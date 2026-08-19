@@ -3,7 +3,13 @@
 Mutation adequacy for a **published conformance corpus**. Standard library only:
 no dependency, no install, no network.
 
+The version lives in one place: `VERSION` in `corpus_adequacy.py`. Every report
+carries it as `tool_version`, plus `tool_commit` when the checkout can resolve
+`HEAD`. Pin CI to the commit SHA; quote the version a human can read. The git
+tag is `v` plus that same number.
+
 ```
+python3 corpus_adequacy.py --version
 python3 corpus_adequacy.py <manifest.json>
 python3 corpus_adequacy.py <manifest.json> --json
 ```

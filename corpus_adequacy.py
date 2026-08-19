@@ -89,10 +89,47 @@ from bounded_run import (  # noqa: E402
 )
 
 SCHEMA = "corpus-adequacy.manifest.v0"
+# One place. The report, --version, CHANGELOG, and the git tag all name this.
+# A SHA pin is exact and opaque; this is the name a measurement can quote.
+VERSION = "0.1.0"
 
 
 class ManifestError(Exception):
     """The manifest does not describe a measurable corpus."""
+
+
+def tool_identity() -> dict:
+    """What a pinned measurement should carry so a SHA is not the only name.
+
+    CI pins this tool by commit SHA. That is exact and opaque. The version
+    constant is the name a report can quote; the commit is resolved from this
+    file's checkout when git is available, so a copied report still names the
+    bytes that produced it. A checkout without `.git` still carries the version.
+    """
+    identity = {"tool_version": VERSION, "tool_commit": None}
+    here = Path(__file__).resolve().parent
+    try:
+        p = subprocess.run(
+            ["git", "-C", str(here), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if p.returncode == 0:
+            commit = p.stdout.strip()
+            identity["tool_commit"] = commit or None
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return identity
+
+
+def _with_tool_identity(report: dict) -> dict:
+    report.update(tool_identity())
+    return report
+
+
+def format_tool_identity(identity: dict | None = None) -> str:
+    identity = identity if identity is not None else tool_identity()
+    commit = identity.get("tool_commit") or "unresolved"
+    return "corpus-adequacy %s commit=%s" % (identity["tool_version"], commit)
 
 
 def _req(obj: dict, key: str, where: str):
@@ -667,7 +704,8 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     if denom == 0:
         failures.append(null_result_reading(known_holes, equivalent, out_of_scope))
 
-    return {"schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
+    return _with_tool_identity({
+            "schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
             "runner": m["runner"], "killed": killed, "survived": survived,
             "known_holes": known_holes, "corpus_digest": m.get("_corpus_digest"),
             "originals_unverified_against_head": guard.unverified,
@@ -682,7 +720,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
             "score_percent": score,
             "score_means": ("percent of author-declared in-scope rules killed; NOT percent of "
                             "the rules the implementation actually has"),
-            "mutants": results, "failures": failures, "adequate": not failures}
+            "mutants": results, "failures": failures, "adequate": not failures})
 
 
 def run(manifest_path: Path) -> dict:
@@ -840,7 +878,8 @@ def run(manifest_path: Path) -> dict:
     if denom == 0:
         failures.append(null_result_reading(known_holes, equivalent, out_of_scope))
 
-    return {"schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
+    return _with_tool_identity({
+            "schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
             "killed": killed, "survived": survived, "equivalent": equivalent,
             "known_holes": known_holes, "corpus_digest": m.get("_corpus_digest"),
             "acknowledged_digests": len(m.get("known_holes", {})),
@@ -854,7 +893,7 @@ def run(manifest_path: Path) -> dict:
             "score_means": ("percent of author-declared in-scope rules killed; NOT percent of the "
                             "rules the implementation actually has"),
             "score_percent": score, "mutants": results, "failures": failures,
-            "adequate": not failures}
+            "adequate": not failures})
 
 
 def null_result_reading(known_holes, equivalent, out_of_scope):
@@ -882,9 +921,16 @@ def null_result_reading(known_holes, equivalent, out_of_scope):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("manifest", type=Path)
+    ap.add_argument("--version", action="store_true",
+                    help="print tool version (and commit, if resolvable) and exit")
+    ap.add_argument("manifest", type=Path, nargs="?")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
+    if args.version:
+        print(format_tool_identity())
+        return 0
+    if args.manifest is None:
+        ap.error("manifest is required")
     try:
         rep = run(args.manifest)
     except (ManifestError, OSError, json.JSONDecodeError) as exc:
@@ -894,6 +940,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(rep, indent=2, sort_keys=True))
     else:
+        print(format_tool_identity(rep))
         for r in rep["mutants"]:
             print("%-22s %-9s %s" % (r["group"], r["verdict"], r["label"]))
             if r["verdict"] != "killed":

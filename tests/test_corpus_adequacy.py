@@ -513,6 +513,24 @@ class Cli(unittest.TestCase):
     def test_json_mode_is_wellformed(self):
         d = json.loads(self._cli({"a": [KILLABLE]}, "--json").stdout)
         self.assertEqual(d["schema"], "corpus-adequacy.report.v0")
+        self.assertEqual(d["tool_version"], ca.VERSION)
+        self.assertRegex(ca.VERSION, r"^\d+\.\d+\.\d+$")
+
+    def test_text_mode_names_the_tool_version(self):
+        r = self._cli({"a": [KILLABLE]})
+        self.assertIn("corpus-adequacy %s" % ca.VERSION, r.stdout)
+
+    def test_version_flag_prints_the_constant_without_a_manifest(self):
+        r = subprocess.run([sys.executable, str(ca.__file__), "--version"],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), ca.format_tool_identity())
+        self.assertIn(ca.VERSION, r.stdout)
+
+    def test_changelog_names_this_version(self):
+        # Tag, report, and changelog must not be three literals that can drift.
+        text = (Path(__file__).resolve().parent.parent / "CHANGELOG.md").read_text()
+        self.assertIn("## %s" % ca.VERSION, text)
 
 
 
