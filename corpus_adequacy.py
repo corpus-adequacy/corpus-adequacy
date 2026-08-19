@@ -72,6 +72,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import sys
 import subprocess
 import tempfile
@@ -137,8 +138,10 @@ def load_manifest(path: Path) -> dict:
     if m["runner"] not in ("module", "process", "batch"):
         raise ManifestError("runner must be module, process or batch, got %r" % m["runner"])
     if m["runner"] in ("process", "batch"):
-        for key in ("entrypoint_command", "outcome_from"):
-            _req(m, key, "manifest (runner=%s)" % m["runner"])
+        _req(m, "entrypoint_command", "manifest (runner=%s)" % m["runner"])
+        if m.get("outcome_parse") != "test-names":
+            _req(m, "outcome_from", "manifest (runner=%s)" % m["runner"])
+        m.setdefault("outcome_from", [])
         # A batch corpus is exercised as a unit, so there is nothing to build and no
         # per-vector path. Anything else must declare its build.
         if m["runner"] == "process":
@@ -308,6 +311,24 @@ def _batch_outcome(m: dict) -> tuple[dict, list[str]]:
     cmd = [str(x) for x in m["entrypoint_command"]]
     try:
         p = _run_capped(cmd, m["_repo_root"], timeout=m["vector_timeout"])
+    except Exception:  # noqa: BLE001
+        return {}, ["<batch>"]
+
+    if m.get("outcome_parse") == "test-names":
+        # The checker is a test binary, not a reporter. Its outcome is WHICH tests
+        # failed, which discriminates per case exactly as a named failures list
+        # does. A bare pass/fail would not: every mutant would kill everything or
+        # nothing.
+        out = p.stdout + p.stderr
+        failed = sorted(set(re.findall(m.get("failed_test_pattern",
+                                             r"^test (\S+) \.\.\. FAILED$"), out, re.M)))
+        ran = sum(int(x) for x in re.findall(r"^test result: \w+\. (\d+) passed", out, re.M))
+        if ran == 0 and not failed:
+            # A filter that selected nothing exits 0 and would read as agreement.
+            return {}, ["<batch>"]
+        return {"<batch>": tuple(failed)}, []
+
+    try:
         doc = json.loads(p.stdout)
     except Exception:  # noqa: BLE001
         return {}, ["<batch>"]
