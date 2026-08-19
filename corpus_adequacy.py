@@ -537,11 +537,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         failures.append("%d mutant(s) survived; the required score is 100%% of non-equivalent "
                         "mutants" % survived)
     if denom == 0:
-        failures.append(
-            "nothing was measured: every declared in-scope rule is either a known hole, "
-            "declared equivalent or out of scope. There is no adequacy result here"
-            if (known_holes or equivalent or out_of_scope)
-            else "no non-equivalent mutants were scored, so no adequacy was measured")
+        failures.append(null_result_reading(known_holes, equivalent, out_of_scope))
 
     return {"schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
             "runner": m["runner"], "killed": killed, "survived": survived,
@@ -713,11 +709,7 @@ def run(manifest_path: Path) -> dict:
         failures.append("%d mutant(s) survived; the required score is 100%% of non-equivalent "
                         "mutants" % survived)
     if denom == 0:
-        failures.append(
-            "nothing was measured: every declared in-scope rule is either a known hole, "
-            "declared equivalent or out of scope. There is no adequacy result here"
-            if (known_holes or equivalent or out_of_scope)
-            else "no non-equivalent mutants were scored, so no adequacy was measured")
+        failures.append(null_result_reading(known_holes, equivalent, out_of_scope))
 
     return {"schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
             "killed": killed, "survived": survived, "equivalent": equivalent,
@@ -734,6 +726,29 @@ def run(manifest_path: Path) -> dict:
                             "rules the implementation actually has"),
             "score_percent": score, "mutants": results, "failures": failures,
             "adequate": not failures}
+
+
+def null_result_reading(known_holes, equivalent, out_of_scope):
+    """What a denominator of zero actually licenses you to say.
+
+    A null result feels like a fact about the corpus -- "this one cannot be
+    measured" -- and reads like a finding. It is almost always a fact about the
+    manifest instead, and reads like a mistake, which is why the wrong reading
+    survives. The author of this tool published "not measurable" for a 14-vector
+    corpus after declaring three rules for it, two of which mutated the wrong
+    stage; the verifier had at least eight more that the vector names all but
+    announce. The message says so rather than leaving the reader to make the
+    same inference unaided.
+    """
+    if known_holes or equivalent or out_of_scope:
+        return ("nothing was measured: every declared in-scope rule is either a known hole, "
+                "declared equivalent or out of scope. There is no adequacy result here. "
+                "A null result is a statement about the DECLARATION before it is one about "
+                "the corpus: count the rules the implementation has, from the implementation "
+                "rather than from this manifest, before concluding the corpus cannot be measured")
+    return ("no non-equivalent mutants were scored, so no adequacy was measured. "
+            "Declare the rules the implementation actually has; an empty declaration "
+            "measures nothing and says nothing")
 
 
 def main() -> int:

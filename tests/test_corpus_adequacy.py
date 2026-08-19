@@ -250,6 +250,33 @@ class KnownHoles(unittest.TestCase):
         self.assertFalse(rep["adequate"])
         self.assertTrue(any("nothing was measured" in f for f in rep["failures"]))
 
+    def test_a_null_result_says_it_indicts_the_declaration_first(self):
+        """The wrong reading of a null result is "this corpus cannot be measured".
+
+        It reads like a finding, which is why it survives; the right reading reads
+        like a mistake. The tool's own author published "not measurable" for a
+        14-vector corpus after declaring three rules for it. The message has to
+        carry the correction, so it is pinned rather than left to phrasing.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._mf(Path(d), "sha256:aaa", "sha256:aaa"))
+        msg = " ".join(rep["failures"])
+        self.assertIn("statement about the DECLARATION", msg)
+        self.assertIn("from the implementation rather than from this manifest", msg)
+
+    def test_an_empty_declaration_is_told_to_declare_rules(self):
+        """The other null-result branch: nothing excluded, nothing declared either.
+
+        Reached when a manifest scores no mutants without any of them being a hole,
+        an equivalent or out of scope -- so the previous message, which explains the
+        denominator by listing exclusions, would name causes that do not apply.
+        """
+        reading = ca.null_result_reading(0, 0, 0)
+        self.assertIn("no non-equivalent mutants were scored", reading)
+        self.assertIn("Declare the rules the implementation actually has", reading)
+        self.assertNotIn("out of scope", reading,
+                         "nothing was excluded here; naming exclusions would misdirect")
+
 
 class BatchRunner(unittest.TestCase):
     """A corpus consumed as a unit: one invocation, the summary is the outcome."""
