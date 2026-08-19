@@ -70,12 +70,17 @@ hard failure here, not a warning.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
 import sys
 import subprocess
 import tempfile
+try:
+    import fcntl                       # POSIX advisory locks
+except ImportError:                          # pragma: no cover - non-POSIX
+    fcntl = None
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -250,6 +255,60 @@ def _outcomes(fn, vectors: list[dict], m: dict) -> tuple[dict, list[str]]:
 # ---------------------------------------------------------------------------
 
 
+class _TreeLock:
+    """One mutation run at a time per repository.
+
+    _SourceGuard restores what THIS run mutated. It cannot see another run, and
+    two runs over one working tree corrupt each other in two ways. The visible
+    one is a wrong score: run A applies a mutant, run B reads the tree and finds
+    its own anchor gone, and reports `anchor not found` or a plausible number
+    over a smaller denominator. The silent one is worse: run A captures its
+    "originals" while run B has a mutant applied, and A's restore then writes
+    B's mutant back to the tree as though it were the original. That is a
+    disabled rule left in a working tree, which is the exact outcome
+    _SourceGuard exists to prevent.
+
+    So the lock is taken BEFORE the dirty check, not after: a clean tree
+    observed outside the lock can be mutated before the originals are captured,
+    which is the same bug one step earlier.
+
+    Non-blocking on purpose. A run that queued and started twenty minutes later
+    would measure a tree nobody chose for it.
+    """
+
+    def __init__(self, repo_root: Path) -> None:
+        key = hashlib.sha256(str(repo_root.resolve()).encode("utf-8")).hexdigest()[:16]
+        self.path = Path(tempfile.gettempdir()) / ("corpus-adequacy-%s.lock" % key)
+        self.repo_root = repo_root
+        self._fh = None
+        self.held = False
+        self.unavailable = fcntl is None
+
+    def __enter__(self) -> "_TreeLock":
+        if self.unavailable:
+            return self                      # stated in the report, never assumed
+        self._fh = open(self.path, "w", encoding="utf-8")
+        try:
+            fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self._fh.close()
+            self._fh = None
+            raise ManifestError(
+                "another corpus-adequacy run holds the lock on %s. It is mutating the "
+                "tree you would measure, so this run would score a mixture of two "
+                "mutants rather than either one. Wait for it, or measure a separate "
+                "checkout." % self.repo_root)
+        self.held = True
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._fh is not None:
+            fcntl.flock(self._fh, fcntl.LOCK_UN)
+            self._fh.close()
+            self._fh = None
+        self.held = False
+
+
 class _SourceGuard:
     """Restores every mutated source file, including on crash.
 
@@ -375,6 +434,12 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     else:
         all_vectors = doc[m["vectors_key"]] if isinstance(doc, dict) else doc
     failures: list[str] = []
+
+    # Taken BEFORE the dirty check: a tree observed clean outside the lock can be
+    # mutated by another run before the originals are captured, and then this run's
+    # restore writes that mutant back as the original.
+    lock = _TreeLock(m["_repo_root"])
+    lock.__enter__()
 
     dirty = _tree_is_dirty(m["_repo_root"], m["_source_paths"])
     if dirty:
@@ -516,6 +581,11 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         if leaked:
             failures.append("SOURCES NOT RESTORED: %s" % leaked)
         _build(m)   # leave the tree with a binary built from the real source
+        if lock.unavailable:
+            failures.append("no advisory lock on this platform, so a concurrent run "
+                            "over this tree could not be excluded; this score is only "
+                            "as good as the assumption that none was running")
+        lock.__exit__()
 
     # A stale acknowledgement is not only one whose rule became killed. Any verdict
     # other than known-hole means the acknowledgement no longer describes anything,

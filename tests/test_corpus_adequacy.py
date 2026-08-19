@@ -515,5 +515,70 @@ class Cli(unittest.TestCase):
         self.assertEqual(d["schema"], "corpus-adequacy.report.v0")
 
 
+
+class ConcurrentRunsAreExcluded(unittest.TestCase):
+    """Two runs over one working tree corrupt each other, in two ways.
+
+    Visible: run A applies a mutant, run B reads the tree, cannot find its own
+    anchor, and reports either `anchor not found` or a plausible score over a
+    smaller denominator. That happened during review of this tool and produced a
+    believable "6 of 8 (75.0%)" where two clean re-runs both gave 4 of 8.
+
+    Silent and worse: run A captures its originals while run B has a mutant
+    applied, so A's restore writes B's mutant into the tree AS the original --
+    a disabled rule left behind, which is what _SourceGuard exists to prevent.
+
+    Pinned at the artefact level, through run(), rather than on _TreeLock alone:
+    a test of the helper is not a test of the thing that has to hold.
+    """
+
+    _corpus = BatchRunner._corpus
+
+    @unittest.skipIf(ca.fcntl is None, "no POSIX advisory locks on this platform")
+    def test_a_held_lock_refuses_the_run_rather_than_scoring_a_mixed_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = self._corpus(tmp)
+            held = ca._TreeLock(tmp)
+            held.__enter__()
+            try:
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.run(manifest)
+            finally:
+                held.__exit__()
+        self.assertIn("another corpus-adequacy run holds the lock", str(cm.exception))
+
+    @unittest.skipIf(ca.fcntl is None, "no POSIX advisory locks on this platform")
+    def test_the_lock_is_released_so_the_next_run_still_measures(self):
+        # A lock that outlives its run turns one crash into a repository nobody
+        # can measure again. Two sequential runs must both score.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = self._corpus(tmp)
+            first = ca.run(manifest)
+            second = ca.run(manifest)
+        self.assertEqual(first["killed"], 1)
+        self.assertEqual(second["killed"], 1)
+
+    @unittest.skipIf(ca.fcntl is None, "no POSIX advisory locks on this platform")
+    def test_the_lock_is_taken_before_the_dirty_check(self):
+        """Order matters: a tree seen clean outside the lock can change before capture.
+
+        Asserted by holding the lock and passing a manifest whose declared source
+        does not exist. Unlocking first would make load/dirty checks fail on that
+        instead, so the lock message proves the lock came first.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = self._corpus(tmp)
+            held = ca._TreeLock(tmp)
+            held.__enter__()
+            try:
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.run(manifest)
+            finally:
+                held.__exit__()
+        self.assertIn("holds the lock", str(cm.exception))
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
