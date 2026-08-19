@@ -317,8 +317,47 @@ class _SourceGuard:
     up front and rewritten in a finally block.
     """
 
-    def __init__(self, paths: list[Path]) -> None:
+    def __init__(self, paths: list[Path], repo_root: Path | None = None) -> None:
         self.original = {p: p.read_bytes() for p in paths}
+        self.unverified: list[str] = []
+        if repo_root is not None:
+            self._verify_against_head(repo_root)
+
+    def _verify_against_head(self, repo_root: Path) -> None:
+        """The captured original must be the committed one, checked AT capture time.
+
+        Checking `git status` before constructing this guard leaves a window: a
+        concurrent actor can mutate a file between the check and the capture, and
+        then the mutant IS the original, so restore writes it back and the run
+        scores against a rule that was already deleted. That window was not
+        theoretical. A run of this tool reported `anchor not found in any declared
+        source` for two anchors that occur exactly once in the committed file,
+        because a second run had a mutant applied at the moment of capture.
+
+        The lock above stops another instance of THIS tool. It cannot stop a hand
+        edit, an editor autosave, or an instance that started before the lock
+        existed, so the content is compared rather than assumed.
+        """
+        for path in self.original:
+            try:
+                rel = path.resolve().relative_to(repo_root.resolve())
+            except ValueError:
+                continue                      # declared outside the repo: nothing to compare
+            try:
+                out = subprocess.run(["git", "-C", str(repo_root), "show", "HEAD:%s" % rel],
+                                     capture_output=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                self.unverified.append(str(rel))
+                continue
+            if out.returncode != 0:
+                self.unverified.append(str(rel))   # untracked or no git: cannot compare
+                continue
+            if out.stdout != self.original[path]:
+                raise ManifestError(
+                    "%s does not match HEAD at the moment its original was captured. "
+                    "Something changed it between the dirty check and now, so this run "
+                    "would treat that change as the original and restore it afterwards. "
+                    "Refusing rather than measuring a tree it did not read." % rel)
 
     def restore(self) -> None:
         for path, data in self.original.items():
@@ -464,7 +503,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         failures.append("known_holes name mutants that do not exist: %s" % sorted(stale))
     results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
     known_holes = 0
-    guard = _SourceGuard(m["_source_paths"])
+    guard = _SourceGuard(m["_source_paths"], m["_repo_root"])
     try:
         ok, detail = _build(m)
         if not ok:
@@ -612,6 +651,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     return {"schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
             "runner": m["runner"], "killed": killed, "survived": survived,
             "known_holes": known_holes, "corpus_digest": m.get("_corpus_digest"),
+            "originals_unverified_against_head": guard.unverified,
             "acknowledged_digests": len(m.get("known_holes", {})),
             "hole_ratio": (None if (killed + survived) == 0
                            else round(known_holes / (killed + survived), 2)),
