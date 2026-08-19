@@ -41,9 +41,24 @@ KILLABLE = {"label": "rejects bad input",
 SURVIVOR = {"label": "big branch",
             "anchor": 'if inputs.get("n", 0) > 10:',
             "replacement": 'if inputs.get("n", 0) > 999999:'}
+# Moves every vector, so it is killed unless the harness sees nothing at all.
+CONTROL = {"label": "CONTROL harness reachability", "control": True,
+           "anchor": 'def evaluate(group, inputs):',
+           "replacement": 'def evaluate(group, inputs):\n    return "MOVED"'}
 
 
-def _manifest(tmp: Path, mutants, equivalent=None, vectors=None, raw=None) -> Path:
+def _manifest(tmp: Path, mutants, equivalent=None, vectors=None, raw=None,
+              control=True) -> Path:
+    """A control is added to every group unless a test is about its absence.
+
+    These fixtures declared none, and for a while that was legal on this runner
+    because the requirement lived only in the process path. Making it default
+    here rather than per-test means a new fixture inherits the rule instead of
+    quietly reproducing the gap.
+    """
+    if control:
+        mutants = {g: (list(ms) + [CONTROL] if not any(x.get("control") for x in ms) else ms)
+                   for g, ms in mutants.items()}
     (tmp / "impl.py").write_text(IMPL)
     (tmp / "vectors.json").write_text(json.dumps(vectors or VECTORS))
     m = {"schema": ca.SCHEMA, "implementation": "impl.py", "entrypoint": "evaluate",
@@ -483,8 +498,14 @@ class Portability(unittest.TestCase):
             m = {"schema": ca.SCHEMA, "implementation": "impl.py", "entrypoint": "check",
                  "entrypoint_args": ["msg"], "vectors": "vectors.json", "id_key": "vector_id",
                  "default_group": "only",
-                 "mutants": {"only": [{"label": "truthy branch",
-                                       "anchor": 'if msg.get("k")', "replacement": "if False"}]}}
+                 "mutants": {"only": [
+                     {"label": "truthy branch",
+                      "anchor": 'if msg.get("k")', "replacement": "if False"},
+                     # Carried like any real corpus: this test is about entrypoint
+                     # arity, not about being allowed to score without a control.
+                     {"label": "CONTROL harness reachability", "control": True,
+                      "anchor": 'def check(msg):',
+                      "replacement": 'def check(msg):\n    return "MOVED"'}]}}
             p = d / "m.json"
             p.write_text(json.dumps(m))
             rep = ca.run(p)
@@ -643,6 +664,41 @@ class DeclaredOutcomeMembersMustExist(unittest.TestCase):
             rep = ca.run(self._corpus(Path(d), ["ok", "failures"]))
         self.assertNotIn("never emits", " ".join(rep["failures"]))
         self.assertTrue(rep["adequate"], rep["failures"])
+
+
+class ControlIsRequiredOnEveryRunner(unittest.TestCase):
+    """The requirement lived only in the process path, and a corpus fell through it.
+
+    A rule stated in two places is a rule that will eventually be enforced in one.
+    `mcp-jsonrpc-id` scored on the module runner with seventeen mutants and no
+    control, while the page publishing its score said every manifest must declare
+    one. Not a wrong number there -- six mutants were killed, so that harness
+    demonstrably reached the code -- but the guarantee was absent: had a later
+    change made all of them survive, nothing would have told that apart from a
+    harness detecting nothing, which is the single thing a control exists to rule
+    out.
+    """
+
+    def test_a_module_corpus_without_a_control_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]}, control=False))
+        self.assertFalse(rep["adequate"], "a module run with no control must not pass")
+        self.assertTrue(any("no control mutant declared" in f for f in rep["failures"]),
+                        rep["failures"])
+
+    def test_the_same_corpus_with_a_control_passes(self):
+        # The other half of the control: the rule must not fail everything.
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]}))
+        self.assertTrue(rep["adequate"], rep["failures"])
+
+    def test_both_runners_answer_from_one_function(self):
+        # Parity by construction rather than by two matching implementations,
+        # which is how they came apart in the first place.
+        import inspect
+        src = inspect.getsource(ca)
+        self.assertEqual(src.count("no control mutant declared"), 1,
+                         "the control requirement is stated more than once again")
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

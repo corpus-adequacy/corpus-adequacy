@@ -528,20 +528,8 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
             "place, so it refuses to run rather than risk losing that work" % dirty)
 
     groups_in_corpus = {_group_of(v, m) for v in all_vectors}
-    unmutated = sorted(groups_in_corpus - set(m["mutants"]))
-    if unmutated:
-        failures.append("groups present in the corpus with no declared mutants: %s" % unmutated)
-    stale = sorted(set(m["mutants"]) - groups_in_corpus)
-    if stale:
-        failures.append("mutants declared for groups not in the corpus: %s" % stale)
-
-    if not any(mut.get("control") for muts in m["mutants"].values() for mut in muts):
-        failures.append("no control mutant declared. Without one, a run of all-survivors "
-                        "cannot be told apart from a harness that detects nothing")
+    failures.extend(structural_failures(m, groups_in_corpus))
     acknowledged = _acknowledged_holes(m)
-    stale = set(acknowledged) - {mu["label"] for ms in m["mutants"].values() for mu in ms}
-    if stale:
-        failures.append("known_holes name mutants that do not exist: %s" % sorted(stale))
     results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
     known_holes = 0
     guard = _SourceGuard(m["_source_paths"], m["_repo_root"])
@@ -734,20 +722,8 @@ def run(manifest_path: Path) -> dict:
     failures: list[str] = []
     groups_in_corpus = {_group_of(v, m) for v in all_vectors}
 
-    # Self-coverage: the reach of this check must not narrow silently.
-    unmutated = sorted(groups_in_corpus - set(m["mutants"]))
-    if unmutated:
-        failures.append(
-            "groups present in the corpus with no declared mutants: %s. Declare a mutant per "
-            "rule, or this check covers less than its name claims" % unmutated)
-    stale = sorted(set(m["mutants"]) - groups_in_corpus)
-    if stale:
-        failures.append("mutants declared for groups not in the corpus: %s" % stale)
-
+    failures.extend(structural_failures(m, groups_in_corpus))
     acknowledged = _acknowledged_holes(m)
-    stale = set(acknowledged) - {mu["label"] for ms in m["mutants"].values() for mu in ms}
-    if stale:
-        failures.append("known_holes name mutants that do not exist: %s" % sorted(stale))
     results, killed, survived, equivalent, out_of_scope = [], 0, 0, 0, 0
     unproved = known_holes = 0
     with tempfile.TemporaryDirectory() as raw:
@@ -917,6 +893,39 @@ def null_result_reading(known_holes, equivalent, out_of_scope):
     return ("no non-equivalent mutants were scored, so no adequacy was measured. "
             "Declare the rules the implementation actually has; an empty declaration "
             "measures nothing and says nothing")
+
+
+def structural_failures(m: dict, groups_in_corpus: set) -> list:
+    """Guards that hold for EVERY runner, in one place because they drifted apart.
+
+    These were written twice, once per runner, and the copies diverged: the
+    control requirement reached the process and batch paths and never reached the
+    module path. A module corpus could therefore score without ever declaring the
+    one mutant that proves the harness can detect anything -- which is exactly the
+    condition the control exists to exclude, missing from the runner where it was
+    cheapest to check. One of this tool's own five subject corpora was in that
+    state, while the page publishing its score said every manifest must declare a
+    control.
+
+    A rule stated in two places is a rule that will eventually be enforced in one.
+    """
+    failures = []
+    unmutated = sorted(groups_in_corpus - set(m["mutants"]))
+    if unmutated:
+        failures.append(
+            "groups present in the corpus with no declared mutants: %s. Declare a mutant per "
+            "rule, or this check covers less than its name claims" % unmutated)
+    stale = sorted(set(m["mutants"]) - groups_in_corpus)
+    if stale:
+        failures.append("mutants declared for groups not in the corpus: %s" % stale)
+    if not any(mut.get("control") for muts in m["mutants"].values() for mut in muts):
+        failures.append("no control mutant declared. Without one, a run of all-survivors "
+                        "cannot be told apart from a harness that detects nothing")
+    acknowledged = _acknowledged_holes(m)
+    orphaned = set(acknowledged) - {mu["label"] for ms in m["mutants"].values() for mu in ms}
+    if orphaned:
+        failures.append("known_holes name mutants that do not exist: %s" % sorted(orphaned))
+    return failures
 
 
 def main() -> int:
