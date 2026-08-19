@@ -431,7 +431,9 @@ def _batch_outcome(m: dict) -> tuple[dict, list[str]]:
     except Exception:  # noqa: BLE001
         return {}, ["<batch>"]
     keys = m["outcome_from"]
-    vals = [doc.get(k) for k in (keys if isinstance(keys, list) else [keys])]
+    keylist = keys if isinstance(keys, list) else [keys]
+    m.setdefault("_outcome_keys_seen", set()).update(k for k in keylist if k in doc)
+    vals = [doc.get(k) for k in keylist]
     # lists are compared as tuples so a failures list discriminates per case
     norm = tuple(tuple(v) if isinstance(v, list) else v for v in vals)
     return {"<batch>": norm}, []
@@ -452,6 +454,8 @@ def _process_outcomes(m: dict, vectors: list[dict]) -> tuple[dict, list[str]]:
             keys = m["outcome_from"]
             # A single key can collapse every rejection onto one value and lose all
             # discrimination, so a list is allowed and compared as a tuple.
+            keylist = keys if isinstance(keys, list) else [keys]
+            m.setdefault("_outcome_keys_seen", set()).update(k for k in keylist if k in doc)
             outcomes[vid] = (tuple(doc.get(k) for k in keys) if isinstance(keys, list)
                              else doc.get(keys))
         except Exception:  # noqa: BLE001 - unreadable output is a behaviour change
@@ -520,6 +524,21 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                 failures.append("%s: the UNMUTATED binary failed on %s" % (group, raised))
                 continue
             baselines[group] = (vectors, base)
+
+        # An outcome member the implementation never emits contributes a constant
+        # None to every comparison, so it discriminates nothing and every score
+        # after it is over-generous by however much that member would have caught.
+        # `doc.get(k)` made that silent. Absent on SOME vectors is legitimate --
+        # `verdict` appears only when integrity passes, `claims` only when the
+        # verdict is valid -- so the rule is "present at least once", not "always".
+        declared_keys = m["outcome_from"] if isinstance(m["outcome_from"], list) else [m["outcome_from"]]
+        never_seen = [k for k in declared_keys if k not in m.get("_outcome_keys_seen", set())]
+        if never_seen and baselines:
+            failures.append(
+                "outcome_from names %s, which the unmutated implementation never emits on any "
+                "vector. Those members compare None to None on every mutant, so they discriminate "
+                "nothing and this score is over-generous by whatever they would have caught. Read "
+                "the corpus's own declaration of its comparison surface and match it." % never_seen)
 
         for group in sorted(m["mutants"]):
             if group not in baselines:

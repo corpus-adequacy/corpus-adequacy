@@ -580,5 +580,51 @@ class ConcurrentRunsAreExcluded(unittest.TestCase):
                 held.__exit__()
         self.assertIn("holds the lock", str(cm.exception))
 
+
+class DeclaredOutcomeMembersMustExist(unittest.TestCase):
+    """A member the implementation never emits compares None to None forever.
+
+    Found on a real corpus: an adequacy manifest declared `all_reproduced`, the
+    consumer emits `all_expected`, and `doc.get` returned None on every run. The
+    comparison silently collapsed onto the one remaining member, and every score
+    over it was over-generous by whatever the missing member would have caught.
+    """
+
+    def _corpus(self, tmp: Path, outcome_from):
+        (tmp / "check.py").write_text(
+            "import json, sys\n"
+            "doc = json.load(open(sys.argv[1]))\n"
+            "fails = [c['id'] for c in doc['cases'] if c['n'] > 10]\n"
+            "print(json.dumps({'ok': not fails, 'failures': fails}))\n")
+        (tmp / "vectors.json").write_text(json.dumps({"cases": [
+            {"id": "c1", "n": 1}, {"id": "c2", "n": 2}]}))
+        m = {"schema": ca.SCHEMA, "runner": "batch", "repo_root": ".",
+             "implementation_sources": ["check.py"],
+             "entrypoint_command": ["python3", "check.py", "vectors.json"],
+             "outcome_from": outcome_from, "vectors": "vectors.json",
+             "id_key": "vector_id", "default_group": "g",
+             "mutants": {"g": [
+                 {"label": "threshold", "anchor": "c['n'] > 10", "replacement": "c['n'] > 1"},
+                 {"label": "CONTROL", "control": True,
+                  "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'"}]}}
+        q = tmp / "m.json"
+        q.write_text(json.dumps(m))
+        return q
+
+    def test_a_member_nothing_emits_is_reported_rather_than_compared_to_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._corpus(Path(d), ["ok", "all_reproduced"]))
+        msg = " ".join(rep["failures"])
+        self.assertIn("all_reproduced", msg)
+        self.assertIn("never emits", msg)
+        self.assertFalse(rep["adequate"])
+
+    def test_a_surface_the_implementation_does_emit_is_not_flagged(self):
+        # The guard must not fire on a correct manifest, or it is noise.
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._corpus(Path(d), ["ok", "failures"]))
+        self.assertNotIn("never emits", " ".join(rep["failures"]))
+        self.assertTrue(rep["adequate"], rep["failures"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
