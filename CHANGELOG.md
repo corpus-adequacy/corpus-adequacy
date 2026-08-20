@@ -5,7 +5,8 @@
 Mutant labels are unique across the manifest, including declared equivalents.
 Duplicate acknowledgements for one corpus digest are refused before any
 mutation starts. Acknowledgement, orphan, and stale-hole checks use the same
-label identity.
+label identity. Malformed or empty labels now produce a controlled manifest
+error instead of an unhandled hash-key exception.
 
 ## 0.1.0 — 2026-08-19
 

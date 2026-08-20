@@ -448,6 +448,29 @@ class ManifestValidation(unittest.TestCase):
             loaded = ca.load_manifest(p)
         self.assertEqual(loaded["mutants"]["a"][0]["label"], "same-hole")
 
+    def test_a_mutant_label_must_be_a_non_empty_string(self):
+        msg = self._err({"mutants": {"a": [dict(KILLABLE, label=[])]}})
+        self.assertIn("mutants[a][0]", msg)
+        self.assertIn("non-empty string", msg)
+
+    def test_an_equivalent_label_must_be_a_non_empty_string(self):
+        msg = self._err({"equivalent": {"a": [{"label": "  ", "reason": "same"}]}})
+        self.assertIn("equivalent[a][0]", msg)
+        self.assertIn("non-empty string", msg)
+
+    def test_a_known_hole_label_must_be_a_non_empty_string(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "digest.json").write_text(json.dumps({"corpus_digest": "sha256:aaa"}))
+            p = _manifest(tmp, {"a": [SURVIVOR]}, raw={
+                "corpus_digest_file": "digest.json", "corpus_digest_key": "corpus_digest",
+                "known_holes": {"sha256:aaa": [{"label": {}, "reason": "known gap",
+                                                   "recorded": "2026-08-20"}]}})
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(p)
+        self.assertIn("known_holes[sha256:aaa][0]", str(cm.exception))
+        self.assertIn("non-empty string", str(cm.exception))
+
 
 class RuleyFindings(unittest.TestCase):
     """Regressions for the blocking review on #2538. Each one scored 100% before."""
@@ -581,6 +604,15 @@ class Cli(unittest.TestCase):
         r = subprocess.run([sys.executable, str(ca.__file__), "/nope/missing.json"],
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 2)
+
+    def test_a_malformed_label_exits_2_without_a_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = _manifest(Path(d), {"a": [dict(KILLABLE, label=[])]})
+            r = subprocess.run([sys.executable, str(ca.__file__), str(p)],
+                               capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("non-empty string", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
     def test_json_mode_is_wellformed(self):
         d = json.loads(self._cli({"a": [KILLABLE]}, "--json").stdout)
