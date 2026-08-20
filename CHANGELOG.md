@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+Mutant labels are unique across the manifest, including declared equivalents.
+Duplicate acknowledgements for one corpus digest are refused before any
+mutation starts. Acknowledgement, orphan, and stale-hole checks use the same
+label identity.
+
 ## 0.1.0 — 2026-08-19
 
 First named release of the extracted tool.

@@ -54,6 +54,10 @@ exclusions, and what the percentage is a percentage of.
 - **A mutant that never ran is `unproved`, never a kill.** It was never shown to
   the corpus, so the corpus said nothing about that rule. Counting it killed lets
   a typo in the substitution print as a covered rule.
+- **Mutant labels are unique across the manifest, including declared
+  equivalents.** A known-hole acknowledgement is keyed by that label, so one
+  repeated name could otherwise excuse two rules. A label may be acknowledged
+  at most once for each corpus digest.
 - **At least one control.** All-survivors because a corpus is weak and
   all-survivors because nothing was measured print identically. A control is a
   mutation on the same path that MUST be killed; it is excluded from the score,

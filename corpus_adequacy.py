@@ -138,6 +138,38 @@ def _req(obj: dict, key: str, where: str):
     return obj[key]
 
 
+def label_identity(entry: dict) -> str:
+    """Return the single identity used for mutants and acknowledgements."""
+    return entry["label"]
+
+
+def _require_unique_labels(m: dict) -> None:
+    """Reject ambiguous mutant and per-digest acknowledgement declarations."""
+    seen_mutants = {}
+    for declaration in ("mutants", "equivalent"):
+        for group, entries in m[declaration].items():
+            for entry in entries:
+                ident = label_identity(entry)
+                if ident in seen_mutants:
+                    previous_declaration, previous_group = seen_mutants[ident]
+                    raise ManifestError(
+                        "mutant label %r is declared more than once (already in %s group %r). "
+                        "Labels are unique across the manifest, so one known-hole "
+                        "acknowledgement cannot name two mutants"
+                        % (ident, previous_declaration, previous_group))
+                seen_mutants[ident] = (declaration, group)
+
+    for digest, entries in m["known_holes"].items():
+        seen_acknowledgements = set()
+        for entry in entries:
+            ident = label_identity(entry)
+            if ident in seen_acknowledgements:
+                raise ManifestError(
+                    "known_holes[%s] repeats acknowledgement %r. Each mutant may be "
+                    "acknowledged at most once for one corpus digest" % (digest, ident))
+            seen_acknowledgements.add(ident)
+
+
 def load_manifest(path: Path) -> dict:
     m = json.loads(path.read_text(encoding="utf-8"))
     if m.get("schema") != SCHEMA:
@@ -238,6 +270,7 @@ def load_manifest(path: Path) -> dict:
                 raise ManifestError(
                     "equivalent[%s][%d] %r: an equivalence needs a stated reason, never a bare claim"
                     % (group, i, e["label"]))
+    _require_unique_labels(m)
     return m
 
 
@@ -267,7 +300,8 @@ def _acknowledged_holes(m: dict) -> dict:
     """
     if not m.get("_corpus_digest"):
         return {}
-    return {e["label"]: e for e in m["known_holes"].get(m["_corpus_digest"], [])}
+    return {label_identity(e): e
+            for e in m["known_holes"].get(m["_corpus_digest"], [])}
 
 
 def _group_of(v: dict, m: dict) -> str:
@@ -636,8 +670,8 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                                     "verdict": "unexercised", "scope": scope, "moved": 0,
                                     "how": "out of scope: %s" % mut["reason"]})
                     out_of_scope += 1
-                elif mut["label"] in acknowledged:
-                    ack = acknowledged[mut["label"]]
+                elif label_identity(mut) in acknowledged:
+                    ack = acknowledged[label_identity(mut)]
                     # A KNOWN HOLE is not a scope statement. The corpus does claim this
                     # rule, the rule is genuinely unexercised, and that fact is recorded
                     # against ONE digest rather than fixed today. It stays loud.
@@ -673,8 +707,8 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     # A stale acknowledgement is not only one whose rule became killed. Any verdict
     # other than known-hole means the acknowledgement no longer describes anything,
     # and a leftover that points at nothing is what hides the next regression.
-    linger = {r["label"]: r["verdict"] for r in results
-              if r["label"] in acknowledged and r["verdict"] != "known-hole"}
+    linger = {label_identity(r): r["verdict"] for r in results
+              if label_identity(r) in acknowledged and r["verdict"] != "known-hole"}
     if linger:
         failures.append("known_holes acknowledge rules that are no longer holes: %s. Remove "
                         "them; an acknowledgement pointing at nothing hides the next regression"
@@ -812,8 +846,8 @@ def run(manifest_path: Path) -> dict:
                         # "each with a stated reason" without showing one is an assertion.
                         "how": "out of scope: %s" % mut["reason"]})
                     out_of_scope += 1
-                elif mut["label"] in acknowledged:
-                    ack = acknowledged[mut["label"]]
+                elif label_identity(mut) in acknowledged:
+                    ack = acknowledged[label_identity(mut)]
                     results.append({"group": group, "label": mut["label"],
                                     "verdict": "known-hole", "scope": scope, "moved": 0,
                                     "how": "KNOWN HOLE against %s, recorded %s: %s"
@@ -835,8 +869,8 @@ def run(manifest_path: Path) -> dict:
                                 "how": eq["reason"], "moved": 0})
                 equivalent += 1
 
-    linger = {r["label"]: r["verdict"] for r in results
-              if r["label"] in acknowledged and r["verdict"] != "known-hole"}
+    linger = {label_identity(r): r["verdict"] for r in results
+              if label_identity(r) in acknowledged and r["verdict"] != "known-hole"}
     if linger:
         failures.append("known_holes acknowledge rules that are no longer holes: %s. Remove "
                         "them; an acknowledgement pointing at nothing hides the next regression"
@@ -922,7 +956,9 @@ def structural_failures(m: dict, groups_in_corpus: set) -> list:
         failures.append("no control mutant declared. Without one, a run of all-survivors "
                         "cannot be told apart from a harness that detects nothing")
     acknowledged = _acknowledged_holes(m)
-    orphaned = set(acknowledged) - {mu["label"] for ms in m["mutants"].values() for mu in ms}
+    orphaned = set(acknowledged) - {
+        label_identity(mu) for ms in m["mutants"].values() for mu in ms
+    }
     if orphaned:
         failures.append("known_holes name mutants that do not exist: %s" % sorted(orphaned))
     return failures
