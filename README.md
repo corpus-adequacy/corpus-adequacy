@@ -111,9 +111,19 @@ that rather than claiming more.
 
 ## Provenance
 
-Extracted from `Rul1an/assay`, where it was built and reviewed. The move is an
-extraction rather than a copy: two implementations of a measurement drift, and
-the copy that drifts is the one that stops measuring.
+Extracted from [`Rul1an/assay`](https://github.com/Rul1an/assay) at
+`78c792f574e882aad683b690bfbff5445774056e`, under that repository's MIT
+license. The root `LICENSE` is that upstream text, including the copyright
+notice, copied without alteration.
+
+The move is an extraction rather than a copy: two implementations of a
+measurement drift, and the copy that drifts is the one that stops measuring.
 
 Its own findings on the corpora it was built against, including the unflattering
 ones, are published in that repository's `conformance/INDEX.md`.
+
+## Trust boundary
+
+A manifest is executable trusted input: an author declaration, not independent evidence. 100% is 100% of what that author declared. Do not run a manifest you do not trust. A third-party manifest is not independent evidence merely because it was written elsewhere.
+
+That the tool itself uses no network does not mean a child or a manifest cannot. `runner: module` runs in-process; `process` and `batch` run the commands the manifest names. Isolation and least privilege are the caller's job; this is not a sandbox.
