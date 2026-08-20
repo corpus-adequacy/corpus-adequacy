@@ -2137,8 +2137,6 @@ class IsolationClaimScope(unittest.TestCase):
                         self.assertNotIn(phrase, text)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=1)
 
 
 # ---------------------------------------------------------------------------
@@ -2554,3 +2552,7 @@ class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
         joined = " ".join(rep["failures"])
         self.assertNotIn("no longer holes", joined)
         self.assertNotIn("were silent", joined)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)
