@@ -267,8 +267,8 @@ class ContinuousCap(_WithTestCap):
     def test_normal_completion_keeps_rc0_and_both_streams(self):
         body = (
             "import sys\n"
-            "sys.stdout.write('hello-out\\n')\n"
-            "sys.stderr.write('hello-err\\n')\n"
+            "sys.stdout.buffer.write(b'hello-out\\n')\n"
+            "sys.stderr.buffer.write(b'hello-err\\n')\n"
         )
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -440,8 +440,8 @@ class Mutations(unittest.TestCase):
         )
         body = (
             "import sys\n"
-            "sys.stdout.write('hello-out\\n')\n"
-            "sys.stderr.write('hello-err\\n')\n"
+            "sys.stdout.buffer.write(b'hello-out\\n')\n"
+            "sys.stderr.buffer.write(b'hello-err\\n')\n"
         )
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
