@@ -413,7 +413,11 @@ class _TreeLock:
 
     def __enter__(self) -> "_TreeLock":
         if self.unavailable:
-            return self                      # stated in the report, never assumed
+            raise ManifestError(
+                "no advisory lock on this platform, so a process or batch run "
+                "cannot exclude a concurrent writer. Refusing before dirty "
+                "check, source capture, build, or mutation of %s"
+                % self.repo_root)
         self._fh = open(self.path, "w", encoding="utf-8")
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -785,10 +789,6 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
             if leaked:
                 failures.append("SOURCES NOT RESTORED: %s" % leaked)
             _build(m)   # leave the tree with a binary built from the real source
-            if lock.unavailable:
-                failures.append("no advisory lock on this platform, so a concurrent run "
-                                "over this tree could not be excluded; this score is only "
-                                "as good as the assumption that none was running")
         finally:
             lock.__exit__()
 

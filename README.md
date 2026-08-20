@@ -87,7 +87,9 @@ limitation belongs to the corpus and the tool says so rather than hiding it.
 guard restores them after normal completion and ordinary Python exceptions; it
 cannot restore after `SIGKILL`, power loss, or host termination. Until those
 runners use an isolated disposable checkout, run them only in a clean,
-disposable checkout. Resolved source paths outside `repo_root` are refused at
+disposable checkout. On platforms without `fcntl` advisory locking, `process`
+and `batch` refuse before the dirty check, source capture, build, child,
+mutation, or score. Resolved source paths outside `repo_root` are refused at
 manifest load and checked again before source access. These repeated checks are
 not an atomic defence against a hostile concurrent filesystem actor; disposable
 checkout isolation remains the durable boundary planned for these runners.
