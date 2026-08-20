@@ -471,11 +471,13 @@ def _module_outcomes(m: dict, source: str, tag: str, vectors: list, tmp: Path) -
 
     So the claim is narrower than "a misbehaving corpus cannot make this run
     say something untrue", which is what an earlier draft of this docstring
-    said. What is claimed: the controller survives whatever the corpus does,
-    and the classes measured here -- abnormal termination, and a protocol that
-    did not arrive intact -- are fail-closed, so neither can be read as a clean
-    result. A corpus written to forge a verdict is outside that claim, and
-    nothing in this file would detect one.
+    said. What is claimed: the classes measured here -- direct-child timeout,
+    output-cap breach, abnormal termination and protocol failure -- are
+    fail-closed, so none can be read as a clean result. Same-user
+    parent signalling (e.g. kill(getppid())), session escape and
+    host resource exhaustion remain outside the process-isolation
+    claim. A corpus written to forge a verdict is also outside that
+    claim, and nothing in this file would detect one.
     """
     if not MODULE_CHILD.is_file():
         raise ManifestError("the module child shim is missing: %s" % MODULE_CHILD)

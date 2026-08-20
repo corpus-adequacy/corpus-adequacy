@@ -2016,5 +2016,39 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
         self.assertIn("unsupported-outcome", v["how"])
         self.assertFalse(rep["adequate"])
 
+class IsolationClaimScope(unittest.TestCase):
+    """The public and internal claims must not overstate the isolation boundary.
+
+    A same-user child can kill(getppid(), SIGKILL) and end the controller with
+    no report, so neither surface may claim survival of arbitrary child
+    behaviour. The measured classes are timeout, output-cap, abnormal
+    termination and protocol failure; everything else is an explicit non-claim.
+    """
+
+    _root = Path(__file__).resolve().parent.parent
+    _surfaces = {
+        "readme": (_root / "README.md").read_text(encoding="utf-8"),
+        "docstring": inspect.getsource(ca._module_outcomes),
+    }
+
+    # (phrase, should_be_present) -- absence guards the overclaim,
+    # presence guards each explicit non-claim.
+    _contract = [
+        ("survives whatever", False),
+        ("parent signalling", True),
+        ("session escape", True),
+        ("host resource exhaustion", True),
+    ]
+
+    def test_isolation_claim_contract(self):
+        for phrase, present in self._contract:
+            for name, text in self._surfaces.items():
+                with self.subTest(phrase=phrase, surface=name):
+                    if present:
+                        self.assertIn(phrase, text)
+                    else:
+                        self.assertNotIn(phrase, text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
