@@ -45,7 +45,10 @@ temp bytes; they stay until the OS reclaims them, and the next run uses a
 new root without auto-deleting the orphan. The copy is not an atomic
 filesystem snapshot; concurrent external writes can produce mixed bytes.
 Cleanup is best-effort. The ignored `_tree_is_dirty` Git status call is
-removed. The process/batch lock opens
+removed. MaterializeHelper tests skip where `O_NOFOLLOW` is absent;
+process/batch already refuse before materialize. A cross-platform pin
+proves `_copy_regular_bounded` fails closed before creating the
+destination when `O_NOFOLLOW` is None. The process/batch lock opens
 without following or truncating a symlink. File copy is chunked so a
 post-lstat grow cannot load past the ceiling. A `.git` entry of any type is
 skipped before the type check. Files and directories share one entry

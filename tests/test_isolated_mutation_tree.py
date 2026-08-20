@@ -145,7 +145,23 @@ class IsolatedTreeCaps(unittest.TestCase):
         self.assertNotIn("_write_pointer_atomic", src)
         self.assertFalse(hasattr(iso, "isolated_tree_pointer"))
 
+    def test_copy_refuses_without_nofollow_before_creating_the_destination(self):
+        """Fail-closed: O_NOFOLLOW=None raises before the destination exists."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "src.bin"
+            dest = Path(d) / "out.bin"
+            src.write_bytes(b"ABC")
+            with mock.patch.object(iso.os, "O_NOFOLLOW", None):
+                with self.assertRaises(iso.IsolationError) as cm:
+                    iso._copy_regular_bounded(src, dest, 0, 64)
+            self.assertFalse(dest.exists())
+            self.assertIn("o_nofollow", str(cm.exception).lower())
 
+
+@unittest.skipIf(
+    not hasattr(os, "O_NOFOLLOW"),
+    "process/batch refuse before materialize when O_NOFOLLOW is absent",
+)
 class MaterializeHelper(unittest.TestCase):
     def test_dirty_bytes_appear_in_the_copy_not_head(self):
         with tempfile.TemporaryDirectory() as d:
