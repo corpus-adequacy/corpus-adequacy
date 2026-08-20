@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -353,6 +354,31 @@ class BatchRunner(unittest.TestCase):
 
 
 class ProcessSourceContainment(unittest.TestCase):
+    def _nested_corpus(self, tmp: Path) -> tuple[Path, Path]:
+        repo = tmp / "repo"
+        source_dir = repo / "src"
+        source_dir.mkdir(parents=True)
+        source = source_dir / "check.py"
+        source.write_text(
+            "import json, sys\n"
+            "doc = json.load(open(sys.argv[1]))\n"
+            "fails = [c['id'] for c in doc['cases'] if c['n'] > 10]\n"
+            "print(json.dumps({'ok': not fails, 'failures': fails}))\n")
+        (repo / "vectors.json").write_text(json.dumps({"cases": [
+            {"id": "c1", "n": 1}, {"id": "c2", "n": 2}]}))
+        raw = {"schema": ca.SCHEMA, "runner": "batch", "repo_root": "repo",
+               "implementation_sources": ["repo/src/check.py"],
+               "entrypoint_command": ["python3", "src/check.py", "vectors.json"],
+               "outcome_from": ["ok", "failures"], "vectors": "repo/vectors.json",
+               "id_key": "vector_id", "default_group": "g", "mutants": {"g": [
+                   {"label": "threshold", "anchor": "c['n'] > 10",
+                    "replacement": "c['n'] > 1"},
+                   {"label": "CONTROL", "control": True,
+                    "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'"}]}}
+        manifest = tmp / "m.json"
+        manifest.write_text(json.dumps(raw))
+        return manifest, source
+
     def test_a_symlinked_source_outside_repo_root_is_refused_before_mutation(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
@@ -396,6 +422,89 @@ class ProcessSourceContainment(unittest.TestCase):
             loaded = ca.load_manifest(manifest)
 
         self.assertEqual(loaded["_source_paths"], [target.resolve()])
+
+    def test_direct_escapes_are_rejected_before_outside_existence_is_observed(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "repo").mkdir()
+            (tmp / "outside.py").write_text("RULE = True\n")
+            manifest = BatchRunner()._corpus(tmp)
+            raw = json.loads(manifest.read_text())
+            raw["repo_root"] = "repo"
+            for source in ("outside.py", "missing.py"):
+                with self.subTest(source=source):
+                    raw["implementation_sources"] = [source]
+                    manifest.write_text(json.dumps(raw))
+                    with self.assertRaises(ca.ManifestError) as cm:
+                        ca.load_manifest(manifest)
+                    self.assertIn("outside repo_root", str(cm.exception))
+                    self.assertNotIn("not found", str(cm.exception))
+
+    def test_repo_root_must_be_an_existing_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = BatchRunner()._corpus(tmp)
+            raw = json.loads(manifest.read_text())
+            (tmp / "root-file").write_text("not a directory\n")
+            for root in ("root-file", "missing-root"):
+                with self.subTest(root=root):
+                    raw["repo_root"] = root
+                    manifest.write_text(json.dumps(raw))
+                    with self.assertRaises(ca.ManifestError) as cm:
+                        ca.load_manifest(manifest)
+                    self.assertIn("repo_root must be an existing directory", str(cm.exception))
+
+    def test_a_parent_swap_after_load_is_refused_before_outside_mutation(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest, source = self._nested_corpus(tmp)
+            loaded = ca.load_manifest(manifest)
+            original_dir = source.parent
+            parked = original_dir.with_name("original-src")
+            original_dir.rename(parked)
+            outside_dir = tmp / "outside"
+            outside_dir.mkdir()
+            outside = outside_dir / "check.py"
+            outside.write_bytes((parked / "check.py").read_bytes())
+            before = outside.read_bytes()
+            original_dir.symlink_to(outside_dir, target_is_directory=True)
+
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca._run_process(loaded, manifest)
+
+            self.assertEqual(outside.read_bytes(), before)
+        self.assertIn("outside repo_root", str(cm.exception))
+
+    def test_a_parent_swap_after_source_capture_is_refused_before_mutation(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest, source = self._nested_corpus(tmp)
+            loaded = ca.load_manifest(manifest)
+            original_dir = source.parent
+            parked = original_dir.with_name("original-src")
+            outside_dir = tmp / "outside"
+            outside_dir.mkdir()
+            outside = outside_dir / "check.py"
+            outside.write_bytes(source.read_bytes())
+            before = outside.read_bytes()
+            real_build = ca._build
+            swapped = False
+
+            def build_then_swap(m):
+                nonlocal swapped
+                result = real_build(m)
+                if not swapped:
+                    original_dir.rename(parked)
+                    original_dir.symlink_to(outside_dir, target_is_directory=True)
+                    swapped = True
+                return result
+
+            with mock.patch.object(ca, "_build", side_effect=build_then_swap):
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca._run_process(loaded, manifest)
+
+            self.assertEqual(outside.read_bytes(), before)
+        self.assertIn("outside repo_root", str(cm.exception))
 
 
 class Guards(unittest.TestCase):

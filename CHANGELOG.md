@@ -9,8 +9,9 @@ label identity. Malformed or empty labels now produce a controlled manifest
 error instead of an unhandled hash-key exception.
 
 Process and batch manifests now reject declared source paths that resolve
-outside `repo_root`, including symlink escapes. Source-guard documentation now
-states its abrupt-termination limit explicitly.
+outside `repo_root`, including symlink escapes, and revalidate containment before
+source access. Invalid roots and outside paths are rejected before probing source
+existence. Source-guard documentation now states its abrupt-termination limit.
 
 ## 0.1.0 — 2026-08-19
 
