@@ -1855,21 +1855,17 @@ class ModuleCorpusRunsInAChild(unittest.TestCase):
         self.assertEqual(_verdict(rep, "flood")["how"], "output-cap")
         self.assertEqual(_verdict(rep, "flood")["verdict"], "killed")
 
-    def test_a_printing_mutant_is_not_a_false_kill(self):
-        # A mutant that only prints changes no outcome, and scoring it a kill
-        # inflates the number exactly as a missed rule deflates it.
-        with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_hostile_manifest(Path(d), 'print("chatty")\nreturn "rejected"',
-                                           "chatty"))
-        self.assertEqual(_verdict(rep, "chatty")["verdict"], "survived")
-
-    def test_a_mutant_writing_straight_to_fd_1_is_not_a_false_kill(self):
-        # No Python-level redirect catches this one, so fd 1 is pointed at the
-        # bounded stderr before any corpus code runs.
-        body = 'import os as _o\n_o.write(1, b"pollution")\nreturn "rejected"'
-        with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_hostile_manifest(Path(d), body, "fd1"))
-        self.assertEqual(_verdict(rep, "fd1")["verdict"], "survived")
+    def test_candidate_writes_are_not_false_kills(self):
+        # A mutant that only writes changes no outcome, and scoring it a kill
+        # inflates the number exactly as a missed rule deflates it. print() a
+        # Python-level redirect would catch; the fd 1 write it would not, which
+        # is why fd 1 is pointed at the bounded stderr before any corpus runs.
+        for label, write in (("chatty", 'print("chatty")'),
+                             ("fd1", 'import os as _o\n_o.write(1, b"pollution")')):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as d:
+                rep = ca.run(_hostile_manifest(
+                    Path(d), '%s\nreturn "rejected"' % write, label))
+                self.assertEqual(_verdict(rep, label)["verdict"], "survived")
 
     # Keyed on the platform, not on _posix_process_group(): a guard that asks the
     # code under test whether to run cannot catch that code being removed.
