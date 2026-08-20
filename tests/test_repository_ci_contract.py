@@ -29,6 +29,9 @@ UNITTEST_RUN = (
 )
 COMPILE_RUN_PREFIX = "python -m py_compile"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# Literal false plus the expression forms this parser treats as disabled.
+# Not a GitHub-expression evaluator: other `if:` forms are a non-claim.
+DISABLED_IF = frozenset((False, "false", "False", "${{ false }}", "${{false}}"))
 
 
 def _strip_comment(line: str) -> str:
@@ -122,6 +125,24 @@ def parse_workflow_yaml(text: str):
     return tree
 
 
+def _is_disabled(node: dict) -> bool:
+    cond = node.get("if")
+    if cond is False:
+        return True
+    return isinstance(cond, str) and cond.strip() in DISABLED_IF
+
+
+def _effective_matrix_oses(matrix: dict) -> list:
+    oses = matrix.get("os")
+    if not isinstance(oses, list):
+        return []
+    excluded = set()
+    for item in matrix.get("exclude") or []:
+        if isinstance(item, dict) and item.get("os") in CLAIMED_OSES:
+            excluded.add(item["os"])
+    return [os_name for os_name in oses if os_name not in excluded]
+
+
 def _uses_action(step: dict, name: str) -> bool:
     uses = step.get("uses")
     return isinstance(uses, str) and uses.startswith(name + "@")
@@ -164,11 +185,29 @@ class RepositoryCiContract(unittest.TestCase):
 
     def test_test_job_matrix_oses(self):
         matrix = ((self.job.get("strategy") or {}).get("matrix") or {})
-        oses = matrix.get("os")
-        self.assertIsInstance(oses, list)
+        self.assertIsInstance(matrix.get("os"), list)
+        effective = _effective_matrix_oses(matrix)
         for os_name in CLAIMED_OSES:
             with self.subTest(os=os_name):
-                self.assertIn(os_name, oses)
+                self.assertIn(os_name, effective)
+
+    def test_test_job_and_required_steps_are_not_disabled(self):
+        self.assertFalse(_is_disabled(self.job), "test job is disabled")
+        required = [
+            s for s in self.steps
+            if isinstance(s, dict)
+            and (
+                s.get("run") == UNITTEST_RUN
+                or (
+                    isinstance(s.get("run"), str)
+                    and s["run"].startswith(COMPILE_RUN_PREFIX)
+                )
+            )
+        ]
+        self.assertGreaterEqual(len(required), 2, "need compile and unittest steps")
+        for step in required:
+            with self.subTest(name=step.get("name"), run=step.get("run")):
+                self.assertFalse(_is_disabled(step), f"{step.get('name')!r} is disabled")
 
     def test_test_job_checkout_is_pinned_official_action(self):
         matches = self._action_steps(CHECKOUT_ACTION)
