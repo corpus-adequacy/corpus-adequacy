@@ -598,5 +598,83 @@ class DirectlyRunnableTestModules(unittest.TestCase):
         self.assertIn("no top-level", problems[0])
 
 
+PRODUCER_MODULE = "corpus_adequacy.py"
+REPORT_PROJECTOR = "_report_v0"
+REPORT_CONSTRUCTING_FUNCTIONS = ("_run_process", "run")
+
+
+def _calls_named(node, name: str) -> list:
+    return [n for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == name]
+
+
+def projector_caller_violations(source: str) -> list[str]:
+    """Both report constructors must go through the one projector.
+
+    A shared projector only guarantees one report shape while every producer
+    actually calls it. Inlining a second dictionary in either constructor
+    restores the drift this replaced, and the report would still parse, still
+    score and still pass every value assertion made about the other runner.
+
+    Parsed rather than grepped: the property is that these two functions call
+    the projector and no longer apply tool identity themselves, which a text
+    match over the whole file cannot express.
+    """
+    tree = ast.parse(source)
+    funcs = {n.name: n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    problems = []
+    for name in REPORT_CONSTRUCTING_FUNCTIONS:
+        if name not in funcs:
+            problems.append("%s: function %s not found" % (PRODUCER_MODULE, name))
+            continue
+        calls = _calls_named(funcs[name], REPORT_PROJECTOR)
+        if len(calls) != 1:
+            problems.append(
+                "%s: %s makes %d call(s) to %s, expected exactly one; a report "
+                "built without it is a second shape"
+                % (PRODUCER_MODULE, name, len(calls), REPORT_PROJECTOR))
+        direct = _calls_named(funcs[name], "_with_tool_identity")
+        if direct:
+            problems.append(
+                "%s: %s calls _with_tool_identity directly at line(s) %s; identity "
+                "belongs to %s alone or a runner can omit it"
+                % (PRODUCER_MODULE, name, [c.lineno for c in direct], REPORT_PROJECTOR))
+    total = _calls_named(tree, REPORT_PROJECTOR)
+    if len(total) != 2:
+        problems.append(
+            "%s: %d call(s) to %s in the module, expected exactly the two canonical "
+            "constructors" % (PRODUCER_MODULE, len(total), REPORT_PROJECTOR))
+    return problems
+
+
+class ReportProjectorHasExactlyTwoCallers(unittest.TestCase):
+    def test_both_constructors_call_the_projector(self):
+        path = Path(__file__).resolve().parent.parent / PRODUCER_MODULE
+        problems = projector_caller_violations(path.read_text(encoding="utf-8"))
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_the_rule_catches_a_constructor_that_bypasses_the_projector(self):
+        bad = ("def _run_process(m):\n    return _with_tool_identity({})\n"
+               "def run(m):\n    return _report_v0(m)\n")
+        problems = projector_caller_violations(bad)
+        self.assertTrue(any("_with_tool_identity directly" in p for p in problems), problems)
+        self.assertTrue(any("expected exactly one" in p for p in problems), problems)
+
+    def test_the_rule_catches_a_third_caller(self):
+        bad = ("def _run_process(m):\n    return _report_v0(m)\n"
+               "def run(m):\n    return _report_v0(m)\n"
+               "def sneaky(m):\n    return _report_v0(m)\n")
+        problems = projector_caller_violations(bad)
+        self.assertTrue(any("expected exactly the two canonical" in p for p in problems),
+                        problems)
+
+    def test_the_rule_accepts_the_intended_shape(self):
+        good = ("def _run_process(m):\n    return _report_v0(m)\n"
+                "def run(m):\n    return _report_v0(m)\n")
+        self.assertEqual(projector_caller_violations(good), [])
+
+
 if __name__ == "__main__":
     unittest.main()

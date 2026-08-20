@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+One private `_report_v0` projector now builds every `corpus-adequacy.report.v0`,
+and both the module and process/batch constructors call it. Module reports carry
+`runner` for the first time, so a consumer no longer has to re-read the manifest
+to recover it; `runner` is read from the manifest rather than passed, since
+`load_manifest` always populates it. The projector owns the schema, the common
+fields, the derived denominator, `hole_ratio`, `declared_total`,
+`out_of_scope_ratio`, `adequate`, one shared `score_means`, and the single
+`_with_tool_identity` call. `originals_unverified_against_head` remains a named
+optional included only when supplied, so it stays specific to process and batch
+rather than becoming a universal `None`.
+
+Three expressions that had drifted between the two constructors converge, each
+numerically inert because the module runner cannot produce a silent mutant:
+module `declared_total` now includes `silent`, module `out_of_scope_ratio` now
+divides by the same denominator as the score, and the module report carries the
+same `score_means` text as process and batch. That text is longer than the one
+module reports previously carried and now describes the silent semantics.
+
+No `report.v1`, no schema change, no scoring, verdict, precedence, exit-code,
+error-envelope or stderr change.
+
 `tool_commit` is the 40-hex `HEAD` only when every declared runtime source
 is byte-identical to `HEAD:<path>`, and `null` otherwise. Reports and
 `--version` additionally carry `tool_source_state` (`exact` | `dirty` |
