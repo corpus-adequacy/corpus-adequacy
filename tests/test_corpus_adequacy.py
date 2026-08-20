@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,7 @@ from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import bounded_run as br  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
 
 IMPL = '''
@@ -356,6 +358,27 @@ class BatchRunner(unittest.TestCase):
             rep = ca.run(p)
         self.assertFalse(rep["adequate"])
         self.assertTrue(any("UNMUTATED" in f for f in rep["failures"]), rep["failures"])
+
+    def test_batch_command_preserves_windows_style_executable_path(self):
+        """JSON load plus _batch_outcome must not rewrite argv[0] slashes or spaces."""
+        win_py = r"C:\Program Files\Python\python.exe"
+        captured = {}
+
+        def capture(cmd, cwd, timeout):
+            captured["cmd"] = list(cmd)
+            return subprocess.CompletedProcess(
+                cmd, 0, json.dumps({"ok": True, "failures": []}), "")
+
+        with tempfile.TemporaryDirectory() as d:
+            p = self._corpus(Path(d))
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            raw["entrypoint_command"][0] = win_py
+            p.write_text(json.dumps(raw), encoding="utf-8")
+            loaded = ca.load_manifest(p)
+            with mock.patch.object(ca, "_run_capped", side_effect=capture):
+                ca._batch_outcome(loaded)
+        self.assertEqual(captured["cmd"][0], win_py)
+        self.assertEqual(captured["cmd"][1:], ["check.py", "vectors.json"])
 
 
 class ProcessSourceContainment(unittest.TestCase):
@@ -1031,6 +1054,24 @@ class ControlIsRequiredOnEveryRunner(unittest.TestCase):
         src = inspect.getsource(ca)
         self.assertEqual(src.count("no control mutant declared"), 1,
                          "the control requirement is stated more than once again")
+
+
+class BoundedRunPortability(unittest.TestCase):
+    """Windows has no killpg/getpgid; the finally must not turn a live child into <batch>."""
+
+    def test_run_capped_when_posix_process_group_apis_are_absent(self):
+        saved = {name: getattr(os, name) for name in ("killpg", "getpgid") if hasattr(os, name)}
+        try:
+            for name in list(saved):
+                delattr(os, name)
+            result = br._run_capped(
+                [sys.executable, "-c", "print('hello')"], Path("."), 10)
+        finally:
+            for name, fn in saved.items():
+                setattr(os, name, fn)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("hello", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
