@@ -4,8 +4,23 @@ Mutation adequacy for a **published conformance corpus**. Standard library only:
 no dependency, no install, no network.
 
 The version lives in one place: `VERSION` in `corpus_adequacy.py`. Every report
-carries it as `tool_version`, plus `tool_commit` when the checkout can resolve
-`HEAD`. Pin CI to the commit SHA; quote the version a human can read.
+carries it as `tool_version`. Pin CI to the commit SHA; quote the version a
+human can read.
+
+A report also names the tool bytes that produced it. `tool_commit` is the
+40-hex `HEAD` only when every declared runtime source — `bounded_run.py`,
+`corpus_adequacy.py`, `isolated_tree.py`, `module_child.py` — is byte-identical
+to that commit; otherwise it is `null`, because a commit id beside bytes it
+does not name is not provenance. `tool_source_state` says which case it was:
+`exact` when the bytes match, `dirty` when the comparison was made and they
+differ, `unresolved` when it could not be made at all. `tool_content_sha256`
+addresses the executing bytes in every case. `exact` names the bytes on disk,
+not the index: a staged edit whose worktree is back at `HEAD` still executes
+`HEAD` bytes. Dirt in a README or a test does not change tool identity.
+
+This is not an attestation, a signature, or an SBOM. It does not prove the
+recorded bytes are the code objects already loaded in `sys.modules`, and it
+does not make the checkout or its environment reproducible.
 
 The git tag is `v` plus that same number. The cut order is cut → dated heading → VERSION → tag. Quoting a version is not a tag and does not make the tag addressable.
 

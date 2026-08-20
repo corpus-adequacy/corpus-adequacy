@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+`tool_commit` is the 40-hex `HEAD` only when every declared runtime source
+is byte-identical to `HEAD:<path>`, and `null` otherwise. Reports and
+`--version` additionally carry `tool_source_state` (`exact` | `dirty` |
+`unresolved`) and `tool_content_sha256` over an ordered, length-delimited
+stream of the declared sources. One producer answers all three renderers;
+`git status` is not consulted. A modified runtime source is therefore no
+longer attributed to the clean commit. This is not an attestation, a
+signature, an SBOM, or a reproducibility claim.
+
 Child stdout and stderr are drained continuously through pipes. Combined
 retained output stays at most `OUTPUT_CAP_BYTES`; two reader threads may
 briefly hold `2 * READ_CHUNK_BYTES` in-flight before charge. Crossing the
