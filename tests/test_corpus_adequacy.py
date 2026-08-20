@@ -2364,11 +2364,13 @@ class ModuleReportCarriesTheSilentFields(unittest.TestCase):
         self.assertIn("diagnostic_channel_declared", rep)
         self.assertIs(rep["diagnostic_channel_declared"], False)
 
-    def test_runner_identity_stays_out_of_scope_here(self):
-        # Guards the boundary of this change: #6 owns runner parity, not this PR.
+    def test_the_module_report_now_names_its_runner(self):
+        # Replaces the assertion that pinned the omission. #6 owns runner parity
+        # and it has landed: the full required-key table lives in
+        # ReportShapeParityAcrossRunners, this keeps the local claim honest.
         with tempfile.TemporaryDirectory() as d:
             rep = ca.run(self._module_manifest(Path(d)))
-        self.assertNotIn("runner", rep)
+        self.assertEqual(rep["runner"], "module")
 
 
 # ---------------------------------------------------------------------------
@@ -2552,6 +2554,169 @@ class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
         joined = " ".join(rep["failures"])
         self.assertNotIn("no longer holes", joined)
         self.assertNotIn("were silent", joined)
+
+
+# ---------------------------------------------------------------------------
+# One report shape across every runner
+# ---------------------------------------------------------------------------
+#
+# Two independent `report.v0` dictionaries drifted: the module one omitted
+# `runner`, so a consumer could not tell from a report which runner produced it
+# and Assay re-read the manifest to recover the field. The required key set is
+# written here, literally, rather than derived from either producer -- a table
+# computed from the code it checks agrees with that code by construction.
+
+
+REQUIRED_REPORT_KEYS = frozenset({
+    "schema", "manifest", "runner",
+    "killed", "survived", "silent", "diagnostic_channel_declared",
+    "known_holes", "corpus_digest", "acknowledged_digests",
+    "hole_ratio", "equivalent", "unexercised_out_of_scope", "unproved",
+    "declared_total", "out_of_scope_ratio",
+    "score_percent", "score_means", "mutants", "failures", "adequate",
+    "tool_version", "tool_commit", "tool_source_state", "tool_content_sha256",
+})
+
+PROCESS_ONLY_REPORT_KEYS = frozenset({"originals_unverified_against_head"})
+
+
+class ReportShapeParityAcrossRunners(unittest.TestCase):
+    """Every runner returns the same required keys, and names itself."""
+
+    def _module(self, tmp: Path):
+        (tmp / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+        (tmp / "vectors.json").write_text(
+            json.dumps({"vectors": [{"vector_id": "v1"}]}), encoding="utf-8")
+        p = tmp / "m.json"
+        p.write_text(json.dumps({
+            "schema": ca.SCHEMA, "runner": "module", "implementation": "impl.py",
+            "entrypoint": "check", "vectors": "vectors.json", "id_key": "vector_id",
+            "default_group": "g",
+            "mutants": {"g": [
+                {"label": "r1", "anchor": "return True", "replacement": "return False"},
+                {"label": "CONTROL", "control": True,
+                 "anchor": "def check", "replacement": "def  check"}]},
+        }), encoding="utf-8")
+        return p
+
+    def _process(self, tmp: Path, runner: str):
+        (tmp / "check.py").write_text(
+            "import json, sys\n"
+            "doc = json.load(open(sys.argv[1]))\n"
+            "fails = [c['id'] for c in doc['cases'] if c['n'] > 10]\n"
+            "print(json.dumps({'ok': not fails, 'failures': fails}))\n", encoding="utf-8")
+        (tmp / "vectors.json").write_text(json.dumps(
+            {"cases": [{"id": "c1", "n": 1}]} if runner == "batch"
+            else {"vectors": [{"vector_id": "v1", "path": "vec.json"}]}), encoding="utf-8")
+        raw = {"schema": ca.SCHEMA, "runner": runner, "repo_root": ".",
+               "implementation_sources": ["check.py"],
+               "outcome_from": ["ok", "failures"], "vectors": "vectors.json",
+               "id_key": "vector_id", "default_group": "g",
+               "mutants": {"g": [
+                   {"label": "threshold", "anchor": "c['n'] > 10",
+                    "replacement": "c['n'] > 1"},
+                   {"label": "CONTROL", "control": True,
+                    "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'"}]}}
+        if runner == "batch":
+            raw["entrypoint_command"] = [_batch_python(), "check.py", "vectors.json"]
+        else:
+            (tmp / "vec.json").write_text(json.dumps({"cases": [{"id": "c1", "n": 1}]}),
+                                          encoding="utf-8")
+            raw["implementation"] = "check.py"
+            raw["build"] = []
+            raw["vector_path_key"] = "path"
+            raw["entrypoint_command"] = [_batch_python(), "check.py", "{vector}"]
+        p = tmp / "m.json"
+        p.write_text(json.dumps(raw), encoding="utf-8")
+        return p
+
+    def test_module_report_carries_every_required_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._module(Path(d)))
+        self.assertEqual(REQUIRED_REPORT_KEYS - set(rep), frozenset())
+        self.assertEqual(rep["runner"], "module")
+        # The process-only field must not become a fake universal one.
+        self.assertEqual(PROCESS_ONLY_REPORT_KEYS & set(rep), frozenset())
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_process_report_carries_every_required_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._process(Path(d), "process"))
+        self.assertEqual(REQUIRED_REPORT_KEYS - set(rep), frozenset())
+        self.assertEqual(rep["runner"], "process")
+        self.assertEqual(PROCESS_ONLY_REPORT_KEYS - set(rep), frozenset())
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_batch_report_carries_every_required_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._process(Path(d), "batch"))
+        self.assertEqual(REQUIRED_REPORT_KEYS - set(rep), frozenset())
+        self.assertEqual(rep["runner"], "batch")
+        self.assertEqual(PROCESS_ONLY_REPORT_KEYS - set(rep), frozenset())
+
+
+class ReportProjectorIsPlatformIndependent(unittest.TestCase):
+    """The contract must still be exercised where the runners cannot run.
+
+    `process` and `batch` refuse without `fcntl`, so on Windows the three tests
+    above reduce to one. Calling the projector directly needs no child, no lock
+    and no filesystem, so every runner's shape is checked on every platform.
+    """
+
+    def _project(self, runner: str, **over):
+        m = {"runner": runner, "known_holes": {}, "_corpus_digest": None}
+        m.update(over.pop("manifest", {}))
+        kw = dict(killed=1, survived=0, silent=0, equivalent=0, out_of_scope=0,
+                  unproved=0, known_holes=0, score=100.0, results=[], failures=[])
+        kw.update(over)
+        return ca._report_v0(Path("m.json"), m, **kw)
+
+    def test_every_runner_projects_the_required_keys(self):
+        for runner in ("module", "process", "batch"):
+            with self.subTest(runner=runner):
+                rep = self._project(runner)
+                self.assertEqual(REQUIRED_REPORT_KEYS - set(rep), frozenset())
+                self.assertEqual(rep["runner"], runner)
+
+    def test_the_runner_comes_from_the_manifest_not_a_literal(self):
+        self.assertEqual(self._project("batch")["runner"], "batch")
+        self.assertEqual(self._project("module")["runner"], "module")
+
+    def test_silent_and_the_diagnostic_flag_are_projected(self):
+        rep = self._project("module")
+        self.assertEqual(rep["silent"], 0)
+        self.assertIs(rep["diagnostic_channel_declared"], False)
+        declared = self._project("process", silent=2,
+                                 manifest={"diagnostic_from": ["reason"]})
+        self.assertEqual(declared["silent"], 2)
+        self.assertIs(declared["diagnostic_channel_declared"], True)
+
+    def test_tool_identity_is_applied_exactly_once_by_the_projector(self):
+        rep = self._project("module")
+        for key in ("tool_version", "tool_commit",
+                    "tool_source_state", "tool_content_sha256"):
+            self.assertIn(key, rep)
+
+    def test_the_process_only_field_is_included_only_when_supplied(self):
+        self.assertNotIn("originals_unverified_against_head", self._project("module"))
+        rep = self._project("process", originals_unverified_against_head=True)
+        self.assertIs(rep["originals_unverified_against_head"], True)
+
+    def test_the_derived_numbers_share_one_denominator(self):
+        rep = self._project("process", killed=1, silent=1, known_holes=1, out_of_scope=1)
+        # denom = killed + survived + silent = 2
+        self.assertEqual(rep["hole_ratio"], 0.5)
+        self.assertEqual(rep["out_of_scope_ratio"], 0.5)
+        self.assertEqual(rep["declared_total"], 4)
+
+    def test_a_zero_denominator_reports_no_ratio_rather_than_a_division(self):
+        rep = self._project("module", killed=0, silent=0, known_holes=1)
+        self.assertIsNone(rep["hole_ratio"])
+        self.assertIsNone(rep["out_of_scope_ratio"])
+
+    def test_adequate_is_exactly_no_failures(self):
+        self.assertIs(self._project("module")["adequate"], True)
+        self.assertIs(self._project("module", failures=["x"])["adequate"], False)
 
 
 if __name__ == "__main__":

@@ -219,6 +219,25 @@ measurement drift, and the copy that drifts is the one that stops measuring.
 Its own findings on the corpora it was built against, including the unflattering
 ones, are published in that repository's `conformance/INDEX.md`.
 
+## One report shape
+
+Every runner returns the same `corpus-adequacy.report.v0` keys, built by one
+private projector that both constructors call. A report names its own producer
+in `runner`, so a consumer never has to re-read the manifest to learn which
+runner made it.
+
+`originals_unverified_against_head` is the one exception and stays specific to
+`process` and `batch`: those runners guard a working tree, the module runner has
+no such guard, and a field present-but-meaningless everywhere would be worse than
+an absent one.
+
+The module runner refuses `diagnostic_from`, so its `silent` is always `0` and
+its `diagnostic_channel_declared` always `false`. Both are reported rather than
+omitted, so a consumer can tell a measured zero from an unmeasured one.
+
+This is shape parity. It says nothing about whether two runners measuring the
+same corpus would agree, and nothing about adequacy, completeness or safety.
+
 ## Related work
 
 This tool is not the first implementation of the measurement it performs, and the

@@ -96,6 +96,7 @@ from isolated_tree import IsolationError, IsolatedMutationTree  # noqa: E402
 
 SCHEMA = "corpus-adequacy.manifest.v0"
 ERROR_SCHEMA = "corpus-adequacy.error.v0"
+REPORT_SCHEMA = "corpus-adequacy.report.v0"
 # One place. The report, --version, and CHANGELOG name this.
 # A tag v+VERSION exists only after the documented cut.
 # A SHA pin is exact and opaque; this is the name a measurement can quote.
@@ -299,6 +300,69 @@ def tool_identity(root: Path | None = None) -> dict:
 def _with_tool_identity(report: dict) -> dict:
     report.update(tool_identity())
     return report
+
+
+# One sentence for every runner. The module report carried an older, shorter
+# version that predated the silent class, so a module consumer read a different
+# description of the same number.
+SCORE_MEANS = ("percent of author-declared in-scope rules killed; NOT percent of "
+               "the rules the implementation actually has. Silent mutants count "
+               "in the denominator and never the numerator. Without "
+               "diagnostic_from the silent class is unreachable, so a zero there "
+               "means it was not measured, not that none exist")
+
+
+def _report_v0(manifest_path: Path, m: dict, *,
+               killed: int, survived: int, silent: int, equivalent: int,
+               out_of_scope: int, unproved: int, known_holes: int,
+               score, results: list, failures: list,
+               originals_unverified_against_head=None) -> dict:
+    """The one `report.v0` shape, for every runner.
+
+    There were two of these, and they drifted: the module one omitted `runner`,
+    so a report could not name its own producer and a downstream consumer
+    re-read the manifest to recover the field. They had also diverged on three
+    expressions that happened to agree numerically only because the module
+    runner cannot produce a silent mutant.
+
+    `runner` is read from the manifest rather than passed by the caller.
+    `load_manifest` defaults it to `module`, so it is always populated, and a
+    caller that cannot supply it cannot supply the wrong one either.
+
+    `originals_unverified_against_head` is a named optional rather than a
+    generic extras mapping: process and batch own that field, module has no
+    such guard, and a mapping splatted into this dictionary could overwrite a
+    common field instead of adding a runner-specific one. It is included only
+    when supplied, so its absence stays absence rather than a fake `None`.
+    """
+    denom = killed + survived + silent
+    report = {
+        "schema": REPORT_SCHEMA,
+        "manifest": str(manifest_path),
+        "runner": m["runner"],
+        "killed": killed,
+        "survived": survived,
+        "silent": silent,
+        "diagnostic_channel_declared": m.get("diagnostic_from") is not None,
+        "known_holes": known_holes,
+        "corpus_digest": m.get("_corpus_digest"),
+        "acknowledged_digests": len(m.get("known_holes", {})),
+        "hole_ratio": None if denom == 0 else round(known_holes / denom, 2),
+        "equivalent": equivalent,
+        "unexercised_out_of_scope": out_of_scope,
+        "unproved": unproved,
+        "declared_total": (killed + survived + silent + equivalent + out_of_scope
+                           + unproved + known_holes),
+        "out_of_scope_ratio": None if denom == 0 else round(out_of_scope / denom, 2),
+        "score_percent": score,
+        "score_means": SCORE_MEANS,
+        "mutants": results,
+        "failures": failures,
+        "adequate": not failures,
+    }
+    if originals_unverified_against_head is not None:
+        report["originals_unverified_against_head"] = originals_unverified_against_head
+    return _with_tool_identity(report)
 
 
 def format_tool_identity(identity: dict | None = None) -> str:
@@ -1345,28 +1409,12 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     if denom == 0:
         failures.append(null_result_reading(known_holes, equivalent, out_of_scope))
 
-    return _with_tool_identity({
-            "schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
-            "runner": m["runner"], "killed": killed, "survived": survived,
-            "silent": silent,
-            "diagnostic_channel_declared": m.get("diagnostic_from") is not None,
-            "known_holes": known_holes, "corpus_digest": m.get("_corpus_digest"),
-            "originals_unverified_against_head": guard.unverified,
-            "acknowledged_digests": len(m.get("known_holes", {})),
-            "hole_ratio": (None if denom == 0
-                           else round(known_holes / denom, 2)),
-            "equivalent": equivalent, "unexercised_out_of_scope": out_of_scope,
-            "unproved": unproved,
-            "declared_total": (killed + survived + silent + equivalent + out_of_scope
-                               + unproved + known_holes),
-            "out_of_scope_ratio": (None if denom == 0 else round(out_of_scope / denom, 2)),
-            "score_percent": score,
-            "score_means": ("percent of author-declared in-scope rules killed; NOT percent of "
-                            "the rules the implementation actually has. Silent mutants count "
-                            "in the denominator and never the numerator. Without "
-                            "diagnostic_from the silent class is unreachable, so a zero there "
-                            "means it was not measured, not that none exist"),
-            "mutants": results, "failures": failures, "adequate": not failures})
+    return _report_v0(
+        manifest_path, m,
+        killed=killed, survived=survived, silent=silent, equivalent=equivalent,
+        out_of_scope=out_of_scope, unproved=unproved, known_holes=known_holes,
+        score=score, results=results, failures=failures,
+        originals_unverified_against_head=guard.unverified)
 
 
 def run(manifest_path: Path) -> dict:
@@ -1559,24 +1607,14 @@ def run(manifest_path: Path) -> dict:
     if denom == 0:
         failures.append(null_result_reading(known_holes, equivalent, out_of_scope))
 
-    return _with_tool_identity({
-            "schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
-            "killed": killed, "survived": survived, "silent": silent,
-            "diagnostic_channel_declared": m.get("diagnostic_from") is not None,
-            "equivalent": equivalent,
-            "known_holes": known_holes, "corpus_digest": m.get("_corpus_digest"),
-            "acknowledged_digests": len(m.get("known_holes", {})),
-            "hole_ratio": (None if denom == 0
-                           else round(known_holes / denom, 2)),
-            "unexercised_out_of_scope": out_of_scope, "unproved": unproved,
-            "declared_total": (killed + survived + equivalent + out_of_scope + unproved
-                               + known_holes),
-            "out_of_scope_ratio": (None if (killed + survived) == 0
-                                   else round(out_of_scope / (killed + survived), 2)),
-            "score_means": ("percent of author-declared in-scope rules killed; NOT percent of the "
-                            "rules the implementation actually has"),
-            "score_percent": score, "mutants": results, "failures": failures,
-            "adequate": not failures})
+    # `silent` is 0 here by construction: the module runner refuses
+    # `diagnostic_from` at load, so the class cannot occur. It is projected
+    # rather than omitted, so a consumer can tell zero from unmeasured.
+    return _report_v0(
+        manifest_path, m,
+        killed=killed, survived=survived, silent=silent, equivalent=equivalent,
+        out_of_scope=out_of_scope, unproved=unproved, known_holes=known_holes,
+        score=score, results=results, failures=failures)
 
 
 def null_result_reading(known_holes, equivalent, out_of_scope):
