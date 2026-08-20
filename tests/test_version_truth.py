@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Version/release-truth contract. Standard library only.
 
-One function. VERSION is read as text from corpus_adequacy.py — no import,
+One function. VERSION is read via ast.parse of corpus_adequacy.py — no import,
 no exec, no runpy. A missing local tag is honest. This is not a release,
 not a tag, not protection, and does not make 0.1.0 addressable.
 
@@ -11,6 +11,7 @@ introduced with VERSION itself at 7491548357d65e45cf3db5a40a05ad0375c6d02b.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import subprocess
@@ -24,10 +25,7 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SEMVER = r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
-VERSION_ASSIGN_RE = re.compile(
-    r"^VERSION\s*=\s*(['\"])(" + SEMVER + r")\1\s*(?:#.*)?$"
-)
-VERSION_LINE_RE = re.compile(r"^VERSION\s*=")
+SEMVER_RE = re.compile(r"^" + SEMVER + r"$")
 UNRELEASED_HEADING_RE = re.compile(r"^##\s+\[?Unreleased\]?\s*$")
 TAG_SCHEMA_PHRASE = "The git tag is `v` plus that same number."
 CUT_ORDER_PHRASE = "cut → dated heading → VERSION → tag"
@@ -39,7 +37,8 @@ NO_ADDRESSABILITY_PHRASE = (
 def check_version_release_truth(root: Path) -> str:
     """One rule: version/release truth for a checkout.
 
-    1. Parse VERSION from corpus_adequacy.py as text (quoted x.y.z only).
+    1. ast.parse corpus_adequacy.py; exactly one module-level Assign to
+       Name('VERSION') whose value is a strict-semver string.
     2. CHANGELOG has exactly one Unreleased heading and exactly one dated
        heading for that VERSION (real ISO calendar date).
     3. Docs name the tag schema, the cut order, and the no-addressability
@@ -54,8 +53,8 @@ def check_version_release_truth(root: Path) -> str:
     """
     root = Path(root)
     version = _parse_version_text((root / "corpus_adequacy.py").read_text(encoding="utf-8"))
-    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    readme = (root / "README.md").read_text(encoding="utf-8")
+    changelog = _public_markdown((root / "CHANGELOG.md").read_text(encoding="utf-8"))
+    readme = _public_markdown((root / "README.md").read_text(encoding="utf-8"))
     _check_changelog_headings(changelog, version)
     tag_present = _tag_is_present(root, version)
     _check_docs_wording(readme, changelog, version, tag_present)
@@ -65,19 +64,65 @@ def check_version_release_truth(root: Path) -> str:
 
 
 def _parse_version_text(source: str) -> str:
-    assignments = [line for line in source.splitlines() if VERSION_LINE_RE.match(line)]
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        raise ValueError("corpus_adequacy.py is not parseable: %s" % exc) from exc
+    assignments = []
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign):
+            target = node.target
+            if isinstance(target, ast.Name) and target.id == "VERSION":
+                raise ValueError("VERSION must be an Assign, not an AnnAssign")
+            continue
+        if not isinstance(node, ast.Assign):
+            continue
+        if len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name) and target.id == "VERSION":
+            assignments.append(node)
     if len(assignments) != 1:
         raise ValueError(
             "need exactly one module-level VERSION assignment, found %d"
             % len(assignments)
         )
-    match = VERSION_ASSIGN_RE.match(assignments[0])
-    if match is None:
+    value = assignments[0].value
+    if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
         raise ValueError(
-            "VERSION must be a quoted MAJOR.MINOR.PATCH string literal, got %r"
-            % assignments[0]
+            "VERSION must be a quoted MAJOR.MINOR.PATCH string literal"
         )
-    return match.group(2)
+    if SEMVER_RE.match(value.value) is None:
+        raise ValueError("VERSION is not strict semver: %r" % value.value)
+    return value.value
+
+
+def _public_markdown(text: str) -> str:
+    """Outward Markdown only: drop HTML comments and fenced code.
+
+    Supported boundary, not a full parser:
+    - HTML comments: <!-- ... --> including across lines.
+    - Fenced blocks: a line whose first non-space run is 3+ ` or ~,
+      closed by a later line with a fence of the same character at
+      least as long. An unclosed fence consumes the rest of the file.
+    Indented code, inline `code`, and other HTML are left as-is.
+    """
+    without_comments = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    lines = without_comments.splitlines(keepends=True)
+    out = []
+    fence = None
+    opener = re.compile(r"(`{3,}|~{3,})")
+    for line in lines:
+        match = opener.match(line.lstrip())
+        if fence is None:
+            if match:
+                fence = (match.group(1)[0], len(match.group(1)))
+                continue
+            out.append(line)
+            continue
+        if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= fence[1]:
+            fence = None
+    return "".join(out)
 
 
 def _headings(text: str) -> list[str]:
@@ -319,6 +364,12 @@ INVALID_SOURCES = (
     ("bool", "VERSION = True\n"),
     ("prefixed-v", 'VERSION = "v0.1.0"\n'),
     ("leading-zeros", 'VERSION = "01.0.0"\n'),
+    ("docstring-only", '"""\nVERSION = "0.1.0"\n"""\n'),
+    ("nested-function", 'def _f():\n    VERSION = "0.1.0"\n'),
+    ("nested-class", "class C:\n    VERSION = \"0.1.0\"\n"),
+    ("attribute-assignment", "mod = type('m', (), {})()\nmod.VERSION = \"0.1.0\"\n"),
+    ("two-module-level", 'VERSION = "0.1.0"\nVERSION = "0.2.0"\n'),
+    ("ann-assign", 'VERSION: str = "0.1.0"\n'),
 )
 
 INVALID_CHANGELOGS = (
@@ -346,6 +397,16 @@ INVALID_CHANGELOGS = (
         "impossible-calendar-date",
         "# Changelog\n\n## Unreleased\n\n"
         "## 0.1.0 — 2026-02-31\n\nFirst named cut.\n",
+    ),
+    (
+        "headings-only-in-fence",
+        "# Changelog\n\n```\n## Unreleased\n\n"
+        "## 0.1.0 — 2026-08-19\n```\n",
+    ),
+    (
+        "headings-only-in-comment",
+        "# Changelog\n\n<!--\n## Unreleased\n\n"
+        "## 0.1.0 — 2026-08-19\n-->\n",
     ),
 )
 
@@ -386,6 +447,8 @@ class VersionReleaseTruth(unittest.TestCase):
             ("schema-removed", CUT_ORDER_PHRASE + " " + NO_ADDRESSABILITY_PHRASE + "\n"),
             ("no-addressability-removed", TAG_SCHEMA_PHRASE + " " + CUT_ORDER_PHRASE + "\n"),
             ("explicit-tag-while-absent", _honest_readme(" See v0.1.0.")),
+            ("phrases-only-in-fence", "```\n" + _honest_readme() + "```\n"),
+            ("phrases-only-in-comment", "<!--\n" + _honest_readme() + "-->\n"),
         )
         for name, readme in cases:
             with self.subTest(name):

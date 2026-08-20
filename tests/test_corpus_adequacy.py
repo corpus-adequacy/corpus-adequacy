@@ -942,15 +942,6 @@ class Cli(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), ca.format_tool_identity())
         self.assertIn(ca.VERSION, r.stdout)
 
-    def test_changelog_names_this_version(self):
-        # Pin is check_version_release_truth: text-parsed VERSION, exact-one
-        # Unreleased, one dated heading. A substring hunt on ca.VERSION would
-        # stay green if Unreleased were missing or VERSION were True.
-        from test_version_truth import check_version_release_truth
-        check_version_release_truth(Path(__file__).resolve().parent.parent)
-
-
-
 class ConcurrentRunsAreExcluded(unittest.TestCase):
     """Two runs over one working tree corrupt each other, in two ways.
 
