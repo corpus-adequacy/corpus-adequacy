@@ -3,8 +3,8 @@
 
 Standard library only. No Assay import, no pip install, no network.
 
-    python3 conformance/corpus_adequacy.py <manifest.json>
-    python3 conformance/corpus_adequacy.py <manifest.json> --json
+    python3 corpus_adequacy.py <manifest.json>
+    python3 corpus_adequacy.py <manifest.json> --json
 
 WHY A CORPUS NEEDS THIS AND A TEST SUITE DOES NOT
 -------------------------------------------------

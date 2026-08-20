@@ -560,6 +560,13 @@ class VersionReleaseTruth(unittest.TestCase):
     def test_checkout_satisfies_version_release_truth(self):
         self.assertEqual(check_version_release_truth(REPO_ROOT), "0.1.0")
 
+    def test_module_docstring_names_the_root_invocation(self):
+        source = (REPO_ROOT / "corpus_adequacy.py").read_text(encoding="utf-8")
+        doc = ast.get_docstring(ast.parse(source))
+        self.assertIsNotNone(doc)
+        self.assertIn("python3 corpus_adequacy.py", doc)
+        self.assertNotIn("conformance/corpus_adequacy.py", doc)
+
     def test_version_is_read_as_text_without_import_or_exec(self):
         with _temp_tree(
             source="raise RuntimeError('imported or executed')\nVERSION = \"0.1.0\"\n"

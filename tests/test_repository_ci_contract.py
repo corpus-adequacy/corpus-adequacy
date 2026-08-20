@@ -34,7 +34,7 @@ COMPILE_RUN = (
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_ON = {
     "pull_request": None,
-    "push": {"branches": ["main"]},
+    "push": {"branches": ["main"], "tags": ["v*"]},
 }
 ALLOWED_TOP_LEVEL_KEYS = frozenset({"name", "on", "permissions", "env", "jobs"})
 ALLOWED_ENV_KEYS = frozenset({"PYTHON_VERSION"})
@@ -197,7 +197,7 @@ def workflow_shape_violations(tree) -> list[str]:
     if extra_top:
         bad.append("unapproved top-level keys: %s" % sorted(extra_top))
     if tree.get("on") != REQUIRED_ON:
-        bad.append("on must be exactly pull_request plus push.branches: [main]")
+        bad.append("on must be exactly pull_request plus push.branches: [main] and push.tags: [v*]")
     if tree.get("permissions") != ALLOWED_PERMISSIONS:
         bad.append("permissions must be exactly {contents: read}")
     env = tree.get("env")
@@ -308,6 +308,16 @@ class RepositoryCiContract(unittest.TestCase):
         mutated = self._mutated("contents: read", "contents: write")
         self.assertIn("permissions must be exactly {contents: read}",
                       workflow_shape_violations(mutated))
+
+    def test_push_runs_ci_on_version_tags(self):
+        self.assertEqual(self.tree.get("on"), REQUIRED_ON)
+        self.assertEqual(self.tree["on"]["push"].get("tags"), ["v*"])
+        removed = self._mutated("\n    tags: [v*]", "")
+        hits = workflow_shape_violations(removed)
+        self.assertTrue(any("push.tags" in v for v in hits), hits)
+        changed = self._mutated("tags: [v*]", "tags: [v1.*]")
+        hits = workflow_shape_violations(changed)
+        self.assertTrue(any("push.tags" in v for v in hits), hits)
 
     def test_checkout_fetches_full_history_and_tags(self):
         checkout = next(
