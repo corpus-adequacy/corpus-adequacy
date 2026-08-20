@@ -15,6 +15,12 @@ python3 corpus_adequacy.py <manifest.json>
 python3 corpus_adequacy.py <manifest.json> --json
 ```
 
+## Support and release
+
+Maintained on CPython 3.13 on ubuntu-latest, macos-latest, and windows-latest.
+The `module` runner is cross-platform. `process` and `batch` refuse where `fcntl` is unavailable.
+Release procedure: move Unreleased notes into a dated CHANGELOG heading, set VERSION, merge only after the three-OS CI is green, create and push an annotated vVERSION tag on that merge SHA, require the tag-push CI green, then publish the GitHub Release. Quoting a version alone is not a release.
+
 ## The question it answers
 
 Not *does this corpus reproduce its own verdicts*, but:

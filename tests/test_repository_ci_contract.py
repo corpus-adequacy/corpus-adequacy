@@ -445,5 +445,39 @@ class BatchFixturePortability(unittest.TestCase):
                 self.assertNotIn("'python3'", args)
 
 
+README = REPO_ROOT / "README.md"
+RELEASE_PROCEDURE_BLOCK = (
+    "Release procedure: move Unreleased notes into a dated CHANGELOG heading, "
+    "set VERSION, merge only after the three-OS CI is green, create and push an "
+    "annotated vVERSION tag on that merge SHA, require the tag-push CI green, "
+    "then publish the GitHub Release. Quoting a version alone is not a release."
+)
+
+
+class ReadmeSupportAndReleaseDocs(unittest.TestCase):
+    """README names the same matrix the workflow contract already pins."""
+
+    def test_readme_names_the_claimed_ci_matrix(self):
+        readme = README.read_text(encoding="utf-8")
+        self.assertIn("CPython %s" % PYTHON_VERSION, readme)
+        for os_name in CLAIMED_OSES:
+            self.assertIn(os_name, readme)
+
+    def test_readme_states_module_is_cross_platform_and_fcntl_runners_refuse(self):
+        readme = README.read_text(encoding="utf-8")
+        self.assertIn("The `module` runner is cross-platform.", readme)
+        self.assertIn(
+            "`process` and `batch` refuse where `fcntl` is unavailable.",
+            readme,
+        )
+
+    def test_readme_states_the_release_procedure_as_one_line(self):
+        readme = README.read_text(encoding="utf-8")
+        self.assertTrue(
+            any(line.strip() == RELEASE_PROCEDURE_BLOCK for line in readme.splitlines()),
+            "README must contain the exact release-procedure block as one line",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
