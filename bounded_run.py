@@ -158,10 +158,12 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
     deadline = time.monotonic() + timeout
     try:
         while proc.poll() is None:
-            if overflow or reader_error:
+            if overflow:
                 break
             if time.monotonic() > deadline:
                 timed_out = True
+                break
+            if reader_error:
                 break
             try:
                 proc.wait(timeout=0.05)
