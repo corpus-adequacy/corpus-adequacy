@@ -1824,13 +1824,13 @@ class ModuleCorpusRunsInAChild(unittest.TestCase):
         self.assertEqual(_verdict(rep, "endless")["verdict"], "killed")
 
     def test_systemexit_from_the_entrypoint_does_not_end_the_tool(self):
-        # It used to propagate out of run(): the mutant picked the exit code.
-        # Raising instead of returning is a behaviour change like any other.
+        # SystemExit escapes collect(), terminates the child, and the parent
+        # sees unexpected-exit. The parent is alive with a parseable report.
         with tempfile.TemporaryDirectory() as d:
             rep = ca.run(_hostile_manifest(Path(d), "raise SystemExit(9)", "systemexit"))
         v = _verdict(rep, "systemexit")
         self.assertEqual(v["verdict"], "killed")
-        self.assertEqual(v["how"], "raises on 1 vector(s)")
+        self.assertEqual(v["how"], "unexpected-exit")
 
     def test_os_exit_leaves_the_tool_standing_and_the_rule_unproved(self):
         # The worst of them: exit 0 with no report is what a CI gate reads as
@@ -2006,37 +2006,22 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
                 self.assertTrue(any("control" in f and "abnormally" in f
                                     for f in rep["failures"]), rep["failures"])
 
-    def test_systemexit_in_a_control_is_control_killed_not_control_error(self):
-        """F1 disposition: vector-level SystemExit is a caught raise, not abnormal
-        child termination. Issue #11 explicitly treats entrypoint SystemExit
-        caught at vector level as a raised outcome, while abnormal CHILD
-        termination is role-invalidating (control-error).
-
-        The distinction: collect() catches BaseException including SystemExit
-        within the child process, the child continues to process remaining
-        vectors, and reports the raise normally. The child does NOT die.
-        An abnormal child termination (process-level) would be caught by
-        the parent as unexpected-exit/signal → control-error.
-
-        So a control whose entrypoint raises SystemExit is control-killed:
-        the harness detected a behaviour change (raise vs return), which is
-        what the control exists to prove. This is correct and intentional.
+    def test_systemexit_in_a_control_is_control_error_not_control_killed(self):
+        """SystemExit is process-control, not an application error. collect()
+        catches Exception only, so SystemExit escapes, terminates the child,
+        and the parent sees unexpected-exit → control-error. The score is
+        invalid because the control measurement failed.
         """
-        # A control that raises SystemExit on every vector: the child catches
-        # it in collect(), reports "raised", the parent sees raised → control-killed.
         ctrl = {"label": "CONTROL systemexit", "control": True,
                 "anchor": 'def evaluate(group, inputs):',
                 "replacement": 'def evaluate(group, inputs):\n    raise SystemExit(42)'}
         with tempfile.TemporaryDirectory() as d:
             rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, ctrl]}, control=False))
         v = _verdict(rep, "CONTROL systemexit")
-        # control-killed: the harness detected the raise, proving it can detect changes.
-        self.assertEqual(v["verdict"], "control-killed",
-                         "vector-level SystemExit is a detected raise, not abnormal "
-                         "child termination; expected control-killed, got %s" % v["verdict"])
-        # The run should not be invalidated by this.
-        self.assertFalse(any("control-error" in f for f in rep["failures"]),
-                         "SystemExit caught at vector level is not control-error")
+        self.assertEqual(v["verdict"], "control-error")
+        self.assertIn("unexpected-exit", v["how"])
+        self.assertFalse(rep["adequate"])
+        self.assertIsNone(rep["score_percent"])
 
     def test_an_outcome_the_transport_cannot_carry_is_unproved(self):
         # Not a new type system: whatever JSON carries is compared, and a value

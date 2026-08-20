@@ -77,9 +77,11 @@ def collect(fn, vectors: list, arg_keys: list, result: dict) -> None:
         key = str(index)
         try:
             value = fn(*[vector[k] for k in arg_keys])
-        except BaseException:  # noqa: BLE001 - any raise is the signal, not an error
-            # SystemExit included: raising instead of returning is a behaviour
-            # change the corpus saw, and letting it end the run was the defect.
+        except Exception:  # noqa: BLE001 - any raise is the signal, not an error
+            # SystemExit and KeyboardInterrupt must escape: they are
+            # process-control, not application errors. The parent
+            # role-classifies the dead child (control-error for a control,
+            # unexpected-exit/killed for a scored mutant).
             result["raised"].append(key)
             continue
         try:
