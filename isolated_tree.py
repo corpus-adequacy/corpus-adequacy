@@ -9,6 +9,9 @@ cleanup removes only self.root, and only when lstat shows a directory
 that is a direct child of system temp and carries the repo-keyed
 muttree prefix. There is no stable pointer and no cross-run stale
 delete. SIGKILL orphans stay inert until the OS reclaims temp.
+The copy is not an atomic filesystem snapshot: concurrent external
+writes can produce mixed bytes. Cleanup is best-effort; a normal
+cleanup error or SIGKILL can leave an inert temp-root.
 
 Never a sandbox. Never a git worktree. Never the #4 output ceiling.
 Never #11 module isolation. Never #2 HEAD-vs-dirty provenance.

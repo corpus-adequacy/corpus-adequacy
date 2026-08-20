@@ -110,7 +110,10 @@ removes only that run's root after lstat, direct-child-of-system-temp, and
 prefix checks. There is no stable pointer and no cross-run stale delete.
 Abrupt `SIGKILL` of the tool cannot run Python finally, so a leftover copy
 may remain under temp until the OS reclaims it; the next run uses a new
-unique root and does not auto-delete the orphan. The process/batch lock is
+unique root and does not auto-delete the orphan. The copy is not an
+atomic filesystem snapshot: concurrent external writes can produce mixed
+bytes. Cleanup is best-effort; a normal cleanup error or SIGKILL can
+leave an inert temp-root. The process/batch lock is
 opened without following or truncating a symlink. Regular files are copied
 in bounded chunks. A `.git` entry is skipped before type checks; files and
 directories share one entry ceiling. This is not a sandbox, not a

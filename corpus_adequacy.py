@@ -492,9 +492,9 @@ class _TreeLock:
     disabled rule left in a working tree, which is the exact outcome
     _SourceGuard exists to prevent.
 
-    So the lock is taken BEFORE the dirty check, not after: a clean tree
-    observed outside the lock can be mutated before the originals are captured,
-    which is the same bug one step earlier.
+    So the lock is taken BEFORE the isolated copy, not after: a tree
+    observed outside the lock can change before the copy is made, which
+    is the same bug one step earlier.
 
     Non-blocking on purpose. A run that queued and started twenty minutes later
     would measure a tree nobody chose for it.
@@ -512,8 +512,8 @@ class _TreeLock:
         if self.unavailable:
             raise ManifestError(
                 "no advisory lock on this platform, so a process or batch run "
-                "cannot exclude a concurrent writer. Refusing before dirty "
-                "check, source capture, build, or mutation of %s"
+                "cannot exclude a concurrent writer. Refusing before source "
+                "copy, build, or mutation of %s"
                 % self.repo_root)
         self._fh = self._open_lockfile()
         try:
@@ -639,17 +639,6 @@ class _SourceGuard:
         return leaked
 
 
-def _tree_is_dirty(repo_root: Path, paths: list[Path]) -> list[str]:
-    """Declared sources with uncommitted changes. Mutating those loses work."""
-    try:
-        out = subprocess.run(["git", "-C", str(repo_root), "status", "--porcelain", "--"]
-                             + [str(p) for p in paths],
-                             capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        return []          # no git: nothing to protect, and nothing to claim
-    return [ln[3:] for ln in out.stdout.splitlines() if ln.strip()]
-
-
 def _build(m: dict) -> tuple[bool, str]:
     if not m.get("build"):
         return True, "nothing to build"      # an interpreted corpus has no build step
@@ -749,10 +738,10 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
     known_holes = 0
 
-    # Taken BEFORE the dirty check: a tree observed clean outside the lock can be
-    # mutated by another run before the originals are captured. Isolation copies
-    # working-tree bytes, so dirty declared sources are measured rather than
-    # refused; the lock still comes first.
+    # Taken BEFORE the isolated copy: a tree observed outside the lock can
+    # change before materialize. Isolation copies working-tree bytes, so dirty
+    # declared sources are measured rather than refused; the lock still comes
+    # first.
     original_root = m["_repo_root"]
     lock = _TreeLock(original_root)
     lock.__enter__()
@@ -760,7 +749,6 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     iso = IsolatedMutationTree(original_root)
     guard = None
     try:
-        _tree_is_dirty(original_root, m["_source_paths"])
         try:
             isolated = iso.materialize()
         except IsolationError as exc:
