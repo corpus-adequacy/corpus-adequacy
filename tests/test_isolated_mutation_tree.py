@@ -342,6 +342,173 @@ class MaterializeHelper(unittest.TestCase):
             self.assertIsNone(_read_pointer(root))
 
 
+
+    def test_write_pointer_atomic_does_not_follow_a_symlink(self):
+        """Measured probe, helper-only: write_text followed the symlink."""
+        victim = Path(tempfile.mkstemp(prefix="iso-ptr-victim-direct-", dir=tempfile.gettempdir())[1])
+        ptr = Path(tempfile.gettempdir()) / "iso-ptr-atomic-probe.ptr"
+        try:
+            secret = b"POINTER_SYMLINK_PROBE_BYTES\n"
+            victim.write_bytes(secret)
+            if ptr.exists() or ptr.is_symlink():
+                ptr.unlink()
+            ptr.symlink_to(victim)
+            iso._write_pointer_atomic(ptr, "/tmp/corpus-adequacy-muttree-owned")
+            self.assertEqual(victim.read_bytes(), secret)
+            self.assertFalse(ptr.is_symlink())
+            self.assertTrue(stat.S_ISREG(os.lstat(ptr).st_mode))
+            self.assertEqual(ptr.read_text(encoding="utf-8"), "/tmp/corpus-adequacy-muttree-owned")
+        finally:
+            for path in (ptr, victim):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def test_pointer_symlink_is_replaced_without_following_to_the_target(self):
+        """Measured probe: ptr.write_text followed a symlink and overwrote the target."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "a.py").write_text("A\n", encoding="utf-8")
+            victim = Path(tempfile.mkstemp(prefix="iso-ptr-victim-", dir=tempfile.gettempdir())[1])
+            try:
+                secret = b"POINTER_SYMLINK_PROBE_BYTES\n"
+                victim.write_bytes(secret)
+                ptr = iso.isolated_tree_pointer(root)
+                if ptr.exists() or ptr.is_symlink():
+                    ptr.unlink()
+                ptr.symlink_to(victim)
+                self.assertTrue(ptr.is_symlink())
+                tree = iso.IsolatedMutationTree(root)
+                try:
+                    isolated = tree.materialize()
+                    self.assertEqual(victim.read_bytes(), secret)
+                    self.assertFalse(ptr.is_symlink())
+                    try:
+                        st = os.lstat(ptr)
+                    except OSError as exc:
+                        self.fail("pointer missing after materialize: %s" % exc)
+                    self.assertTrue(stat.S_ISREG(st.st_mode))
+                    named = Path(ptr.read_text(encoding="utf-8").strip())
+                    self.assertEqual(named.resolve(), isolated.resolve())
+                finally:
+                    tree.cleanup()
+            finally:
+                try:
+                    victim.unlink()
+                except OSError:
+                    pass
+
+    def test_foreign_temp_pointer_target_is_left_intact(self):
+        """Measured probe: _forget_previous_root rmtree'd an arbitrary other temp dir."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "a.py").write_text("A\n", encoding="utf-8")
+            foreign = Path(tempfile.mkdtemp(prefix="iso-foreign-probe-"))
+            marker = foreign / "keep.txt"
+            marker.write_bytes(b"FOREIGN_TEMP_PROBE_BYTES\n")
+            ptr = iso.isolated_tree_pointer(root)
+            if ptr.exists() or ptr.is_symlink():
+                ptr.unlink()
+            ptr.write_text(str(foreign), encoding="utf-8")
+            tree = iso.IsolatedMutationTree(root)
+            try:
+                isolated = tree.materialize()
+                self.assertTrue(marker.is_file(), "foreign temp dir was removed")
+                self.assertEqual(marker.read_bytes(), b"FOREIGN_TEMP_PROBE_BYTES\n")
+                self.assertNotEqual(isolated.resolve(), foreign.resolve())
+                self.assertTrue(foreign.is_dir())
+            finally:
+                tree.cleanup()
+                if foreign.exists():
+                    for child in foreign.iterdir():
+                        child.unlink()
+                    foreign.rmdir()
+
+
+
+    def test_user_dir_with_muttree_prefix_is_copied(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            kept = root / "corpus-adequacy-muttree-userdir"
+            kept.mkdir()
+            (kept / "payload.txt").write_text("KEEP_USERDIR\n", encoding="utf-8")
+            (root / "a.py").write_text("A\n", encoding="utf-8")
+            tree = iso.IsolatedMutationTree(root)
+            try:
+                isolated = tree.materialize()
+                copied = isolated / "corpus-adequacy-muttree-userdir" / "payload.txt"
+                self.assertTrue(copied.is_file())
+                self.assertEqual(copied.read_text(encoding="utf-8"), "KEEP_USERDIR\n")
+            finally:
+                tree.cleanup()
+
+    def test_oversize_copy_refuses_without_a_large_allocation(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            payload = b"Z" * 80
+            (root / "big.bin").write_bytes(payload)
+            dest = Path(d) / "out.bin"
+            with self.assertRaises(iso.IsolationError) as cm:
+                iso._copy_regular_bounded(root / "big.bin", dest, 0, 40, chunk=16)
+            self.assertIn("40", str(cm.exception))
+            self.assertFalse(dest.exists())
+            self.assertEqual((root / "big.bin").read_bytes(), payload)
+
+    def test_growing_file_cannot_bypass_cap_in_memory(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "grow.bin"
+            dest = Path(d) / "out.bin"
+            src.write_bytes(b"a" * 8)
+            real_read = iso.os.read
+            state = {"n": 0}
+
+            def read_then_grow(fd, n):
+                data = real_read(fd, n)
+                state["n"] += 1
+                if state["n"] == 1:
+                    with open(src, "ab") as fh:
+                        fh.write(b"b" * 80)
+                return data
+
+            with mock.patch.object(iso.os, "read", side_effect=read_then_grow):
+                with self.assertRaises(iso.IsolationError) as cm:
+                    iso._copy_regular_bounded(src, dest, 0, 32, chunk=8)
+            self.assertTrue("32" in str(cm.exception) or "ceiling" in str(cm.exception).lower())
+            self.assertFalse(dest.exists())
+            self.assertLessEqual(8, 32)
+
+
+@unittest.skipIf(ca.fcntl is None, "process/batch lock is POSIX")
+@unittest.skipIf(not hasattr(os, "O_NOFOLLOW"), "O_NOFOLLOW is required")
+class TreeLockNoFollow(unittest.TestCase):
+    def test_lock_open_does_not_follow_or_truncate_a_symlink(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            victim = Path(tempfile.mkstemp(prefix="iso-lock-victim-", dir=tempfile.gettempdir())[1])
+            secret = b"LOCK_SYMLINK_PROBE_BYTES\n"
+            victim.write_bytes(secret)
+            lock = ca._TreeLock(root)
+            if lock.path.exists() or lock.path.is_symlink():
+                lock.path.unlink()
+            lock.path.symlink_to(victim)
+            try:
+                with self.assertRaises(ca.ManifestError) as cm:
+                    lock.__enter__()
+                self.assertFalse(lock.held)
+                self.assertEqual(victim.read_bytes(), secret)
+                self.assertIn("regular file", str(cm.exception).lower())
+            finally:
+                if lock._fh is not None:
+                    lock.__exit__()
+                if lock.path.is_symlink():
+                    lock.path.unlink()
+                try:
+                    victim.unlink()
+                except OSError:
+                    pass
+
+
 @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
 class IsolatedRun(unittest.TestCase):
     def test_normal_success_scores_and_removes_the_home(self):

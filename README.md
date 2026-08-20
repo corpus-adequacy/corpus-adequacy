@@ -107,7 +107,7 @@ limitation belongs to the corpus and the tool says so rather than hiding it.
 directory (never under the declared checkout) and remaps mutation, build, and
 child cwd to that copy. The declared user checkout is not written. Abrupt
 `SIGKILL` of the tool cannot run Python finally, so a leftover copy may remain
-under temp; the next run uses a new unique root. This is not a sandbox, not a
+under temp; the next run uses a new unique root. The discoverability pointer is written atomically without following a symlink; only a direct child of system temp that carries the repo-keyed muttree prefix is removed. The process/batch lock is opened without following or truncating a symlink. Regular files are copied in bounded chunks. This is not a sandbox, not a
 git worktree, not the #4 output ceiling, not #11 module isolation, and not #2
 HEAD-vs-dirty provenance. `.git` is omitted; build rules that need git metadata
 in the tree are unsupported. A symlink, FIFO, socket, or device in the walk is

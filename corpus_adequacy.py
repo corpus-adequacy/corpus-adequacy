@@ -76,7 +76,9 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import stat
 import sys
 import subprocess
 import tempfile
@@ -513,7 +515,7 @@ class _TreeLock:
                 "cannot exclude a concurrent writer. Refusing before dirty "
                 "check, source capture, build, or mutation of %s"
                 % self.repo_root)
-        self._fh = open(self.path, "w", encoding="utf-8")
+        self._fh = self._open_lockfile()
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -526,6 +528,37 @@ class _TreeLock:
                 "checkout." % self.repo_root)
         self.held = True
         return self
+
+    def _open_lockfile(self):
+        """POSIX lock open: no follow, no truncate. Fail-closed on a symlink."""
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            raise ManifestError(
+                "no O_NOFOLLOW on this platform, so the lock path cannot be "
+                "opened without following a symlink. Refusing before isolation of %s"
+                % self.repo_root)
+        flags = os.O_RDWR | os.O_CREAT | nofollow
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        try:
+            fd = os.open(self.path, flags, 0o600)
+        except OSError:
+            raise ManifestError(
+                "lock path %s is not a regular file; refusing before isolation of %s"
+                % (self.path, self.repo_root))
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                os.close(fd)
+                raise ManifestError(
+                    "lock path %s is not a regular file; refusing before isolation of %s"
+                    % (self.path, self.repo_root))
+            return os.fdopen(fd, "r+")
+        except ManifestError:
+            raise
+        except Exception:
+            os.close(fd)
+            raise
 
     def __exit__(self, *exc) -> None:
         if self._fh is not None:

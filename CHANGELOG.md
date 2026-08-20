@@ -39,7 +39,7 @@ Process and batch mutation now happens in a unique disposable working-tree
 copy of `repo_root`, not in the declared checkout. Dirty working-tree bytes
 are measured. Symlinks and special files are refused fail-closed at
 materialization. `.git` is omitted. File and byte ceilings apply during the
-copy. `SIGKILL` may leave orphaned temp bytes; the next run uses a new root.
+copy. `SIGKILL` may leave orphaned temp bytes; the next run uses a new root. The pointer is written atomically without following a symlink; only a keyed direct child of system temp is removed, so a foreign temp path is left intact. The process/batch lock opens without following or truncating a symlink. File copy is chunked so a post-lstat grow cannot load past the ceiling.
 This is not a sandbox, not a git worktree, not the output ceiling, and not
 HEAD-vs-dirty provenance.
 
