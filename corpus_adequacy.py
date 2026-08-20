@@ -101,6 +101,21 @@ ERROR_SCHEMA = "corpus-adequacy.error.v0"
 # A SHA pin is exact and opaque; this is the name a measurement can quote.
 VERSION = "0.1.0"
 
+# Every shipped runtime source, in one ordered explicit set. HEAD byte equality
+# and the content digest read this same tuple, so a runtime file added without
+# declaring it here cannot be silently excluded from tool identity. Enumerating
+# sys.modules instead would absorb whatever the measured candidate imports.
+TOOL_SOURCE_PATHS = (
+    "bounded_run.py",
+    "corpus_adequacy.py",
+    "isolated_tree.py",
+    "module_child.py",
+)
+# The digest is domain-tagged so it cannot be confused with a bare concatenation
+# of the same bytes under some other rule.
+TOOL_SOURCE_DIGEST_TAG = b"corpus-adequacy.tool-source.v0\n"
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+
 
 class ManifestError(Exception):
     """The manifest does not describe a measurable corpus."""
@@ -132,27 +147,153 @@ def error_envelope(exc: BaseException) -> dict:
     }
 
 
-def tool_identity() -> dict:
-    """What a pinned measurement should carry so a SHA is not the only name.
+def _git_bytes(root: Path, *args: str) -> subprocess.CompletedProcess:
+    """Plumbing, bytes out. Porcelain is never the source of truth here.
 
-    CI pins this tool by commit SHA. That is exact and opaque. The version
-    constant is the name a report can quote; the commit is resolved from this
-    file's checkout when git is available, so a copied report still names the
-    bytes that produced it. A checkout without `.git` still carries the version.
+    `git status` answers whether git considers a path modified, which is an
+    index-aware question. Tool identity asks a different one: are the bytes on
+    disk the bytes HEAD committed. Only plumbing can answer that directly.
     """
-    identity = {"tool_version": VERSION, "tool_commit": None}
-    here = Path(__file__).resolve().parent
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True, timeout=10, env=env,
+    )
+
+
+def _runtime_source_bytes(root: Path) -> list | None:
+    """Raw bytes of every declared runtime path, in declared order.
+
+    None when the executing surface is not the declared surface: a missing
+    path, a symlink, a directory, or a path that resolves outside the tool
+    root. Those bytes are not this checkout's bytes, so there is nothing
+    honest to attribute to HEAD and nothing honest to digest.
+    """
     try:
-        p = subprocess.run(
-            ["git", "-C", str(here), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if p.returncode == 0:
-            commit = p.stdout.strip()
-            identity["tool_commit"] = commit or None
+        root_real = root.resolve()
+    except OSError:
+        return None
+    collected = []
+    for rel in TOOL_SOURCE_PATHS:
+        path = root / rel
+        try:
+            st = path.lstat()
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        try:
+            if path.resolve().parent != root_real:
+                return None
+            collected.append((rel, path.read_bytes()))
+        except OSError:
+            return None
+    return collected
+
+
+def _tool_content_digest(sources: list | None) -> str | None:
+    """sha256 over an ordered, length-delimited (path, bytes) stream.
+
+    Length delimiting is what makes the stream unambiguous: without it a
+    rename plus a matching edit could produce one concatenation two ways.
+    """
+    if sources is None:
+        return None
+    digest = hashlib.sha256()
+    digest.update(TOOL_SOURCE_DIGEST_TAG)
+    for rel, data in sources:
+        raw = rel.encode("utf-8")
+        digest.update(b"%d\n" % len(raw))
+        digest.update(raw)
+        digest.update(b"%d\n" % len(data))
+        digest.update(data)
+    return "sha256:" + digest.hexdigest()
+
+
+def _tool_source_state(root: Path, sources: list | None) -> tuple:
+    """(state, commit). exact only when every declared runtime file is
+    byte-identical to `HEAD:./<path>`.
+
+    Two failures are kept apart. `unresolved` means the comparison could not
+    be established: no git, an unresolvable HEAD, a HEAD that is not a commit
+    id, or a `git show` that failed. `dirty` means it was established and the
+    worktree differs. Neither yields a commit, because a commit id next to
+    bytes it does not name is the defect this function exists to remove.
+
+    `HEAD:./<path>` is resolved relative to the tool root, so a copy of this
+    tool sitting inside an unrelated repository compares against nothing and
+    reports unresolved rather than borrowing that repository's HEAD.
+
+    A checkout filter that rewrites line endings on the way to the worktree
+    makes those bytes genuinely differ from the committed bytes; this reports
+    dirty there. That direction is the safe one: never a false exact.
+    """
+    try:
+        head = _git_bytes(root, "rev-parse", "HEAD")
     except (OSError, subprocess.TimeoutExpired):
-        pass
-    return identity
+        return "unresolved", None
+    if head.returncode != 0:
+        return "unresolved", None
+    commit = head.stdout.decode("utf-8", "replace").strip()
+    if _COMMIT_RE.match(commit) is None:
+        return "unresolved", None
+    committed = {}
+    for rel in TOOL_SOURCE_PATHS:
+        try:
+            shown = _git_bytes(root, "show", "HEAD:./%s" % rel)
+        except (OSError, subprocess.TimeoutExpired):
+            return "unresolved", None
+        if shown.returncode != 0:
+            return "unresolved", None
+        committed[rel] = shown.stdout
+    if sources is None:
+        return "dirty", None
+    for rel, data in sources:
+        if data != committed[rel]:
+            return "dirty", None
+    return "exact", commit
+
+
+def tool_identity(root: Path | None = None) -> dict:
+    """One producer. What a pinned measurement may claim about its own bytes.
+
+    CI pins this tool by commit SHA. That is exact and opaque; the version
+    constant is the name a report can quote. `tool_commit` stays semantically
+    a commit: it is the 40-hex HEAD only when every declared runtime source is
+    byte-identical to that commit, and null otherwise. `tool_source_state`
+    says which case it was, and `tool_content_sha256` keeps the executing
+    bytes addressable even when no commit may be named. A checkout without
+    `.git` still carries the version and the digest.
+
+    Reading the sources and comparing them are not one instant, so the
+    snapshot is re-read once the comparison is done and any observed change
+    fails closed. That is a narrowed window, not an atomic snapshot: a change
+    made and reverted entirely between the two reads is not detectable, and in
+    that case the bytes on disk did equal HEAD at both observations.
+
+    Non-claims: this is not an attestation, signature, or SBOM; it does not
+    prove the recorded bytes are the code objects already loaded in
+    sys.modules; and it does not make the checkout or its environment
+    reproducible.
+    """
+    root = Path(__file__).resolve().parent if root is None else Path(root)
+    sources = _runtime_source_bytes(root)
+    state, commit = _tool_source_state(root, sources)
+    if state == "exact" and _runtime_source_bytes(root) != sources:
+        # The snapshot was read before the comparison ran, so the bytes could
+        # move underneath it. Re-reading proves the snapshot still describes
+        # the disk. It differs here, and the snapshot equalled HEAD, so the
+        # bytes now on disk provably do not: dirty is measured, not hedged.
+        # No single byte-state can be addressed either, so the digest is
+        # dropped rather than naming bytes that have already been replaced.
+        state, commit, sources = "dirty", None, None
+    return {
+        "tool_version": VERSION,
+        "tool_commit": commit,
+        "tool_source_state": state,
+        "tool_content_sha256": _tool_content_digest(sources),
+    }
 
 
 def _with_tool_identity(report: dict) -> dict:
@@ -161,9 +302,18 @@ def _with_tool_identity(report: dict) -> dict:
 
 
 def format_tool_identity(identity: dict | None = None) -> str:
+    """Render one producer result. This never resolves identity itself.
+
+    A second resolution here would be a second answer to the same question,
+    and the two could disagree with each other inside one report.
+    """
     identity = identity if identity is not None else tool_identity()
-    commit = identity.get("tool_commit") or "unresolved"
-    return "corpus-adequacy %s commit=%s" % (identity["tool_version"], commit)
+    commit = identity.get("tool_commit") or "none"
+    state = identity.get("tool_source_state") or "unresolved"
+    content = identity.get("tool_content_sha256") or "none"
+    return "corpus-adequacy %s commit=%s source=%s content=%s" % (
+        identity["tool_version"], commit, state, content,
+    )
 
 
 def _req(obj: dict, key: str, where: str):
