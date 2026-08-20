@@ -37,8 +37,10 @@ NO_ADDRESSABILITY_PHRASE = (
 def check_version_release_truth(root: Path) -> str:
     """One rule: version/release truth for a checkout.
 
-    1. ast.parse corpus_adequacy.py; exactly one module-level Assign to
-       Name('VERSION') whose value is a strict-semver string.
+    1. ast.parse corpus_adequacy.py; exactly one top-level simple Assign
+       to Name('VERSION') with a strict-semver string, and exactly one
+       Name VERSION with Store or Del in the whole AST. Import aliases
+       that bind VERSION are refused.
     2. CHANGELOG has exactly one Unreleased heading and exactly one dated
        heading for that VERSION (real ISO calendar date).
     3. Docs name the tag schema, the cut order, and the no-addressability
@@ -68,6 +70,23 @@ def _parse_version_text(source: str) -> str:
         tree = ast.parse(source)
     except SyntaxError as exc:
         raise ValueError("corpus_adequacy.py is not parseable: %s" % exc) from exc
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if (alias.asname or alias.name) == "VERSION":
+                    raise ValueError("VERSION is bound by an import")
+    stores = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and node.id == "VERSION"
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+    ]
+    if len(stores) != 1:
+        raise ValueError(
+            "need exactly one VERSION Store or Del in the AST, found %d"
+            % len(stores)
+        )
     assignments = []
     for node in tree.body:
         if isinstance(node, ast.AnnAssign):
@@ -97,30 +116,60 @@ def _parse_version_text(source: str) -> str:
     return value.value
 
 
+_FENCE_LINE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
+
+
+def _strip_html_comments(text: str) -> str:
+    pieces = []
+    cursor = 0
+    while True:
+        start = text.find("<!--", cursor)
+        if start < 0:
+            pieces.append(text[cursor:])
+            return "".join(pieces)
+        pieces.append(text[cursor:start])
+        end = text.find("-->", start + 4)
+        if end < 0:
+            return "".join(pieces)
+        cursor = end + 3
+
+
+def _fence_line(line: str):
+    match = _FENCE_LINE_RE.match(line.rstrip("\n"))
+    if match is None:
+        return None
+    run = match.group(2)
+    return run[0], len(run), match.group(3)
+
+
 def _public_markdown(text: str) -> str:
     """Outward Markdown only: drop HTML comments and fenced code.
 
     Supported boundary, not a full parser:
-    - HTML comments: <!-- ... --> including across lines.
-    - Fenced blocks: a line whose first non-space run is 3+ ` or ~,
-      closed by a later line with a fence of the same character at
-      least as long. An unclosed fence consumes the rest of the file.
+    - HTML comments: <!-- ... --> including across lines. An unclosed
+      <!-- consumes the rest of the file.
+    - Fenced blocks: opener is 0-3 spaces then 3+ ` or ~. A closer is
+      0-3 spaces, the same character, at least as long as the opener,
+      and trailing whitespace only. An unclosed fence consumes the rest.
     Indented code, inline `code`, and other HTML are left as-is.
     """
-    without_comments = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-    lines = without_comments.splitlines(keepends=True)
+    lines = _strip_html_comments(text).splitlines(keepends=True)
     out = []
     fence = None
-    opener = re.compile(r"(`{3,}|~{3,})")
     for line in lines:
-        match = opener.match(line.lstrip())
+        parsed = _fence_line(line)
         if fence is None:
-            if match:
-                fence = (match.group(1)[0], len(match.group(1)))
+            if parsed is not None:
+                fence = (parsed[0], parsed[1])
                 continue
             out.append(line)
             continue
-        if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= fence[1]:
+        if (
+            parsed is not None
+            and parsed[0] == fence[0]
+            and parsed[1] >= fence[1]
+            and parsed[2].strip() == ""
+        ):
             fence = None
     return "".join(out)
 
@@ -370,6 +419,17 @@ INVALID_SOURCES = (
     ("attribute-assignment", "mod = type('m', (), {})()\nmod.VERSION = \"0.1.0\"\n"),
     ("two-module-level", 'VERSION = "0.1.0"\nVERSION = "0.2.0"\n'),
     ("ann-assign", 'VERSION: str = "0.1.0"\n'),
+    ("augassign", 'VERSION = "0.1.0"\nVERSION += "1"\n'),
+    (
+        "if-rebind",
+        'VERSION = "0.1.0"\nif True:\n    VERSION = "0.2.0"\n',
+    ),
+    (
+        "function-global",
+        'VERSION = "0.1.0"\ndef _f():\n    global VERSION\n'
+        '    VERSION = "0.2.0"\n_f()\n',
+    ),
+    ("import-alias", 'from x import foo as VERSION\nVERSION = "0.1.0"\n'),
 )
 
 INVALID_CHANGELOGS = (
@@ -407,6 +467,11 @@ INVALID_CHANGELOGS = (
         "headings-only-in-comment",
         "# Changelog\n\n<!--\n## Unreleased\n\n"
         "## 0.1.0 — 2026-08-19\n-->\n",
+    ),
+    (
+        "headings-after-unclosed-comment",
+        "# Changelog\n\n<!--\n## Unreleased\n\n"
+        "## 0.1.0 — 2026-08-19\n",
     ),
 )
 
@@ -449,12 +514,25 @@ class VersionReleaseTruth(unittest.TestCase):
             ("explicit-tag-while-absent", _honest_readme(" See v0.1.0.")),
             ("phrases-only-in-fence", "```\n" + _honest_readme() + "```\n"),
             ("phrases-only-in-comment", "<!--\n" + _honest_readme() + "-->\n"),
+            ("phrases-after-unclosed-comment", "<!--\n" + _honest_readme()),
+            (
+                "fence-closer-with-trailing-text",
+                "```\n``` not a closer\n" + _honest_readme() + "```\n",
+            ),
+            (
+                "four-space-line-is-not-a-closer",
+                "```\n    ```\n" + _honest_readme() + "```\n",
+            ),
         )
         for name, readme in cases:
             with self.subTest(name):
                 with _temp_tree(readme=readme) as root:
                     with self.assertRaises(ValueError):
                         check_version_release_truth(root)
+
+    def test_phrases_after_a_real_fence_closer_are_public(self):
+        with _temp_tree(readme="```\nhidden\n```\n" + _honest_readme()) as root:
+            self.assertEqual(check_version_release_truth(root), "0.1.0")
 
     def test_explicit_tag_token_is_allowed_once_the_tag_exists(self):
         with _temp_tree(readme=_honest_readme(" See v0.1.0.")) as root:
