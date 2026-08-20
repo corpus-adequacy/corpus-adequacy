@@ -446,6 +446,12 @@ class BatchFixturePortability(unittest.TestCase):
 
 
 README = REPO_ROOT / "README.md"
+EXPECTED_SUPPORT_LINE = "Maintained on CPython %s on %s, %s, and %s." % (
+    PYTHON_VERSION,
+    CLAIMED_OSES[0],
+    CLAIMED_OSES[1],
+    CLAIMED_OSES[2],
+)
 RELEASE_PROCEDURE_BLOCK = (
     "Release procedure: move Unreleased notes into a dated CHANGELOG heading, "
     "set VERSION, merge only after the three-OS CI is green, create and push an "
@@ -459,9 +465,27 @@ class ReadmeSupportAndReleaseDocs(unittest.TestCase):
 
     def test_readme_names_the_claimed_ci_matrix(self):
         readme = README.read_text(encoding="utf-8")
-        self.assertIn("CPython %s" % PYTHON_VERSION, readme)
+        self.assertTrue(
+            any(line.strip() == EXPECTED_SUPPORT_LINE for line in readme.splitlines()),
+            "README must contain the exact support-matrix line",
+        )
+
+    def test_scattered_matrix_tokens_without_the_line_are_rejected(self):
+        readme = README.read_text(encoding="utf-8")
+        self.assertIn(EXPECTED_SUPPORT_LINE, readme)
+        scattered = readme.replace(
+            EXPECTED_SUPPORT_LINE,
+            "CPython %s appears. Also %s / %s / %s."
+            % (PYTHON_VERSION, CLAIMED_OSES[0], CLAIMED_OSES[1], CLAIMED_OSES[2]),
+            1,
+        )
+        self.assertNotEqual(scattered, readme)
+        self.assertIn("CPython %s" % PYTHON_VERSION, scattered)
         for os_name in CLAIMED_OSES:
-            self.assertIn(os_name, readme)
+            self.assertIn(os_name, scattered)
+        self.assertFalse(
+            any(line.strip() == EXPECTED_SUPPORT_LINE for line in scattered.splitlines())
+        )
 
     def test_readme_states_module_is_cross_platform_and_fcntl_runners_refuse(self):
         readme = README.read_text(encoding="utf-8")
