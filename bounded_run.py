@@ -21,10 +21,11 @@ from pathlib import Path
 # rather than after it exits.
 OUTPUT_CAP_BYTES = 4 * 1024 * 1024
 
-# One fixed read size. Combined bytes held in memory stay at most
-# OUTPUT_CAP_BYTES + READ_CHUNK_BYTES: the crossing chunk is retained, then the
-# child boundary is killed. This is the documented read margin, not a second
-# cap and not a scheduling exception.
+# One fixed read size. Two reader threads may each hold a chunk before the
+# locked charge serializes, so combined bytes held in memory stay at most
+# OUTPUT_CAP_BYTES + 2 * READ_CHUNK_BYTES. Reads themselves are not locked:
+# serializing a blocking read can stall the other pipe. This is the documented
+# read margin, not a second cap and not a scheduling exception.
 READ_CHUNK_BYTES = 64 * 1024
 
 
@@ -41,10 +42,12 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
 
     Drains stdout and stderr concurrently through pipes. One locked counter
     charges every chunk. Combined retained bytes never exceed
-    OUTPUT_CAP_BYTES + READ_CHUNK_BYTES. Crossing the cap kills the POSIX
-    process group (Windows: the direct child only) and raises
-    _OutputTooLarge. Timeout remains TimeoutExpired. No temporary output
-    files are used.
+    OUTPUT_CAP_BYTES + 2 * READ_CHUNK_BYTES. Crossing the cap kills the
+    POSIX process group and raises _OutputTooLarge. Timeout remains
+    TimeoutExpired. No temporary output files are used.
+
+    Windows: process/batch already refuse where fcntl is missing, and this
+    helper kills only the direct child. That is not a process-tree claim.
     """
     cap = OUTPUT_CAP_BYTES
     posix = _posix_process_group()
@@ -91,6 +94,15 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
         except subprocess.TimeoutExpired:
             pass
 
+    def close_pipes() -> None:
+        for stream in (proc.stdout, proc.stderr):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except OSError:
+                pass
+
     def charge(which: int, data: bytes) -> None:
         nonlocal total, overflow
         with lock:
@@ -115,6 +127,7 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
         except Exception as exc:  # noqa: BLE001 - surface after join
             reader_error.append(exc)
             stop.set()
+            kill_boundary()
         finally:
             try:
                 stream.close()
@@ -131,12 +144,10 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
     deadline = time.monotonic() + timeout
     try:
         while proc.poll() is None:
-            if overflow:
-                kill_boundary()
+            if overflow or reader_error:
                 break
             if time.monotonic() > deadline:
                 timed_out = True
-                kill_boundary()
                 break
             try:
                 proc.wait(timeout=0.05)
@@ -144,17 +155,27 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
             except subprocess.TimeoutExpired:
                 pass
     finally:
-        stop.set()
-        kill_boundary()
+        if overflow or timed_out or reader_error:
+            stop.set()
+            kill_boundary()
+        else:
+            kill_boundary()
         for thread in threads:
             thread.join(timeout=10)
+            if thread.is_alive():
+                stop.set()
+                kill_boundary()
+                close_pipes()
+                thread.join(timeout=1)
+            if thread.is_alive():
+                raise RuntimeError("capped child reader did not stop")
 
     if overflow:
         raise _OutputTooLarge()
-    if timed_out:
-        raise subprocess.TimeoutExpired(cmd, timeout)
     if reader_error:
         raise reader_error[0]
+    if timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout)
     stdout_text = b"".join(chunks[1]).decode("utf-8", "replace")
     stderr_text = b"".join(chunks[2]).decode("utf-8", "replace")
     return subprocess.CompletedProcess(

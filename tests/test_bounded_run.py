@@ -4,7 +4,8 @@
 A fast child can finish a write far above the cap between 250 ms polls when
 stdout/stderr land on TemporaryFile objects. These tests require continuous
 pipe drains, one combined counter, and a process-group kill that still works
-after the leader has exited. Windows has no process-tree claim here.
+after the leader has exited. Windows process/batch already refuse without
+fcntl; this helper claims no process tree there.
 Source-string mutations are supplementary; the cases above are the contract.
 """
 
@@ -135,7 +136,7 @@ class ContinuousCap(_WithTestCap):
         self.assertTrue(hasattr(br, "READ_CHUNK_BYTES"))
         self.assertEqual(br.READ_CHUNK_BYTES, 64 * 1024)
         self.assertGreater(pulled[0], TEST_CAP)
-        self.assertLessEqual(pulled[0], TEST_CAP + br.READ_CHUNK_BYTES)
+        self.assertLessEqual(pulled[0], TEST_CAP + 2 * br.READ_CHUNK_BYTES)
 
     def test_interleaved_stdout_and_stderr_share_one_combined_cap(self):
         body = (
@@ -158,6 +159,35 @@ class ContinuousCap(_WithTestCap):
             with self.assertRaises(br._OutputTooLarge):
                 br._run_capped(_probe(tmp, body), tmp, 5)
 
+    def test_reader_failure_stops_the_child_without_waiting_out_the_timeout(self):
+        real = subprocess.Popen
+
+        def spy(*args, **kwargs):
+            proc = real(*args, **kwargs)
+
+            class _Boom:
+                def __init__(self, raw):
+                    self._raw = raw
+
+                def read(self, n=-1):
+                    raise OSError("reader boom")
+
+                def close(self):
+                    return self._raw.close()
+
+            proc.stdout = _Boom(proc.stdout)
+            return proc
+
+        popen = mock.patch.object(subprocess, "Popen", side_effect=spy)
+        popen.start()
+        self.addCleanup(popen.stop)
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            with self.assertRaises(OSError):
+                br._run_capped(_probe(tmp, "import time\ntime.sleep(30)\n"), tmp, 10)
+        self.assertLess(time.monotonic() - started, 2)
+
     def test_timeout_stays_timeout_expired(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -176,6 +206,49 @@ class ContinuousCap(_WithTestCap):
         self.assertEqual(done.returncode, 0)
         self.assertEqual(done.stdout, "hello-out\n")
         self.assertEqual(done.stderr, "hello-err\n")
+
+    def test_fast_sub_cap_payload_is_byte_exact_on_both_streams(self):
+        # Small chunks force many loop turns. A stop.set() on clean exit
+        # then drops whatever is still sitting in the pipes.
+        chunk = mock.patch.object(br, "READ_CHUNK_BYTES", 256)
+        chunk.start()
+        self.addCleanup(chunk.stop)
+        n = 20 * 1024
+        body = (
+            "import sys\n"
+            "sys.stdout.buffer.write(b'O' * %d)\n"
+            "sys.stderr.buffer.write(b'E' * %d)\n"
+            % (n, n)
+        )
+        pulled = [0]
+        real = subprocess.Popen
+
+        def spy(*args, **kwargs):
+            proc = real(*args, **kwargs)
+
+            class _YieldPipe(_CountPipe):
+                def read(self, size=-1):
+                    data = super().read(size)
+                    if data:
+                        time.sleep(0.01)
+                    return data
+
+            if proc.stdout is not None:
+                proc.stdout = _YieldPipe(proc.stdout, pulled)
+            if proc.stderr is not None:
+                proc.stderr = _YieldPipe(proc.stderr, pulled)
+            return proc
+
+        popen = mock.patch.object(subprocess, "Popen", side_effect=spy)
+        popen.start()
+        self.addCleanup(popen.stop)
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            done = br._run_capped(_probe(tmp, body), tmp, 5)
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(done.stdout, "O" * n)
+        self.assertEqual(done.stderr, "E" * n)
+        self.assertEqual(pulled[0], 2 * n)
 
     def test_utf8_replacement_is_deterministic_after_chunk_joins(self):
         chunk = mock.patch.object(br, "READ_CHUNK_BYTES", 1, create=True)
@@ -200,7 +273,7 @@ class DescendantPipes(_WithTestCap):
     def test_descendant_holding_pipes_is_group_killed(self):
         if not POSIX:
             self.skipTest(
-                "Windows has no process-group claim; direct-child kill only"
+                "process/batch refuse without fcntl; no Windows process-tree claim"
             )
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -245,7 +318,7 @@ class Mutations(unittest.TestCase):
     def test_leader_only_kill_leaves_a_posix_descendant(self):
         if not POSIX:
             self.skipTest(
-                "Windows has no process-group claim; direct-child kill only"
+                "process/batch refuse without fcntl; no Windows process-tree claim"
             )
         run = _mutated_run(self, "os.killpg(pgid, signal.SIGKILL)", "proc.kill()")
         with tempfile.TemporaryDirectory() as raw:
