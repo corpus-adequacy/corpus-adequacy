@@ -445,5 +445,68 @@ class BatchFixturePortability(unittest.TestCase):
                 self.assertNotIn("'python3'", args)
 
 
+README = REPO_ROOT / "README.md"
+EXPECTED_SUPPORT_LINE = "Maintained on CPython %s on %s, %s, and %s." % (
+    PYTHON_VERSION,
+    CLAIMED_OSES[0],
+    CLAIMED_OSES[1],
+    CLAIMED_OSES[2],
+)
+RELEASE_PROCEDURE_BLOCK = (
+    "Release procedure: move Unreleased notes into a dated CHANGELOG heading, "
+    "set VERSION, merge only after the three-OS CI is green, create and push an "
+    "annotated vVERSION tag on that merge SHA, require the tag-push CI green, "
+    "then publish the GitHub Release. Quoting a version alone is not a release."
+)
+
+
+def readme_support_violations(readme: str) -> list[str]:
+    """One guard: the constructed support line must be a full public line."""
+    if any(line.strip() == EXPECTED_SUPPORT_LINE for line in readme.splitlines()):
+        return []
+    return ["README must contain the exact support-matrix line"]
+
+
+class ReadmeSupportAndReleaseDocs(unittest.TestCase):
+    """README names the same matrix the workflow contract already pins."""
+
+    def test_readme_names_the_claimed_ci_matrix(self):
+        readme = README.read_text(encoding="utf-8")
+        self.assertEqual(readme_support_violations(readme), [])
+
+    def test_scattered_matrix_tokens_without_the_line_are_rejected(self):
+        readme = README.read_text(encoding="utf-8")
+        self.assertEqual(readme_support_violations(readme), [])
+        scattered = readme.replace(
+            EXPECTED_SUPPORT_LINE,
+            "CPython %s appears. Also %s / %s / %s."
+            % (PYTHON_VERSION, CLAIMED_OSES[0], CLAIMED_OSES[1], CLAIMED_OSES[2]),
+            1,
+        )
+        self.assertNotEqual(scattered, readme)
+        self.assertIn("CPython %s" % PYTHON_VERSION, scattered)
+        for os_name in CLAIMED_OSES:
+            self.assertIn(os_name, scattered)
+        self.assertEqual(
+            readme_support_violations(scattered),
+            ["README must contain the exact support-matrix line"],
+        )
+
+    def test_readme_states_module_is_cross_platform_and_fcntl_runners_refuse(self):
+        readme = README.read_text(encoding="utf-8")
+        self.assertIn("The `module` runner is cross-platform.", readme)
+        self.assertIn(
+            "`process` and `batch` refuse where `fcntl` is unavailable.",
+            readme,
+        )
+
+    def test_readme_states_the_release_procedure_as_one_line(self):
+        readme = README.read_text(encoding="utf-8")
+        self.assertTrue(
+            any(line.strip() == RELEASE_PROCEDURE_BLOCK for line in readme.splitlines()),
+            "README must contain the exact release-procedure block as one line",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
