@@ -146,6 +146,22 @@ def label_identity(entry: dict, where: str = "entry") -> str:
     return label
 
 
+def _resolved_contained_source(path: Path, repo_root: Path) -> Path:
+    """Resolve one source, refusing roots and targets outside the declared boundary."""
+    root = repo_root.resolve()
+    if not root.is_dir():
+        raise ManifestError("repo_root must be an existing directory: %s" % root)
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise ManifestError(
+            "implementation source %s resolves outside repo_root %s" % (path, root))
+    if not resolved.is_file():
+        raise ManifestError("implementation source not found: %s" % resolved)
+    return resolved
+
+
 def _require_unique_labels(m: dict) -> None:
     """Reject ambiguous mutant and per-digest acknowledgement declarations."""
     seen_mutants = {}
@@ -224,13 +240,14 @@ def load_manifest(path: Path) -> dict:
         if m["runner"] == "process":
             _req(m, "build", "manifest (runner=process)")
         m.setdefault("build", [])
-        srcs = m.get("implementation_sources") or [m["implementation"]]
-        m["_source_paths"] = [(base / x).resolve() for x in srcs]
-        for sp in m["_source_paths"]:
-            if not sp.is_file():
-                raise ManifestError("implementation source not found: %s" % sp)
         m.setdefault("repo_root", ".")
         m["_repo_root"] = (base / m["repo_root"]).resolve()
+        srcs = m.get("implementation_sources") or [m["implementation"]]
+        m["_source_paths"] = []
+        for source in srcs:
+            declared = base / source
+            m["_source_paths"].append(
+                _resolved_contained_source(declared, m["_repo_root"]))
         m.setdefault("vector_path_key", "path")
         m.setdefault("build_timeout", 1800)
         m.setdefault("vector_timeout", 120)
@@ -384,15 +401,21 @@ class _TreeLock:
 
 
 class _SourceGuard:
-    """Restores every mutated source file, including on crash.
+    """Restores every mutated source file while this Python process can unwind.
 
-    The adapter edits files in the working tree. A restore that only happens on
-    the happy path leaks a mutant into a commit, so the originals are captured
-    up front and rewritten in a finally block.
+    The adapter edits files in the working tree. The originals are captured up
+    front and rewritten in a finally block, covering normal return and ordinary
+    Python exceptions. SIGKILL, power loss, and host termination cannot run that
+    finally block, so this guard is not durable crash recovery.
     """
 
     def __init__(self, paths: list[Path], repo_root: Path | None = None) -> None:
-        self.original = {p: p.read_bytes() for p in paths}
+        self.repo_root = repo_root
+        self.original = {}
+        for path in paths:
+            current = (_resolved_contained_source(path, repo_root)
+                       if repo_root is not None else path)
+            self.original[path] = current.read_bytes()
         self.unverified: list[str] = []
         if repo_root is not None:
             self._verify_against_head(repo_root)
@@ -413,10 +436,8 @@ class _SourceGuard:
         existed, so the content is compared rather than assumed.
         """
         for path in self.original:
-            try:
-                rel = path.resolve().relative_to(repo_root.resolve())
-            except ValueError:
-                continue                      # declared outside the repo: nothing to compare
+            current = _resolved_contained_source(path, repo_root)
+            rel = current.relative_to(repo_root.resolve())
             try:
                 out = subprocess.run(["git", "-C", str(repo_root), "show", "HEAD:%s" % rel],
                                      capture_output=True, timeout=60)
@@ -435,11 +456,19 @@ class _SourceGuard:
 
     def restore(self) -> None:
         for path, data in self.original.items():
-            if path.read_bytes() != data:
-                path.write_bytes(data)
+            current = (_resolved_contained_source(path, self.repo_root)
+                       if self.repo_root is not None else path)
+            if current.read_bytes() != data:
+                current.write_bytes(data)
 
     def verify_clean(self) -> list[str]:
-        return [str(p) for p, d in self.original.items() if p.read_bytes() != d]
+        leaked = []
+        for path, data in self.original.items():
+            current = (_resolved_contained_source(path, self.repo_root)
+                       if self.repo_root is not None else path)
+            if current.read_bytes() != data:
+                leaked.append(str(path))
+        return leaked
 
 
 def _tree_is_dirty(repo_root: Path, paths: list[Path]) -> list[str]:
@@ -552,24 +581,37 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         all_vectors = doc[m["vectors_key"]] if isinstance(doc, dict) else doc
     failures: list[str] = []
 
+    # Manifest loading and execution can be separated by arbitrary caller work.
+    # Re-resolve before touching git, capturing originals, or mutating a source.
+    m["_source_paths"] = [
+        _resolved_contained_source(path, m["_repo_root"])
+        for path in m["_source_paths"]]
+
+    # Pure corpus/manifest validation happens before acquiring a mutation lock.
+    # A malformed vector must not leave a lock or captured source behind.
+    groups_in_corpus = {_group_of(v, m) for v in all_vectors}
+    failures.extend(structural_failures(m, groups_in_corpus))
+    acknowledged = _acknowledged_holes(m)
+    results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
+    known_holes = 0
+
     # Taken BEFORE the dirty check: a tree observed clean outside the lock can be
     # mutated by another run before the originals are captured, and then this run's
     # restore writes that mutant back as the original.
     lock = _TreeLock(m["_repo_root"])
     lock.__enter__()
 
-    dirty = _tree_is_dirty(m["_repo_root"], m["_source_paths"])
-    if dirty:
-        raise ManifestError(
-            "declared sources have uncommitted changes: %s. This adapter edits them in "
-            "place, so it refuses to run rather than risk losing that work" % dirty)
+    try:
+        dirty = _tree_is_dirty(m["_repo_root"], m["_source_paths"])
+        if dirty:
+            raise ManifestError(
+                "declared sources have uncommitted changes: %s. This adapter edits them in "
+                "place, so it refuses to run rather than risk losing that work" % dirty)
+        guard = _SourceGuard(m["_source_paths"], m["_repo_root"])
+    except BaseException:
+        lock.__exit__()
+        raise
 
-    groups_in_corpus = {_group_of(v, m) for v in all_vectors}
-    failures.extend(structural_failures(m, groups_in_corpus))
-    acknowledged = _acknowledged_holes(m)
-    results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
-    known_holes = 0
-    guard = _SourceGuard(m["_source_paths"], m["_repo_root"])
     try:
         ok, detail = _build(m)
         if not ok:
@@ -608,8 +650,10 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
             vectors, baseline = baselines[group]
             for mut in m["mutants"][group]:
                 scope = mut.get("scope", "declared")
+                sources = [_resolved_contained_source(sp, m["_repo_root"])
+                           for sp in m["_source_paths"]]
                 hits = [(sp, sp.read_text(encoding="utf-8").count(mut["anchor"]))
-                        for sp in m["_source_paths"]]
+                        for sp in sources]
                 total = sum(n for _, n in hits)
                 if total == 0:
                     failures.append("%s / %s: anchor not found in any declared source"
@@ -623,7 +667,9 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                     continue
 
                 target = next(sp for sp, n in hits if n == 1)
+                target = _resolved_contained_source(target, m["_repo_root"])
                 original = target.read_text(encoding="utf-8")
+                target = _resolved_contained_source(target, m["_repo_root"])
                 target.write_text(original.replace(mut["anchor"], mut["replacement"], 1),
                                   encoding="utf-8")
                 try:
@@ -642,6 +688,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                         continue
                     out, raised = _process_outcomes(m, vectors)
                 finally:
+                    target = _resolved_contained_source(target, m["_repo_root"])
                     target.write_text(original, encoding="utf-8")
 
                 moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
@@ -696,16 +743,18 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                                 "how": eq["reason"], "moved": 0})
                 equivalent += 1
     finally:
-        guard.restore()
-        leaked = guard.verify_clean()
-        if leaked:
-            failures.append("SOURCES NOT RESTORED: %s" % leaked)
-        _build(m)   # leave the tree with a binary built from the real source
-        if lock.unavailable:
-            failures.append("no advisory lock on this platform, so a concurrent run "
-                            "over this tree could not be excluded; this score is only "
-                            "as good as the assumption that none was running")
-        lock.__exit__()
+        try:
+            guard.restore()
+            leaked = guard.verify_clean()
+            if leaked:
+                failures.append("SOURCES NOT RESTORED: %s" % leaked)
+            _build(m)   # leave the tree with a binary built from the real source
+            if lock.unavailable:
+                failures.append("no advisory lock on this platform, so a concurrent run "
+                                "over this tree could not be excluded; this score is only "
+                                "as good as the assumption that none was running")
+        finally:
+            lock.__exit__()
 
     # A stale acknowledgement is not only one whose rule became killed. Any verdict
     # other than known-hole means the acknowledgement no longer describes anything,

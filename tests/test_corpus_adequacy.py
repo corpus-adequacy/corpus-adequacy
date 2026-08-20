@@ -10,11 +10,13 @@ rule none does, a rule declared out of scope, and a rule declared equivalent.
 
 from __future__ import annotations
 
+import gc
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -350,6 +352,230 @@ class BatchRunner(unittest.TestCase):
             rep = ca.run(p)
         self.assertFalse(rep["adequate"])
         self.assertTrue(any("UNMUTATED" in f for f in rep["failures"]), rep["failures"])
+
+
+class ProcessSourceContainment(unittest.TestCase):
+    def _assert_lock_can_be_reacquired(self, repo_root: Path) -> None:
+        second = ca._TreeLock(repo_root)
+        try:
+            second.__enter__()
+        finally:
+            if second.held:
+                second.__exit__()
+
+    def _nested_corpus(self, tmp: Path) -> tuple[Path, Path]:
+        repo = tmp / "repo"
+        source_dir = repo / "src"
+        source_dir.mkdir(parents=True)
+        source = source_dir / "check.py"
+        source.write_text(
+            "import json, sys\n"
+            "doc = json.load(open(sys.argv[1]))\n"
+            "fails = [c['id'] for c in doc['cases'] if c['n'] > 10]\n"
+            "print(json.dumps({'ok': not fails, 'failures': fails}))\n")
+        (repo / "vectors.json").write_text(json.dumps({"cases": [
+            {"id": "c1", "n": 1}, {"id": "c2", "n": 2}]}))
+        raw = {"schema": ca.SCHEMA, "runner": "batch", "repo_root": "repo",
+               "implementation_sources": ["repo/src/check.py"],
+               "entrypoint_command": ["python3", "src/check.py", "vectors.json"],
+               "outcome_from": ["ok", "failures"], "vectors": "repo/vectors.json",
+               "id_key": "vector_id", "default_group": "g", "mutants": {"g": [
+                   {"label": "threshold", "anchor": "c['n'] > 10",
+                    "replacement": "c['n'] > 1"},
+                   {"label": "CONTROL", "control": True,
+                    "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'"}]}}
+        manifest = tmp / "m.json"
+        manifest.write_text(json.dumps(raw))
+        return manifest, source
+
+    def test_a_symlinked_source_outside_repo_root_is_refused_before_mutation(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            repo = tmp / "repo"
+            repo.mkdir()
+            outside = tmp / "outside.py"
+            outside.write_text("RULE = True\n")
+            before = outside.read_bytes()
+            link = repo / "linked.py"
+            link.symlink_to(outside)
+
+            manifest = BatchRunner()._corpus(tmp)
+            raw = json.loads(manifest.read_text())
+            raw["repo_root"] = "repo"
+            raw["implementation_sources"] = ["repo/linked.py"]
+            manifest.write_text(json.dumps(raw))
+
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(manifest)
+
+            self.assertEqual(outside.read_bytes(), before)
+        self.assertIn("outside repo_root", str(cm.exception))
+        self.assertIn("linked.py", str(cm.exception))
+
+    def test_a_symlinked_source_inside_repo_root_remains_valid(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            repo = tmp / "repo"
+            repo.mkdir()
+            target = repo / "target.py"
+            target.write_text("RULE = True\n")
+            link = repo / "linked.py"
+            link.symlink_to(target)
+
+            manifest = BatchRunner()._corpus(tmp)
+            raw = json.loads(manifest.read_text())
+            raw["repo_root"] = "repo"
+            raw["implementation_sources"] = ["repo/linked.py"]
+            manifest.write_text(json.dumps(raw))
+
+            loaded = ca.load_manifest(manifest)
+
+        self.assertEqual(loaded["_source_paths"], [target.resolve()])
+
+    def test_direct_escapes_are_rejected_before_outside_existence_is_observed(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "repo").mkdir()
+            (tmp / "outside.py").write_text("RULE = True\n")
+            manifest = BatchRunner()._corpus(tmp)
+            raw = json.loads(manifest.read_text())
+            raw["repo_root"] = "repo"
+            for source in ("outside.py", "missing.py"):
+                with self.subTest(source=source):
+                    raw["implementation_sources"] = [source]
+                    manifest.write_text(json.dumps(raw))
+                    with self.assertRaises(ca.ManifestError) as cm:
+                        ca.load_manifest(manifest)
+                    self.assertIn("outside repo_root", str(cm.exception))
+                    self.assertNotIn("not found", str(cm.exception))
+
+    def test_repo_root_must_be_an_existing_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = BatchRunner()._corpus(tmp)
+            raw = json.loads(manifest.read_text())
+            (tmp / "root-file").write_text("not a directory\n")
+            for root in ("root-file", "missing-root"):
+                with self.subTest(root=root):
+                    raw["repo_root"] = root
+                    manifest.write_text(json.dumps(raw))
+                    with self.assertRaises(ca.ManifestError) as cm:
+                        ca.load_manifest(manifest)
+                    self.assertIn("repo_root must be an existing directory", str(cm.exception))
+
+    def test_a_parent_swap_after_load_is_refused_before_outside_mutation(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest, source = self._nested_corpus(tmp)
+            loaded = ca.load_manifest(manifest)
+            original_dir = source.parent
+            parked = original_dir.with_name("original-src")
+            original_dir.rename(parked)
+            outside_dir = tmp / "outside"
+            outside_dir.mkdir()
+            outside = outside_dir / "check.py"
+            outside.write_bytes((parked / "check.py").read_bytes())
+            before = outside.read_bytes()
+            original_dir.symlink_to(outside_dir, target_is_directory=True)
+
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca._run_process(loaded, manifest)
+
+            self.assertEqual(outside.read_bytes(), before)
+        self.assertIn("outside repo_root", str(cm.exception))
+
+    def test_a_parent_swap_after_source_capture_is_refused_before_mutation(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest, source = self._nested_corpus(tmp)
+            loaded = ca.load_manifest(manifest)
+            original_dir = source.parent
+            parked = original_dir.with_name("original-src")
+            outside_dir = tmp / "outside"
+            outside_dir.mkdir()
+            outside = outside_dir / "check.py"
+            outside.write_bytes(source.read_bytes())
+            before = outside.read_bytes()
+            real_build = ca._build
+            swapped = False
+
+            def build_then_swap(m):
+                nonlocal swapped
+                result = real_build(m)
+                if not swapped:
+                    original_dir.rename(parked)
+                    original_dir.symlink_to(outside_dir, target_is_directory=True)
+                    swapped = True
+                return result
+
+            captured = None
+            with mock.patch.object(ca, "_build", side_effect=build_then_swap):
+                try:
+                    ca._run_process(loaded, manifest)
+                except ca.ManifestError as exc:
+                    captured = exc
+
+            self.assertIsNotNone(captured)
+            self.assertEqual(outside.read_bytes(), before)
+            self.assertIn("outside repo_root", str(captured))
+            self._assert_lock_can_be_reacquired(loaded["_repo_root"])
+            captured = None
+            gc.collect()
+
+    @unittest.skipIf(ca.fcntl is None, "no POSIX advisory locks on this platform")
+    def test_pre_guard_failure_releases_the_tree_lock(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest, source = self._nested_corpus(tmp)
+            loaded = ca.load_manifest(manifest)
+            before = source.read_bytes()
+            captured = None
+            with mock.patch.object(ca, "_tree_is_dirty", side_effect=RuntimeError("probe")):
+                try:
+                    ca._run_process(loaded, manifest)
+                except RuntimeError as exc:
+                    captured = exc
+
+            self.assertIsNotNone(captured)
+            self.assertEqual(source.read_bytes(), before)
+            self._assert_lock_can_be_reacquired(loaded["_repo_root"])
+            captured = None
+            gc.collect()
+
+    @unittest.skipIf(ca.fcntl is None, "no POSIX advisory locks on this platform")
+    def test_vector_validation_failure_does_not_leave_the_tree_lock_held(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            repo = tmp / "repo"
+            repo.mkdir()
+            source = repo / "check.py"
+            source.write_text("print('ok')\n")
+            (repo / "vectors.json").write_text(json.dumps({"vectors": [
+                {"vector_id": "v1", "inputs": {}}]}))
+            raw = {"schema": ca.SCHEMA, "runner": "process", "repo_root": "repo",
+                   "implementation": "repo/check.py",
+                   "implementation_sources": ["repo/check.py"],
+                   "build": ["true"], "entrypoint_command": ["true"],
+                   "outcome_from": "ok", "vectors": "repo/vectors.json",
+                   "group_key": "axis", "id_key": "vector_id", "inputs_key": "inputs",
+                   "mutants": {"a": [
+                       {"label": "rule", "anchor": "print('ok')",
+                        "replacement": "print('moved')"},
+                       {"label": "CONTROL", "control": True,
+                        "anchor": "print('ok')", "replacement": "print('control')"}]}}
+            manifest = tmp / "m.json"
+            manifest.write_text(json.dumps(raw))
+            loaded = ca.load_manifest(manifest)
+            captured = None
+            try:
+                ca._run_process(loaded, manifest)
+            except KeyError as exc:
+                captured = exc  # Keep the traceback and its locals alive during the lock probe.
+            self.assertIsNotNone(captured)
+
+            self._assert_lock_can_be_reacquired(loaded["_repo_root"])
+            captured = None
+            gc.collect()
 
 
 class Guards(unittest.TestCase):
