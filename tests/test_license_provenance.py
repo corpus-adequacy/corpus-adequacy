@@ -15,6 +15,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LICENSE = REPO_ROOT / "LICENSE"
 README = REPO_ROOT / "README.md"
+GITATTRIBUTES = REPO_ROOT / ".gitattributes"
+LICENSE_EOL_LF = "LICENSE text eol=lf"
 
 # Exact upstream MIT at Rul1an/assay@78c792f574e882aad683b690bfbff5445774056e
 UPSTREAM_LICENSE_SHA256 = (
@@ -44,6 +46,12 @@ THIRD_PARTY_NOT_EVIDENCE = (
 class LicenseProvenance(unittest.TestCase):
     def test_license_file_is_present(self):
         self.assertTrue(LICENSE.is_file(), "root LICENSE is missing")
+
+    def test_gitattributes_pins_license_to_lf(self):
+        self.assertTrue(GITATTRIBUTES.is_file(), "root .gitattributes is missing")
+        lines = GITATTRIBUTES.read_text(encoding="utf-8").splitlines()
+        self.assertIn(LICENSE_EOL_LF, lines)
+        self.assertNotIn("LICENSE text eol=crlf", lines)
 
     def test_license_is_the_exact_upstream_mit_text(self):
         digest = hashlib.sha256(LICENSE.read_bytes()).hexdigest()
