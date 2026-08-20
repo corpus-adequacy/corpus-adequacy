@@ -411,6 +411,18 @@ class ManifestValidation(unittest.TestCase):
         self.assertIn("declared more than once", msg)
         self.assertIn("same-hole", msg)
 
+    def test_a_mutant_and_equivalent_cannot_share_one_label(self):
+        duplicate = {"label": KILLABLE["label"], "reason": "also called equivalent"}
+        msg = self._err({"equivalent": {"a": [duplicate]}})
+        self.assertIn("declared more than once", msg)
+        self.assertIn(KILLABLE["label"], msg)
+
+    def test_equivalent_labels_are_unique_across_groups(self):
+        duplicate = {"label": "same-equivalent", "reason": "same behavior"}
+        msg = self._err({"equivalent": {"a": [duplicate], "b": [duplicate]}})
+        self.assertIn("declared more than once", msg)
+        self.assertIn("same-equivalent", msg)
+
     def test_duplicate_acknowledgements_for_one_digest_are_refused(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)

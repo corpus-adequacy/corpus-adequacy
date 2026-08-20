@@ -146,16 +146,18 @@ def label_identity(entry: dict) -> str:
 def _require_unique_labels(m: dict) -> None:
     """Reject ambiguous mutant and per-digest acknowledgement declarations."""
     seen_mutants = {}
-    for group, entries in m["mutants"].items():
-        for entry in entries:
-            ident = label_identity(entry)
-            if ident in seen_mutants:
-                raise ManifestError(
-                    "mutant label %r is declared more than once (already in group %r). "
-                    "Labels are unique across the manifest, so one known-hole "
-                    "acknowledgement cannot name two mutants"
-                    % (ident, seen_mutants[ident]))
-            seen_mutants[ident] = group
+    for declaration in ("mutants", "equivalent"):
+        for group, entries in m[declaration].items():
+            for entry in entries:
+                ident = label_identity(entry)
+                if ident in seen_mutants:
+                    previous_declaration, previous_group = seen_mutants[ident]
+                    raise ManifestError(
+                        "mutant label %r is declared more than once (already in %s group %r). "
+                        "Labels are unique across the manifest, so one known-hole "
+                        "acknowledgement cannot name two mutants"
+                        % (ident, previous_declaration, previous_group))
+                seen_mutants[ident] = (declaration, group)
 
     for digest, entries in m["known_holes"].items():
         seen_acknowledgements = set()
