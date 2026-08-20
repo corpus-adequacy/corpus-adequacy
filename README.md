@@ -132,9 +132,23 @@ manifest would read as covering more than it does. That is a controlled refusal.
 `diagnostic_from` needs a JSON outcome and is refused beside
 `outcome_parse: test-names`, where the names *are* the outcome.
 
+Every member a selector declares must be one the unmutated implementation
+actually emits, and that rule is the same for `outcome_from` and
+`diagnostic_from` because the defect is the same: a member nothing emits compares
+`None` to `None` on every mutant. On the outcome it makes the score
+over-generous; on the diagnostic it makes `silent` unreachable while the report
+still says the channel was declared. Either one fails the run, and a partially
+present selector fails on the members that are missing.
+
 Without `diagnostic_from` the class is unreachable, so `"silent": 0` in a report
 means it was not measured, not that none exist. The report says which by carrying
-`diagnostic_channel_declared`.
+`diagnostic_channel_declared`. Both fields are on every report, including the
+module runner's, which refuses the channel and therefore always reports
+`0` and `false` rather than omitting them.
+
+`hole_ratio` divides by the same denominator the score does,
+`killed + survived + silent`, so the two numbers in a report describe the same
+set of rules.
 
 ## Runners
 

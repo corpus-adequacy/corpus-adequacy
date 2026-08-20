@@ -14,6 +14,18 @@ alike; `git status` is not consulted. A modified runtime source is therefore no
 longer attributed to the clean commit. This is not an attestation, a
 signature, an SBOM, or a reproducibility claim.
 
+Selector presence is one rule for every declared selector. A member the
+unmutated implementation never emits fails the run whether it was declared on
+`outcome_from` or on `diagnostic_from`, and a partially present selector fails on
+the members that are missing. Previously only `outcome_from` was checked, so a
+`diagnostic_from` naming a member nothing emits reported
+`diagnostic_channel_declared: true` with `silent: 0` and no failure, which reads
+as measured. `hole_ratio` now divides by the scored denominator
+`killed + survived + silent` on every path, so it no longer disagrees with the
+score's own denominator. Module reports carry `silent` and
+`diagnostic_channel_declared`; runner identity remains absent there and stays
+with issue #6.
+
 A `silent` verdict separates a mutant that moves a declared diagnostic from one
 nothing noticed. Declaring `diagnostic_from` beside `outcome_from` enables it:
 moved in the outcome is `killed`, moved only in the diagnostic is `silent`,

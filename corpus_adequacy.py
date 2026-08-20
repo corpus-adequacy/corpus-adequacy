@@ -322,6 +322,15 @@ def _req(obj: dict, key: str, where: str):
     return obj[key]
 
 
+def selector_members(sel) -> list:
+    """The declared members of a selector, whether it is a scalar or a list.
+
+    One function so the reader, the presence rule and the manifest validation
+    cannot disagree about what a selector declares.
+    """
+    return sel if isinstance(sel, list) else [sel]
+
+
 def label_identity(entry: dict, where: str = "entry") -> str:
     """Return the exact string identity used for declarations and acknowledgements."""
     label = entry["label"]
@@ -774,12 +783,15 @@ def child_outcome(m: dict, completed: subprocess.CompletedProcess):
         return None, None, "parse-error"
     if not isinstance(doc, dict):
         return None, None, "parse-error"
-    keys = m["outcome_from"]
-    keylist = keys if isinstance(keys, list) else [keys]
-    m.setdefault("_outcome_keys_seen", set()).update(k for k in keylist if k in doc)
-
-    def _read(sel):
-        sl = sel if isinstance(sel, list) else [sel]
+    def _read(name, sel):
+        # Presence is recorded for EVERY selector, not only the outcome. A member
+        # nothing emits compares None to None on every mutant, and that is the
+        # same defect whichever selector declared it: on `outcome_from` it makes
+        # the score over-generous, on `diagnostic_from` it makes the `silent`
+        # class unreachable while the report still says the channel was declared.
+        sl = selector_members(sel)
+        m.setdefault("_selector_keys_seen", {}).setdefault(name, set()).update(
+            k for k in sl if k in doc)
         if m.get("runner") == "batch":
             vals = [doc.get(k) for k in sl]
             return tuple(tuple(v) if isinstance(v, list) else v for v in vals)
@@ -787,8 +799,9 @@ def child_outcome(m: dict, completed: subprocess.CompletedProcess):
             return tuple(doc.get(k) for k in sel)
         return doc.get(sel)
 
-    diag = _read(m["diagnostic_from"]) if m.get("diagnostic_from") is not None else None
-    return _read(keys), diag, None
+    diag = (_read("diagnostic_from", m["diagnostic_from"])
+            if m.get("diagnostic_from") is not None else None)
+    return _read("outcome_from", m["outcome_from"]), diag, None
 
 
 # ---------------------------------------------------------------------------
@@ -1113,14 +1126,19 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         # `doc.get(k)` made that silent. Absent on SOME vectors is legitimate --
         # `verdict` appears only when integrity passes, `claims` only when the
         # verdict is valid -- so the rule is "present at least once", not "always".
-        declared_keys = m["outcome_from"] if isinstance(m["outcome_from"], list) else [m["outcome_from"]]
-        never_seen = [k for k in declared_keys if k not in m.get("_outcome_keys_seen", set())]
-        if never_seen and baselines:
-            failures.append(
-                "outcome_from names %s, which the unmutated implementation never emits on any "
-                "vector. Those members compare None to None on every mutant, so they discriminate "
-                "nothing and this score is over-generous by whatever they would have caught. Read "
-                "the corpus's own declaration of its comparison surface and match it." % never_seen)
+        for _selector in ("outcome_from", "diagnostic_from"):
+            if m.get(_selector) is None:
+                continue
+            declared_keys = selector_members(m[_selector])
+            seen = m.get("_selector_keys_seen", {}).get(_selector, set())
+            never_seen = [k for k in declared_keys if k not in seen]
+            if never_seen and baselines:
+                failures.append(
+                    "%s names %s, which the unmutated implementation never emits on any "
+                    "vector. Those members compare None to None on every mutant, so they "
+                    "discriminate nothing and this score is over-generous by whatever they "
+                    "would have caught. Read the corpus's own declaration of its comparison "
+                    "surface and match it." % (_selector, never_seen))
 
         for group in sorted(m["mutants"]):
             if group not in baselines:
@@ -1303,8 +1321,8 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
             "known_holes": known_holes, "corpus_digest": m.get("_corpus_digest"),
             "originals_unverified_against_head": guard.unverified,
             "acknowledged_digests": len(m.get("known_holes", {})),
-            "hole_ratio": (None if (killed + survived) == 0
-                           else round(known_holes / (killed + survived), 2)),
+            "hole_ratio": (None if denom == 0
+                           else round(known_holes / denom, 2)),
             "equivalent": equivalent, "unexercised_out_of_scope": out_of_scope,
             "unproved": unproved,
             "declared_total": (killed + survived + silent + equivalent + out_of_scope
@@ -1333,6 +1351,11 @@ def run(manifest_path: Path) -> dict:
     failures.extend(structural_failures(m, groups_in_corpus))
     acknowledged = _acknowledged_holes(m)
     results, killed, survived, equivalent, out_of_scope = [], 0, 0, 0, 0
+    # The module runner refuses `diagnostic_from` at load, so the silent class
+    # cannot occur here. It is still reported: a consumer reading `.get("silent",
+    # 0)` on a report that omits the key gets the false-measured answer the field
+    # exists to prevent, and the same denominator rule has to hold on every path.
+    silent = 0
     unproved = known_holes = 0
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -1490,7 +1513,7 @@ def run(manifest_path: Path) -> dict:
         failures.append("known_holes acknowledge rules that are no longer holes: %s. Remove "
                         "them; an acknowledgement pointing at nothing hides the next regression"
                         % sorted("%s (now %s)" % kv for kv in linger.items()))
-    denom = killed + survived
+    denom = killed + survived + silent
     score = _score_or_none(None if denom == 0 else round(100.0 * killed / denom, 1),
                            results, failures)
     if unproved:
@@ -1506,11 +1529,13 @@ def run(manifest_path: Path) -> dict:
 
     return _with_tool_identity({
             "schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
-            "killed": killed, "survived": survived, "equivalent": equivalent,
+            "killed": killed, "survived": survived, "silent": silent,
+            "diagnostic_channel_declared": m.get("diagnostic_from") is not None,
+            "equivalent": equivalent,
             "known_holes": known_holes, "corpus_digest": m.get("_corpus_digest"),
             "acknowledged_digests": len(m.get("known_holes", {})),
-            "hole_ratio": (None if (killed + survived) == 0
-                           else round(known_holes / (killed + survived), 2)),
+            "hole_ratio": (None if denom == 0
+                           else round(known_holes / denom, 2)),
             "unexercised_out_of_scope": out_of_scope, "unproved": unproved,
             "declared_total": (killed + survived + equivalent + out_of_scope + unproved
                                + known_holes),

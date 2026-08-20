@@ -2250,3 +2250,188 @@ class SilentClass(unittest.TestCase):
             with self.assertRaises(ca.ManifestError) as e:
                 ca.load_manifest(p)
         self.assertIn("not implemented for runner=module", str(e.exception))
+
+
+# ---------------------------------------------------------------------------
+# Selector presence: one rule for every declared selector
+# ---------------------------------------------------------------------------
+#
+# `outcome_from` has failed closed on a member nothing emits since the
+# all_reproduced incident above. `diagnostic_from` reads members the same way,
+# through the same parser, and a member nothing emits is the same defect there:
+# it compares None to None on every mutant, so the channel can never produce a
+# `silent` verdict while the report still says the channel was declared. One
+# rule covers both selectors, or the newer one repeats the older one's bug.
+
+
+class DeclaredSelectorMembersMustExist(unittest.TestCase):
+    def _corpus(self, tmp: Path, outcome_from, diagnostic_from=None):
+        (tmp / "check.py").write_text(
+            "import json, sys\n"
+            "doc = json.load(open(sys.argv[1]))\n"
+            "fails = [c['id'] for c in doc['cases'] if c['n'] > 10]\n"
+            "print(json.dumps({'ok': not fails, 'failures': fails}))\n")
+        (tmp / "vectors.json").write_text(json.dumps({"cases": [
+            {"id": "c1", "n": 1}, {"id": "c2", "n": 2}]}))
+        m = {"schema": ca.SCHEMA, "runner": "batch", "repo_root": ".",
+             "implementation_sources": ["check.py"],
+             "entrypoint_command": [_batch_python(), "check.py", "vectors.json"],
+             "outcome_from": outcome_from, "vectors": "vectors.json",
+             "id_key": "vector_id", "default_group": "g",
+             "mutants": {"g": [
+                 {"label": "threshold", "anchor": "c['n'] > 10", "replacement": "c['n'] > 1"},
+                 {"label": "CONTROL", "control": True,
+                  "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'"}]}}
+        if diagnostic_from is not None:
+            m["diagnostic_from"] = diagnostic_from
+        q = tmp / "m.json"
+        q.write_text(json.dumps(m))
+        return q
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_diagnostic_member_nothing_emits_fails_closed(self):
+        # MISSING: every declared diagnostic member is absent from the output.
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._corpus(Path(d), ["ok"], ["no_such_member"]))
+        msg = " ".join(rep["failures"])
+        self.assertIn("diagnostic_from", msg)
+        self.assertIn("no_such_member", msg)
+        self.assertIn("never emits", msg)
+        self.assertFalse(rep["adequate"])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_a_partially_present_diagnostic_selector_still_fails_closed(self):
+        # PARTIAL is the dangerous shape: one member works, so the channel looks
+        # live, while the other silently contributes nothing to every comparison.
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._corpus(Path(d), ["ok"], ["failures", "no_such_member"]))
+        msg = " ".join(rep["failures"])
+        self.assertIn("no_such_member", msg)
+        self.assertIn("never emits", msg)
+        self.assertNotIn("'failures'", msg)
+        self.assertFalse(rep["adequate"])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_a_diagnostic_selector_the_implementation_emits_is_not_flagged(self):
+        # PRESENT: the guard must not fire on a correct manifest, or it is noise.
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._corpus(Path(d), ["ok"], ["failures"]))
+        self.assertNotIn("never emits", " ".join(rep["failures"]))
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_the_outcome_selector_keeps_its_own_presence_rule(self):
+        # The shared rule must not lose the behaviour it generalises.
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._corpus(Path(d), ["ok", "all_reproduced"]))
+        msg = " ".join(rep["failures"])
+        self.assertIn("outcome_from", msg)
+        self.assertIn("all_reproduced", msg)
+        self.assertIn("never emits", msg)
+
+
+# ---------------------------------------------------------------------------
+# report.v0 parity for the fields this tool's own docs promise
+# ---------------------------------------------------------------------------
+
+
+class ModuleReportCarriesTheSilentFields(unittest.TestCase):
+    """README says a report distinguishes `silent: 0` from not measured.
+
+    A module report that omits both fields cannot: a consumer reading
+    `.get("silent", 0)` gets the false-measured answer the field exists to
+    prevent. Runner identity is a separate parity gap and stays with issue #6.
+    """
+
+    def _module_manifest(self, tmp: Path):
+        (tmp / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+        (tmp / "vectors.json").write_text(
+            json.dumps({"vectors": [{"vector_id": "v1"}]}), encoding="utf-8")
+        p = tmp / "m.json"
+        p.write_text(json.dumps({
+            "schema": ca.SCHEMA, "runner": "module", "implementation": "impl.py",
+            "entrypoint": "check", "vectors": "vectors.json", "id_key": "vector_id",
+            "default_group": "g",
+            "mutants": {"g": [
+                {"label": "r1", "anchor": "return True", "replacement": "return False"},
+                {"label": "CONTROL", "control": True,
+                 "anchor": "def check", "replacement": "def  check"}]},
+        }), encoding="utf-8")
+        return p
+
+    def test_module_report_carries_silent_and_the_channel_flag(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._module_manifest(Path(d)))
+        self.assertIn("silent", rep)
+        self.assertEqual(rep["silent"], 0)
+        self.assertIn("diagnostic_channel_declared", rep)
+        self.assertIs(rep["diagnostic_channel_declared"], False)
+
+    def test_runner_identity_stays_out_of_scope_here(self):
+        # Guards the boundary of this change: #6 owns runner parity, not this PR.
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._module_manifest(Path(d)))
+        self.assertNotIn("runner", rep)
+
+
+# ---------------------------------------------------------------------------
+# hole_ratio shares the scored denominator
+# ---------------------------------------------------------------------------
+
+
+class HoleRatioUsesTheScoredDenominator(unittest.TestCase):
+    """`silent` is scored, so the ratio reported beside the score must count it.
+
+    Two ratios over two denominators in one report is a reader trap: the score
+    says one thing about how many rules were in play and `hole_ratio` divides by
+    another.
+    """
+
+    def _corpus(self, tmp: Path):
+        (tmp / "check.py").write_text(
+            "import json\n"
+            "ok = True\n"
+            "guard = True\n"
+            "hole = True\n"
+            'reason = "A"\n'
+            "if not guard:\n"
+            "    ok = False\n"
+            'print(json.dumps({"ok": ok and hole, "reason": reason}))\n',
+            encoding="utf-8")
+        (tmp / "vec.json").write_text("{}\n", encoding="utf-8")
+        (tmp / "digest.json").write_text('{"digest":"sha256:deadbeef"}\n', encoding="utf-8")
+        (tmp / "vectors.json").write_text(json.dumps({
+            "vectors": [{"vector_id": "v1", "path": "vec.json"}]}), encoding="utf-8")
+        p = tmp / "m.json"
+        p.write_text(json.dumps({
+            "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+            "implementation": "check.py", "implementation_sources": ["check.py"],
+            "build": [],
+            "entrypoint_command": [_batch_python(), "check.py", "{vector}"],
+            "outcome_from": ["ok"], "diagnostic_from": ["reason"],
+            "vectors": "vectors.json", "id_key": "vector_id",
+            "vector_path_key": "path", "default_group": "g",
+            "corpus_digest_file": "digest.json", "corpus_digest_key": "digest",
+            "known_holes": {"sha256:deadbeef": [
+                {"label": "hole-rule", "reason": "acknowledged", "recorded": "2026-08-20"}]},
+            "mutants": {"g": [
+                {"label": "killed-rule", "anchor": "hole = True",
+                 "replacement": "hole = False"},
+                {"label": "silent-rule", "anchor": 'reason = "A"',
+                 "replacement": 'reason = "B"'},
+                {"label": "hole-rule", "anchor": "ok = True",
+                 "replacement": "ok = True  # acknowledged"},
+                {"label": "CONTROL", "control": True,
+                 "anchor": "guard = True", "replacement": "guard = False"}]},
+        }), encoding="utf-8")
+        return p
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_hole_ratio_divides_by_killed_survived_and_silent(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._corpus(Path(d)))
+        self.assertEqual(rep["killed"], 1)
+        self.assertEqual(rep["survived"], 0)
+        self.assertEqual(rep["silent"], 1)
+        self.assertEqual(rep["known_holes"], 1)
+        # 1 hole over the scored denominator killed+survived+silent = 2.
+        self.assertEqual(rep["hole_ratio"], 0.5)
