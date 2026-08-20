@@ -355,6 +355,14 @@ class BatchRunner(unittest.TestCase):
 
 
 class ProcessSourceContainment(unittest.TestCase):
+    def _assert_lock_can_be_reacquired(self, repo_root: Path) -> None:
+        second = ca._TreeLock(repo_root)
+        try:
+            second.__enter__()
+        finally:
+            if second.held:
+                second.__exit__()
+
     def _nested_corpus(self, tmp: Path) -> tuple[Path, Path]:
         repo = tmp / "repo"
         source_dir = repo / "src"
@@ -500,12 +508,39 @@ class ProcessSourceContainment(unittest.TestCase):
                     swapped = True
                 return result
 
+            captured = None
             with mock.patch.object(ca, "_build", side_effect=build_then_swap):
-                with self.assertRaises(ca.ManifestError) as cm:
+                try:
                     ca._run_process(loaded, manifest)
+                except ca.ManifestError as exc:
+                    captured = exc
 
+            self.assertIsNotNone(captured)
             self.assertEqual(outside.read_bytes(), before)
-        self.assertIn("outside repo_root", str(cm.exception))
+            self.assertIn("outside repo_root", str(captured))
+            self._assert_lock_can_be_reacquired(loaded["_repo_root"])
+            captured = None
+            gc.collect()
+
+    @unittest.skipIf(ca.fcntl is None, "no POSIX advisory locks on this platform")
+    def test_pre_guard_failure_releases_the_tree_lock(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest, source = self._nested_corpus(tmp)
+            loaded = ca.load_manifest(manifest)
+            before = source.read_bytes()
+            captured = None
+            with mock.patch.object(ca, "_tree_is_dirty", side_effect=RuntimeError("probe")):
+                try:
+                    ca._run_process(loaded, manifest)
+                except RuntimeError as exc:
+                    captured = exc
+
+            self.assertIsNotNone(captured)
+            self.assertEqual(source.read_bytes(), before)
+            self._assert_lock_can_be_reacquired(loaded["_repo_root"])
+            captured = None
+            gc.collect()
 
     @unittest.skipIf(ca.fcntl is None, "no POSIX advisory locks on this platform")
     def test_vector_validation_failure_does_not_leave_the_tree_lock_held(self):
@@ -538,14 +573,9 @@ class ProcessSourceContainment(unittest.TestCase):
                 captured = exc  # Keep the traceback and its locals alive during the lock probe.
             self.assertIsNotNone(captured)
 
-            second = ca._TreeLock(loaded["_repo_root"])
-            try:
-                second.__enter__()
-            finally:
-                if second.held:
-                    second.__exit__()
-                captured = None
-                gc.collect()
+            self._assert_lock_can_be_reacquired(loaded["_repo_root"])
+            captured = None
+            gc.collect()
 
 
 class Guards(unittest.TestCase):
