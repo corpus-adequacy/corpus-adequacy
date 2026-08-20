@@ -2692,10 +2692,30 @@ class ReportProjectorIsPlatformIndependent(unittest.TestCase):
         self.assertIs(declared["diagnostic_channel_declared"], True)
 
     def test_tool_identity_is_applied_exactly_once_by_the_projector(self):
-        rep = self._project("module")
-        for key in ("tool_version", "tool_commit",
-                    "tool_source_state", "tool_content_sha256"):
+        """Presence proves the fields arrived, not that one call produced them.
+
+        `_with_tool_identity` is idempotent over its own output, so wrapping
+        twice leaves every field present and every value correct. Counting the
+        producer calls is the only way to tell one application from two, and two
+        means the projector resolved identity twice per report: `tool_identity`
+        stats and hashes every declared runtime source, so a second call is real
+        work and a second chance to disagree with the first.
+        """
+        calls = []
+        fake = {"tool_version": "9.9.9", "tool_commit": None,
+                "tool_source_state": "unresolved", "tool_content_sha256": None}
+
+        def counted():
+            calls.append(1)
+            return dict(fake)
+
+        with mock.patch.object(ca, "tool_identity", counted):
+            rep = self._project("module")
+
+        self.assertEqual(len(calls), 1, "identity was resolved %d times" % len(calls))
+        for key, value in fake.items():
             self.assertIn(key, rep)
+            self.assertEqual(rep[key], value)
 
     def test_the_process_only_field_is_included_only_when_supplied(self):
         self.assertNotIn("originals_unverified_against_head", self._project("module"))

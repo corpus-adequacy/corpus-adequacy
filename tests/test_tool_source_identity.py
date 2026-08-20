@@ -663,34 +663,6 @@ class SnapshotIsRecheckedBeforeExactIsClaimed(unittest.TestCase):
         self.assertEqual(identity["tool_commit"], expected_head)
 
 
-def _report_returns(source: str) -> list:
-    """Every `return` of a report literal, and whether it is wrapped.
-
-    A behavioural test can only guard the paths it happens to drive. This reads
-    the module instead, so deleting the wrapper on a return nobody exercises on
-    this platform still fails.
-    """
-    found = []
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Return) or node.value is None:
-            continue
-        value = node.value
-        wrapped = False
-        if (isinstance(value, ast.Call)
-                and isinstance(value.func, ast.Name)
-                and value.func.id == "_with_tool_identity"
-                and len(value.args) == 1):
-            wrapped, value = True, value.args[0]
-        if not isinstance(value, ast.Dict):
-            continue
-        for key, val in zip(value.keys, value.values):
-            if (isinstance(key, ast.Constant) and key.value == "schema"
-                    and isinstance(val, ast.Constant)
-                    and val.value == "corpus-adequacy.report.v0"):
-                found.append((node.lineno, wrapped))
-    return found
-
-
 class EveryCanonicalCallerCarriesIdentity(unittest.TestCase):
     """The two report return paths, guarded structurally and behaviourally."""
 
@@ -698,17 +670,22 @@ class EveryCanonicalCallerCarriesIdentity(unittest.TestCase):
         "tool_version", "tool_commit", "tool_source_state", "tool_content_sha256",
     )
 
-    def test_every_report_return_is_wrapped_and_both_paths_are_pinned(self):
-        source = (REPO_ROOT / "corpus_adequacy.py").read_text(encoding="utf-8")
-        returns = _report_returns(source)
-        self.assertEqual(
-            len(returns), 2,
-            "expected the module and process/batch report returns, found %r" % (returns,),
-        )
-        unwrapped = [line for line, wrapped in returns if not wrapped]
-        self.assertEqual(
-            unwrapped, [], "report returned without tool identity at line(s) %r" % unwrapped
-        )
+    def test_the_projector_carries_identity(self):
+        """Identity has one producer, so this pins that producer and nothing else.
+
+        The previous version of this test walked the module for `return`
+        statements of a report dict literal and required each to be wrapped.
+        That shape is deliberately gone: both constructors now return the
+        projector's result and the literal exists once, inside it. Which
+        functions are canonical callers is a question for
+        `test_repository_ci_contract.ReportProjectorHasExactlyTwoCallers`;
+        duplicating it here would be a second producer rule to keep in step.
+        """
+        report = ca._report_v0(
+            Path("m.json"), {"runner": "module", "known_holes": {}},
+            killed=1, survived=0, silent=0, equivalent=0, out_of_scope=0,
+            unproved=0, known_holes=0, score=100.0, results=[], failures=[])
+        self._assert_carries_identity(report)
 
     def _assert_carries_identity(self, report: dict) -> None:
         expected = ca.tool_identity()
@@ -719,7 +696,7 @@ class EveryCanonicalCallerCarriesIdentity(unittest.TestCase):
     def test_module_runner_report_carries_identity(self):
         with tempfile.TemporaryDirectory() as d:
             report = ca.run(_module_manifest(Path(d)))
-        self.assertNotIn("runner", report)
+        self.assertEqual(report["runner"], "module")
         self._assert_carries_identity(report)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
