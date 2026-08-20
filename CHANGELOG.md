@@ -12,6 +12,8 @@ Process and batch manifests now reject declared source paths that resolve
 outside `repo_root`, including symlink escapes, and revalidate containment before
 source access. Invalid roots and outside paths are rejected before probing source
 existence. Source-guard documentation now states its abrupt-termination limit.
+On platforms without fcntl advisory locking, process and batch runs refuse
+before dirty check, source capture, build, child, mutation, or score.
 
 ## 0.1.0 — 2026-08-19
 
