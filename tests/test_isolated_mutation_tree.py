@@ -151,7 +151,7 @@ class IsolatedTreeCaps(unittest.TestCase):
             src = Path(d) / "src.bin"
             dest = Path(d) / "out.bin"
             src.write_bytes(b"ABC")
-            with mock.patch.object(iso.os, "O_NOFOLLOW", None):
+            with mock.patch.object(iso.os, "O_NOFOLLOW", None, create=True):
                 with self.assertRaises(iso.IsolationError) as cm:
                     iso._copy_regular_bounded(src, dest, 0, 64)
             self.assertFalse(dest.exists())
