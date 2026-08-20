@@ -51,9 +51,9 @@ def check_version_release_truth(root: Path) -> str:
        This does not exec the module or prove globals()/exec reflection.
     2. CHANGELOG has exactly one Unreleased heading and exactly one dated
        heading for that VERSION (real ISO calendar date).
-    3. Public README must contain RELEASE_TRUTH_BLOCK as one exact
-       contiguous string. The literal v<VERSION> is forbidden only
-       while that tag is demonstrably absent.
+    3. Public README must contain RELEASE_TRUTH_BLOCK as one full
+       trimmed line. The literal v<VERSION> is forbidden only while
+       that tag is demonstrably absent.
     4. No git metadata: treat as no tag. In a checkout, show-ref --verify
        --quiet maps rc 1 to absent and any other nonzero to error. A
        present tag is read via git show tag:path, run through the same
@@ -245,8 +245,27 @@ def _public_markdown(text: str) -> str:
     return "".join(out)
 
 
+ATX_HEADING_RE = re.compile(r"^( {0,3})(#{1,6}[ 	]+.+)$")
+
+
+def _atx_heading(line: str) -> str | None:
+    """CommonMark ATX heading: 0-3 leading spaces, then hashes.
+
+    Returns the heading without the leading spaces, or None.
+    """
+    match = ATX_HEADING_RE.match(line)
+    if match is None:
+        return None
+    return match.group(2)
+
+
 def _headings(text: str) -> list[str]:
-    return [line for line in text.splitlines() if line.startswith("## ")]
+    found = []
+    for line in text.splitlines():
+        heading = _atx_heading(line)
+        if heading is not None:
+            found.append(heading)
+    return found
 
 
 def _check_changelog_headings(changelog: str, version: str) -> None:
@@ -291,9 +310,9 @@ def _check_changelog_headings(changelog: str, version: str) -> None:
 def _check_docs_wording(
     readme: str, changelog: str, version: str, tag_present: bool
 ) -> None:
-    if RELEASE_TRUTH_BLOCK not in readme:
+    if not any(line.strip() == RELEASE_TRUTH_BLOCK for line in readme.splitlines()):
         raise ValueError(
-            "README must contain the exact release-truth block"
+            "README must contain the exact release-truth block as one line"
         )
     if tag_present:
         return
@@ -337,14 +356,15 @@ def _unreleased_body(changelog: str) -> str:
     lines = changelog.splitlines()
     start = None
     for i, line in enumerate(lines):
-        if UNRELEASED_HEADING_RE.match(line):
+        heading = _atx_heading(line)
+        if heading is not None and UNRELEASED_HEADING_RE.match(heading):
             start = i + 1
             break
     if start is None:
         raise ValueError("tagged CHANGELOG has no Unreleased heading")
     body = []
     for line in lines[start:]:
-        if line.startswith("## "):
+        if _atx_heading(line) is not None:
             break
         body.append(line)
     return "\n".join(body).strip()
@@ -381,7 +401,9 @@ def _check_tagged_tree(root: Path, version: str) -> None:
 
 
 def _honest_readme(extra: str = "") -> str:
-    return RELEASE_TRUTH_BLOCK + extra + "\n"
+    if extra:
+        return RELEASE_TRUTH_BLOCK + "\n" + extra.lstrip() + "\n"
+    return RELEASE_TRUTH_BLOCK + "\n"
 
 
 def _honest_changelog(version: str = "0.1.0") -> str:
@@ -553,6 +575,17 @@ INVALID_CHANGELOGS = (
         "# Changelog\n\n<!--\n## Unreleased\n\n"
         "## 0.1.0 — 2026-08-19\n",
     ),
+    (
+        "unreleased-indented-duplicate",
+        "# Changelog\n\n## Unreleased\n\n ## Unreleased\n\n"
+        "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n",
+    ),
+    (
+        "dated-indented-duplicate",
+        "# Changelog\n\n## Unreleased\n\n"
+        "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n\n"
+        " ## 0.1.0 — 2026-08-20\n\nDuplicate.\n",
+    ),
 )
 
 
@@ -636,6 +669,10 @@ class VersionReleaseTruth(unittest.TestCase):
                         NO_ADDRESSABILITY_PHRASE,
                     )
                 ),
+            ),
+            (
+                "block-only-in-one-reference-title",
+                '[truth]: https://example.test "%s"\n' % RELEASE_TRUTH_BLOCK,
             ),
         )
         for name, readme in cases:
