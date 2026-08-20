@@ -322,6 +322,27 @@ def _req(obj: dict, key: str, where: str):
     return obj[key]
 
 
+def _diagnostic_note(m: dict, moved_diag: list) -> dict:
+    """`moved_diagnostic` on rows whose verdict is not itself about diagnostics.
+
+    An excluded or acknowledged row that the diagnostics DID move is a different
+    fact from one nothing moved, and the row is the only place a reader can see
+    which it was. Present only where a channel was declared, so absent and zero
+    do not blur.
+    """
+    if m.get("diagnostic_from") is None:
+        return {}
+    return {"moved_diagnostic": len(moved_diag)}
+
+
+def _diagnostic_suffix(moved_diag: list) -> str:
+    """Said in the row's own `how`, because the verdict alone would overstate."""
+    if not moved_diag:
+        return ""
+    return (". The declared diagnostic channel moved on %d vector(s); the pinned "
+            "outcomes did not, and this verdict is not scored" % len(moved_diag))
+
+
 def selector_members(sel) -> list:
     """The declared members of a selector, whether it is a scalar or a list.
 
@@ -1230,6 +1251,33 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                     results.append({"group": group, "label": mut["label"], "verdict": "killed",
                                     "scope": scope, "moved": len(moved), "how": how})
                     killed += 1
+                # A diagnostic-only move never overrides a declared exclusion.
+                # `silent` says "the corpus claims this rule and its pinned
+                # outcomes cannot see it". An out-of-scope mutant is not making
+                # that claim, and an acknowledged hole has already made it and
+                # recorded the fact, so reclassifying either one scored a rule
+                # the author excluded and called a still-valid acknowledgement
+                # stale. Outcome movement is unaffected: it kills above, and the
+                # linger guard still retires an acknowledgement it kills.
+                elif scope == "out_of_scope":
+                    results.append({"group": group, "label": mut["label"],
+                                    "verdict": "unexercised", "scope": scope, "moved": 0,
+                                    **_diagnostic_note(m, moved_diag),
+                                    "how": "out of scope: %s%s"
+                                           % (mut["reason"], _diagnostic_suffix(moved_diag))})
+                    out_of_scope += 1
+                elif label_identity(mut) in acknowledged:
+                    ack = acknowledged[label_identity(mut)]
+                    # A KNOWN HOLE is not a scope statement. The corpus does claim this
+                    # rule, the rule is genuinely unexercised, and that fact is recorded
+                    # against ONE digest rather than fixed today. It stays loud.
+                    results.append({"group": group, "label": mut["label"],
+                                    "verdict": "known-hole", "scope": scope, "moved": 0,
+                                    **_diagnostic_note(m, moved_diag),
+                                    "how": "KNOWN HOLE against %s, recorded %s: %s%s"
+                                           % (m["_corpus_digest"][:19], ack["recorded"],
+                                              ack["reason"], _diagnostic_suffix(moved_diag))})
+                    known_holes += 1
                 elif moved_diag:
                     results.append({"group": group, "label": mut["label"], "verdict": "silent",
                                     "scope": scope, "moved": 0,
@@ -1241,22 +1289,6 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                                            "comparing diagnostics would notice"
                                            % len(moved_diag)})
                     silent += 1
-                elif scope == "out_of_scope":
-                    results.append({"group": group, "label": mut["label"],
-                                    "verdict": "unexercised", "scope": scope, "moved": 0,
-                                    "how": "out of scope: %s" % mut["reason"]})
-                    out_of_scope += 1
-                elif label_identity(mut) in acknowledged:
-                    ack = acknowledged[label_identity(mut)]
-                    # A KNOWN HOLE is not a scope statement. The corpus does claim this
-                    # rule, the rule is genuinely unexercised, and that fact is recorded
-                    # against ONE digest rather than fixed today. It stays loud.
-                    results.append({"group": group, "label": mut["label"],
-                                    "verdict": "known-hole", "scope": scope, "moved": 0,
-                                    "how": "KNOWN HOLE against %s, recorded %s: %s"
-                                           % (m["_corpus_digest"][:19], ack["recorded"],
-                                              ack["reason"])})
-                    known_holes += 1
                 else:
                     results.append({"group": group, "label": mut["label"], "verdict": "survived",
                                     "scope": scope, "moved": 0,

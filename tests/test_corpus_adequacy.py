@@ -2435,3 +2435,89 @@ class HoleRatioUsesTheScoredDenominator(unittest.TestCase):
         self.assertEqual(rep["known_holes"], 1)
         # 1 hole over the scored denominator killed+survived+silent = 2.
         self.assertEqual(rep["hole_ratio"], 0.5)
+
+
+# ---------------------------------------------------------------------------
+# A diagnostic-only move never overrides a declared exclusion
+# ---------------------------------------------------------------------------
+#
+# `silent` answers "the corpus claims this rule and its pinned outcomes cannot
+# see it". Neither an out-of-scope mutant nor an acknowledged hole is making that
+# claim, so a diagnostic move must not reclassify either of them. Getting this
+# wrong scored rules the author excluded, and told an author to delete a valid
+# acknowledgement for a rule that is still unforced.
+#
+# Rule 3 (outcome movement still kills and still makes an acknowledgement stale)
+# is already pinned by
+# `KnownHoles.test_an_acknowledgement_for_a_rule_now_exercised_is_flagged` and
+# `…test_an_acknowledgement_lingers_when_its_rule_becomes_out_of_scope`.
+
+
+class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
+    def _corpus(self, tmp: Path, second: dict, known_holes=None):
+        (tmp / "check.py").write_text(
+            "import json\n"
+            "ok = True\n"
+            "guard = True\n"
+            "killme = True\n"
+            'tag = "A"\n'
+            "if not guard:\n"
+            "    ok = False\n"
+            'print(json.dumps({"ok": ok and killme, "reason": tag}))\n',
+            encoding="utf-8")
+        (tmp / "vec.json").write_text("{}\n", encoding="utf-8")
+        (tmp / "digest.json").write_text('{"digest":"sha256:deadbeef"}\n', encoding="utf-8")
+        (tmp / "vectors.json").write_text(json.dumps({
+            "vectors": [{"vector_id": "v1", "path": "vec.json"}]}), encoding="utf-8")
+        raw = {
+            "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+            "implementation": "check.py", "implementation_sources": ["check.py"],
+            "build": [],
+            "entrypoint_command": [_batch_python(), "check.py", "{vector}"],
+            "outcome_from": ["ok"], "diagnostic_from": ["reason"],
+            "vectors": "vectors.json", "id_key": "vector_id",
+            "vector_path_key": "path", "default_group": "g",
+            "corpus_digest_file": "digest.json", "corpus_digest_key": "digest",
+            "mutants": {"g": [
+                {"label": "killed-rule", "anchor": "killme = True",
+                 "replacement": "killme = False"},
+                second,
+                {"label": "CONTROL", "control": True,
+                 "anchor": "guard = True", "replacement": "guard = False"}]},
+        }
+        if known_holes is not None:
+            raw["known_holes"] = known_holes
+        p = tmp / "m.json"
+        p.write_text(json.dumps(raw), encoding="utf-8")
+        return p
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_out_of_scope_survives_a_diagnostic_only_move(self):
+        second = {"label": "oos-rule", "anchor": 'tag = "A"', "replacement": 'tag = "B"',
+                  "scope": "out_of_scope", "reason": "the corpus never claimed this rule"}
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._corpus(Path(d), second))
+        row = {r["label"]: r for r in rep["mutants"]}["oos-rule"]
+        self.assertEqual(row["verdict"], "unexercised")
+        self.assertEqual(rep["silent"], 0)
+        self.assertEqual(rep["unexercised_out_of_scope"], 1)
+        self.assertEqual(rep["score_percent"], 100.0)
+        self.assertTrue(rep["adequate"], rep["failures"])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_a_current_digest_known_hole_survives_a_diagnostic_only_move(self):
+        second = {"label": "hole-rule", "anchor": 'tag = "A"', "replacement": 'tag = "B"'}
+        holes = {"sha256:deadbeef": [
+            {"label": "hole-rule", "reason": "acknowledged", "recorded": "2026-08-20"}]}
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._corpus(Path(d), second, known_holes=holes))
+        row = {r["label"]: r for r in rep["mutants"]}["hole-rule"]
+        self.assertEqual(row["verdict"], "known-hole")
+        # The row stays honest about what did see it.
+        self.assertEqual(row["moved_diagnostic"], 1)
+        self.assertEqual(rep["silent"], 0)
+        self.assertEqual(rep["known_holes"], 1)
+        self.assertEqual(rep["score_percent"], 100.0)
+        joined = " ".join(rep["failures"])
+        self.assertNotIn("no longer holes", joined)
+        self.assertNotIn("were silent", joined)

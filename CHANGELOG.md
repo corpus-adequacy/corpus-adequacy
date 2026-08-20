@@ -14,6 +14,17 @@ alike; `git status` is not consulted. A modified runtime source is therefore no
 longer attributed to the clean commit. This is not an attestation, a
 signature, an SBOM, or a reproducibility claim.
 
+A diagnostic-only move no longer overrides a declared exclusion. An
+`out_of_scope` mutant stayed out of scope and an acknowledged current-digest hole
+stayed a known hole only while the diagnostic channel was quiet; a move on that
+channel reclassified either one as `silent`, which scored a rule the author had
+excluded and told an author to delete a still-valid acknowledgement for a rule
+that was still unforced. Precedence is now killed, then out-of-scope, then
+known-hole, then silent, and the excluded and acknowledged rows carry
+`moved_diagnostic` plus a `how` saying the diagnostics moved while the pinned
+outcomes did not. Outcome movement is untouched: it kills, and it still retires
+an acknowledgement through the existing linger guard.
+
 Selector presence is one rule for every declared selector. A member the
 unmutated implementation never emits fails the run whether it was declared on
 `outcome_from` or on `diagnostic_from`, and a partially present selector fails on

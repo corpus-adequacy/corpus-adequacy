@@ -120,6 +120,15 @@ Declaring `diagnostic_from` beside `outcome_from` buys a third verdict:
 | no | yes | `silent` |
 | no | no | `survived` |
 
+A diagnostic move never overrides a declared exclusion. `silent` says *the
+corpus claims this rule and its pinned outcomes cannot see it*, and neither an
+`out_of_scope` mutant nor an acknowledged known hole is making that claim, so
+both keep their own verdict and stay unscored even when the diagnostic channel
+moved. The row carries `moved_diagnostic` and says so in its `how`, because the
+verdict alone would hide it. Only an in-scope, unacknowledged mutant becomes
+`silent`. Outcome movement is unaffected: it still kills, and killing an
+acknowledged rule still retires the acknowledgement.
+
 `silent` sits in the denominator and **never** in the numerator: an implementer
 can still delete that rule and reproduce every pinned outcome. It is named
 separately because the repair differs — a survivor needs a vector that moves an
