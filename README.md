@@ -57,7 +57,16 @@ exclusions, and what the percentage is a percentage of.
   mutant can cut.
 - **Equivalence is declared with a reason, never inferred.** Deciding mutant
   equivalence is undecidable, so a tool claiming to detect it would be lying.
-- **A crash is a kill**, reported separately.
+- **Child termination is classified before stdout is parsed.** Default
+  `accepted_exit_codes` is `[0]`. A parseable report on an undeclared code, a
+  signal, or a missing code is not an outcome. Signals and `None` are never
+  accepted. `outcome_parse: test-names` must include existing code `101`.
+  Privileged verifier JSON (`verify-privileged-mcp-action`) must include
+  existing code `2`. An observed unexpected exit or signal on an ordinary
+  mutant may be a kill with that class named as `how`. A control abnormality
+  is `control-error` and invalidates the run; it is not a score. Timeout and
+  output-ceiling failures stay their own classes. This repository ships no
+  corpus manifests and does not migrate downstream adapter manifests.
 - **A mutant that never ran is `unproved`, never a kill.** It was never shown to
   the corpus, so the corpus said nothing about that rule. Counting it killed lets
   a typo in the substitution print as a covered rule.

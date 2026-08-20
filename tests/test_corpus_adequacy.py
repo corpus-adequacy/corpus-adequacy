@@ -11,6 +11,8 @@ rule none does, a rule declared out of scope, and a rule declared equivalent.
 from __future__ import annotations
 
 import gc
+import inspect
+import io
 import json
 import os
 import subprocess
@@ -1301,6 +1303,364 @@ class NestedContainerShapeCli(unittest.TestCase):
         for name, fields, with_digest, needle in self.CASES:
             with self.subTest(name):
                 self._assert_envelope(self._cli(fields, with_digest), needle)
+
+
+VALID_CHILD_JSON = json.dumps({"ok": True, "failures": []})
+VALID_TEST_NAMES = "test foo ... FAILED\ntest result: FAILED. 0 passed; 1 failed\n"
+
+
+def _completed(returncode, stdout=VALID_CHILD_JSON, stderr=""):
+    return subprocess.CompletedProcess(["child"], returncode, stdout, stderr)
+
+
+def _policy_manifest(tmp: Path, extra=None, runner="batch"):
+    extra = dict(extra or {})
+    if runner == "batch":
+        p = BatchRunner()._corpus(tmp)
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        raw.update(extra)
+        p.write_text(json.dumps(raw), encoding="utf-8")
+        return p
+    (tmp / "check.py").write_text("print('x')\n")
+    (tmp / "vec.json").write_text("{}\n")
+    (tmp / "vectors.json").write_text(json.dumps({
+        "vectors": [{"vector_id": "v1", "path": "vec.json"}]}))
+    raw = {
+        "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+        "implementation": "check.py", "implementation_sources": ["check.py"],
+        "build": [],
+        "entrypoint_command": [_batch_python(), "check.py", "{vector}"],
+        "outcome_from": ["ok", "failures"], "vectors": "vectors.json",
+        "id_key": "vector_id", "vector_path_key": "path", "default_group": "g",
+        "mutants": {"g": [
+            {"label": "threshold",
+             "anchor": "print('x')", "replacement": "print('y')"},
+            {"label": "CONTROL", "control": True,
+             "anchor": "print", "replacement": "print  # c"}]}}
+    raw.update(extra)
+    p = tmp / "m.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    return p
+
+
+class ClassifyChildExit(unittest.TestCase):
+    """Termination class is a function of returncode and the accepted set only."""
+
+    def test_zero_is_ok_under_the_default_policy(self):
+        self.assertEqual(ca.classify(0, [0]), "ok")
+
+    def test_undeclared_positive_is_unexpected_exit(self):
+        self.assertEqual(ca.classify(1, [0]), "unexpected-exit")
+        self.assertEqual(ca.classify(2, [0]), "unexpected-exit")
+        self.assertEqual(ca.classify(101, [0]), "unexpected-exit")
+
+    def test_declared_positive_is_ok(self):
+        self.assertEqual(ca.classify(101, [0, 101]), "ok")
+        self.assertEqual(ca.classify(2, [0, 2]), "ok")
+
+    def test_signal_is_signal_even_if_a_numeric_policy_lists_it(self):
+        self.assertEqual(ca.classify(-9, [0]), "signal")
+        self.assertEqual(ca.classify(-6, [0, -6]), "signal")
+
+    def test_none_is_incomplete_even_if_the_policy_is_malformed(self):
+        self.assertEqual(ca.classify(None, [0]), "incomplete")
+        self.assertEqual(ca.classify(None, [True]), "incomplete")
+
+
+class ChildOutcomeClassifyThenParse(unittest.TestCase):
+    """Accepted termination is necessary, not sufficient. Classify before parse."""
+
+    def _m(self, **fields):
+        m = {"runner": "process", "outcome_from": ["ok", "failures"],
+             "accepted_exit_codes": [0]}
+        m.update(fields)
+        return m
+
+    def test_undeclared_positive_with_valid_json_is_unexpected_exit(self):
+        value, kind = ca.child_outcome(self._m(), _completed(1))
+        self.assertIsNone(value)
+        self.assertEqual(kind, "unexpected-exit")
+
+    def test_declared_2_with_valid_verifier_json_parses(self):
+        value, kind = ca.child_outcome(
+            self._m(accepted_exit_codes=[0, 2]), _completed(2))
+        self.assertEqual(kind, None)
+        self.assertEqual(value, (True, []))
+
+    def test_undeclared_2_with_valid_verifier_json_does_not_parse(self):
+        value, kind = ca.child_outcome(self._m(), _completed(2))
+        self.assertIsNone(value)
+        self.assertEqual(kind, "unexpected-exit")
+
+    def test_declared_101_with_test_names_parses(self):
+        m = self._m(runner="batch", outcome_parse="test-names",
+                    accepted_exit_codes=[0, 101])
+        value, kind = ca.child_outcome(m, _completed(101, VALID_TEST_NAMES))
+        self.assertEqual(kind, None)
+        self.assertEqual(value, ("foo",))
+
+    def test_undeclared_101_with_test_names_is_unexpected_exit(self):
+        m = self._m(runner="batch", outcome_parse="test-names",
+                    accepted_exit_codes=[0])
+        value, kind = ca.child_outcome(m, _completed(101, VALID_TEST_NAMES))
+        self.assertIsNone(value)
+        self.assertEqual(kind, "unexpected-exit")
+
+    def test_signal_with_valid_output_never_parses(self):
+        value, kind = ca.child_outcome(self._m(), _completed(-9))
+        self.assertIsNone(value)
+        self.assertEqual(kind, "signal")
+
+    def test_none_with_valid_output_never_parses(self):
+        value, kind = ca.child_outcome(self._m(), _completed(None))
+        self.assertIsNone(value)
+        self.assertEqual(kind, "incomplete")
+
+    def test_accepted_2_with_empty_stdout_is_parse_error(self):
+        value, kind = ca.child_outcome(
+            self._m(accepted_exit_codes=[0, 2]), _completed(2, ""))
+        self.assertIsNone(value)
+        self.assertEqual(kind, "parse-error")
+
+    def test_accepted_zero_with_malformed_output_is_parse_error(self):
+        value, kind = ca.child_outcome(self._m(), _completed(0, "not-json"))
+        self.assertIsNone(value)
+        self.assertEqual(kind, "parse-error")
+
+    def test_rejected_exit_with_malformed_output_is_unexpected_exit(self):
+        value, kind = ca.child_outcome(self._m(), _completed(1, "not-json"))
+        self.assertIsNone(value)
+        self.assertEqual(kind, "unexpected-exit")
+
+
+class ChildExitCallsites(unittest.TestCase):
+    """One classifier, used before parse, at both outcome-child callsites."""
+
+    def test_child_outcome_calls_classify(self):
+        src = inspect.getsource(ca.child_outcome)
+        self.assertIn("classify(", src)
+
+    def test_child_outcome_classifies_before_it_parses(self):
+        src = inspect.getsource(ca.child_outcome)
+        self.assertLess(src.index("classify("), src.index("json.loads"))
+
+    def test_process_and_batch_call_child_outcome_and_do_not_parse_themselves(self):
+        for fn in (ca._batch_outcome, ca._process_outcomes):
+            with self.subTest(fn.__name__):
+                src = inspect.getsource(fn)
+                self.assertIn("child_outcome(", src)
+                self.assertNotIn("json.loads", src)
+
+    def test_build_stays_outside_the_outcome_exit_rule(self):
+        src = inspect.getsource(ca._build)
+        self.assertNotIn("classify(", src)
+        self.assertNotIn("child_outcome(", src)
+        self.assertNotIn("accepted_exit_codes", src)
+
+
+class ProcessAndBatchRefuseParseableCrash(unittest.TestCase):
+    """Both runners classify mocked children; no real abort or _exit."""
+
+    def _vectors(self, runner, loaded):
+        if runner == "batch":
+            return [{loaded["id_key"]: "<batch>"}]
+        return [{"vector_id": "v1", "path": "vec.json"}]
+
+    def _run_outcomes(self, runner, extra, child):
+        with tempfile.TemporaryDirectory() as d:
+            loaded = ca.load_manifest(_policy_manifest(Path(d), extra, runner=runner))
+            with mock.patch.object(ca, "_run_capped", return_value=child):
+                return ca._process_outcomes(loaded, self._vectors(runner, loaded))
+
+    def test_parseable_stdout_then_undeclared_exit_is_not_an_outcome(self):
+        for runner in ("process", "batch"):
+            with self.subTest(runner=runner):
+                out, failed = self._run_outcomes(runner, {}, _completed(1))
+                self.assertEqual(out, {})
+                self.assertEqual(set(failed.values()), {"unexpected-exit"})
+
+    def test_parseable_stdout_then_signal_is_not_an_outcome(self):
+        for runner in ("process", "batch"):
+            with self.subTest(runner=runner):
+                out, failed = self._run_outcomes(runner, {}, _completed(-11))
+                self.assertEqual(out, {})
+                self.assertEqual(set(failed.values()), {"signal"})
+
+    def test_timeout_is_timeout_not_a_crash_or_outcome(self):
+        for runner in ("process", "batch"):
+            with self.subTest(runner=runner):
+                with tempfile.TemporaryDirectory() as d:
+                    loaded = ca.load_manifest(_policy_manifest(Path(d), runner=runner))
+                    with mock.patch.object(
+                            ca, "_run_capped",
+                            side_effect=subprocess.TimeoutExpired(["child"], 1)):
+                        out, failed = ca._process_outcomes(
+                            loaded, self._vectors(runner, loaded))
+                self.assertEqual(out, {})
+                self.assertEqual(set(failed.values()), {"timeout"})
+
+    def test_output_cap_is_output_cap_not_a_crash_or_outcome(self):
+        for runner in ("process", "batch"):
+            with self.subTest(runner=runner):
+                with tempfile.TemporaryDirectory() as d:
+                    loaded = ca.load_manifest(_policy_manifest(Path(d), runner=runner))
+                    with mock.patch.object(
+                            ca, "_run_capped", side_effect=br._OutputTooLarge()):
+                        out, failed = ca._process_outcomes(
+                            loaded, self._vectors(runner, loaded))
+                self.assertEqual(out, {})
+                self.assertEqual(set(failed.values()), {"output-cap"})
+
+    def test_rc0_valid_json_is_still_an_outcome(self):
+        out, failed = self._run_outcomes("batch", {}, _completed(0))
+        self.assertEqual(failed, {})
+        self.assertEqual(out["<batch>"], (True, ()))
+
+
+class AcceptedExitPolicy(unittest.TestCase):
+    """One load-time validator: unique nonnegative ints plus protocol codes."""
+
+    def _load(self, extra, runner="batch"):
+        with tempfile.TemporaryDirectory() as d:
+            return ca.load_manifest(_policy_manifest(Path(d), extra, runner=runner))
+
+    def _refuse(self, extra, runner="batch"):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(_policy_manifest(Path(d), extra, runner=runner))
+        return str(cm.exception)
+
+    def test_default_accepted_exit_codes_is_zero_only(self):
+        loaded = self._load({})
+        self.assertEqual(loaded["accepted_exit_codes"], [0])
+
+    def test_bool_true_is_a_manifest_error(self):
+        msg = self._refuse({"accepted_exit_codes": [True]})
+        self.assertIn("accepted_exit_codes", msg)
+        self.assertIn("bool", msg)
+
+    def test_test_names_without_101_is_a_manifest_error(self):
+        # Protocol test-names: cargo-test failures use existing code 101.
+        # This repository ships no manifests.
+        msg = self._refuse({"outcome_parse": "test-names"})
+        self.assertIn("101", msg)
+        self.assertIn("test-names", msg)
+
+    def test_test_names_with_101_loads(self):
+        loaded = self._load({
+            "outcome_parse": "test-names", "accepted_exit_codes": [0, 101]})
+        self.assertEqual(loaded["accepted_exit_codes"], [0, 101])
+
+    def test_privileged_verifier_json_without_2_is_a_manifest_error(self):
+        # Protocol privileged verifier JSON: an invalid bundle is a normal
+        # parseable result and uses existing code 2. Named as the protocol,
+        # not as a downstream path this repository ships.
+        msg = self._refuse({
+            "entrypoint_command": [
+                "verifier", "verify-privileged-mcp-action", "{vector}"],
+        }, runner="process")
+        self.assertIn("2", msg)
+        self.assertIn("privileged", msg.lower())
+
+    def test_privileged_verifier_json_with_2_loads(self):
+        loaded = self._load({
+            "entrypoint_command": [
+                "verifier", "verify-privileged-mcp-action", "{vector}"],
+            "accepted_exit_codes": [0, 2],
+        }, runner="process")
+        self.assertEqual(loaded["accepted_exit_codes"], [0, 2])
+
+    def test_docs_do_not_claim_downstream_manifests_were_migrated(self):
+        root = Path(__file__).resolve().parent.parent
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn("ships no", readme.lower())
+        self.assertIn("does not migrate", changelog.lower())
+
+    def test_a_negative_code_is_a_manifest_error(self):
+        msg = self._refuse({"accepted_exit_codes": [0, -9]})
+        self.assertIn("accepted_exit_codes", msg)
+
+    def test_a_duplicate_code_is_a_manifest_error(self):
+        msg = self._refuse({"accepted_exit_codes": [0, 0]})
+        self.assertIn("accepted_exit_codes", msg)
+
+
+class ChildExitRunSemantics(unittest.TestCase):
+    """Unmutated/control fail closed with no score; a mutant abort may kill."""
+
+    def _fake_from_source(self, *, control_rc=0, mutant_rc=0, baseline_rc=0,
+                          stdout=VALID_CHILD_JSON):
+        def fake(cmd, cwd, timeout):
+            src = Path(cwd, "check.py").read_text(encoding="utf-8")
+            if "'ok': 'MOVED'" in src:
+                return _completed(control_rc, stdout)
+            if "c['n'] > 1" in src and "c['n'] > 10" not in src:
+                return _completed(mutant_rc, stdout)
+            return _completed(baseline_rc, stdout)
+        return fake
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_unmutated_abnormal_exit_is_a_group_failure_with_no_score(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = BatchRunner()._corpus(Path(d))
+            with mock.patch.object(ca, "_run_capped",
+                                   return_value=_completed(1)):
+                rep = ca.run(p)
+        self.assertFalse(rep["adequate"])
+        self.assertTrue(any("UNMUTATED" in f for f in rep["failures"]),
+                        rep["failures"])
+        self.assertIsNone(rep["score_percent"])
+        self.assertEqual(rep["killed"], 0)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_control_abnormal_exit_is_control_error_not_killed(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = BatchRunner()._corpus(Path(d))
+            with mock.patch.object(
+                    ca, "_run_capped",
+                    side_effect=self._fake_from_source(control_rc=1)):
+                rep = ca.run(p)
+        verdicts = {r["label"]: r for r in rep["mutants"]}
+        self.assertEqual(verdicts["CONTROL"]["verdict"], "control-error")
+        self.assertNotEqual(verdicts["CONTROL"]["verdict"], "control-killed")
+        self.assertIn("unexpected-exit", verdicts["CONTROL"]["how"])
+        self.assertFalse(rep["adequate"])
+        self.assertIsNone(rep["score_percent"])
+        self.assertEqual(rep["killed"], 0)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_mutant_unexpected_exit_is_a_kill_naming_the_class(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = BatchRunner()._corpus(Path(d))
+            with mock.patch.object(
+                    ca, "_run_capped",
+                    side_effect=self._fake_from_source(mutant_rc=1)):
+                rep = ca.run(p)
+        row = next(r for r in rep["mutants"] if r["label"] == "threshold")
+        self.assertEqual(row["verdict"], "killed")
+        self.assertIn("unexpected-exit", row["how"])
+
+    def test_text_and_json_name_the_failure_class_for_a_killed_mutant(self):
+        rep = {
+            "schema": "corpus-adequacy.report.v0", "manifest": "m.json",
+            "killed": 1, "survived": 0, "equivalent": 0,
+            "known_holes": 0, "unexercised_out_of_scope": 0, "unproved": 0,
+            "declared_total": 1, "out_of_scope_ratio": 0.0, "hole_ratio": 0.0,
+            "score_percent": 100.0, "score_means": "author-declared",
+            "adequate": True, "failures": [], "tool_version": "0.1.0",
+            "tool_commit": None,
+            "mutants": [{"group": "g", "verdict": "killed",
+                         "label": "threshold", "how": "unexpected-exit"}],
+        }
+        with mock.patch.object(ca, "run", return_value=rep), \
+                mock.patch.object(sys, "argv", ["corpus_adequacy.py", "m.json"]):
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                rc = ca.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("unexpected-exit", buf.getvalue())
+        self.assertIn("killed", buf.getvalue())
 
 
 if __name__ == "__main__":
