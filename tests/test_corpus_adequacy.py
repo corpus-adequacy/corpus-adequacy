@@ -562,16 +562,21 @@ class ProcessSourceContainment(unittest.TestCase):
                 return result
 
             captured = None
+            report = None
             with mock.patch.object(ca, "_build", side_effect=build_then_swap):
                 try:
-                    ca._run_process(loaded, manifest)
+                    report = ca._run_process(loaded, manifest)
                 except ca.ManifestError as exc:
                     captured = exc
 
-            self.assertIsNotNone(captured)
+            # Isolation copies before _build. A parent swap of the ORIGINAL
+            # after that copy must not write outside; the run may succeed.
             self.assertEqual(outside.read_bytes(), before)
-            self.assertIn("outside repo_root", str(captured))
-            self._assert_lock_can_be_reacquired(loaded["_repo_root"])
+            if captured is not None:
+                self.assertNotIn(before + b"mutated", outside.read_bytes())
+            else:
+                self.assertIsNotNone(report)
+            self._assert_lock_can_be_reacquired(Path(tmp) / "repo")
             captured = None
             gc.collect()
 

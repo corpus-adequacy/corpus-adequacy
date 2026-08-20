@@ -1,0 +1,606 @@
+#!/usr/bin/env python3
+"""Isolated working-tree copy for process/batch mutation.
+
+SIGKILL of the tool cannot run Python finally, so a leftover copy may remain
+under temp; the next materialize removes that discoverability pointer. Tests may reap only
+children of a recorded tool PID — never other processes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import corpus_adequacy as ca  # noqa: E402
+import isolated_tree as iso  # noqa: E402
+
+
+def _batch_python() -> str:
+    return sys.executable
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=iso-test",
+         "-c", "user.email=iso-test@example.com", *args],
+        check=check, capture_output=True, text=True,
+    )
+
+
+def _write_batch_corpus(tmp: Path, *, one_mutant: bool = False,
+                        sleep_mutant: bool = False) -> Path:
+    """Batch fixture similar to tests/test_corpus_adequacy.py BatchRunner."""
+    (tmp / "check.py").write_text(
+        "import json, sys\n"
+        "doc = json.load(open(sys.argv[1]))\n"
+        "fails = [c['id'] for c in doc['cases'] if c['n'] > 10]\n"
+        "print(json.dumps({'ok': not fails, 'failures': fails}))\n",
+        encoding="utf-8",
+    )
+    (tmp / "vectors.json").write_text(json.dumps({"cases": [
+        {"id": "c1", "n": 1}, {"id": "c2", "n": 2}]}), encoding="utf-8")
+    if sleep_mutant:
+        threshold = {
+            "label": "threshold",
+            "anchor": "import json, sys\n",
+            "replacement": (
+                "import json, sys\n"
+                "import time; time.sleep(60)  # MUTANT_VISIBLE\n"
+            ),
+        }
+    else:
+        threshold = {
+            "label": "threshold",
+            "anchor": "c['n'] > 10",
+            "replacement": "c['n'] > 0  # MUTANT_VISIBLE",
+        }
+    mutants = [threshold]
+    if not one_mutant:
+        mutants.append({
+            "label": "CONTROL", "control": True,
+            "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'",
+        })
+    raw = {
+        "schema": ca.SCHEMA, "runner": "batch", "repo_root": ".",
+        "implementation_sources": ["check.py"],
+        "entrypoint_command": [_batch_python(), "check.py", "vectors.json"],
+        "outcome_from": ["ok", "failures"], "vectors": "vectors.json",
+        "id_key": "vector_id", "default_group": "g",
+        "mutants": {"g": mutants},
+    }
+    manifest = tmp / "m.json"
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+    return manifest
+
+
+def _assert_lock_releasable(test: unittest.TestCase, repo_root: Path) -> None:
+    second = ca._TreeLock(repo_root)
+    try:
+        second.__enter__()
+    finally:
+        if second.held:
+            second.__exit__()
+
+
+def _reap_tool_group(pid: int) -> None:
+    """Reap only the recorded tool PID and descendants of that session.
+
+    SIGKILL of the tool cannot run Python finally, so a mutant entrypoint
+    started as a child of that PID may still be alive.
+    """
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _read_pointer(repo: Path) -> Path | None:
+    ptr = iso.isolated_tree_pointer(repo)
+    if not ptr.is_file():
+        return None
+    try:
+        text = ptr.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    return Path(text)
+
+
+def _under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+class IsolatedTreePointer(unittest.TestCase):
+    def test_pointer_is_keyed_under_system_temp_not_the_checkout(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            key = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
+            expected = Path(tempfile.gettempdir()) / (
+                "corpus-adequacy-muttree-%s.ptr" % key)
+            ptr = iso.isolated_tree_pointer(root)
+            self.assertEqual(ptr, expected)
+            self.assertFalse(_under(ptr, root))
+            self.assertTrue(_under(ptr, Path(tempfile.gettempdir())))
+
+    def test_ceilings_are_owned_and_are_not_the_output_cap(self):
+        self.assertEqual(iso.MATERIALIZATION_CAP_BYTES, 64 * 1024 * 1024)
+        self.assertGreater(iso.MATERIALIZATION_CAP_FILES, 0)
+        import bounded_run as br
+        self.assertNotEqual(iso.MATERIALIZATION_CAP_BYTES, br.OUTPUT_CAP_BYTES)
+        src = Path(iso.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("OUTPUT_CAP_BYTES", src)
+        self.assertNotIn("bounded_run", src)
+
+
+class MaterializeHelper(unittest.TestCase):
+    def test_dirty_bytes_appear_in_the_copy_not_head(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "check.py").write_text("CLEAN = 1\n", encoding="utf-8")
+            _git(root, "init")
+            _git(root, "add", "check.py")
+            _git(root, "commit", "-m", "clean")
+            (root / "check.py").write_text("CLEAN = 1\nDIRTY_DECLARED\n", encoding="utf-8")
+            tree = iso.IsolatedMutationTree(root)
+            try:
+                isolated = tree.materialize()
+                copied = (isolated / "check.py").read_bytes()
+                self.assertIn(b"DIRTY_DECLARED", copied)
+                head = subprocess.run(
+                    ["git", "-C", str(root), "show", "HEAD:check.py"],
+                    capture_output=True, check=True)
+                self.assertNotIn(b"DIRTY_DECLARED", head.stdout)
+                self.assertEqual(copied, (root / "check.py").read_bytes())
+                self.assertFalse((isolated / ".git").exists())
+                self.assertEqual(tree.root, isolated)
+                self.assertFalse(_under(isolated, root))
+            finally:
+                tree.cleanup()
+
+    def test_every_symlink_is_refused_fail_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            root = tmp / "repo"
+            root.mkdir()
+            outside = tmp / "outside.txt"
+            outside.write_text("OUTSIDE_SECRET\n", encoding="utf-8")
+            before = outside.read_bytes()
+            (root / "keep.py").write_text("ok\n", encoding="utf-8")
+            (root / "target.py").write_text("TARGET\n", encoding="utf-8")
+            for name, dest in (("escape", outside), ("contained", root / "target.py")):
+                with self.subTest(name=name):
+                    link = root / "link"
+                    if link.exists() or link.is_symlink():
+                        link.unlink()
+                    link.symlink_to(dest)
+                    tree = iso.IsolatedMutationTree(root)
+                    with self.assertRaises(iso.IsolationError) as cm:
+                        tree.materialize()
+                    self.assertIn("symlink", str(cm.exception).lower())
+                    self.assertEqual(outside.read_bytes(), before)
+                    self.assertEqual((root / "keep.py").read_text(encoding="utf-8"), "ok\n")
+                    tree.cleanup()
+                    self.assertFalse(iso.isolated_tree_pointer(root).exists())
+                    link.unlink()
+
+    def test_symlink_escape_is_refused_and_outside_bytes_unchanged(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            root = tmp / "repo"
+            root.mkdir()
+            outside = tmp / "outside.txt"
+            outside.write_text("OUTSIDE_SECRET\n", encoding="utf-8")
+            before = outside.read_bytes()
+            (root / "keep.py").write_text("ok\n", encoding="utf-8")
+            (root / "escape").symlink_to(outside)
+            tree = iso.IsolatedMutationTree(root)
+            with self.assertRaises(iso.IsolationError) as cm:
+                tree.materialize()
+            self.assertIn("symlink", str(cm.exception).lower())
+            self.assertEqual(outside.read_bytes(), before)
+            self.assertEqual((root / "keep.py").read_text(encoding="utf-8"), "ok\n")
+            tree.cleanup()
+            self.assertFalse(iso.isolated_tree_pointer(root).exists())
+
+    def test_tiny_cap_refuses_and_leaves_original_untouched(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            payload = b"X" * 200
+            (root / "big.bin").write_bytes(payload)
+            before = (root / "big.bin").read_bytes()
+            tree = iso.IsolatedMutationTree(root)
+            with self.assertRaises(iso.IsolationError) as cm:
+                tree.materialize(cap=50)
+            self.assertIn("50", str(cm.exception))
+            self.assertTrue("ceiling" in str(cm.exception).lower()
+                            or "cap" in str(cm.exception).lower())
+            self.assertEqual((root / "big.bin").read_bytes(), before)
+            tree.cleanup()
+
+    def test_missing_original_root_is_refused(self):
+        missing = Path(tempfile.gettempdir()) / "iso-missing-root-does-not-exist"
+        tree = iso.IsolatedMutationTree(missing)
+        with self.assertRaises(iso.IsolationError) as cm:
+            tree.materialize()
+        self.assertTrue("missing" in str(cm.exception).lower()
+                        or "not" in str(cm.exception).lower())
+        tree.cleanup()
+
+    def test_each_materialize_uses_a_new_root_outside_the_checkout(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "a.py").write_text("A\n", encoding="utf-8")
+            first = iso.IsolatedMutationTree(root)
+            second = iso.IsolatedMutationTree(root)
+            try:
+                p1 = first.materialize()
+                p1_res = p1.resolve()
+                sys_tmp = Path(tempfile.gettempdir()).resolve()
+                self.assertTrue(_under(p1_res, sys_tmp))
+                self.assertFalse(_under(p1_res, root))
+                p2 = second.materialize()
+                self.assertNotEqual(p1_res, p2.resolve())
+                self.assertFalse(_under(p2.resolve(), root))
+                named = _read_pointer(root)
+                self.assertEqual(named.resolve(), p2.resolve())
+            finally:
+                first.cleanup()
+                second.cleanup()
+            self.assertIsNone(_read_pointer(root))
+
+    def test_file_cap_refuses_mid_walk_and_leaves_original(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for i in range(3):
+                (root / ("f%d.txt" % i)).write_text("x\n", encoding="utf-8")
+            snapshot = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            tree = iso.IsolatedMutationTree(root)
+            with self.assertRaises(iso.IsolationError) as cm:
+                tree.materialize(file_cap=2)
+            self.assertIn("2", str(cm.exception))
+            now = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            self.assertEqual(now, snapshot)
+            tree.cleanup()
+
+    def test_executable_mode_is_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            script = root / "tool.sh"
+            script.write_text("#!/bin/sh\necho x\n", encoding="utf-8")
+            os.chmod(script, 0o755)
+            plain = root / "plain.txt"
+            plain.write_text("noexec\n", encoding="utf-8")
+            os.chmod(plain, 0o644)
+            tree = iso.IsolatedMutationTree(root)
+            try:
+                isolated = tree.materialize()
+                copied = isolated / "tool.sh"
+                self.assertTrue(stat.S_IMODE(copied.stat().st_mode) & 0o111)
+                self.assertFalse(stat.S_IMODE((isolated / "plain.txt").stat().st_mode) & 0o111)
+            finally:
+                tree.cleanup()
+
+    def test_fifo_is_refused_and_original_untouched(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("os.mkfifo is unavailable")
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "keep.py").write_text("ok\n", encoding="utf-8")
+            os.mkfifo(root / "pipe")
+            before = (root / "keep.py").read_bytes()
+            tree = iso.IsolatedMutationTree(root)
+            with self.assertRaises(iso.IsolationError) as cm:
+                tree.materialize()
+            msg = str(cm.exception).lower()
+            self.assertTrue(any(w in msg for w in ("fifo", "socket", "device", "special")))
+            self.assertEqual((root / "keep.py").read_bytes(), before)
+            tree.cleanup()
+
+    def test_context_manager_cleans_up_on_exception(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "a.py").write_text("A\n", encoding="utf-8")
+            held = None
+            with self.assertRaises(RuntimeError):
+                with iso.IsolatedMutationTree(root) as isolated:
+                    held = isolated
+                    self.assertTrue((isolated / "a.py").is_file())
+                    raise RuntimeError("forced")
+            self.assertIsNotNone(held)
+            self.assertFalse(Path(held).exists())
+            self.assertIsNone(_read_pointer(root))
+
+    def test_cleanup_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "a.py").write_text("A\n", encoding="utf-8")
+            tree = iso.IsolatedMutationTree(root)
+            isolated = tree.materialize()
+            tree.cleanup()
+            tree.cleanup()
+            self.assertFalse(Path(isolated).exists())
+            self.assertIsNone(_read_pointer(root))
+
+
+@unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+class IsolatedRun(unittest.TestCase):
+    def test_normal_success_scores_and_removes_the_home(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = _write_batch_corpus(tmp)
+            before = (tmp / "check.py").read_bytes()
+            home = iso.isolated_tree_pointer(tmp)
+            rep = ca.run(manifest)
+            self.assertEqual(rep["killed"], 1)
+            self.assertTrue(rep["adequate"], rep["failures"])
+            self.assertEqual((tmp / "check.py").read_bytes(), before)
+            self.assertFalse(home.exists())
+
+    def test_dirty_declared_source_is_measured_not_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = _write_batch_corpus(tmp)
+            _git(tmp, "init")
+            _git(tmp, "add", "check.py")
+            _git(tmp, "commit", "-m", "tracked")
+            dirty = (tmp / "check.py").read_text(encoding="utf-8") + "# DIRTY_DECLARED\n"
+            (tmp / "check.py").write_text(dirty, encoding="utf-8")
+            (tmp / "notes.txt").write_text("UNTRACKED\n", encoding="utf-8")
+            before_src = (tmp / "check.py").read_bytes()
+            before_notes = (tmp / "notes.txt").read_bytes()
+            home = iso.isolated_tree_pointer(tmp)
+            rep = ca.run(manifest)
+            self.assertEqual(rep["killed"], 1)
+            self.assertTrue(rep["adequate"], rep["failures"])
+            self.assertEqual((tmp / "check.py").read_bytes(), before_src)
+            self.assertEqual((tmp / "notes.txt").read_bytes(), before_notes)
+            self.assertFalse(home.exists())
+            self.assertIn(b"DIRTY_DECLARED", before_src)
+
+    def test_symlink_escape_in_the_tree_refuses_run_and_leaves_outside(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = _write_batch_corpus(tmp)
+            outside = tmp / "outside.txt"
+            # repo_root is tmp; put the escape target outside tmp
+            # Use a sibling of tmp... TemporaryDirectory is the repo.
+            # Create a file in gettempdir() outside this repo.
+            outside_dir = Path(tempfile.mkdtemp(prefix="iso-outside-"))
+            try:
+                secret = outside_dir / "secret.txt"
+                secret.write_text("OUTSIDE_SECRET\n", encoding="utf-8")
+                before = secret.read_bytes()
+                (tmp / "escape").symlink_to(secret)
+                home = iso.isolated_tree_pointer(tmp)
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.run(manifest)
+                self.assertIn("symlink", str(cm.exception).lower())
+                self.assertEqual(secret.read_bytes(), before)
+                self.assertFalse(home.exists())
+            finally:
+                secret = outside_dir / "secret.txt"
+                if secret.exists():
+                    secret.unlink()
+                outside_dir.rmdir()
+
+    def test_oversized_materialization_refuses_without_writing_original(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = _write_batch_corpus(tmp)
+            (tmp / "pad.bin").write_bytes(b"Y" * 100)
+            before = {
+                path: path.read_bytes()
+                for path in tmp.rglob("*") if path.is_file() and not path.is_symlink()
+            }
+            home = iso.isolated_tree_pointer(tmp)
+            with mock.patch.object(iso, "MATERIALIZATION_CAP_BYTES", 20):
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.run(manifest)
+            self.assertTrue("20" in str(cm.exception) or "ceiling" in str(cm.exception).lower()
+                            or "cap" in str(cm.exception).lower())
+            now = {
+                path: path.read_bytes()
+                for path in tmp.rglob("*") if path.is_file() and not path.is_symlink()
+            }
+            self.assertEqual(now, before)
+            self.assertFalse(home.exists())
+
+    def test_vanished_declared_source_refuses_without_writing_original(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = _write_batch_corpus(tmp)
+            other = tmp / "vectors.json"
+            other_before = other.read_bytes()
+            loaded = ca.load_manifest(manifest)
+            (tmp / "check.py").unlink()
+            with self.assertRaises(ca.ManifestError):
+                ca._run_process(loaded, manifest)
+            self.assertEqual(other.read_bytes(), other_before)
+            self.assertFalse((tmp / "check.py").exists())
+            self.assertFalse(iso.isolated_tree_pointer(tmp).exists())
+
+    def test_exception_after_materialize_cleans_home_and_releases_lock(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = _write_batch_corpus(tmp)
+            before = (tmp / "check.py").read_bytes()
+            loaded = ca.load_manifest(manifest)
+            home = iso.isolated_tree_pointer(tmp)
+            with mock.patch.object(ca, "_build", side_effect=RuntimeError("forced")):
+                with self.assertRaises(RuntimeError):
+                    ca._run_process(loaded, manifest)
+            self.assertEqual((tmp / "check.py").read_bytes(), before)
+            self.assertFalse(home.exists())
+            _assert_lock_releasable(self, tmp)
+
+    def test_run_capped_cwd_is_the_isolated_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = _write_batch_corpus(tmp)
+            before = (tmp / "check.py").read_bytes()
+            captured = []
+            real = ca._run_capped
+
+            def capture(cmd, cwd, timeout):
+                captured.append(Path(cwd).resolve())
+                return real(cmd, cwd, timeout)
+
+            with mock.patch.object(ca, "_run_capped", side_effect=capture):
+                rep = ca.run(manifest)
+            self.assertEqual(rep["killed"], 1)
+            self.assertTrue(captured)
+            sys_tmp = Path(tempfile.gettempdir()).resolve()
+            first = captured[0]
+            for cwd in captured:
+                self.assertEqual(cwd, first)
+                self.assertNotEqual(cwd, tmp.resolve())
+                self.assertFalse(_under(cwd, tmp))
+                self.assertTrue(_under(cwd, sys_tmp))
+            self.assertEqual((tmp / "check.py").read_bytes(), before)
+            self.assertFalse(first.exists())
+            self.assertFalse(iso.isolated_tree_pointer(tmp).exists())
+
+            captured.clear()
+            with mock.patch.object(ca, "_run_capped", side_effect=capture):
+                ca.run(manifest)
+            self.assertTrue(captured)
+            self.assertNotEqual(captured[0], first)
+            self.assertFalse(_under(captured[0], tmp))
+
+    def test_successful_run_does_not_write_the_original(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = _write_batch_corpus(tmp)
+            before = (tmp / "check.py").read_bytes()
+            ca.run(manifest)
+            self.assertEqual((tmp / "check.py").read_bytes(), before)
+            self.assertNotIn(b"MUTANT_VISIBLE", before)
+
+
+@unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+@unittest.skipIf(not hasattr(signal, "SIGKILL"), "SIGKILL is POSIX")
+class ExternalProcessSigkill(unittest.TestCase):
+    """Abrupt SIGKILL of the tool cannot run Python finally.
+
+    Only the recorded tool-child (and descendants of that session) are
+    signalled. The unmutated baseline completes quickly; the mutant is
+    visible on disk in the isolated copy before that entrypoint starts.
+    """
+
+    def test_sigkill_leaves_the_declared_checkout_byte_identical(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            manifest = _write_batch_corpus(repo, one_mutant=True, sleep_mutant=True)
+            _git(repo, "init")
+            _git(repo, "add", "check.py")
+            _git(repo, "commit", "-m", "tracked source")
+            dirty_src = (repo / "check.py").read_text(encoding="utf-8")
+            dirty_src = "# DIRTY_DECLARED\n" + dirty_src
+            (repo / "check.py").write_text(dirty_src, encoding="utf-8")
+            (repo / "notes.txt").write_text("UNTRACKED_BYTES\n", encoding="utf-8")
+            before_src = (repo / "check.py").read_bytes()
+            before_notes = (repo / "notes.txt").read_bytes()
+            first_root = None
+
+            proc = subprocess.Popen(
+                [sys.executable, str(Path(ca.__file__).resolve()), str(manifest)],
+                cwd=str(repo),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            pid = proc.pid
+            self.assertIsInstance(pid, int)
+            self.assertGreater(pid, 0)
+            deadline = time.monotonic() + 20
+            seen = False
+            try:
+                while time.monotonic() < deadline:
+                    named = _read_pointer(repo)
+                    if named is not None:
+                        first_root = named
+                        isolated_src = named / "check.py"
+                        if isolated_src.is_file():
+                            try:
+                                text = isolated_src.read_text(encoding="utf-8")
+                            except OSError:
+                                text = ""
+                            if "MUTANT_VISIBLE" in text:
+                                seen = True
+                                break
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                if not seen:
+                    _reap_tool_group(pid)
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    self.fail("timed out waiting for isolated mutant bytes (pid=%s)" % pid)
+                os.kill(pid, signal.SIGKILL)
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    _reap_tool_group(pid)
+                    proc.wait(timeout=5)
+            finally:
+                if proc.poll() is None:
+                    _reap_tool_group(pid)
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                else:
+                    _reap_tool_group(pid)
+
+            self.assertEqual((repo / "check.py").read_bytes(), before_src)
+            self.assertEqual((repo / "notes.txt").read_bytes(), before_notes)
+            self.assertIsNotNone(first_root)
+
+            # SIGKILL may leave orphaned temp bytes. Next run must score,
+            # use a NEW unique root, and not write the checkout.
+            follow = _write_batch_corpus(repo, one_mutant=False, sleep_mutant=False)
+            (repo / "check.py").write_bytes(before_src)
+            (repo / "notes.txt").write_bytes(before_notes)
+            captured = []
+            real = ca._run_capped
+
+            def capture(cmd, cwd, timeout):
+                captured.append(Path(cwd).resolve())
+                return real(cmd, cwd, timeout)
+
+            with mock.patch.object(ca, "_run_capped", side_effect=capture):
+                rep = ca.run(follow)
+            self.assertIsNotNone(rep.get("score_percent"))
+            self.assertEqual(rep["killed"], 1)
+            self.assertEqual((repo / "check.py").read_bytes(), before_src)
+            self.assertEqual((repo / "notes.txt").read_bytes(), before_notes)
+            self.assertTrue(captured)
+            self.assertNotEqual(captured[0], Path(first_root).resolve())
+            self.assertFalse(_under(captured[0], repo))
+            self.assertFalse(iso.isolated_tree_pointer(repo).exists())
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

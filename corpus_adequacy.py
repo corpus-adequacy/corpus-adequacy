@@ -90,6 +90,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_run import (  # noqa: E402
     OUTPUT_CAP_BYTES, _OutputTooLarge, _run_capped,
 )
+from isolated_tree import IsolationError, IsolatedMutationTree  # noqa: E402
 
 SCHEMA = "corpus-adequacy.manifest.v0"
 ERROR_SCHEMA = "corpus-adequacy.error.v0"
@@ -716,19 +717,34 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     known_holes = 0
 
     # Taken BEFORE the dirty check: a tree observed clean outside the lock can be
-    # mutated by another run before the originals are captured, and then this run's
-    # restore writes that mutant back as the original.
-    lock = _TreeLock(m["_repo_root"])
+    # mutated by another run before the originals are captured. Isolation copies
+    # working-tree bytes, so dirty declared sources are measured rather than
+    # refused; the lock still comes first.
+    original_root = m["_repo_root"]
+    lock = _TreeLock(original_root)
     lock.__enter__()
 
+    iso = IsolatedMutationTree(original_root)
+    guard = None
     try:
-        dirty = _tree_is_dirty(m["_repo_root"], m["_source_paths"])
-        if dirty:
-            raise ManifestError(
-                "declared sources have uncommitted changes: %s. This adapter edits them in "
-                "place, so it refuses to run rather than risk losing that work" % dirty)
-        guard = _SourceGuard(m["_source_paths"], m["_repo_root"])
+        _tree_is_dirty(original_root, m["_source_paths"])
+        try:
+            isolated = iso.materialize()
+        except IsolationError as exc:
+            raise ManifestError(str(exc)) from exc
+        remapped = []
+        root_res = original_root.resolve()
+        for path in m["_source_paths"]:
+            remapped.append(isolated / path.resolve().relative_to(root_res))
+        missing = [str(p) for p in remapped if not p.is_file()]
+        if missing:
+            raise ManifestError("implementation source not found: %s" % missing)
+        m["_repo_root"] = isolated
+        m["_source_paths"] = remapped
+        # Isolated tree has no .git; dirty working-tree bytes are allowed.
+        guard = _SourceGuard(m["_source_paths"], repo_root=None)
     except BaseException:
+        iso.cleanup()
         lock.__exit__()
         raise
 
@@ -874,12 +890,13 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                 equivalent += 1
     finally:
         try:
-            guard.restore()
-            leaked = guard.verify_clean()
-            if leaked:
-                failures.append("SOURCES NOT RESTORED: %s" % leaked)
-            _build(m)   # leave the tree with a binary built from the real source
+            if guard is not None:
+                guard.restore()
+                leaked = guard.verify_clean()
+                if leaked:
+                    failures.append("SOURCES NOT RESTORED: %s" % leaked)
         finally:
+            iso.cleanup()
             lock.__exit__()
 
     # A stale acknowledgement is not only one whose rule became killed. Any verdict

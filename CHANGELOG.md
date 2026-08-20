@@ -35,6 +35,14 @@ existence. Source-guard documentation now states its abrupt-termination limit.
 On platforms without fcntl advisory locking, process and batch runs refuse
 before dirty check, source capture, build, child, mutation, or score.
 
+Process and batch mutation now happens in a unique disposable working-tree
+copy of `repo_root`, not in the declared checkout. Dirty working-tree bytes
+are measured. Symlinks and special files are refused fail-closed at
+materialization. `.git` is omitted. File and byte ceilings apply during the
+copy. `SIGKILL` may leave orphaned temp bytes; the next run uses a new root.
+This is not a sandbox, not a git worktree, not the output ceiling, and not
+HEAD-vs-dirty provenance.
+
 ## 0.1.0 — 2026-08-19
 
 First named cut of the extracted tool.
