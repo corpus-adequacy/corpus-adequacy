@@ -4,13 +4,15 @@
 
 Process and batch outcome children are classified against
 `accepted_exit_codes` (default `[0]`) before stdout is parsed.
-`outcome_parse: test-names` requires existing code `101`; privileged
-verifier JSON requires existing code `2`. Signals and `None` never parse.
-An accepted code with malformed output remains a parse error. A mutant
-unexpected-exit or signal may kill with that class named; unmutated and
-control abnormalities fail closed with no score (`control-error`, not
-`control-killed`). This change does not migrate downstream adapter
-manifests; this repository ships none.
+`outcome_parse: test-names` is batch-only and requires `101`. JSON
+`outcome_from` has no protocol ID; extra codes such as `2` are declared
+explicitly, not inferred from a command name. Signals and `None` never
+parse. An accepted code with malformed output remains a parse error. A
+mutant unexpected-exit or signal may kill with that class named;
+unmutated and control abnormalities fail closed with no score
+(`control-error`, not `control-killed`), even when another mutant already
+moved. This change does not migrate downstream adapter manifests; this
+repository ships none.
 
 Malformed manifest containers (`mutants`, `equivalent`, `known_holes`, and
 their group or entry values) are refused by one shape rule as a controlled

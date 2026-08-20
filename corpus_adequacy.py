@@ -398,13 +398,13 @@ def classify(returncode, accepted) -> str:
 
 
 def accepted_exit_codes(m: dict) -> list[int]:
-    """One process/batch policy: unique nonnegative ints, plus protocol codes.
+    """One process/batch policy: unique nonnegative ints, plus parse rules.
 
     Default is [0]. Bools are excluded (JSON true is not exit 1). Signals are
-    never accepted. outcome_parse test-names requires existing code 101.
-    Privileged verifier JSON (verify-privileged-mcp-action) requires existing
-    code 2. This repository ships no manifests; those codes are the protocols'
-    existing exits, not a claim that downstream adapter manifests were migrated.
+    never accepted. outcome_parse test-names is batch-only and requires 101.
+    JSON outcome_from has no protocol ID, so extra codes such as 2 are declared
+    explicitly. This repository ships no manifests and does not infer codes
+    from a command name.
     """
     raw = m.get("accepted_exit_codes", [0])
     if not isinstance(raw, list):
@@ -427,14 +427,14 @@ def accepted_exit_codes(m: dict) -> list[int]:
             raise ManifestError("accepted_exit_codes repeats %d" % value)
         seen.add(value)
         codes.append(value)
-    if m.get("outcome_parse") == "test-names" and 101 not in seen:
-        raise ManifestError(
-            "outcome_parse test-names requires accepted_exit_codes to include 101")
-    cmd = m.get("entrypoint_command") or []
-    if any("verify-privileged-mcp-action" in str(part) for part in cmd):
-        if 2 not in seen:
+    if m.get("outcome_parse") == "test-names":
+        if m.get("runner") == "process":
             raise ManifestError(
-                "privileged verifier JSON requires accepted_exit_codes to include 2")
+                "outcome_parse test-names is implemented only for runner=batch, "
+                "not runner=process")
+        if 101 not in seen:
+            raise ManifestError(
+                "outcome_parse test-names requires accepted_exit_codes to include 101")
     return codes
 
 

@@ -60,11 +60,12 @@ exclusions, and what the percentage is a percentage of.
 - **Child termination is classified before stdout is parsed.** Default
   `accepted_exit_codes` is `[0]`. A parseable report on an undeclared code, a
   signal, or a missing code is not an outcome. Signals and `None` are never
-  accepted. `outcome_parse: test-names` must include existing code `101`.
-  Privileged verifier JSON (`verify-privileged-mcp-action`) must include
-  existing code `2`. An observed unexpected exit or signal on an ordinary
-  mutant may be a kill with that class named as `how`. A control abnormality
-  is `control-error` and invalidates the run; it is not a score. Timeout and
+  accepted. `outcome_parse: test-names` is batch-only and must include `101`.
+  JSON `outcome_from` has no protocol ID; extra codes such as `2` are declared
+  explicitly, not inferred from a command name. An observed unexpected exit
+  or signal on an ordinary mutant may be a kill with that class named as
+  `how`. A control abnormality is `control-error` and invalidates the run
+  (no score), even if another mutant already moved. Timeout and
   output-ceiling failures stay their own classes. This repository ships no
   corpus manifests and does not migrate downstream adapter manifests.
 - **A mutant that never ran is `unproved`, never a kill.** It was never shown to

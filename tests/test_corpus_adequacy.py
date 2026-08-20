@@ -1551,24 +1551,29 @@ class AcceptedExitPolicy(unittest.TestCase):
             "outcome_parse": "test-names", "accepted_exit_codes": [0, 101]})
         self.assertEqual(loaded["accepted_exit_codes"], [0, 101])
 
-    def test_privileged_verifier_json_without_2_is_a_manifest_error(self):
-        # Protocol privileged verifier JSON: an invalid bundle is a normal
-        # parseable result and uses existing code 2. Named as the protocol,
-        # not as a downstream path this repository ships.
+    def test_test_names_on_process_is_a_manifest_error(self):
         msg = self._refuse({
-            "entrypoint_command": [
-                "verifier", "verify-privileged-mcp-action", "{vector}"],
+            "outcome_parse": "test-names", "accepted_exit_codes": [0, 101],
         }, runner="process")
-        self.assertIn("2", msg)
-        self.assertIn("privileged", msg.lower())
+        self.assertIn("test-names", msg)
+        self.assertIn("process", msg)
 
-    def test_privileged_verifier_json_with_2_loads(self):
+    def test_declared_2_loads_on_generic_json(self):
+        # JSON outcome_from has no protocol ID. Code 2 is declared, not inferred.
+        loaded = self._load({"accepted_exit_codes": [0, 2]}, runner="process")
+        self.assertEqual(loaded["accepted_exit_codes"], [0, 2])
+
+    def test_generic_json_command_is_not_refused_by_argv(self):
         loaded = self._load({
             "entrypoint_command": [
                 "verifier", "verify-privileged-mcp-action", "{vector}"],
-            "accepted_exit_codes": [0, 2],
         }, runner="process")
-        self.assertEqual(loaded["accepted_exit_codes"], [0, 2])
+        self.assertEqual(loaded["accepted_exit_codes"], [0])
+
+    def test_validator_does_not_recognize_commands_by_name(self):
+        src = inspect.getsource(ca.accepted_exit_codes)
+        self.assertNotIn("verify-privileged", src)
+        self.assertNotIn("entrypoint_command", src)
 
     def test_docs_do_not_claim_downstream_manifests_were_migrated(self):
         root = Path(__file__).resolve().parent.parent
@@ -1590,13 +1595,14 @@ class ChildExitRunSemantics(unittest.TestCase):
     """Unmutated/control fail closed with no score; a mutant abort may kill."""
 
     def _fake_from_source(self, *, control_rc=0, mutant_rc=0, baseline_rc=0,
-                          stdout=VALID_CHILD_JSON):
+                          stdout=VALID_CHILD_JSON, mutant_stdout=None,
+                          control_stdout=None):
         def fake(cmd, cwd, timeout):
             src = Path(cwd, "check.py").read_text(encoding="utf-8")
             if "'ok': 'MOVED'" in src:
-                return _completed(control_rc, stdout)
+                return _completed(control_rc, control_stdout or stdout)
             if "c['n'] > 1" in src and "c['n'] > 10" not in src:
-                return _completed(mutant_rc, stdout)
+                return _completed(mutant_rc, mutant_stdout or stdout)
             return _completed(baseline_rc, stdout)
         return fake
 
@@ -1628,6 +1634,23 @@ class ChildExitRunSemantics(unittest.TestCase):
         self.assertFalse(rep["adequate"])
         self.assertIsNone(rep["score_percent"])
         self.assertEqual(rep["killed"], 0)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_moved_mutant_then_abnormal_control_has_no_score(self):
+        moved = json.dumps({"ok": False, "failures": ["c2"]})
+        with tempfile.TemporaryDirectory() as d:
+            p = BatchRunner()._corpus(Path(d))
+            with mock.patch.object(
+                    ca, "_run_capped",
+                    side_effect=self._fake_from_source(
+                        control_rc=1, mutant_stdout=moved)):
+                rep = ca.run(p)
+        verdicts = {r["label"]: r for r in rep["mutants"]}
+        self.assertEqual(verdicts["threshold"]["verdict"], "killed")
+        self.assertEqual(verdicts["CONTROL"]["verdict"], "control-error")
+        self.assertFalse(rep["adequate"])
+        self.assertIsNone(rep["score_percent"])
+        self.assertEqual(rep["killed"], 1)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_mutant_unexpected_exit_is_a_kill_naming_the_class(self):
