@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+Malformed manifest containers (`mutants`, `equivalent`, `known_holes`, and
+their group or entry values) are refused by one shape rule as a controlled
+manifest error. `--json` prints a parseable `corpus-adequacy.error.v0`
+envelope on stdout and still exits 2, with no traceback.
+
 Mutant labels are unique across the manifest, including declared equivalents.
 Duplicate acknowledgements for one corpus digest are refused before any
 mutation starts. Acknowledgement, orphan, and stale-hole checks use the same

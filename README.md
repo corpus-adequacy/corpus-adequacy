@@ -66,6 +66,10 @@ exclusions, and what the percentage is a percentage of.
   meaningless.
 - **A group present in the corpus with no declared mutants is a hard failure** —
   the check may not silently cover less than its name claims.
+- **Manifest containers have one declared JSON kind.** `mutants`, `equivalent`,
+  and `known_holes` are objects; each group or digest value is an array of
+  objects. A wrong kind is a controlled refusal (exit 2), not a traceback.
+  `--json` then prints a `corpus-adequacy.error.v0` envelope on stdout.
 
 ## Runners
 

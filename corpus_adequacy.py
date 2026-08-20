@@ -89,6 +89,7 @@ from bounded_run import (  # noqa: E402
 )
 
 SCHEMA = "corpus-adequacy.manifest.v0"
+ERROR_SCHEMA = "corpus-adequacy.error.v0"
 # One place. The report, --version, CHANGELOG, and the git tag all name this.
 # A SHA pin is exact and opaque; this is the name a measurement can quote.
 VERSION = "0.1.0"
@@ -96,6 +97,32 @@ VERSION = "0.1.0"
 
 class ManifestError(Exception):
     """The manifest does not describe a measurable corpus."""
+
+
+def require_shape(obj, expected, where: str) -> None:
+    """One boundary: a container is the declared JSON kind, or the run does not start.
+
+    Walking .items() or a non-object entry is a traceback, not a measurement refusal.
+    """
+    if expected is dict:
+        if not isinstance(obj, dict):
+            raise ManifestError("%s must be an object, got %s" % (where, type(obj).__name__))
+        return
+    if expected is list:
+        if not isinstance(obj, list):
+            raise ManifestError("%s must be an array, got %s" % (where, type(obj).__name__))
+        return
+    raise TypeError("require_shape expected dict or list")
+
+
+def error_envelope(exc: BaseException) -> dict:
+    """Parseable --json body for a run that never produced a report."""
+    return {
+        "schema": ERROR_SCHEMA,
+        "ok": False,
+        "error": "could not measure: %s" % exc,
+        "exit": 2,
+    }
 
 
 def tool_identity() -> dict:
@@ -212,6 +239,7 @@ def load_manifest(path: Path) -> dict:
                  [k for k in (m["group_key"], m["inputs_key"]) if k is not None])
     m.setdefault("default_group", "all")
     m.setdefault("known_holes", {})
+    require_shape(m["known_holes"], dict, "known_holes")
     m["_corpus_digest"] = None
     if m["known_holes"]:
         for key in ("corpus_digest_file", "corpus_digest_key"):
@@ -221,7 +249,9 @@ def load_manifest(path: Path) -> dict:
             raise ManifestError("corpus_digest_file not found: %s" % dp)
         m["_corpus_digest"] = json.loads(dp.read_text(encoding="utf-8"))[m["corpus_digest_key"]]
         for digest, entries in m["known_holes"].items():
+            require_shape(entries, list, "known_holes[%s]" % digest)
             for i, e in enumerate(entries):
+                require_shape(e, dict, "known_holes[%s][%d]" % (digest, i))
                 for key in ("label", "reason", "recorded"):
                     _req(e, key, "known_holes[%s][%d]" % (digest, i))
                 if not str(e["reason"]).strip():
@@ -253,10 +283,14 @@ def load_manifest(path: Path) -> dict:
         m.setdefault("vector_timeout", 120)
     m.setdefault("mutants", {})
     m.setdefault("equivalent", {})
+    require_shape(m["mutants"], dict, "mutants")
+    require_shape(m["equivalent"], dict, "equivalent")
     if not m["mutants"]:
         raise ManifestError("manifest declares no mutants; there is nothing to measure")
     for group, entries in m["mutants"].items():
+        require_shape(entries, list, "mutants[%s]" % group)
         for i, e in enumerate(entries):
+            require_shape(e, dict, "mutants[%s][%d]" % (group, i))
             for key in ("label", "anchor", "replacement"):
                 _req(e, key, "mutants[%s][%d]" % (group, i))
             e.setdefault("scope", "declared")
@@ -283,7 +317,9 @@ def load_manifest(path: Path) -> dict:
                     "mutants[%s][%d] %r: anchor and replacement are identical, so it mutates nothing"
                     % (group, i, e["label"]))
     for group, entries in m["equivalent"].items():
+        require_shape(entries, list, "equivalent[%s]" % group)
         for i, e in enumerate(entries):
+            require_shape(e, dict, "equivalent[%s][%d]" % (group, i))
             for key in ("label", "reason"):
                 _req(e, key, "equivalent[%s][%d]" % (group, i))
             if not str(e["reason"]).strip():
@@ -1032,6 +1068,8 @@ def main() -> int:
         rep = run(args.manifest)
     except (ManifestError, OSError, json.JSONDecodeError) as exc:
         print("could not measure: %s" % exc, file=sys.stderr)
+        if args.json:
+            print(json.dumps(error_envelope(exc), indent=2, sort_keys=True))
         return 2
 
     if args.json:
