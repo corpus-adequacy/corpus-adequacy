@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+A `silent` verdict separates a mutant that moves a declared diagnostic from one
+nothing noticed. Declaring `diagnostic_from` beside `outcome_from` enables it:
+moved in the outcome is `killed`, moved only in the diagnostic is `silent`,
+neither is `survived`. Silent counts in the denominator and never the numerator,
+because an implementer can still delete that rule and reproduce every pinned
+outcome; it is reported separately because the repair differs. The two selectors
+may not share a member, which would make the class unreachable, and the channel
+is refused beside `outcome_parse: test-names`. Reports carry `silent` and
+`diagnostic_channel_declared`, so a zero is distinguishable from not measured.
+`child_outcome` and `_process_outcomes` return an additional diagnostic slot.
+
+The README gains a Related work section. The measurement is not original to this
+tool: the forcing gate in `astrogilda/aee-conformance` (2026-07-30) precedes this
+tool's earliest ancestor (`rge-bench/scripts/check_rule_liveness.py`, 2026-08-10),
+and the `silent` verdict is his SILENT class adopted with the name kept.
+
 Child stdout and stderr are drained continuously through pipes. Combined
 retained output stays at most `OUTPUT_CAP_BYTES`; two reader threads may
 briefly hold `2 * READ_CHUNK_BYTES` in-flight before charge. Crossing the

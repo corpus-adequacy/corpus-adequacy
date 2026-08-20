@@ -1389,58 +1389,58 @@ class ChildOutcomeClassifyThenParse(unittest.TestCase):
         return m
 
     def test_undeclared_positive_with_valid_json_is_unexpected_exit(self):
-        value, kind = ca.child_outcome(self._m(), _completed(1))
+        value, _diag, kind = ca.child_outcome(self._m(), _completed(1))
         self.assertIsNone(value)
         self.assertEqual(kind, "unexpected-exit")
 
     def test_declared_2_with_valid_verifier_json_parses(self):
-        value, kind = ca.child_outcome(
+        value, _diag, kind = ca.child_outcome(
             self._m(accepted_exit_codes=[0, 2]), _completed(2))
         self.assertEqual(kind, None)
         self.assertEqual(value, (True, []))
 
     def test_undeclared_2_with_valid_verifier_json_does_not_parse(self):
-        value, kind = ca.child_outcome(self._m(), _completed(2))
+        value, _diag, kind = ca.child_outcome(self._m(), _completed(2))
         self.assertIsNone(value)
         self.assertEqual(kind, "unexpected-exit")
 
     def test_declared_101_with_test_names_parses(self):
         m = self._m(runner="batch", outcome_parse="test-names",
                     accepted_exit_codes=[0, 101])
-        value, kind = ca.child_outcome(m, _completed(101, VALID_TEST_NAMES))
+        value, _diag, kind = ca.child_outcome(m, _completed(101, VALID_TEST_NAMES))
         self.assertEqual(kind, None)
         self.assertEqual(value, ("foo",))
 
     def test_undeclared_101_with_test_names_is_unexpected_exit(self):
         m = self._m(runner="batch", outcome_parse="test-names",
                     accepted_exit_codes=[0])
-        value, kind = ca.child_outcome(m, _completed(101, VALID_TEST_NAMES))
+        value, _diag, kind = ca.child_outcome(m, _completed(101, VALID_TEST_NAMES))
         self.assertIsNone(value)
         self.assertEqual(kind, "unexpected-exit")
 
     def test_signal_with_valid_output_never_parses(self):
-        value, kind = ca.child_outcome(self._m(), _completed(-9))
+        value, _diag, kind = ca.child_outcome(self._m(), _completed(-9))
         self.assertIsNone(value)
         self.assertEqual(kind, "signal")
 
     def test_none_with_valid_output_never_parses(self):
-        value, kind = ca.child_outcome(self._m(), _completed(None))
+        value, _diag, kind = ca.child_outcome(self._m(), _completed(None))
         self.assertIsNone(value)
         self.assertEqual(kind, "incomplete")
 
     def test_accepted_2_with_empty_stdout_is_parse_error(self):
-        value, kind = ca.child_outcome(
+        value, _diag, kind = ca.child_outcome(
             self._m(accepted_exit_codes=[0, 2]), _completed(2, ""))
         self.assertIsNone(value)
         self.assertEqual(kind, "parse-error")
 
     def test_accepted_zero_with_malformed_output_is_parse_error(self):
-        value, kind = ca.child_outcome(self._m(), _completed(0, "not-json"))
+        value, _diag, kind = ca.child_outcome(self._m(), _completed(0, "not-json"))
         self.assertIsNone(value)
         self.assertEqual(kind, "parse-error")
 
     def test_rejected_exit_with_malformed_output_is_unexpected_exit(self):
-        value, kind = ca.child_outcome(self._m(), _completed(1, "not-json"))
+        value, _diag, kind = ca.child_outcome(self._m(), _completed(1, "not-json"))
         self.assertIsNone(value)
         self.assertEqual(kind, "unexpected-exit")
 
@@ -1457,7 +1457,7 @@ class ChildOutcomeClassifyThenParse(unittest.TestCase):
         for name, rc, accepted, stdout in cases:
             with self.subTest(name):
                 try:
-                    value, kind = ca.child_outcome(
+                    value, _diag, kind = ca.child_outcome(
                         self._m(accepted_exit_codes=accepted),
                         _completed(rc, stdout))
                 except Exception as exc:  # noqa: BLE001 - leak is the defect
@@ -1508,14 +1508,14 @@ class ProcessAndBatchRefuseParseableCrash(unittest.TestCase):
     def test_parseable_stdout_then_undeclared_exit_is_not_an_outcome(self):
         for runner in ("process", "batch"):
             with self.subTest(runner=runner):
-                out, failed = self._run_outcomes(runner, {}, _completed(1))
+                out, _diag, failed = self._run_outcomes(runner, {}, _completed(1))
                 self.assertEqual(out, {})
                 self.assertEqual(set(failed.values()), {"unexpected-exit"})
 
     def test_parseable_stdout_then_signal_is_not_an_outcome(self):
         for runner in ("process", "batch"):
             with self.subTest(runner=runner):
-                out, failed = self._run_outcomes(runner, {}, _completed(-11))
+                out, _diag, failed = self._run_outcomes(runner, {}, _completed(-11))
                 self.assertEqual(out, {})
                 self.assertEqual(set(failed.values()), {"signal"})
 
@@ -1527,7 +1527,7 @@ class ProcessAndBatchRefuseParseableCrash(unittest.TestCase):
                     with mock.patch.object(
                             ca, "_run_capped",
                             side_effect=subprocess.TimeoutExpired(["child"], 1)):
-                        out, failed = ca._process_outcomes(
+                        out, _diag, failed = ca._process_outcomes(
                             loaded, self._vectors(runner, loaded))
                 self.assertEqual(out, {})
                 self.assertEqual(set(failed.values()), {"timeout"})
@@ -1539,13 +1539,13 @@ class ProcessAndBatchRefuseParseableCrash(unittest.TestCase):
                     loaded = ca.load_manifest(_policy_manifest(Path(d), runner=runner))
                     with mock.patch.object(
                             ca, "_run_capped", side_effect=br._OutputTooLarge()):
-                        out, failed = ca._process_outcomes(
+                        out, _diag, failed = ca._process_outcomes(
                             loaded, self._vectors(runner, loaded))
                 self.assertEqual(out, {})
                 self.assertEqual(set(failed.values()), {"output-cap"})
 
     def test_rc0_valid_json_is_still_an_outcome(self):
-        out, failed = self._run_outcomes("batch", {}, _completed(0))
+        out, _diag, failed = self._run_outcomes("batch", {}, _completed(0))
         self.assertEqual(failed, {})
         self.assertEqual(out["<batch>"], (True, ()))
 
@@ -2139,3 +2139,111 @@ class IsolationClaimScope(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
+
+
+# ---------------------------------------------------------------------------
+# The silent class
+# ---------------------------------------------------------------------------
+#
+# Adopted from the forcing gate in astrogilda/aee-conformance, which separates
+# KILLED ("some vector goes PASS -> FAIL") from SILENT ("no vector changes
+# status, but some vector's OBSERVATION changes ... This is the weak case").
+# Without the distinction a corpus whose verdicts cannot see a rule scores the
+# same whether its diagnostics noticed or not, and the two need different repairs.
+
+
+def _silent_manifest(tmp: Path, extra=None):
+    """A corpus whose outcome is `ok` and whose diagnostic is `reason`."""
+    (tmp / "check.py").write_text(
+        "import json\n"
+        "ok = True\n"
+        'reason = "A"\n'
+        'print(json.dumps({"ok": ok, "reason": reason}))\n',
+        encoding="utf-8")
+    (tmp / "vec.json").write_text("{}\n", encoding="utf-8")
+    (tmp / "vectors.json").write_text(json.dumps({
+        "vectors": [{"vector_id": "v1", "path": "vec.json"}]}), encoding="utf-8")
+    raw = {
+        "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+        "implementation": "check.py", "implementation_sources": ["check.py"],
+        "build": [],
+        "entrypoint_command": [_batch_python(), "check.py", "{vector}"],
+        "outcome_from": ["ok"], "vectors": "vectors.json",
+        "id_key": "vector_id", "vector_path_key": "path", "default_group": "g",
+        "mutants": {"g": [
+            {"label": "reason-text", "anchor": 'reason = "A"',
+             "replacement": 'reason = "B"'},
+            {"label": "CONTROL", "control": True,
+             "anchor": "ok = True", "replacement": "ok = False"}]}}
+    raw.update(dict(extra or {}))
+    p = tmp / "m.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    return p
+
+
+class SilentClass(unittest.TestCase):
+    def _run(self, extra):
+        with tempfile.TemporaryDirectory() as d:
+            return ca.run(_silent_manifest(Path(d), extra))
+
+    def test_diagnostic_only_move_is_silent_not_killed(self):
+        r = self._run({"diagnostic_from": ["reason"]})
+        v = {m["label"]: m for m in r["mutants"]}
+        self.assertEqual(v["reason-text"]["verdict"], "silent")
+        self.assertEqual(v["reason-text"]["moved"], 0)
+        self.assertEqual(v["reason-text"]["moved_diagnostic"], 1)
+        self.assertEqual(r["killed"], 0)
+        self.assertEqual(r["silent"], 1)
+        self.assertTrue(r["diagnostic_channel_declared"])
+
+    def test_silent_counts_against_the_score_and_never_for_it(self):
+        r = self._run({"diagnostic_from": ["reason"]})
+        # denominator includes it, numerator does not: 0 of 1.
+        self.assertEqual(r["score_percent"], 0.0)
+        self.assertFalse(r["adequate"])
+        self.assertTrue(any("silent" in f for f in r["failures"]))
+
+    def test_without_the_channel_the_same_mutant_reads_as_survived(self):
+        # The class is unreachable when nothing declares a diagnostic channel,
+        # so a zero there means it was not measured rather than that none exist.
+        r = self._run({})
+        v = {m["label"]: m for m in r["mutants"]}
+        self.assertEqual(v["reason-text"]["verdict"], "survived")
+        self.assertEqual(r["silent"], 0)
+        self.assertFalse(r["diagnostic_channel_declared"])
+
+    def test_a_member_on_both_channels_is_refused(self):
+        # It could never produce `silent`: any move in it already moves the
+        # outcome, so the manifest would read as covering a class it cannot reach.
+        with self.assertRaises(ca.ManifestError) as e:
+            self._run({"diagnostic_from": ["ok"]})
+        self.assertIn("silent-only", str(e.exception))
+
+    def test_diagnostic_channel_is_refused_beside_test_names(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = _policy_manifest(Path(d), {"outcome_parse": "test-names",
+                                           "diagnostic_from": ["reason"],
+                                           "accepted_exit_codes": [0, 101]},
+                                 runner="batch")
+            with self.assertRaises(ca.ManifestError) as e:
+                ca.load_manifest(p)
+        self.assertIn("test names are the outcome", str(e.exception))
+
+    def test_module_runner_refuses_the_channel_rather_than_ignoring_it(self):
+        # Ignoring it would report `silent: 0` for a class that was never read,
+        # which is the silent-coverage failure this tool exists to catch.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+            (tmp / "vectors.json").write_text(json.dumps({"vectors": [{"vector_id": "v1"}]}),
+                                              encoding="utf-8")
+            p = tmp / "m.json"
+            p.write_text(json.dumps({
+                "schema": ca.SCHEMA, "runner": "module", "implementation": "impl.py",
+                "entrypoint": "check", "vectors": "vectors.json", "id_key": "vector_id",
+                "default_group": "g", "diagnostic_from": ["reason"],
+                "mutants": {"g": [{"label": "x", "anchor": "True", "replacement": "False"}]},
+            }), encoding="utf-8")
+            with self.assertRaises(ca.ManifestError) as e:
+                ca.load_manifest(p)
+        self.assertIn("not implemented for runner=module", str(e.exception))

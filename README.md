@@ -90,6 +90,37 @@ exclusions, and what the percentage is a percentage of.
   A missing manifest file takes the same catch: exit 2, the envelope on stdout,
   and the human `could not measure` line on stderr.
 
+## The silent class, and `diagnostic_from`
+
+A corpus pins outcomes. Whether a mutant is *seen* therefore depends on which
+channel the manifest declares as the outcome, and a rule can move a checker's
+diagnostics while moving no pinned outcome at all. Scoring that as a kill would
+credit the corpus for a rule its verdicts cannot see.
+
+Declaring `diagnostic_from` beside `outcome_from` buys a third verdict:
+
+| moved in `outcome_from` | moved in `diagnostic_from` | verdict |
+|---|---|---|
+| yes | either | `killed` |
+| no | yes | `silent` |
+| no | no | `survived` |
+
+`silent` sits in the denominator and **never** in the numerator: an implementer
+can still delete that rule and reproduce every pinned outcome. It is named
+separately because the repair differs — a survivor needs a vector that moves an
+outcome, a silent mutant may instead mean the corpus should declare its
+diagnostics part of the pinned surface.
+
+The two selectors may not name the same member: a member read as the outcome can
+never produce a silent-only move, so the class would be unreachable and the
+manifest would read as covering more than it does. That is a controlled refusal.
+`diagnostic_from` needs a JSON outcome and is refused beside
+`outcome_parse: test-names`, where the names *are* the outcome.
+
+Without `diagnostic_from` the class is unreachable, so `"silent": 0` in a report
+means it was not measured, not that none exist. The report says which by carrying
+`diagnostic_channel_declared`.
+
 ## Runners
 
 | Runner | For |
@@ -149,6 +180,52 @@ measurement drift, and the copy that drifts is the one that stops measuring.
 
 Its own findings on the corpora it was built against, including the unflattering
 ones, are published in that repository's `conformance/INDEX.md`.
+
+## Related work
+
+This tool is not the first implementation of the measurement it performs, and the
+honest place to say so is here.
+
+`astrogilda/aee-conformance` ships a **forcing gate** that asks the same question
+against one corpus, and asked it first. `scripts/forcing-gate.py` and
+`cmd/mutgen/mutate.go` date to 2026-07-30, with the unforced-coverage ledger
+`vectors/coverage-unforced.json` (2026-07-28) and `docs/FORCING-HONESTY.md`
+(2026-08-01). The earliest ancestor of this tool is
+`rge-bench/scripts/check_rule_liveness.py`, 2026-08-10. His gate states the
+measurement plainly:
+
+> Forcing is a property of the PAIR (corpus, rail) and it is measured, not
+> argued: switch off exactly one rule in the rail, replay the whole corpus, and
+> see whether the corpus notices. A rule the corpus never notices losing is a
+> rule no third party is obliged to implement, whatever the vector count says.
+
+That is this tool's question in another vocabulary: his *forcing* and *unforced*
+for what is *killed* and *survived* here.
+
+**How the two differ.** They are complementary, and the axis is not what each one
+mutates — both weaken the implementation — but how the mutants are obtained:
+
+- `mutgen` enumerates mutation sites from the **Go AST** of the rail it ships
+  with, under eleven weakening operators. It needs no author declaration and
+  cannot miss a site the AST exposes, but it is bound to that language and that
+  repository: `forcing-gate.py` hardcodes the rail package, the baseline file and
+  the build command. It is a gate for one corpus, not a tool.
+- This tool refuses to infer rules and requires an **author-declared manifest**,
+  one mutant per declared rule, so it runs against any implementation behind a
+  module, a command, or a batch summary, and is language-agnostic through its
+  `process` and `batch` runners. The cost is stated at the top of this README and
+  repeated in every report: **100% is 100% of what the author declared.**
+
+Neither bound is removable by trying harder. Enumeration cannot know which of the
+sites it finds are *rules*; declaration cannot know what the author forgot.
+
+**Where each is stronger.** His taxonomy is finer on the observation axis: KILLED,
+SILENT, DEAD and INCONCLUSIVE, with `unkillable` and `masked` annotations. The
+`silent` verdict here is his SILENT, adopted with the name kept. This tool is
+stronger on ground truth: it requires **at least one control mutant** and voids
+the entire run if one survives, which the forcing gate has no counterpart for.
+All-survivors because a corpus is weak and all-survivors because nothing was
+measured print identically, and only a control separates them.
 
 ## Trust boundary
 
