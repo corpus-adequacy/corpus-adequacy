@@ -322,6 +322,36 @@ def _req(obj: dict, key: str, where: str):
     return obj[key]
 
 
+def _diagnostic_note(m: dict, moved_diag: list) -> dict:
+    """`moved_diagnostic` on rows whose verdict is not itself about diagnostics.
+
+    An excluded or acknowledged row that the diagnostics DID move is a different
+    fact from one nothing moved, and the row is the only place a reader can see
+    which it was. Present only where a channel was declared, so absent and zero
+    do not blur.
+    """
+    if m.get("diagnostic_from") is None:
+        return {}
+    return {"moved_diagnostic": len(moved_diag)}
+
+
+def _diagnostic_suffix(moved_diag: list) -> str:
+    """Said in the row's own `how`, because the verdict alone would overstate."""
+    if not moved_diag:
+        return ""
+    return (". The declared diagnostic channel moved on %d vector(s); the pinned "
+            "outcomes did not, and this verdict is not scored" % len(moved_diag))
+
+
+def selector_members(sel) -> list:
+    """The declared members of a selector, whether it is a scalar or a list.
+
+    One function so the reader, the presence rule and the manifest validation
+    cannot disagree about what a selector declares.
+    """
+    return sel if isinstance(sel, list) else [sel]
+
+
 def label_identity(entry: dict, where: str = "entry") -> str:
     """Return the exact string identity used for declarations and acknowledgements."""
     label = entry["label"]
@@ -421,11 +451,42 @@ def load_manifest(path: Path) -> dict:
         raise ManifestError(
             "outcome_parse test-names is implemented only for runner=batch, "
             "not runner=%s" % m["runner"])
+    if m["runner"] == "module" and m.get("diagnostic_from") is not None:
+        # Silently ignoring it would be this tool's own failure mode: a manifest
+        # declaring a channel that is never read, reporting `silent: 0` as though
+        # the class had been measured.
+        raise ManifestError(
+            "diagnostic_from is not implemented for runner=module; the module runner "
+            "reads one callable result, so there is no second channel to compare")
     if m["runner"] in ("process", "batch"):
         _req(m, "entrypoint_command", "manifest (runner=%s)" % m["runner"])
         if m.get("outcome_parse") != "test-names":
             _req(m, "outcome_from", "manifest (runner=%s)" % m["runner"])
         m.setdefault("outcome_from", [])
+        # Optional second channel. Declaring it buys the `silent` verdict: a
+        # mutant that moves nothing here is `survived`, one that moves only here
+        # is `silent`. Refused beside `test-names`, where the names ARE the
+        # outcome and there is no second channel to read.
+        if m.get("diagnostic_from") is not None:
+            if m.get("outcome_parse") == "test-names":
+                raise ManifestError(
+                    "diagnostic_from needs a JSON outcome; it cannot be read beside "
+                    "outcome_parse test-names, where the test names are the outcome")
+            if not isinstance(m["diagnostic_from"], (str, list)):
+                raise ManifestError("diagnostic_from must be a string or a list of strings")
+            sel = m["diagnostic_from"]
+            sel = sel if isinstance(sel, list) else [sel]
+            if not sel or not all(isinstance(k, str) and k for k in sel):
+                raise ManifestError("diagnostic_from names no readable member")
+            oc = m["outcome_from"] if isinstance(m["outcome_from"], list) else [m["outcome_from"]]
+            overlap = sorted(set(sel) & set(oc))
+            if overlap:
+                # A member on both channels can never produce `silent`: any move
+                # in it is already a move in the outcome, so the class would be
+                # unreachable and the manifest would read as covering more.
+                raise ManifestError(
+                    "diagnostic_from and outcome_from both name %s; a member read as the "
+                    "outcome can never be a silent-only move" % overlap)
         # A batch corpus is exercised as a unit, so there is nothing to build and no
         # per-vector path. Anything else must declare its build.
         if m["runner"] == "process":
@@ -726,30 +787,42 @@ def child_outcome(m: dict, completed: subprocess.CompletedProcess):
     """
     kind = classify(completed.returncode, m["accepted_exit_codes"])
     if kind != "ok":
-        return None, kind
+        return None, None, kind
     if m.get("outcome_parse") == "test-names":
         out = completed.stdout + completed.stderr
         failed = sorted(set(re.findall(m.get("failed_test_pattern",
                                              r"^test (\S+) \.\.\. FAILED$"), out, re.M)))
         ran = sum(int(x) for x in re.findall(r"^test result: \w+\. (\d+) passed", out, re.M))
         if ran == 0 and not failed:
-            return None, "parse-error"
-        return tuple(failed), None
+            return None, None, "parse-error"
+        # `test-names` exposes no separate diagnostic channel: the names ARE the
+        # outcome. A corpus wanting the silent class here must emit JSON.
+        return tuple(failed), None, None
     try:
         doc = json.loads(completed.stdout)
     except Exception:  # noqa: BLE001 - unreadable output is a parse-error
-        return None, "parse-error"
+        return None, None, "parse-error"
     if not isinstance(doc, dict):
-        return None, "parse-error"
-    keys = m["outcome_from"]
-    keylist = keys if isinstance(keys, list) else [keys]
-    m.setdefault("_outcome_keys_seen", set()).update(k for k in keylist if k in doc)
-    if m.get("runner") == "batch":
-        vals = [doc.get(k) for k in keylist]
-        return tuple(tuple(v) if isinstance(v, list) else v for v in vals), None
-    if isinstance(keys, list):
-        return tuple(doc.get(k) for k in keys), None
-    return doc.get(keys), None
+        return None, None, "parse-error"
+    def _read(name, sel):
+        # Presence is recorded for EVERY selector, not only the outcome. A member
+        # nothing emits compares None to None on every mutant, and that is the
+        # same defect whichever selector declared it: on `outcome_from` it makes
+        # the score over-generous, on `diagnostic_from` it makes the `silent`
+        # class unreachable while the report still says the channel was declared.
+        sl = selector_members(sel)
+        m.setdefault("_selector_keys_seen", {}).setdefault(name, set()).update(
+            k for k in sl if k in doc)
+        if m.get("runner") == "batch":
+            vals = [doc.get(k) for k in sl]
+            return tuple(tuple(v) if isinstance(v, list) else v for v in vals)
+        if isinstance(sel, list):
+            return tuple(doc.get(k) for k in sel)
+        return doc.get(sel)
+
+    diag = (_read("diagnostic_from", m["diagnostic_from"])
+            if m.get("diagnostic_from") is not None else None)
+    return _read("outcome_from", m["outcome_from"]), diag, None
 
 
 # ---------------------------------------------------------------------------
@@ -948,22 +1021,22 @@ def _batch_outcome(m: dict) -> tuple[dict, dict[str, str]]:
     try:
         p = _run_capped(cmd, m["_repo_root"], timeout=m["vector_timeout"])
     except subprocess.TimeoutExpired:
-        return {}, {"<batch>": "timeout"}
+        return {}, {}, {"<batch>": "timeout"}
     except _OutputTooLarge:
-        return {}, {"<batch>": "output-cap"}
+        return {}, {}, {"<batch>": "output-cap"}
     except OSError:
-        return {}, {"<batch>": "incomplete"}
-    value, kind = child_outcome(m, p)
+        return {}, {}, {"<batch>": "incomplete"}
+    value, diag, kind = child_outcome(m, p)
     if kind:
-        return {}, {"<batch>": kind}
-    return {"<batch>": value}, {}
+        return {}, {}, {"<batch>": kind}
+    return {"<batch>": value}, {"<batch>": diag}, {}
 
 
-def _process_outcomes(m: dict, vectors: list[dict]) -> tuple[dict, dict]:
+def _process_outcomes(m: dict, vectors: list[dict]) -> tuple[dict, dict, dict]:
     """Run the built command once per vector. Classify the child before parse."""
     if m["runner"] == "batch":
         return _batch_outcome(m)
-    outcomes, raised = {}, {}
+    outcomes, diags, raised = {}, {}, {}
     for v in vectors:
         vid = v[m["id_key"]]
         cmd = [str(x).replace("{vector}", str((m["_repo_root"] / v[m["vector_path_key"]]).resolve()))
@@ -979,12 +1052,13 @@ def _process_outcomes(m: dict, vectors: list[dict]) -> tuple[dict, dict]:
         except OSError:
             raised[vid] = "incomplete"
             continue
-        value, kind = child_outcome(m, p)
+        value, diag, kind = child_outcome(m, p)
         if kind:
             raised[vid] = kind
         else:
             outcomes[vid] = value
-    return outcomes, raised
+            diags[vid] = diag
+    return outcomes, diags, raised
 
 
 
@@ -1014,6 +1088,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     failures.extend(structural_failures(m, groups_in_corpus))
     acknowledged = _acknowledged_holes(m)
     results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
+    silent = 0
     known_holes = 0
 
     # Taken BEFORE the isolated copy: a tree observed outside the lock can
@@ -1058,13 +1133,13 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
             if not vectors:
                 failures.append("%s: no vectors, so its mutants cannot be scored" % group)
                 continue
-            base, raised = _process_outcomes(m, vectors)
+            base, base_diag, raised = _process_outcomes(m, vectors)
             if raised:
                 kinds = sorted(set(raised.values()))
                 failures.append("%s: the UNMUTATED binary failed (%s) on %s"
                                 % (group, ", ".join(kinds), sorted(raised)))
                 continue
-            baselines[group] = (vectors, base)
+            baselines[group] = (vectors, base, base_diag)
 
         # An outcome member the implementation never emits contributes a constant
         # None to every comparison, so it discriminates nothing and every score
@@ -1072,19 +1147,24 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         # `doc.get(k)` made that silent. Absent on SOME vectors is legitimate --
         # `verdict` appears only when integrity passes, `claims` only when the
         # verdict is valid -- so the rule is "present at least once", not "always".
-        declared_keys = m["outcome_from"] if isinstance(m["outcome_from"], list) else [m["outcome_from"]]
-        never_seen = [k for k in declared_keys if k not in m.get("_outcome_keys_seen", set())]
-        if never_seen and baselines:
-            failures.append(
-                "outcome_from names %s, which the unmutated implementation never emits on any "
-                "vector. Those members compare None to None on every mutant, so they discriminate "
-                "nothing and this score is over-generous by whatever they would have caught. Read "
-                "the corpus's own declaration of its comparison surface and match it." % never_seen)
+        for _selector in ("outcome_from", "diagnostic_from"):
+            if m.get(_selector) is None:
+                continue
+            declared_keys = selector_members(m[_selector])
+            seen = m.get("_selector_keys_seen", {}).get(_selector, set())
+            never_seen = [k for k in declared_keys if k not in seen]
+            if never_seen and baselines:
+                failures.append(
+                    "%s names %s, which the unmutated implementation never emits on any "
+                    "vector. Those members compare None to None on every mutant, so they "
+                    "discriminate nothing and this score is over-generous by whatever they "
+                    "would have caught. Read the corpus's own declaration of its comparison "
+                    "surface and match it." % (_selector, never_seen))
 
         for group in sorted(m["mutants"]):
             if group not in baselines:
                 continue
-            vectors, baseline = baselines[group]
+            vectors, baseline, baseline_diag = baselines[group]
             for mut in m["mutants"][group]:
                 scope = mut.get("scope", "declared")
                 sources = [_resolved_contained_source(sp, m["_repo_root"])
@@ -1123,12 +1203,23 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                                                "never run against it: %s" % detail})
                         unproved += 1
                         continue
-                    out, raised = _process_outcomes(m, vectors)
+                    out, out_diag, raised = _process_outcomes(m, vectors)
                 finally:
                     target = _resolved_contained_source(target, m["_repo_root"])
                     target.write_text(original, encoding="utf-8")
 
                 moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
+                # The silent class, adopted from the forcing gate in
+                # `astrogilda/aee-conformance` (see Related work): a mutant that
+                # moves no declared outcome but does move a declared diagnostic
+                # is a different finding from one nothing noticed at all. It is
+                # NOT a kill -- the corpus's own verdict channel did not see the
+                # rule go -- so it scores as a survivor, and it is named because
+                # the repair differs: a survivor needs a new vector, a silent one
+                # may only need the corpus to make its diagnostics normative.
+                moved_diag = ([vid for vid, val in out_diag.items()
+                               if baseline_diag.get(vid) != val]
+                              if m.get("diagnostic_from") is not None else [])
                 if mut.get("control"):
                     # Only a successfully parsed outcome change proves the control
                     # bites. An abnormal child is control-error, not a kill, and
@@ -1160,10 +1251,20 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                     results.append({"group": group, "label": mut["label"], "verdict": "killed",
                                     "scope": scope, "moved": len(moved), "how": how})
                     killed += 1
+                # A diagnostic-only move never overrides a declared exclusion.
+                # `silent` says "the corpus claims this rule and its pinned
+                # outcomes cannot see it". An out-of-scope mutant is not making
+                # that claim, and an acknowledged hole has already made it and
+                # recorded the fact, so reclassifying either one scored a rule
+                # the author excluded and called a still-valid acknowledgement
+                # stale. Outcome movement is unaffected: it kills above, and the
+                # linger guard still retires an acknowledgement it kills.
                 elif scope == "out_of_scope":
                     results.append({"group": group, "label": mut["label"],
                                     "verdict": "unexercised", "scope": scope, "moved": 0,
-                                    "how": "out of scope: %s" % mut["reason"]})
+                                    **_diagnostic_note(m, moved_diag),
+                                    "how": "out of scope: %s%s"
+                                           % (mut["reason"], _diagnostic_suffix(moved_diag))})
                     out_of_scope += 1
                 elif label_identity(mut) in acknowledged:
                     ack = acknowledged[label_identity(mut)]
@@ -1172,10 +1273,22 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                     # against ONE digest rather than fixed today. It stays loud.
                     results.append({"group": group, "label": mut["label"],
                                     "verdict": "known-hole", "scope": scope, "moved": 0,
-                                    "how": "KNOWN HOLE against %s, recorded %s: %s"
+                                    **_diagnostic_note(m, moved_diag),
+                                    "how": "KNOWN HOLE against %s, recorded %s: %s%s"
                                            % (m["_corpus_digest"][:19], ack["recorded"],
-                                              ack["reason"])})
+                                              ack["reason"], _diagnostic_suffix(moved_diag))})
                     known_holes += 1
+                elif moved_diag:
+                    results.append({"group": group, "label": mut["label"], "verdict": "silent",
+                                    "scope": scope, "moved": 0,
+                                    "moved_diagnostic": len(moved_diag),
+                                    "how": "no vector's declared outcome distinguishes it, but "
+                                           "%d vector(s) moved on the declared diagnostic "
+                                           "channel. An implementation can delete this rule and "
+                                           "still reproduce every pinned outcome; only a consumer "
+                                           "comparing diagnostics would notice"
+                                           % len(moved_diag)})
+                    silent += 1
                 else:
                     results.append({"group": group, "label": mut["label"], "verdict": "survived",
                                     "scope": scope, "moved": 0,
@@ -1207,7 +1320,12 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         failures.append("known_holes acknowledge rules that are no longer holes: %s. Remove "
                         "them; an acknowledgement pointing at nothing hides the next regression"
                         % sorted("%s (now %s)" % kv for kv in linger.items()))
-    denom = killed + survived
+    # `silent` sits in the denominator beside `survived` and NEVER in the
+    # numerator. A mutant the declared outcome channel could not see is a rule an
+    # implementer can delete while reproducing every pinned outcome, whatever the
+    # diagnostics did; counting it killed would inflate the score by exactly the
+    # rules the corpus fails to force.
+    denom = killed + survived + silent
     # No denominator means no measurement. Printing 100% over zero is the same
     # defect as excluding everything and printing 100%. An unmutated or control
     # abnormality fail-closes the run: there is no adequacy score.
@@ -1219,25 +1337,35 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     if survived:
         failures.append("%d mutant(s) survived; the required score is 100%% of non-equivalent "
                         "mutants" % survived)
+    if silent:
+        failures.append("%d mutant(s) were silent: no declared outcome moved, only a declared "
+                        "diagnostic. The rule is not forced by the outcomes this corpus pins, so "
+                        "it counts against the score; either write a vector that moves an outcome "
+                        "or declare the diagnostic channel part of the pinned surface" % silent)
     if denom == 0:
         failures.append(null_result_reading(known_holes, equivalent, out_of_scope))
 
     return _with_tool_identity({
             "schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
             "runner": m["runner"], "killed": killed, "survived": survived,
+            "silent": silent,
+            "diagnostic_channel_declared": m.get("diagnostic_from") is not None,
             "known_holes": known_holes, "corpus_digest": m.get("_corpus_digest"),
             "originals_unverified_against_head": guard.unverified,
             "acknowledged_digests": len(m.get("known_holes", {})),
-            "hole_ratio": (None if (killed + survived) == 0
-                           else round(known_holes / (killed + survived), 2)),
+            "hole_ratio": (None if denom == 0
+                           else round(known_holes / denom, 2)),
             "equivalent": equivalent, "unexercised_out_of_scope": out_of_scope,
             "unproved": unproved,
-            "declared_total": (killed + survived + equivalent + out_of_scope + unproved
-                               + known_holes),
+            "declared_total": (killed + survived + silent + equivalent + out_of_scope
+                               + unproved + known_holes),
             "out_of_scope_ratio": (None if denom == 0 else round(out_of_scope / denom, 2)),
             "score_percent": score,
             "score_means": ("percent of author-declared in-scope rules killed; NOT percent of "
-                            "the rules the implementation actually has"),
+                            "the rules the implementation actually has. Silent mutants count "
+                            "in the denominator and never the numerator. Without "
+                            "diagnostic_from the silent class is unreachable, so a zero there "
+                            "means it was not measured, not that none exist"),
             "mutants": results, "failures": failures, "adequate": not failures})
 
 
@@ -1255,6 +1383,11 @@ def run(manifest_path: Path) -> dict:
     failures.extend(structural_failures(m, groups_in_corpus))
     acknowledged = _acknowledged_holes(m)
     results, killed, survived, equivalent, out_of_scope = [], 0, 0, 0, 0
+    # The module runner refuses `diagnostic_from` at load, so the silent class
+    # cannot occur here. It is still reported: a consumer reading `.get("silent",
+    # 0)` on a report that omits the key gets the false-measured answer the field
+    # exists to prevent, and the same denominator rule has to hold on every path.
+    silent = 0
     unproved = known_holes = 0
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -1412,7 +1545,7 @@ def run(manifest_path: Path) -> dict:
         failures.append("known_holes acknowledge rules that are no longer holes: %s. Remove "
                         "them; an acknowledgement pointing at nothing hides the next regression"
                         % sorted("%s (now %s)" % kv for kv in linger.items()))
-    denom = killed + survived
+    denom = killed + survived + silent
     score = _score_or_none(None if denom == 0 else round(100.0 * killed / denom, 1),
                            results, failures)
     if unproved:
@@ -1428,11 +1561,13 @@ def run(manifest_path: Path) -> dict:
 
     return _with_tool_identity({
             "schema": "corpus-adequacy.report.v0", "manifest": str(manifest_path),
-            "killed": killed, "survived": survived, "equivalent": equivalent,
+            "killed": killed, "survived": survived, "silent": silent,
+            "diagnostic_channel_declared": m.get("diagnostic_from") is not None,
+            "equivalent": equivalent,
             "known_holes": known_holes, "corpus_digest": m.get("_corpus_digest"),
             "acknowledged_digests": len(m.get("known_holes", {})),
-            "hole_ratio": (None if (killed + survived) == 0
-                           else round(known_holes / (killed + survived), 2)),
+            "hole_ratio": (None if denom == 0
+                           else round(known_holes / denom, 2)),
             "unexercised_out_of_scope": out_of_scope, "unproved": unproved,
             "declared_total": (killed + survived + equivalent + out_of_scope + unproved
                                + known_holes),

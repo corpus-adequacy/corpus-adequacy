@@ -14,6 +14,45 @@ alike; `git status` is not consulted. A modified runtime source is therefore no
 longer attributed to the clean commit. This is not an attestation, a
 signature, an SBOM, or a reproducibility claim.
 
+A diagnostic-only move no longer overrides a declared exclusion. An
+`out_of_scope` mutant stayed out of scope and an acknowledged current-digest hole
+stayed a known hole only while the diagnostic channel was quiet; a move on that
+channel reclassified either one as `silent`, which scored a rule the author had
+excluded and told an author to delete a still-valid acknowledgement for a rule
+that was still unforced. Precedence is now killed, then out-of-scope, then
+known-hole, then silent, and the excluded and acknowledged rows carry
+`moved_diagnostic` plus a `how` saying the diagnostics moved while the pinned
+outcomes did not. Outcome movement is untouched: it kills, and it still retires
+an acknowledgement through the existing linger guard.
+
+Selector presence is one rule for every declared selector. A member the
+unmutated implementation never emits fails the run whether it was declared on
+`outcome_from` or on `diagnostic_from`, and a partially present selector fails on
+the members that are missing. Previously only `outcome_from` was checked, so a
+`diagnostic_from` naming a member nothing emits reported
+`diagnostic_channel_declared: true` with `silent: 0` and no failure, which reads
+as measured. `hole_ratio` now divides by the scored denominator
+`killed + survived + silent` on every path, so it no longer disagrees with the
+score's own denominator. Module reports carry `silent` and
+`diagnostic_channel_declared`; runner identity remains absent there and stays
+with issue #6.
+
+A `silent` verdict separates a mutant that moves a declared diagnostic from one
+nothing noticed. Declaring `diagnostic_from` beside `outcome_from` enables it:
+moved in the outcome is `killed`, moved only in the diagnostic is `silent`,
+neither is `survived`. Silent counts in the denominator and never the numerator,
+because an implementer can still delete that rule and reproduce every pinned
+outcome; it is reported separately because the repair differs. The two selectors
+may not share a member, which would make the class unreachable, and the channel
+is refused beside `outcome_parse: test-names`. Reports carry `silent` and
+`diagnostic_channel_declared`, so a zero is distinguishable from not measured.
+`child_outcome` and `_process_outcomes` return an additional diagnostic slot.
+
+The README gains a Related work section. The measurement is not original to this
+tool: the forcing gate in `astrogilda/aee-conformance` (2026-07-30) precedes this
+tool's earliest ancestor (`rge-bench/scripts/check_rule_liveness.py`, 2026-08-10),
+and the `silent` verdict is his SILENT class adopted with the name kept.
+
 Child stdout and stderr are drained continuously through pipes. Combined
 retained output stays at most `OUTPUT_CAP_BYTES`; two reader threads may
 briefly hold `2 * READ_CHUNK_BYTES` in-flight before charge. Crossing the

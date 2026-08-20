@@ -7,6 +7,7 @@ This is not a GitHub-expression evaluator: values are compared as literals.
 
 from __future__ import annotations
 
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -506,6 +507,95 @@ class ReadmeSupportAndReleaseDocs(unittest.TestCase):
             any(line.strip() == RELEASE_PROCEDURE_BLOCK for line in readme.splitlines()),
             "README must contain the exact release-procedure block as one line",
         )
+
+
+# One module, because one module advertises direct execution in its docstring.
+# A tuple here would contract a rule over files nobody has measured.
+DIRECTLY_RUNNABLE_TEST_MODULE = "test_corpus_adequacy.py"
+
+
+def main_guard_violations(source: str, name: str) -> list[str]:
+    """Every test in a directly runnable module must be defined before it runs.
+
+    `unittest.main()` collects the module as it stands when the guard executes,
+    and then exits. A class defined after the guard is never reached, so
+    `python3 tests/<module>` reports a smaller, silently truncated run.
+
+    Measured on this repository at 634291a, comparing the module against itself:
+    direct execution ran 148 while loading that same module via unittest found
+    164, so 16 tests in that module were silently skipped. The guard sat 2140
+    lines into a 2556-line file. Full discovery reporting 293 is integration
+    evidence only, and is not the comparison that addresses this defect.
+
+    Parsed, not grepped: a comment, a docstring or a nested `if __name__` inside
+    a function would each fool a text match, and the property is about top-level
+    structure rather than about the presence of a string.
+    """
+    tree = ast.parse(source)
+    guards = [n for n in tree.body
+              if isinstance(n, ast.If) and _is_main_guard(n.test)]
+    if not guards:
+        return ["%s: no top-level `if __name__ == \"__main__\"` guard" % name]
+    if len(guards) > 1:
+        return ["%s: %d top-level `__main__` guards, expected exactly one (lines %s)"
+                % (name, len(guards), [g.lineno for g in guards])]
+    guard = guards[0]
+    if tree.body[-1] is guard:
+        return []
+    trailing = [n for n in tree.body if n.lineno > guard.lineno]
+    named = [getattr(n, "name", type(n).__name__) for n in trailing]
+    return ["%s: the `__main__` guard is at line %d but %d top-level statement(s) "
+            "follow it (%s). Direct execution defines nothing after the guard, so "
+            "those tests run under discovery and are silently skipped when the "
+            "module is run directly."
+            % (name, guard.lineno, len(trailing), ", ".join(named[:6]))]
+
+
+def _is_main_guard(test) -> bool:
+    """`__name__ == "__main__"`, in either order, without matching a substring."""
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+        return False
+    if not isinstance(test.ops[0], ast.Eq):
+        return False
+    sides = [test.left, test.comparators[0]]
+    has_name = any(isinstance(x, ast.Name) and x.id == "__name__" for x in sides)
+    has_main = any(isinstance(x, ast.Constant) and x.value == "__main__" for x in sides)
+    return has_name and has_main
+
+
+class DirectlyRunnableTestModules(unittest.TestCase):
+    def test_the_main_guard_is_the_last_top_level_statement(self):
+        name = DIRECTLY_RUNNABLE_TEST_MODULE
+        path = Path(__file__).resolve().parent / name
+        problems = main_guard_violations(path.read_text(encoding="utf-8"), name)
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_the_rule_catches_a_class_defined_after_the_guard(self):
+        # A contract test that cannot fail is not a contract. This is the shape
+        # the repository was actually in.
+        bad = ('import unittest\n'
+               'class A(unittest.TestCase):\n    pass\n'
+               'if __name__ == "__main__":\n    unittest.main()\n'
+               'class B(unittest.TestCase):\n    pass\n')
+        problems = main_guard_violations(bad, "sample.py")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("follow it", problems[0])
+        self.assertIn("B", problems[0])
+
+    def test_the_rule_accepts_a_guard_at_the_end(self):
+        good = ('import unittest\n'
+                'class A(unittest.TestCase):\n    pass\n'
+                'if __name__ == "__main__":\n    unittest.main()\n')
+        self.assertEqual(main_guard_violations(good, "sample.py"), [])
+
+    def test_a_nested_main_check_is_not_mistaken_for_the_guard(self):
+        # Text matching would count this one and pass a module with no guard.
+        nested = ('import unittest\n'
+                  'def f():\n'
+                  '    if __name__ == "__main__":\n        pass\n')
+        problems = main_guard_violations(nested, "sample.py")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("no top-level", problems[0])
 
 
 if __name__ == "__main__":
