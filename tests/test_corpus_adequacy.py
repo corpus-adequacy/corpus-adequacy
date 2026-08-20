@@ -901,6 +901,22 @@ class Cli(unittest.TestCase):
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 2)
 
+    def test_missing_file_json_prints_error_envelope_and_keeps_stderr(self):
+        # Shared catch: OSError is the same path as ManifestError. --json is not
+        # a hole here; claiming it was would be the dishonest non-claim.
+        r = subprocess.run(
+            [sys.executable, str(ca.__file__), "/nope/missing.json", "--json"],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("could not measure", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertNotIn("Traceback", r.stdout)
+        env = json.loads(r.stdout)
+        self.assertEqual(env["schema"], "corpus-adequacy.error.v0")
+        self.assertIs(env["ok"], False)
+        self.assertEqual(env["exit"], 2)
+        self.assertIn("could not measure", env["error"])
+
     def test_a_malformed_label_exits_2_without_a_traceback(self):
         with tempfile.TemporaryDirectory() as d:
             p = _manifest(Path(d), {"a": [dict(KILLABLE, label=[])]})
@@ -1082,6 +1098,74 @@ class ControlIsRequiredOnEveryRunner(unittest.TestCase):
                          "the control requirement is stated more than once again")
 
 
+class ManifestShapeIsRefusedAsManifestError(unittest.TestCase):
+    """A wrong JSON kind at the manifest boundary must not traceback.
+
+    These five shapes currently raise AttributeError/TypeError out of load_manifest
+    and the CLI. The contract is one shape rule, ManifestError, rc=2, and a
+    parseable --json envelope.
+    """
+
+    def _overlay(self, tmp, **fields):
+        p = _manifest(tmp, {"a": [KILLABLE]})
+        data = json.loads(p.read_text())
+        data.update(fields)
+        p.write_text(json.dumps(data))
+        return p
+
+    def _refuse(self, **fields):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(self._overlay(Path(d), **fields))
+        return str(cm.exception)
+
+    def test_mutants_as_a_number_is_a_manifest_error(self):
+        msg = self._refuse(mutants=42)
+        self.assertIn("mutants", msg)
+        self.assertIn("int", msg)
+
+    def test_a_mutant_group_as_a_number_is_a_manifest_error(self):
+        msg = self._refuse(mutants={"a": 42})
+        self.assertIn("mutants", msg)
+        self.assertIn("int", msg)
+
+    def test_a_mutant_entry_as_a_number_is_a_manifest_error(self):
+        msg = self._refuse(mutants={"a": [42]})
+        self.assertIn("mutants", msg)
+        self.assertIn("int", msg)
+
+    def test_known_holes_as_an_array_is_a_manifest_error(self):
+        msg = self._refuse(known_holes=[])
+        self.assertIn("known_holes", msg)
+        self.assertIn("list", msg)
+
+    def test_equivalent_as_an_array_is_a_manifest_error(self):
+        msg = self._refuse(equivalent=[])
+        self.assertIn("equivalent", msg)
+        self.assertIn("list", msg)
+
+    def test_json_mode_prints_a_parseable_error_envelope_and_exits_2(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._overlay(Path(d), mutants=42)
+            r = subprocess.run(
+                [sys.executable, str(ca.__file__), str(p), "--json"],
+                capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("Traceback", r.stdout)
+        self.assertNotIn("Traceback", r.stderr)
+        env = json.loads(r.stdout)
+        self.assertEqual(env["schema"], "corpus-adequacy.error.v0")
+        self.assertIs(env["ok"], False)
+        self.assertEqual(env["exit"], 2)
+        self.assertIn("mutants", env["error"])
+        self.assertIn("int", env["error"])
+
+    def test_a_valid_manifest_still_loads(self):
+        with tempfile.TemporaryDirectory() as d:
+            m = ca.load_manifest(_manifest(Path(d), {"a": [KILLABLE]}))
+        self.assertIn("a", m["mutants"])
+
+
 class ProcessBatchPlatformContract(unittest.TestCase):
     """Windows/non-POSIX is a supported refusal path, not a process/batch scoring path."""
 
@@ -1176,6 +1260,55 @@ class BoundedRunPortability(unittest.TestCase):
             with self.assertRaises(ValueError) as cm:
                 br._run_capped([sys.executable, "-c", "print('x')"], Path("."), 10)
         self.assertIn("start_new_session", str(cm.exception))
+
+
+
+class NestedContainerShapeCli(unittest.TestCase):
+    """CLI pins for nested container/entry kinds the first slice left unpinned."""
+
+    CASES = (
+        ("known_holes_digest",
+         {"known_holes": {"sha256:aaa": 42}}, True, "known_holes"),
+        ("known_holes_entry",
+         {"known_holes": {"sha256:aaa": [42]}}, True, "known_holes"),
+        ("equivalent_group",
+         {"equivalent": {"a": 42}}, False, "equivalent"),
+        ("equivalent_entry",
+         {"equivalent": {"a": [42]}}, False, "equivalent"),
+    )
+
+    def _cli(self, fields, with_digest):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            p = _manifest(tmp, {"a": [KILLABLE]})
+            data = json.loads(p.read_text())
+            if with_digest:
+                (tmp / "digest.json").write_text(json.dumps({"corpus_digest": "sha256:aaa"}))
+                data["corpus_digest_file"] = "digest.json"
+                data["corpus_digest_key"] = "corpus_digest"
+            data.update(fields)
+            p.write_text(json.dumps(data))
+            return subprocess.run(
+                [sys.executable, str(ca.__file__), str(p), "--json"],
+                capture_output=True, text=True, timeout=60)
+
+    def _assert_envelope(self, r, needle):
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("could not measure", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertNotIn("Traceback", r.stdout)
+        env = json.loads(r.stdout)
+        self.assertEqual(env["schema"], "corpus-adequacy.error.v0")
+        self.assertIs(env["ok"], False)
+        self.assertEqual(env["exit"], 2)
+        self.assertIn(needle, env["error"])
+        self.assertIn("int", env["error"])
+        self.assertIn("could not measure", env["error"])
+
+    def test_wrong_nested_kinds_exit_2_with_json_envelope_and_stderr(self):
+        for name, fields, with_digest, needle in self.CASES:
+            with self.subTest(name):
+                self._assert_envelope(self._cli(fields, with_digest), needle)
 
 
 if __name__ == "__main__":
