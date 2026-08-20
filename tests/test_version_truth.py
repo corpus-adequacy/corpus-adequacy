@@ -37,12 +37,13 @@ NO_ADDRESSABILITY_PHRASE = (
 def check_version_release_truth(root: Path) -> str:
     """One rule: version/release truth for a checkout.
 
-    1. ast.parse corpus_adequacy.py. One binding collector lists every
-       syntactic VERSION binding (Name Store/Del, def/class name,
+    1. ast.parse corpus_adequacy.py. One collector lists conservative
+       runtime-rebinding forms (Name Store/Del, def/class name,
        arguments, except-as, import/from-import, match name/rest).
-       from-import * is unknown and refused. Exactly one VERSION
-       binding, and it is the direct top-level simple Assign. This
-       does not exec the module or prove globals()/exec reflection.
+       It does not cover PEP 695 type parameters or other syntactic
+       bindings. from-import * is unknown and refused. Exactly one
+       VERSION binding, and it is the direct top-level simple Assign.
+       This does not exec the module or prove globals()/exec reflection.
     2. CHANGELOG has exactly one Unreleased heading and exactly one dated
        heading for that VERSION (real ISO calendar date).
     3. Docs name the tag schema, the cut order, and the no-addressability
@@ -50,8 +51,9 @@ def check_version_release_truth(root: Path) -> str:
        is demonstrably absent.
     4. No git metadata: treat as no tag. In a checkout, show-ref --verify
        --quiet maps rc 1 to absent and any other nonzero to error. A
-       present tag's tree must carry the same VERSION and an empty
-       Unreleased section.
+       present tag is read via git show tag:path, run through the same
+       public-markdown + heading/docs checks, and must have an empty
+       public Unreleased body (fenced leftover notes still fail).
 
     Returns the parsed VERSION. Raises ValueError on any violation.
     """
@@ -68,7 +70,7 @@ def check_version_release_truth(root: Path) -> str:
 
 
 class _BindingCollector(ast.NodeVisitor):
-    """Syntactic binding names. Does not exec or inspect runtime globals."""
+    """Conservative runtime-rebinding names. Not PEP 695. No exec."""
 
     def __init__(self):
         self.names: list[str] = []
@@ -186,6 +188,13 @@ def _strip_html_comments(text: str) -> str:
         cursor = end + 3
 
 
+def _indented_code_line(line: str) -> bool:
+    raw = line[:-1] if line.endswith("\n") else line
+    if raw.endswith("\r"):
+        raw = raw[:-1]
+    return raw.startswith("\t") or raw.startswith("    ")
+
+
 def _fence_line(line: str):
     match = _FENCE_LINE_RE.match(line.rstrip("\n"))
     if match is None:
@@ -203,7 +212,10 @@ def _public_markdown(text: str) -> str:
     - Fenced blocks: opener is 0-3 spaces then 3+ ` or ~. A closer is
       0-3 spaces, the same character, at least as long as the opener,
       and trailing whitespace only. An unclosed fence consumes the rest.
-    Indented code, inline `code`, and other HTML are left as-is.
+    - Indented code: a line that starts with a tab or 4+ spaces is
+      dropped. Conservative CommonMark; nested lists/quote-indents
+      that use 4 spaces are also dropped. Inline `code` stays.
+    Other HTML is left as-is.
     """
     lines = _strip_html_comments(text).splitlines(keepends=True)
     out = []
@@ -213,6 +225,8 @@ def _public_markdown(text: str) -> str:
         if fence is None:
             if parsed is not None:
                 fence = (parsed[0], parsed[1])
+                continue
+            if _indented_code_line(line):
                 continue
             out.append(line)
             continue
@@ -341,21 +355,34 @@ def _unreleased_body(changelog: str) -> str:
     return "\n".join(body).strip()
 
 
+def _show_tagged_file(root: Path, tag: str, path: str) -> str:
+    shown = _git(root, "show", "%s:%s" % (tag, path))
+    if shown.returncode != 0:
+        raise ValueError("tag %s exists but has no %s" % (tag, path))
+    return shown.stdout
+
+
 def _check_tagged_tree(root: Path, version: str) -> None:
     tag = "v" + version
-    shown = _git(root, "show", "%s:corpus_adequacy.py" % tag)
-    if shown.returncode != 0:
-        raise ValueError("tag %s exists but has no corpus_adequacy.py" % tag)
-    tagged_version = _parse_version_text(shown.stdout)
+    tagged_version = _parse_version_text(
+        _show_tagged_file(root, tag, "corpus_adequacy.py")
+    )
     if tagged_version != version:
         raise ValueError(
             "tag %s has VERSION %s, not %s" % (tag, tagged_version, version)
         )
-    log_shown = _git(root, "show", "%s:CHANGELOG.md" % tag)
-    if log_shown.returncode != 0:
-        raise ValueError("tag %s exists but has no CHANGELOG.md" % tag)
-    if _unreleased_body(log_shown.stdout):
-        raise ValueError("tag %s has a non-empty Unreleased section" % tag)
+    raw_changelog = _show_tagged_file(root, tag, "CHANGELOG.md")
+    raw_readme = _show_tagged_file(root, tag, "README.md")
+    changelog = _public_markdown(raw_changelog)
+    readme = _public_markdown(raw_readme)
+    _check_changelog_headings(changelog, version)
+    _check_docs_wording(readme, changelog, version, True)
+    if _unreleased_body(changelog):
+        raise ValueError("tag %s has a non-empty public Unreleased section" % tag)
+    if _unreleased_body(raw_changelog):
+        raise ValueError(
+            "tag %s hides Unreleased notes in a fence or comment" % tag
+        )
 
 
 def _honest_readme(extra: str = "") -> str:
@@ -584,6 +611,20 @@ class VersionReleaseTruth(unittest.TestCase):
                 "four-space-line-is-not-a-closer",
                 "```\n    ```\n" + _honest_readme() + "```\n",
             ),
+            (
+                "phrases-only-indented-spaces",
+                "".join(
+                    ("    " + line if line.strip() else line)
+                    for line in _honest_readme().splitlines(True)
+                ),
+            ),
+            (
+                "phrases-only-indented-tab",
+                "".join(
+                    ("\t" + line if line.strip() else line)
+                    for line in _honest_readme().splitlines(True)
+                ),
+            ),
         )
         for name, readme in cases:
             with self.subTest(name):
@@ -594,6 +635,41 @@ class VersionReleaseTruth(unittest.TestCase):
     def test_phrases_after_a_real_fence_closer_are_public(self):
         with _temp_tree(readme="```\nhidden\n```\n" + _honest_readme()) as root:
             self.assertEqual(check_version_release_truth(root), "0.1.0")
+
+    def _tag_bad_tree_then_heal(self, root):
+        _init_git_repo(root)
+        _tag(root, "v0.1.0")
+        _write_tree(root)
+        _git_fixture(root, "add", "-A")
+        _git_fixture(root, "commit", "-m", "heal")
+
+    def test_tagged_tree_must_match_public_docs(self):
+        cases = (
+            (
+                "tag-without-dated-heading",
+                {"changelog": "# Changelog\n\n## Unreleased\n\n"},
+            ),
+            (
+                "tag-unreleased-hidden-in-fence",
+                {
+                    "changelog": (
+                        "# Changelog\n\n## Unreleased\n\n"
+                        "```\nLater work.\n```\n\n"
+                        "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n"
+                    )
+                },
+            ),
+            (
+                "tag-without-readme-release-text",
+                {"readme": "no release procedure here\n"},
+            ),
+        )
+        for name, kwargs in cases:
+            with self.subTest(name):
+                with _temp_tree(**kwargs) as root:
+                    self._tag_bad_tree_then_heal(root)
+                    with self.assertRaises(ValueError):
+                        check_version_release_truth(root)
 
     def test_explicit_tag_token_is_allowed_once_the_tag_exists(self):
         with _temp_tree(readme=_honest_readme(" See v0.1.0.")) as root:
