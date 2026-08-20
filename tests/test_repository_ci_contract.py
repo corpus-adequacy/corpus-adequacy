@@ -49,6 +49,7 @@ ALLOWED_PERMISSIONS = {"contents": "read"}
 ALLOWED_ACTIONS = {
     "%s@%s" % (CHECKOUT_ACTION, CHECKOUT_SHA): {
         "persist-credentials": False,
+        "fetch-depth": 0,
     },
     "%s@%s" % (SETUP_PYTHON_ACTION, SETUP_PYTHON_SHA): {
         "python-version": PYTHON_VERSION_EXPR,
@@ -60,7 +61,7 @@ ALLOWED_STEPS = (
     {
         "name": "Checkout",
         "uses": "%s@%s" % (CHECKOUT_ACTION, CHECKOUT_SHA),
-        "with": {"persist-credentials": False},
+        "with": {"persist-credentials": False, "fetch-depth": 0},
     },
     {
         "name": "Set up Python",
@@ -307,6 +308,26 @@ class RepositoryCiContract(unittest.TestCase):
         mutated = self._mutated("contents: read", "contents: write")
         self.assertIn("permissions must be exactly {contents: read}",
                       workflow_shape_violations(mutated))
+
+    def test_checkout_fetches_full_history_and_tags(self):
+        checkout = next(
+            s for s in self.steps
+            if isinstance(s, dict) and str(s.get("uses", "")).startswith("%s@" % CHECKOUT_ACTION)
+        )
+        self.assertEqual(
+            checkout.get("with"),
+            {"persist-credentials": False, "fetch-depth": 0},
+        )
+        removed = self._mutated("\n          fetch-depth: 0", "")
+        hits = workflow_shape_violations(removed)
+        self.assertTrue(
+            any("with keys must be exactly" in v for v in hits), hits
+        )
+        depth_one = self._mutated("fetch-depth: 0", "fetch-depth: 1")
+        hits = workflow_shape_violations(depth_one)
+        self.assertTrue(
+            any("with keys must be exactly" in v for v in hits), hits
+        )
 
     def test_unapproved_action_is_rejected(self):
         uses = [s.get("uses") for s in self.steps if isinstance(s, dict)]
