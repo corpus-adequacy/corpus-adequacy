@@ -40,8 +40,11 @@ declares its own mutants in a manifest:
   - equivalent mutants are DECLARED WITH A REASON, never inferred. Deciding
     mutant equivalence is undecidable in general, so a tool that claimed to
     detect it would be lying.
-  - a crash is a KILL, reported separately, because "raises without this rule"
-    says more about the rule than "returns something else".
+    - child termination is classified before stdout is parsed. Default
+    accepted_exit_codes is [0]. A parseable report on an undeclared code,
+    a signal, or a missing code is not an outcome. An observed unexpected
+    exit or signal on an ordinary mutant may be a kill with that class
+    named; a control abnormality is control-error and is not a score.
 
 WHAT THE PERCENTAGE IS A PERCENTAGE OF
 ---------------------------------------
@@ -261,6 +264,10 @@ def load_manifest(path: Path) -> dict:
     m.setdefault("runner", "module")
     if m["runner"] not in ("module", "process", "batch"):
         raise ManifestError("runner must be module, process or batch, got %r" % m["runner"])
+    if m.get("outcome_parse") == "test-names" and m["runner"] != "batch":
+        raise ManifestError(
+            "outcome_parse test-names is implemented only for runner=batch, "
+            "not runner=%s" % m["runner"])
     if m["runner"] in ("process", "batch"):
         _req(m, "entrypoint_command", "manifest (runner=%s)" % m["runner"])
         if m.get("outcome_parse") != "test-names":
@@ -282,6 +289,7 @@ def load_manifest(path: Path) -> dict:
         m.setdefault("vector_path_key", "path")
         m.setdefault("build_timeout", 1800)
         m.setdefault("vector_timeout", 120)
+        m["accepted_exit_codes"] = accepted_exit_codes(m)
     m.setdefault("mutants", {})
     m.setdefault("equivalent", {})
     require_shape(m["mutants"], dict, "mutants")
@@ -376,6 +384,91 @@ def _outcomes(fn, vectors: list[dict], m: dict) -> tuple[dict, list[str]]:
             raised.append(vid)
     return outcomes, raised
 
+
+
+def classify(returncode, accepted) -> str:
+    """ok | unexpected-exit | signal | incomplete. Never reads stdout.
+
+    Signals and None never become ok, even if *accepted* is malformed.
+    """
+    if returncode is None or type(returncode) is not int:
+        return "incomplete"
+    if returncode < 0:
+        return "signal"
+    allowed = {code for code in (accepted or []) if type(code) is int and code >= 0}
+    if returncode in allowed:
+        return "ok"
+    return "unexpected-exit"
+
+
+def accepted_exit_codes(m: dict) -> list[int]:
+    """One process/batch policy: unique nonnegative ints, plus parse rules.
+
+    Default is [0]. Bools are excluded (JSON true is not exit 1). Signals are
+    never accepted. outcome_parse test-names requires 101.
+    JSON outcome_from has no protocol ID, so extra codes such as 2 are declared
+    explicitly. This repository ships no manifests and does not infer codes
+    from a command name.
+    """
+    raw = m.get("accepted_exit_codes", [0])
+    if not isinstance(raw, list):
+        raise ManifestError(
+            "accepted_exit_codes must be an array of unique nonnegative integers")
+    seen: set[int] = set()
+    codes: list[int] = []
+    for i, value in enumerate(raw):
+        if type(value) is bool:
+            raise ManifestError(
+                "accepted_exit_codes[%d] must be a nonnegative integer, got bool" % i)
+        if type(value) is not int:
+            raise ManifestError(
+                "accepted_exit_codes[%d] must be a nonnegative integer, got %s"
+                % (i, type(value).__name__))
+        if value < 0:
+            raise ManifestError(
+                "accepted_exit_codes[%d] is %s; signals are never accepted" % (i, value))
+        if value in seen:
+            raise ManifestError("accepted_exit_codes repeats %d" % value)
+        seen.add(value)
+        codes.append(value)
+    if m.get("outcome_parse") == "test-names":
+        if 101 not in seen:
+            raise ManifestError(
+                "outcome_parse test-names requires accepted_exit_codes to include 101")
+    return codes
+
+
+def child_outcome(m: dict, completed: subprocess.CompletedProcess):
+    """Classify returncode against the accepted policy, then parse stdout.
+
+    An accepted code with empty or malformed output is still a parse-error.
+    """
+    kind = classify(completed.returncode, m["accepted_exit_codes"])
+    if kind != "ok":
+        return None, kind
+    if m.get("outcome_parse") == "test-names":
+        out = completed.stdout + completed.stderr
+        failed = sorted(set(re.findall(m.get("failed_test_pattern",
+                                             r"^test (\S+) \.\.\. FAILED$"), out, re.M)))
+        ran = sum(int(x) for x in re.findall(r"^test result: \w+\. (\d+) passed", out, re.M))
+        if ran == 0 and not failed:
+            return None, "parse-error"
+        return tuple(failed), None
+    try:
+        doc = json.loads(completed.stdout)
+    except Exception:  # noqa: BLE001 - unreadable output is a parse-error
+        return None, "parse-error"
+    if not isinstance(doc, dict):
+        return None, "parse-error"
+    keys = m["outcome_from"]
+    keylist = keys if isinstance(keys, list) else [keys]
+    m.setdefault("_outcome_keys_seen", set()).update(k for k in keylist if k in doc)
+    if m.get("runner") == "batch":
+        vals = [doc.get(k) for k in keylist]
+        return tuple(tuple(v) if isinstance(v, list) else v for v in vals), None
+    if isinstance(keys, list):
+        return tuple(doc.get(k) for k in keys), None
+    return doc.get(keys), None
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +632,7 @@ def _build(m: dict) -> tuple[bool, str]:
     return True, "built"
 
 
-def _batch_outcome(m: dict) -> tuple[dict, list[str]]:
+def _batch_outcome(m: dict) -> tuple[dict, dict[str, str]]:
     """Run the command ONCE over the whole corpus.
 
     Some corpora are consumed as a unit: the checker takes the vector file and
@@ -553,57 +646,43 @@ def _batch_outcome(m: dict) -> tuple[dict, list[str]]:
     cmd = [str(x) for x in m["entrypoint_command"]]
     try:
         p = _run_capped(cmd, m["_repo_root"], timeout=m["vector_timeout"])
-    except Exception:  # noqa: BLE001
-        return {}, ["<batch>"]
-
-    if m.get("outcome_parse") == "test-names":
-        # The checker is a test binary, not a reporter. Its outcome is WHICH tests
-        # failed, which discriminates per case exactly as a named failures list
-        # does. A bare pass/fail would not: every mutant would kill everything or
-        # nothing.
-        out = p.stdout + p.stderr
-        failed = sorted(set(re.findall(m.get("failed_test_pattern",
-                                             r"^test (\S+) \.\.\. FAILED$"), out, re.M)))
-        ran = sum(int(x) for x in re.findall(r"^test result: \w+\. (\d+) passed", out, re.M))
-        if ran == 0 and not failed:
-            # A filter that selected nothing exits 0 and would read as agreement.
-            return {}, ["<batch>"]
-        return {"<batch>": tuple(failed)}, []
-
-    try:
-        doc = json.loads(p.stdout)
-    except Exception:  # noqa: BLE001
-        return {}, ["<batch>"]
-    keys = m["outcome_from"]
-    keylist = keys if isinstance(keys, list) else [keys]
-    m.setdefault("_outcome_keys_seen", set()).update(k for k in keylist if k in doc)
-    vals = [doc.get(k) for k in keylist]
-    # lists are compared as tuples so a failures list discriminates per case
-    norm = tuple(tuple(v) if isinstance(v, list) else v for v in vals)
-    return {"<batch>": norm}, []
+    except subprocess.TimeoutExpired:
+        return {}, {"<batch>": "timeout"}
+    except _OutputTooLarge:
+        return {}, {"<batch>": "output-cap"}
+    except OSError:
+        return {}, {"<batch>": "incomplete"}
+    value, kind = child_outcome(m, p)
+    if kind:
+        return {}, {"<batch>": kind}
+    return {"<batch>": value}, {}
 
 
-def _process_outcomes(m: dict, vectors: list[dict]) -> tuple[dict, list[str]]:
-    """Run the built command once per vector. A vector that cannot be read is a raise."""
+def _process_outcomes(m: dict, vectors: list[dict]) -> tuple[dict, dict]:
+    """Run the built command once per vector. Classify the child before parse."""
     if m["runner"] == "batch":
         return _batch_outcome(m)
-    outcomes, raised = {}, []
+    outcomes, raised = {}, {}
     for v in vectors:
         vid = v[m["id_key"]]
         cmd = [str(x).replace("{vector}", str((m["_repo_root"] / v[m["vector_path_key"]]).resolve()))
                for x in m["entrypoint_command"]]
         try:
             p = _run_capped(cmd, m["_repo_root"], timeout=m["vector_timeout"])
-            doc = json.loads(p.stdout)
-            keys = m["outcome_from"]
-            # A single key can collapse every rejection onto one value and lose all
-            # discrimination, so a list is allowed and compared as a tuple.
-            keylist = keys if isinstance(keys, list) else [keys]
-            m.setdefault("_outcome_keys_seen", set()).update(k for k in keylist if k in doc)
-            outcomes[vid] = (tuple(doc.get(k) for k in keys) if isinstance(keys, list)
-                             else doc.get(keys))
-        except Exception:  # noqa: BLE001 - unreadable output is a behaviour change
-            raised.append(vid)
+        except subprocess.TimeoutExpired:
+            raised[vid] = "timeout"
+            continue
+        except _OutputTooLarge:
+            raised[vid] = "output-cap"
+            continue
+        except OSError:
+            raised[vid] = "incomplete"
+            continue
+        value, kind = child_outcome(m, p)
+        if kind:
+            raised[vid] = kind
+        else:
+            outcomes[vid] = value
     return outcomes, raised
 
 
@@ -666,7 +745,9 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                 continue
             base, raised = _process_outcomes(m, vectors)
             if raised:
-                failures.append("%s: the UNMUTATED binary failed on %s" % (group, raised))
+                kinds = sorted(set(raised.values()))
+                failures.append("%s: the UNMUTATED binary failed (%s) on %s"
+                                % (group, ", ".join(kinds), sorted(raised)))
                 continue
             baselines[group] = (vectors, base)
 
@@ -734,11 +815,19 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
 
                 moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
                 if mut.get("control"):
-                    # A control exists to prove the harness can detect ANYTHING. It is
-                    # never scored: counting it would inflate the very number it exists
-                    # to make trustworthy. A control that survives means the run says
-                    # nothing at all about the corpus.
-                    ok = bool(raised or moved)
+                    # Only a successfully parsed outcome change proves the control
+                    # bites. An abnormal child is control-error, not a kill, and
+                    # invalidates the run.
+                    if raised:
+                        how = ", ".join(sorted(set(raised.values())))
+                        results.append({"group": group, "label": mut["label"],
+                                        "verdict": "control-error", "scope": scope,
+                                        "moved": 0, "how": how})
+                        failures.append(
+                            "control %r ended abnormally (%s); that is not a kill and "
+                            "this run has no adequacy score" % (mut["label"], how))
+                        continue
+                    ok = bool(moved)
                     results.append({"group": group, "label": mut["label"],
                                     "verdict": "control-killed" if ok else "control-SURVIVED",
                                     "scope": scope, "moved": len(moved),
@@ -751,10 +840,10 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                             % mut["label"])
                     continue
                 if raised or moved:
+                    how = (", ".join(sorted(set(raised.values()))) if raised
+                           else "%d vector(s) moved" % len(moved))
                     results.append({"group": group, "label": mut["label"], "verdict": "killed",
-                                    "scope": scope, "moved": len(moved),
-                                    "how": ("raises on %d vector(s)" % len(raised)) if raised
-                                           else "%d vector(s) moved" % len(moved)})
+                                    "scope": scope, "moved": len(moved), "how": how})
                     killed += 1
                 elif scope == "out_of_scope":
                     results.append({"group": group, "label": mut["label"],
@@ -804,8 +893,12 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                         % sorted("%s (now %s)" % kv for kv in linger.items()))
     denom = killed + survived
     # No denominator means no measurement. Printing 100% over zero is the same
-    # defect as excluding everything and printing 100%.
+    # defect as excluding everything and printing 100%. An unmutated or control
+    # abnormality fail-closes the run: there is no adequacy score.
     score = None if denom == 0 else round(100.0 * killed / denom, 1)
+    if (any(r.get("verdict") == "control-error" for r in results)
+            or any("UNMUTATED" in f for f in failures)):
+        score = None
     if unproved:
         failures.append("%d mutant(s) never ran, so this corpus was not measured against them"
                         % unproved)
@@ -1079,7 +1172,7 @@ def main() -> int:
         print(format_tool_identity(rep))
         for r in rep["mutants"]:
             print("%-22s %-9s %s" % (r["group"], r["verdict"], r["label"]))
-            if r["verdict"] != "killed":
+            if r["verdict"] != "killed" or rep.get("runner") in ("process", "batch"):
                 print("    %s" % r["how"])
         print()
         # Never a bare percentage. A score reported without its denominator and its
