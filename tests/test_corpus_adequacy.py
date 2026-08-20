@@ -49,6 +49,10 @@ CONTROL = {"label": "CONTROL harness reachability", "control": True,
            "replacement": 'def evaluate(group, inputs):\n    return "MOVED"'}
 
 
+def _batch_python() -> str:
+    return sys.executable
+
+
 def _manifest(tmp: Path, mutants, equivalent=None, vectors=None, raw=None,
               control=True) -> Path:
     """A control is added to every group unless a test is about its absence.
@@ -309,7 +313,7 @@ class BatchRunner(unittest.TestCase):
             {"id": "c1", "n": 1}, {"id": "c2", "n": 2}]}))
         m = {"schema": ca.SCHEMA, "runner": "batch", "repo_root": ".",
              "implementation_sources": ["check.py"],
-             "entrypoint_command": ["python3", "check.py", "vectors.json"],
+             "entrypoint_command": [_batch_python(), "check.py", "vectors.json"],
              "outcome_from": ["ok", "failures"], "vectors": "vectors.json",
              "id_key": "vector_id", "default_group": "g",
              "mutants": {"g": [
@@ -377,7 +381,7 @@ class ProcessSourceContainment(unittest.TestCase):
             {"id": "c1", "n": 1}, {"id": "c2", "n": 2}]}))
         raw = {"schema": ca.SCHEMA, "runner": "batch", "repo_root": "repo",
                "implementation_sources": ["repo/src/check.py"],
-               "entrypoint_command": ["python3", "src/check.py", "vectors.json"],
+               "entrypoint_command": [_batch_python(), "src/check.py", "vectors.json"],
                "outcome_from": ["ok", "failures"], "vectors": "repo/vectors.json",
                "id_key": "vector_id", "default_group": "g", "mutants": {"g": [
                    {"label": "threshold", "anchor": "c['n'] > 10",
@@ -967,7 +971,7 @@ class DeclaredOutcomeMembersMustExist(unittest.TestCase):
             {"id": "c1", "n": 1}, {"id": "c2", "n": 2}]}))
         m = {"schema": ca.SCHEMA, "runner": "batch", "repo_root": ".",
              "implementation_sources": ["check.py"],
-             "entrypoint_command": ["python3", "check.py", "vectors.json"],
+             "entrypoint_command": [_batch_python(), "check.py", "vectors.json"],
              "outcome_from": outcome_from, "vectors": "vectors.json",
              "id_key": "vector_id", "default_group": "g",
              "mutants": {"g": [

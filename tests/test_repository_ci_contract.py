@@ -71,5 +71,37 @@ class RepositoryCiContract(unittest.TestCase):
                 self.assertIn(os_name, self.text)
 
 
+class BatchFixturePortability(unittest.TestCase):
+    """Batch fixtures must invoke the interpreter CI actually provided."""
+
+    def test_batch_fixtures_use_sys_executable_not_literal_python3(self):
+        text = (REPO_ROOT / "tests" / "test_corpus_adequacy.py").read_text(
+            encoding="utf-8"
+        )
+        helper = re.search(
+            r"def _batch_python\(.*?\n(?:    .+\n)+",
+            text,
+        )
+        self.assertIsNotNone(helper, "batch fixtures need one _batch_python helper")
+        body = helper.group(0)
+        self.assertIn("return sys.executable", body)
+        self.assertNotRegex(body, r"""return\s+["']python3["']""")
+
+        python_entrypoints = [
+            args
+            for args in (
+                m.group(1)
+                for m in re.finditer(r'"entrypoint_command":\s*\[([^\]]+)\]', text)
+            )
+            if "check.py" in args or "_batch_python" in args or '"python3"' in args
+        ]
+        self.assertGreaterEqual(len(python_entrypoints), 3)
+        for args in python_entrypoints:
+            with self.subTest(args=args):
+                self.assertIn("_batch_python()", args)
+                self.assertNotIn('"python3"', args)
+                self.assertNotIn("'python3'", args)
+
+
 if __name__ == "__main__":
     unittest.main()
