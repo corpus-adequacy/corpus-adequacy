@@ -32,6 +32,11 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # Literal false plus the expression forms this parser treats as disabled.
 # Not a GitHub-expression evaluator: other `if:` forms are a non-claim.
 DISABLED_IF = frozenset((False, "false", "False", "${{ false }}", "${{false}}"))
+# One claimed `on` structure. Both pull_request and push.branches are read from it.
+REQUIRED_ON = {
+    "pull_request": None,
+    "push": {"branches": ["main"]},
+}
 
 
 def _strip_comment(line: str) -> str:
@@ -132,6 +137,19 @@ def _is_disabled(node: dict) -> bool:
     return isinstance(cond, str) and cond.strip() in DISABLED_IF
 
 
+def _claimed_on(on) -> dict:
+    """Project the parsed `on` mapping onto REQUIRED_ON's keys only."""
+    if not isinstance(on, dict):
+        return {}
+    claimed = {}
+    if "pull_request" in on:
+        claimed["pull_request"] = on["pull_request"]
+    push = on.get("push")
+    if isinstance(push, dict) and "branches" in push:
+        claimed["push"] = {"branches": push["branches"]}
+    return claimed
+
+
 def _effective_matrix_oses(matrix: dict) -> list:
     oses = matrix.get("os")
     if not isinstance(oses, list):
@@ -173,6 +191,9 @@ class RepositoryCiContract(unittest.TestCase):
 
     def _action_steps(self, action: str) -> list[dict]:
         return [s for s in self.steps if isinstance(s, dict) and _uses_action(s, action)]
+
+    def test_workflow_on_triggers_include_pull_request_and_main_push(self):
+        self.assertEqual(_claimed_on(self.tree.get("on")), REQUIRED_ON)
 
     def test_test_job_has_timeout(self):
         self.assertEqual(self.job.get("timeout-minutes"), TIMEOUT_MINUTES)
