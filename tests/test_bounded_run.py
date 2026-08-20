@@ -29,6 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = (REPO_ROOT / "bounded_run.py").read_text(encoding="utf-8")
 TEST_CAP = 64 * 1024
 BURST = 256 * 1024
+# Each stream stays under TEST_CAP; together they cross it.
+INTERLEAVE_EACH = 40 * 1024
 # One completed crossing write, then hold: a larger write is still in
 # progress when the parent closes the pipe, and SIGPIPE kills the
 # descendant even without a group kill.
@@ -100,6 +102,48 @@ def _mutated_run(test: unittest.TestCase, old: str, new: str):
     return ns["_run_capped"]
 
 
+def _interleaved_body() -> str:
+    chunk = INTERLEAVE_EACH // 4
+    return (
+        "import sys\n"
+        "for _ in range(4):\n"
+        "    sys.stdout.buffer.write(b'O' * %d)\n"
+        "    sys.stderr.buffer.write(b'E' * %d)\n"
+        "    sys.stdout.buffer.flush()\n"
+        "    sys.stderr.buffer.flush()\n"
+        % (chunk, chunk)
+    )
+
+
+def _assert_mutated_leaves_descendant(test: unittest.TestCase, run, n: int = HOLD) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        pid_path = tmp / "desc.pid"
+        finished = []
+
+        def go():
+            try:
+                finished.append(run(_probe(tmp, DESCENDANT, str(pid_path), str(n)), tmp, 5))
+            except Exception as exc:  # noqa: BLE001 - mutation outcome
+                finished.append(exc)
+
+        worker = threading.Thread(target=go)
+        worker.start()
+        try:
+            deadline = time.monotonic() + 2
+            while (not pid_path.exists() or not pid_path.stat().st_size) and (
+                time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+            pid = int(pid_path.read_text())
+            worker.join(timeout=1.0)
+            test.assertTrue(_pid_alive(pid), "mutated kill must leave the descendant")
+        finally:
+            if pid_path.exists() and pid_path.stat().st_size:
+                _reap_pid(int(pid_path.read_text()))
+            worker.join(timeout=2)
+
+
 class _WithTestCap(unittest.TestCase):
     def setUp(self):
         patcher = mock.patch.object(br, "OUTPUT_CAP_BYTES", TEST_CAP)
@@ -139,18 +183,12 @@ class ContinuousCap(_WithTestCap):
         self.assertLessEqual(pulled[0], TEST_CAP + 2 * br.READ_CHUNK_BYTES)
 
     def test_interleaved_stdout_and_stderr_share_one_combined_cap(self):
-        body = (
-            "import sys\n"
-            "for _ in range(8):\n"
-            "    sys.stdout.buffer.write(b'O' * 10000)\n"
-            "    sys.stderr.buffer.write(b'E' * 10000)\n"
-            "    sys.stdout.buffer.flush()\n"
-            "    sys.stderr.buffer.flush()\n"
-        )
+        self.assertLess(INTERLEAVE_EACH, TEST_CAP)
+        self.assertGreater(2 * INTERLEAVE_EACH, TEST_CAP)
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             with self.assertRaises(br._OutputTooLarge):
-                br._run_capped(_probe(tmp, body), tmp, 5)
+                br._run_capped(_probe(tmp, _interleaved_body()), tmp, 5)
 
     def test_stderr_only_burst_is_still_capped(self):
         body = "import sys\nsys.stderr.buffer.write(b'E' * %d)\n" % BURST
@@ -385,41 +423,39 @@ class Mutations(unittest.TestCase):
         self.assertEqual(done.returncode, 0)
         self.assertEqual(len(done.stderr), BURST)
 
+    def test_separate_per_stream_caps_miss_combined_overflow(self):
+        run = _mutated_run(
+            self,
+            "_charge_before_retain(total, cap, data)",
+            "_charge_before_retain(len(b''.join(chunks[which])), cap, data)",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            done = run(_probe(tmp, _interleaved_body()), tmp, 5)
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(len(done.stdout), INTERLEAVE_EACH)
+        self.assertEqual(len(done.stderr), INTERLEAVE_EACH)
+
     def test_leader_only_kill_leaves_a_posix_descendant(self):
         if not POSIX:
             self.skipTest(
                 "process/batch refuse without fcntl; no Windows process-tree claim"
             )
         run = _mutated_run(self, "os.killpg(pgid, signal.SIGKILL)", "proc.kill()")
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            pid_path = tmp / "desc.pid"
-            finished = []
+        _assert_mutated_leaves_descendant(self, run)
 
-            def go():
-                try:
-                    finished.append(run(_probe(tmp, DESCENDANT, str(pid_path), str(HOLD)), tmp, 5))
-                except Exception as exc:  # noqa: BLE001 - mutation outcome
-                    finished.append(exc)
-
-            worker = threading.Thread(target=go)
-            worker.start()
-            try:
-                deadline = time.monotonic() + 2
-                while (not pid_path.exists() or not pid_path.stat().st_size) and (
-                    time.monotonic() < deadline
-                ):
-                    time.sleep(0.05)
-                pid = int(pid_path.read_text())
-                worker.join(timeout=1.0)
-                self.assertTrue(
-                    _pid_alive(pid),
-                    "leader-only kill must leave the bursting descendant",
-                )
-            finally:
-                if pid_path.exists() and pid_path.stat().st_size:
-                    _reap_pid(int(pid_path.read_text()))
-                worker.join(timeout=2)
+    def test_late_getpgid_leaves_a_posix_descendant(self):
+        if not POSIX:
+            self.skipTest(
+                "process/batch refuse without fcntl; no Windows process-tree claim"
+            )
+        run = _mutated_run(
+            self,
+            "os.killpg(pgid, signal.SIGKILL)",
+            "os.killpg(os.getpgid(proc.pid), signal.SIGKILL)",
+        )
+        # Leader exits first (tiny write), then getpgid(proc.pid) is ESRCH.
+        _assert_mutated_leaves_descendant(self, run, n=0)
 
     def test_removing_timeout_lets_a_sleeper_finish(self):
         run = _mutated_run(
