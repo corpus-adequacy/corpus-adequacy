@@ -1432,6 +1432,27 @@ class ChildOutcomeClassifyThenParse(unittest.TestCase):
         self.assertIsNone(value)
         self.assertEqual(kind, "unexpected-exit")
 
+    def test_accepted_exit_with_non_object_json_is_parse_error(self):
+        cases = (
+            ("rc0 array", 0, [0], "[]"),
+            ("rc0 null", 0, [0], "null"),
+            ("rc0 true", 0, [0], "true"),
+            ("rc0 number", 0, [0], "1"),
+            ("rc0 string", 0, [0], '"ok"'),
+            ("declared rc2 array", 2, [0, 2], "[]"),
+            ("declared rc2 null", 2, [0, 2], "null"),
+        )
+        for name, rc, accepted, stdout in cases:
+            with self.subTest(name):
+                try:
+                    value, kind = ca.child_outcome(
+                        self._m(accepted_exit_codes=accepted),
+                        _completed(rc, stdout))
+                except Exception as exc:  # noqa: BLE001 - leak is the defect
+                    self.fail("non-object JSON leaked %s: %r" % (type(exc).__name__, exc))
+                self.assertIsNone(value)
+                self.assertEqual(kind, "parse-error")
+
 
 class ChildExitCallsites(unittest.TestCase):
     """One classifier, used before parse, at both outcome-child callsites."""
@@ -1664,7 +1685,7 @@ class ChildExitRunSemantics(unittest.TestCase):
         self.assertEqual(row["verdict"], "killed")
         self.assertIn("unexpected-exit", row["how"])
 
-    def test_text_and_json_name_the_failure_class_for_a_killed_mutant(self):
+    def _text_report(self, **fields):
         rep = {
             "schema": "corpus-adequacy.report.v0", "manifest": "m.json",
             "killed": 1, "survived": 0, "equivalent": 0,
@@ -1676,14 +1697,30 @@ class ChildExitRunSemantics(unittest.TestCase):
             "mutants": [{"group": "g", "verdict": "killed",
                          "label": "threshold", "how": "unexpected-exit"}],
         }
+        rep.update(fields)
         with mock.patch.object(ca, "run", return_value=rep), \
                 mock.patch.object(sys, "argv", ["corpus_adequacy.py", "m.json"]):
             buf = io.StringIO()
             with mock.patch("sys.stdout", buf):
                 rc = ca.main()
+        return rc, buf.getvalue()
+
+    def test_text_and_json_name_the_failure_class_for_a_killed_mutant(self):
+        rc, text = self._text_report(runner="process")
         self.assertEqual(rc, 0)
-        self.assertIn("unexpected-exit", buf.getvalue())
-        self.assertIn("killed", buf.getvalue())
+        self.assertIn("unexpected-exit", text)
+        self.assertIn("killed", text)
+
+    def test_module_killed_text_omits_the_how_line(self):
+        rc, text = self._text_report()
+        self.assertEqual(rc, 0)
+        self.assertIn("killed", text)
+        killed_lines = [ln for ln in text.splitlines() if "killed" in ln and "threshold" in ln]
+        self.assertTrue(killed_lines, text)
+        idx = text.splitlines().index(killed_lines[0])
+        following = text.splitlines()[idx + 1]
+        self.assertNotEqual(following.strip(), "unexpected-exit")
+        self.assertFalse(following.startswith("    "))
 
 
 if __name__ == "__main__":

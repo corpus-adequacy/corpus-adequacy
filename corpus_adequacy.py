@@ -458,6 +458,8 @@ def child_outcome(m: dict, completed: subprocess.CompletedProcess):
         doc = json.loads(completed.stdout)
     except Exception:  # noqa: BLE001 - unreadable output is a parse-error
         return None, "parse-error"
+    if not isinstance(doc, dict):
+        return None, "parse-error"
     keys = m["outcome_from"]
     keylist = keys if isinstance(keys, list) else [keys]
     m.setdefault("_outcome_keys_seen", set()).update(k for k in keylist if k in doc)
@@ -630,7 +632,7 @@ def _build(m: dict) -> tuple[bool, str]:
     return True, "built"
 
 
-def _batch_outcome(m: dict) -> tuple[dict, list[str]]:
+def _batch_outcome(m: dict) -> tuple[dict, dict[str, str]]:
     """Run the command ONCE over the whole corpus.
 
     Some corpora are consumed as a unit: the checker takes the vector file and
@@ -1170,7 +1172,8 @@ def main() -> int:
         print(format_tool_identity(rep))
         for r in rep["mutants"]:
             print("%-22s %-9s %s" % (r["group"], r["verdict"], r["label"]))
-            print("    %s" % r["how"])
+            if r["verdict"] != "killed" or rep.get("runner") in ("process", "batch"):
+                print("    %s" % r["how"])
         print()
         # Never a bare percentage. A score reported without its denominator and its
         # exclusions is a percentage target wearing a different coat: an author can
