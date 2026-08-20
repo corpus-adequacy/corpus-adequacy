@@ -405,7 +405,7 @@ def accepted_exit_codes(m: dict) -> list[int]:
     """One process/batch policy: unique nonnegative ints, plus parse rules.
 
     Default is [0]. Bools are excluded (JSON true is not exit 1). Signals are
-    never accepted. outcome_parse test-names is batch-only and requires 101.
+    never accepted. outcome_parse test-names requires 101.
     JSON outcome_from has no protocol ID, so extra codes such as 2 are declared
     explicitly. This repository ships no manifests and does not infer codes
     from a command name.
@@ -432,10 +432,6 @@ def accepted_exit_codes(m: dict) -> list[int]:
         seen.add(value)
         codes.append(value)
     if m.get("outcome_parse") == "test-names":
-        if m.get("runner") == "process":
-            raise ManifestError(
-                "outcome_parse test-names is implemented only for runner=batch, "
-                "not runner=process")
         if 101 not in seen:
             raise ManifestError(
                 "outcome_parse test-names requires accepted_exit_codes to include 101")
