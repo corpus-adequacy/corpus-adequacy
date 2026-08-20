@@ -74,7 +74,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -86,6 +85,7 @@ try:
     import fcntl                       # POSIX advisory locks
 except ImportError:                          # pragma: no cover - non-POSIX
     fcntl = None
+from collections import namedtuple
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -293,6 +293,8 @@ def load_manifest(path: Path) -> dict:
         m.setdefault("build_timeout", 1800)
         m.setdefault("vector_timeout", 120)
         m["accepted_exit_codes"] = accepted_exit_codes(m)
+    # One deadline per child, on every runner. The module runner has a child too.
+    m.setdefault("vector_timeout", 120)
     m.setdefault("mutants", {})
     m.setdefault("equivalent", {})
     require_shape(m["mutants"], dict, "mutants")
@@ -342,15 +344,6 @@ def load_manifest(path: Path) -> dict:
     return m
 
 
-def _load_module(source: str, tag: str, tmp: Path):
-    path = tmp / ("impl_%s.py" % tag)
-    path.write_text(source, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("adequacy_%s" % tag, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _acknowledged_holes(m: dict) -> dict:
     """Holes acknowledged against the DECLARED corpus digest.
 
@@ -376,17 +369,152 @@ def _group_of(v: dict, m: dict) -> str:
     return v[m["group_key"]] if m["group_key"] else m["default_group"]
 
 
-def _outcomes(fn, vectors: list[dict], m: dict) -> tuple[dict, list[str]]:
-    """(outcome per vector id, ids that raised). A raise is a behaviour change."""
-    outcomes, raised = {}, []
-    for v in vectors:
-        vid = v[m["id_key"]]
-        try:
-            outcomes[vid] = fn(*[v[k] for k in m["entrypoint_args"]])
-        except Exception:  # noqa: BLE001 - any raise is the signal, not an error
-            raised.append(vid)
-    return outcomes, raised
+# ---------------------------------------------------------------------------
+# module runner: the corpus runs in a disposable child, never in this process
+# ---------------------------------------------------------------------------
 
+MODULE_CHILD = Path(__file__).resolve().parent / "module_child.py"
+MODULE_CHILD_SCHEMA = "corpus-adequacy.module-child.v0"
+
+# Abnormal TERMINATION of the child, observed before a word of its output is
+# read. The unmutated run completed on these same vectors and this one did not,
+# so the harness distinguished the mutant, and that is a kill with the class
+# named. Everything else -- a child that exited 0 leaving nothing parseable, a
+# child that could not be started at all -- is a failure of the MEASUREMENT.
+# Reporting one of those as a kill would credit the corpus with catching
+# something it was never shown, which is the over-claim this tool exists to
+# find, one level up in its own implementation. Those become unproved, and an
+# unproved mutant already fails the run.
+TERMINATED_KINDS = frozenset({"timeout", "output-cap", "unexpected-exit", "signal"})
+
+_ModuleRun = namedtuple(
+    "_ModuleRun", "outcomes raised unsupported load_error entrypoint_missing abnormal")
+
+
+def _module_abnormal(kind: str) -> _ModuleRun:
+    """A child that did not report. Never an outcome, on any of the three roles."""
+    return _ModuleRun({}, [], [], None, False, kind)
+
+
+def child_module_result(raw: str, count: int):
+    """Validate the child's typed JSON before any of it becomes an outcome.
+
+    Same contract as child_outcome on the process path: anything the child did
+    not say EXACTLY is a kind, never a value. Empty output is the case that
+    decides whether this tool is honest, because a child that was killed, or
+    that called os._exit, leaves nothing behind -- and reading nothing as "no
+    outcome moved" reports a rule as covered on the strength of silence.
+    """
+    if not raw.strip():
+        return None, "no-result"
+    try:
+        doc = json.loads(raw)
+    except Exception:  # noqa: BLE001 - unreadable output is a parse-error
+        return None, "parse-error"
+    if not isinstance(doc, dict) or doc.get("schema") != MODULE_CHILD_SCHEMA:
+        return None, "parse-error"
+    # Outcome VALUES are the corpus's own and are not constrained here. Their
+    # keys, and the bookkeeping around them, are this protocol's business.
+    outcomes = doc.get("outcomes")
+    if not isinstance(outcomes, dict) or not all(type(k) is str for k in outcomes):
+        return None, "parse-error"
+    for key in ("raised", "unsupported"):
+        seq = doc.get(key)
+        if not isinstance(seq, list) or not all(type(x) is str for x in seq):
+            return None, "parse-error"
+    if doc.get("load_error") is not None and type(doc.get("load_error")) is not str:
+        return None, "parse-error"
+    if type(doc.get("entrypoint_missing")) is not bool:
+        return None, "parse-error"
+    seen = list(outcomes) + doc["raised"] + doc["unsupported"]
+    if not all(k.isascii() and k.isdigit() and str(int(k)) == k and int(k) < count
+               for k in seen):
+        return None, "parse-error"
+    index = [int(k) for k in seen]
+    if len(set(index)) != len(index):
+        return None, "parse-error"
+    if doc["load_error"] is None and not doc["entrypoint_missing"]:
+        # A child that ran accounts for every vector exactly once. Silence about
+        # a vector reads as "unchanged", which is a false survivor wearing the
+        # shape of a measurement.
+        if sorted(index) != list(range(count)):
+            return None, "parse-error"
+    return doc, None
+
+
+def _module_outcomes(m: dict, source: str, tag: str, vectors: list, tmp: Path) -> _ModuleRun:
+    """Load one variant of the implementation and collect its outcomes, in a child.
+
+    Corpus source -- mutated corpus source, at that -- is arbitrary code, and
+    every way that ends badly was observed on this runner while it ran here: an
+    endless mutant hung the tool with no report, SystemExit chose the tool's
+    exit code, os._exit(0) ended it at exit 0 with no report at all, a printing
+    mutant put 6.3 MB on the tool's own stdout, and a spawned descendant
+    outlived the run.
+
+    So the boundary is the one the process and batch runners already had, taken
+    through the same _run_capped rather than written a second time: one
+    deadline, one output ceiling, one POSIX process-group kill. Windows keeps
+    bounded_run's stated non-claim -- the direct child is killed, the process
+    tree is not.
+
+    WHAT THIS DOES AND DOES NOT CLAIM
+    ---------------------------------
+    Process isolation for a trusted-local corpus, not a sandbox. The child
+    inherits this process's filesystem, network, environment and credentials,
+    and nothing here bounds its memory or its descriptors.
+
+    The protocol channel is not authenticated either. Fd 1 is duplicated before
+    any corpus code runs and the original is pointed at stderr, which stops
+    accidental pollution; it does not stop a child that scans its descriptors,
+    finds the duplicate, and writes a well-formed payload of its choosing.
+
+    So the claim is narrower than "a misbehaving corpus cannot make this run
+    say something untrue", which is what an earlier draft of this docstring
+    said. What is claimed: the classes measured here -- direct-child timeout,
+    output-cap breach, abnormal termination and protocol failure -- are
+    fail-closed, so none can be read as a clean result. Same-user
+    parent signalling (e.g. kill(getppid())), session escape and
+    host resource exhaustion remain outside the process-isolation
+    claim. A corpus written to forge a verdict is also outside that
+    claim, and nothing in this file would detect one.
+    """
+    if not MODULE_CHILD.is_file():
+        raise ManifestError("the module child shim is missing: %s" % MODULE_CHILD)
+    request = tmp / ("request_%s.json" % tag)
+    request.write_text(json.dumps({
+        "source": source, "tag": tag, "work_dir": str(tmp),
+        "entrypoint": m["entrypoint"], "arg_keys": list(m["entrypoint_args"]),
+        "vectors": vectors,
+        "sys_path": [p for p in sys.path if isinstance(p, str)],
+    }), encoding="utf-8")
+    cmd = [sys.executable, str(MODULE_CHILD), str(request)]
+    try:
+        p = _run_capped(cmd, Path.cwd(), timeout=m["vector_timeout"])
+    except subprocess.TimeoutExpired:
+        return _module_abnormal("timeout")
+    except _OutputTooLarge:
+        return _module_abnormal("output-cap")
+    except OSError:
+        return _module_abnormal("incomplete")
+    # Classify the child before reading a word of its output, exactly as the
+    # process path does: a parseable report on a code we did not accept is not
+    # an outcome. The shim is ours, so the only accepted code is 0; the
+    # manifest's accepted_exit_codes describe the corpus's own checker.
+    kind = classify(p.returncode, [0])
+    if kind != "ok":
+        return _module_abnormal(kind)
+    doc, kind = child_module_result(p.stdout, len(vectors))
+    if kind:
+        return _module_abnormal(kind)
+    vids = [v[m["id_key"]] for v in vectors]
+    return _ModuleRun(
+        outcomes={vids[int(k)]: v for k, v in doc["outcomes"].items()},
+        raised=[vids[int(k)] for k in doc["raised"]],
+        unsupported=[vids[int(k)] for k in doc["unsupported"]],
+        load_error=doc["load_error"],
+        entrypoint_missing=doc["entrypoint_missing"],
+        abnormal=None)
 
 
 def classify(returncode, accepted) -> str:
@@ -933,10 +1061,8 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     # No denominator means no measurement. Printing 100% over zero is the same
     # defect as excluding everything and printing 100%. An unmutated or control
     # abnormality fail-closes the run: there is no adequacy score.
-    score = None if denom == 0 else round(100.0 * killed / denom, 1)
-    if (any(r.get("verdict") == "control-error" for r in results)
-            or any("UNMUTATED" in f for f in failures)):
-        score = None
+    score = _score_or_none(None if denom == 0 else round(100.0 * killed / denom, 1),
+                           results, failures)
     if unproved:
         failures.append("%d mutant(s) never ran, so this corpus was not measured against them"
                         % unproved)
@@ -982,21 +1108,34 @@ def run(manifest_path: Path) -> dict:
     unproved = known_holes = 0
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
-        base_mod = _load_module(source, "base", tmp)
-        base_fn = getattr(base_mod, m["entrypoint"], None)
-        if base_fn is None:
-            raise ManifestError("implementation has no entrypoint %r" % m["entrypoint"])
-
         for group in sorted(m["mutants"]):
             vectors = [v for v in all_vectors if _group_of(v, m) == group]
             if not vectors:
                 failures.append("%s: no vectors, so its mutants cannot be scored" % group)
                 continue
-            baseline, base_raised = _outcomes(base_fn, vectors, m)
-            if base_raised:
-                failures.append("%s: the UNMUTATED implementation raised on %s"
-                                % (group, base_raised))
+            base = _module_outcomes(m, source, "base", vectors, tmp)
+            if base.entrypoint_missing:
+                raise ManifestError("implementation has no entrypoint %r" % m["entrypoint"])
+            if base.load_error:
+                raise ManifestError("the implementation does not load: %s" % base.load_error)
+            # The unmutated run is what every other verdict in this group is
+            # measured against, so its child dying is not a result about any
+            # mutant. It invalidates the group and nulls the score.
+            if base.abnormal:
+                failures.append("%s: the UNMUTATED implementation could not be measured (%s)"
+                                % (group, base.abnormal))
                 continue
+            if base.unsupported:
+                failures.append(
+                    "%s: the UNMUTATED implementation returned outcomes this runner cannot "
+                    "transport on %s, so there is nothing for a mutant to be compared against"
+                    % (group, base.unsupported))
+                continue
+            if base.raised:
+                failures.append("%s: the UNMUTATED implementation raised on %s"
+                                % (group, base.raised))
+                continue
+            baseline = base.outcomes
 
             for idx, mut in enumerate(m["mutants"][group]):
                 occurrences = source.count(mut["anchor"])
@@ -1015,22 +1154,50 @@ def run(manifest_path: Path) -> dict:
                     continue
                 scope = mut.get("scope", "declared")
                 mutated = source.replace(mut["anchor"], mut["replacement"], 1)
-                try:
-                    mod = _load_module(mutated, "%s_%d" % (group.replace("-", "_"), idx), tmp)
-                    fn = getattr(mod, m["entrypoint"])
-                except Exception as exc:  # noqa: BLE001
+                res = _module_outcomes(m, mutated,
+                                       "%s_%d" % (group.replace("-", "_"), idx), vectors, tmp)
+                if res.load_error or res.entrypoint_missing:
                     # A mutant that never loaded was never shown to the corpus, so the
                     # corpus said nothing about it. Counting that as a kill lets a typo
                     # in the substitution print as "rule covered". The same argument
                     # rules out treating a Rust build failure as a kill; measure a
                     # load-bearing rule with a variant that RUNS, or declare it equivalent.
+                    detail = res.load_error or ("no entrypoint %r" % m["entrypoint"])
                     results.append({"group": group, "label": mut["label"],
                                     "verdict": "unproved", "scope": scope, "moved": 0,
                                     "how": "the mutant does not load, so the corpus never "
-                                           "saw it and said nothing about this rule: %r" % (exc,)})
+                                           "saw it and said nothing about this rule: %s" % detail})
                     unproved += 1
                     continue
-                out, raised = _outcomes(fn, vectors, m)
+                if res.abnormal or res.unsupported:
+                    kind = res.abnormal or "unsupported-outcome"
+                    if mut.get("control"):
+                        # The control is what proves the harness detects anything, so
+                        # its child dying is not a kill. It leaves the run with no score.
+                        results.append({"group": group, "label": mut["label"],
+                                        "verdict": "control-error", "scope": scope,
+                                        "moved": 0, "how": kind})
+                        failures.append(
+                            "control %r ended abnormally (%s); that is not a kill and "
+                            "this run has no adequacy score" % (mut["label"], kind))
+                        continue
+                    if kind in TERMINATED_KINDS:
+                        # Observed termination: the unmutated run completed on these
+                        # same vectors and this one did not.
+                        results.append({"group": group, "label": mut["label"],
+                                        "verdict": "killed", "scope": scope, "moved": 0,
+                                        "how": kind})
+                        killed += 1
+                        continue
+                    results.append({
+                        "group": group, "label": mut["label"], "verdict": "unproved",
+                        "scope": scope, "moved": 0,
+                        "how": "the measurement did not complete (%s), so the corpus was "
+                               "never shown this mutant and said nothing about this rule" % kind})
+                    unproved += 1
+                    continue
+                out = res.outcomes
+                raised = list(res.raised)
                 moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
                 if mut.get("control"):
                     ok = bool(raised or moved)
@@ -1096,7 +1263,8 @@ def run(manifest_path: Path) -> dict:
                         "them; an acknowledgement pointing at nothing hides the next regression"
                         % sorted("%s (now %s)" % kv for kv in linger.items()))
     denom = killed + survived
-    score = None if denom == 0 else round(100.0 * killed / denom, 1)
+    score = _score_or_none(None if denom == 0 else round(100.0 * killed / denom, 1),
+                           results, failures)
     if unproved:
         # Not a soft warning: an unproved mutant means the measurement did not happen,
         # and a score computed over the rest reports more than the run established.
@@ -1147,6 +1315,21 @@ def null_result_reading(known_holes, equivalent, out_of_scope):
     return ("no non-equivalent mutants were scored, so no adequacy was measured. "
             "Declare the rules the implementation actually has; an empty declaration "
             "measures nothing and says nothing")
+
+
+def _score_or_none(score, results: list, failures: list):
+    """A run whose own harness or unmutated baseline failed has no score.
+
+    One function because it was two. The process path nulled the score on a
+    control-error or a failed UNMUTATED run; the module path did not, so the
+    same abnormality was a refusal on one runner and a printed percentage on
+    the other. That is the defect structural_failures already describes one
+    level up, in the arithmetic instead of in the guards.
+    """
+    if (any(r.get("verdict") == "control-error" for r in results)
+            or any("UNMUTATED" in f for f in failures)):
+        return None
+    return score
 
 
 def structural_failures(m: dict, groups_in_corpus: set) -> list:

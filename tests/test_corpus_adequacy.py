@@ -15,9 +15,11 @@ import inspect
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -1753,6 +1755,386 @@ class ChildExitRunSemantics(unittest.TestCase):
         following = text.splitlines()[idx + 1]
         self.assertNotEqual(following.strip(), "unexpected-exit")
         self.assertFalse(following.startswith("    "))
+
+
+# ---------------------------------------------------------------------------
+# module runner: the corpus runs in a disposable child, never in this process
+# ---------------------------------------------------------------------------
+
+HOSTILE_IMPL = '''
+def evaluate(group, inputs):
+    if inputs.get("bad"):
+        return "rejected"
+    return "ok"
+'''
+
+
+def _hostile_manifest(tmp: Path, body: str, label="hostile", extra=None) -> Path:
+    """A module corpus whose one scored mutant replaces the first rule's body.
+
+    `body` is re-indented to the anchor's column, so it may be several
+    statements. The control is carried like any real corpus.
+    """
+    (tmp / "impl.py").write_text(HOSTILE_IMPL)
+    (tmp / "vectors.json").write_text(json.dumps(VECTORS))
+    m = {"schema": ca.SCHEMA, "implementation": "impl.py", "entrypoint": "evaluate",
+         "vectors": "vectors.json", "group_key": "axis", "id_key": "vector_id",
+         "inputs_key": "inputs",
+         "mutants": {"a": [{"label": label, "anchor": 'return "rejected"',
+                            "replacement": "\n        ".join(body.strip().splitlines())},
+                           dict(CONTROL, label="CONTROL [a]")]}}
+    if extra:
+        m.update(extra)
+    p = tmp / "m.json"
+    p.write_text(json.dumps(m))
+    return p
+
+
+def _tool_json(manifest: Path, timeout: float):
+    """Run the tool as CI does. A hostile mutant that reaches the measuring
+    process can end or hang it, and a suite that vanishes reads like
+    infrastructure trouble rather than a lost boundary."""
+    r = subprocess.run([sys.executable, str(ca.__file__), str(manifest), "--json"],
+                       capture_output=True, timeout=timeout)
+    try:
+        rep = json.loads(r.stdout.decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 - absence of a report is the assertion
+        rep = None
+    return r, rep
+
+
+def _verdict(rep: dict, label: str) -> dict:
+    return next(r for r in rep["mutants"] if r["label"] == label)
+
+
+class ModuleCorpusRunsInAChild(unittest.TestCase):
+    """The ways a module mutant reached the tool itself, each reproduced on
+    this runner before the boundary existed. _module_outcomes names them."""
+
+    def test_a_mutant_that_never_returns_is_bounded_and_killed(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = _hostile_manifest(Path(d), "while True:\n    pass", "endless",
+                                  extra={"vector_timeout": 3})
+            started = time.monotonic()
+            r, rep = _tool_json(p, timeout=90)
+            elapsed = time.monotonic() - started
+        self.assertIsNotNone(rep, r.stderr[-400:])
+        self.assertLess(elapsed, 60, "the deadline did not bound the child")
+        self.assertEqual(_verdict(rep, "endless")["how"], "timeout")
+        self.assertEqual(_verdict(rep, "endless")["verdict"], "killed")
+
+    def test_systemexit_from_the_entrypoint_does_not_end_the_tool(self):
+        # SystemExit escapes collect(), terminates the child, and the parent
+        # sees unexpected-exit. The parent is alive with a parseable report.
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(_hostile_manifest(Path(d), "raise SystemExit(9)", "systemexit"))
+        v = _verdict(rep, "systemexit")
+        self.assertEqual(v["verdict"], "killed")
+        self.assertEqual(v["how"], "unexpected-exit")
+
+    def test_os_exit_leaves_the_tool_standing_and_the_rule_unproved(self):
+        # The worst of them: exit 0 with no report is what a CI gate reads as
+        # "the adequacy check passed". Exit 0 with nothing parseable is a failed
+        # measurement, not a rule the corpus caught, so it is unproved.
+        with tempfile.TemporaryDirectory() as d:
+            p = _hostile_manifest(Path(d), '__import__("os")._exit(0)', "os_exit")
+            r, rep = _tool_json(p, timeout=90)
+        self.assertIsNotNone(rep, "the tool produced no report at all")
+        self.assertEqual(_verdict(rep, "os_exit")["verdict"], "unproved")
+        self.assertIn("no-result", _verdict(rep, "os_exit")["how"])
+        self.assertFalse(rep["adequate"])
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_flooding_mutant_is_bounded_and_still_leaves_a_report(self):
+        body = 'for _i in range(5):\n    print("F" * (1 << 20))\nreturn "rejected"'
+        with tempfile.TemporaryDirectory() as d:
+            p = _hostile_manifest(Path(d), body, "flood")
+            r, rep = _tool_json(p, timeout=180)
+        self.assertLess(len(r.stdout), 1 << 20, "the mutant's output reached the tool's stdout")
+        self.assertIsNotNone(rep, "the flood displaced the report")
+        self.assertEqual(_verdict(rep, "flood")["how"], "output-cap")
+        self.assertEqual(_verdict(rep, "flood")["verdict"], "killed")
+
+    def test_candidate_writes_are_not_false_kills(self):
+        # A mutant that only writes changes no outcome, and scoring it a kill
+        # inflates the number exactly as a missed rule deflates it. print() a
+        # Python-level redirect would catch; the fd 1 write it would not, which
+        # is why fd 1 is pointed at the bounded stderr before any corpus runs.
+        for label, write in (("chatty", 'print("chatty")'),
+                             ("fd1", 'import os as _o\n_o.write(1, b"pollution")')):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as d:
+                rep = ca.run(_hostile_manifest(
+                    Path(d), '%s\nreturn "rejected"' % write, label))
+                self.assertEqual(_verdict(rep, label)["verdict"], "survived")
+
+    # Keyed on the platform, not on _posix_process_group(): a guard that asks the
+    # code under test whether to run cannot catch that code being removed.
+    @unittest.skipUnless(os.name == "posix",
+                         "process-group cleanup is POSIX; Windows keeps the process-tree nonclaim")
+    def test_a_descendant_does_not_outlive_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = Path(d) / "descendant.pid"
+            child = ("import os, sys, time\n"
+                     "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+                     "time.sleep(300)\n")
+            body = ('import subprocess as _s, sys as _y, time as _t\n'
+                    '_s.Popen([_y.executable, "-c", %r, %r],\n'
+                    '         stdout=_s.DEVNULL, stderr=_s.DEVNULL)\n'
+                    '_t.sleep(0.5)\n'
+                    'return "rejected"' % (child, str(pidfile)))
+            ca.run(_hostile_manifest(Path(d), body, "spawner"))
+            self.assertTrue(pidfile.is_file(), "the fixture never spawned a descendant")
+            pid = int(pidfile.read_text())
+            alive = self._alive(pid)
+            if alive:
+                os.kill(pid, signal.SIGKILL)
+        self.assertFalse(alive, "descendant %d outlived the run" % pid)
+
+    @staticmethod
+    def _alive(pid: int) -> bool:
+        for _ in range(20):
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return False
+            time.sleep(0.05)
+        return True
+
+
+class _NthChild:
+    """Stand in for the nth _run_capped call; run the real one for the rest."""
+
+    def __init__(self, n, exc=None, returncode=None, stdout=""):
+        self.real = ca._run_capped
+        self.n, self.exc, self.returncode, self.stdout = n, exc, returncode, stdout
+        self.calls = 0
+
+    def __call__(self, cmd, cwd, timeout):
+        self.calls += 1
+        if self.calls != self.n:
+            return self.real(cmd, cwd, timeout)
+        if self.exc is not None:
+            raise self.exc
+        return subprocess.CompletedProcess(cmd, self.returncode, self.stdout, "")
+
+
+# The child terminated abnormally, and we know that before reading its output.
+TERMINATED = (("timeout", dict(exc=subprocess.TimeoutExpired(["x"], 1))),
+              ("output-cap", dict(exc=br._OutputTooLarge())),
+              ("unexpected-exit", dict(returncode=3)),
+              ("signal", dict(returncode=-9)))
+# The child was never started, or exited cleanly leaving nothing usable.
+UNMEASURED = (("incomplete", dict(exc=OSError("no child"))),
+              ("no-result", dict(returncode=0, stdout="")),
+              ("parse-error", dict(returncode=0, stdout="{")))
+
+
+class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
+    """Which role the dead child belonged to decides what may be said.
+
+    Observed termination of a scored mutant is a named kill. A measurement that
+    merely failed is unproved, because crediting the corpus with a catch it was
+    never shown is the over-claim this tool exists to find. The unmutated run
+    and the control are what every other verdict rests on.
+    """
+
+    def _run(self, nth, kw):
+        with tempfile.TemporaryDirectory() as d:
+            p = _hostile_manifest(Path(d), 'return "REJECTED"', "scored")
+            with mock.patch.object(ca, "_run_capped", _NthChild(nth, **kw)):
+                return ca.run(p)
+
+    def test_observed_termination_of_a_mutant_child_is_a_named_kill(self):
+        for kind, kw in TERMINATED:
+            with self.subTest(kind=kind):
+                rep = self._run(2, kw)
+                v = _verdict(rep, "scored")
+                self.assertEqual((v["verdict"], v["how"], v["moved"]), ("killed", kind, 0))
+
+    def test_a_failed_measurement_is_unproved_and_never_a_kill(self):
+        for kind, kw in UNMEASURED:
+            with self.subTest(kind=kind):
+                rep = self._run(2, kw)
+                v = _verdict(rep, "scored")
+                self.assertEqual(v["verdict"], "unproved")
+                self.assertIn(kind, v["how"])
+                self.assertEqual((rep["killed"], rep["survived"]), (0, 0))
+                self.assertFalse(rep["adequate"])
+
+    def test_a_parseable_report_on_an_unaccepted_code_is_not_parsed(self):
+        # Classify before parse. This payload says both vectors are unchanged,
+        # so parsing it would report a survivor; the exit code says the child
+        # did not finish, and that is what the verdict must come from.
+        payload = json.dumps({"schema": ca.MODULE_CHILD_SCHEMA,
+                              "outcomes": {"0": "rejected", "1": "ok"},
+                              "raised": [], "unsupported": [],
+                              "load_error": None, "entrypoint_missing": False})
+        rep = self._run(2, dict(returncode=7, stdout=payload))
+        v = _verdict(rep, "scored")
+        self.assertEqual((v["verdict"], v["how"]), ("killed", "unexpected-exit"))
+
+    def test_a_child_that_reported_only_some_vectors_is_not_a_measurement(self):
+        # Silence about a vector reads as "unchanged", so a partial report makes
+        # a mutant that moved the missing vector look like a survivor.
+        partial = json.dumps({"schema": ca.MODULE_CHILD_SCHEMA,
+                              "outcomes": {"0": "rejected"}, "raised": [],
+                              "unsupported": [], "load_error": None,
+                              "entrypoint_missing": False})
+        rep = self._run(2, dict(returncode=0, stdout=partial))
+        v = _verdict(rep, "scored")
+        self.assertEqual(v["verdict"], "unproved")
+        self.assertIn("parse-error", v["how"])
+        self.assertEqual(rep["survived"], 0)
+
+    def test_a_dead_unmutated_child_invalidates_the_run(self):
+        for kind, kw in TERMINATED + UNMEASURED:
+            with self.subTest(kind=kind):
+                rep = self._run(1, kw)
+                self.assertIsNone(rep["score_percent"])
+                self.assertFalse(rep["adequate"])
+                self.assertTrue(any("UNMUTATED" in f and kind in f for f in rep["failures"]),
+                                rep["failures"])
+                self.assertEqual(rep["killed"], 0)
+
+    def test_a_dead_control_child_invalidates_the_run(self):
+        for kind, kw in TERMINATED + UNMEASURED:
+            with self.subTest(kind=kind):
+                rep = self._run(3, kw)
+                self.assertIsNone(rep["score_percent"])
+                self.assertFalse(rep["adequate"])
+                self.assertEqual(_verdict(rep, "CONTROL [a]")["verdict"], "control-error")
+                self.assertTrue(any("control" in f and "abnormally" in f
+                                    for f in rep["failures"]), rep["failures"])
+
+    def test_systemexit_in_a_control_is_control_error_not_control_killed(self):
+        """SystemExit is process-control, not an application error. collect()
+        catches Exception only, so SystemExit escapes, terminates the child,
+        and the parent sees unexpected-exit → control-error. The score is
+        invalid because the control measurement failed.
+        """
+        ctrl = {"label": "CONTROL systemexit", "control": True,
+                "anchor": 'def evaluate(group, inputs):',
+                "replacement": 'def evaluate(group, inputs):\n    raise SystemExit(42)'}
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, ctrl]}, control=False))
+        v = _verdict(rep, "CONTROL systemexit")
+        self.assertEqual(v["verdict"], "control-error")
+        self.assertIn("unexpected-exit", v["how"])
+        self.assertFalse(rep["adequate"])
+        self.assertIsNone(rep["score_percent"])
+
+    def test_an_outcome_the_transport_cannot_carry_is_unproved(self):
+        # Not a new type system: whatever JSON carries is compared, and a value
+        # it cannot carry is declined rather than guessed at.
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(_hostile_manifest(Path(d), "return object()", "unsupported"))
+        v = _verdict(rep, "unsupported")
+        self.assertEqual(v["verdict"], "unproved")
+        self.assertIn("unsupported-outcome", v["how"])
+        self.assertFalse(rep["adequate"])
+
+class MutableOutcomeIsNotAFalseKill(unittest.TestCase):
+    """F2: without snapshot, a mutable alias becomes unserialisable and the
+    child crashes.  The parent sees unexpected-exit → killed: a false clean.
+
+    With snapshot the baseline and mutant outcomes are identical JSON values,
+    so the mutant survives and the corpus is correctly inadequate.
+    """
+
+    # Baseline: bad=True → return [] (fresh list); bad=False → append object()
+    # to _shared then return "ok".
+    # Mutant: replaces `return []` with `return _shared`.  At call time both
+    # return [], but the mutant's stored reference is _shared itself.  The
+    # second vector appends object() to _shared.  Without snapshot, emit()
+    # crashes on the now-corrupt entry.
+    _IMPL = (
+        '_shared = []\n'
+        'def evaluate(group, inputs):\n'
+        '    if inputs.get("bad"):\n'
+        '        return []\n'
+        '    _shared.append(object())\n'
+        '    return "ok"\n'
+    )
+    _VECTORS = {"vectors": [
+        {"vector_id": "v1", "axis": "a", "inputs": {"bad": True}},
+        {"vector_id": "v2", "axis": "a", "inputs": {}},
+    ]}
+
+    def _run(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "impl.py").write_text(self._IMPL)
+            (tmp / "vectors.json").write_text(json.dumps(self._VECTORS))
+            m = {"schema": ca.SCHEMA, "implementation": "impl.py",
+                 "entrypoint": "evaluate", "vectors": "vectors.json",
+                 "group_key": "axis", "id_key": "vector_id",
+                 "inputs_key": "inputs",
+                 "mutants": {"a": [
+                     {"label": "alias",
+                      "anchor": 'return []',
+                      "replacement": 'return _shared'},
+                     dict(CONTROL, label="CONTROL [a]"),
+                 ]}}
+            p = tmp / "m.json"
+            p.write_text(json.dumps(m))
+            return ca.run(p)
+
+    def test_mutable_alias_survives_not_false_killed(self):
+        rep = self._run()
+        v = _verdict(rep, "alias")
+        self.assertEqual(v["verdict"], "survived")
+        self.assertNotEqual(v.get("how"), "unexpected-exit")
+        self.assertFalse(rep["adequate"])
+
+
+class IsolationClaimScope(unittest.TestCase):
+    """The public and internal claims must not overstate the isolation boundary.
+
+    A same-user child can kill(getppid(), SIGKILL) and end the controller with
+    no report, so neither surface may claim survival of arbitrary child
+    behaviour. The measured classes are timeout, output-cap, abnormal
+    termination and protocol failure; everything else is an explicit non-claim.
+    """
+
+    _root = Path(__file__).resolve().parent.parent
+    _surfaces = {
+        "readme": (_root / "README.md").read_text(encoding="utf-8"),
+        "docstring": inspect.getsource(ca._module_outcomes),
+    }
+
+    # (phrase, should_be_present) -- absence guards the overclaim,
+    # presence guards each explicit non-claim.
+    _contract = [
+        ("survives whatever", False),
+        ("parent signalling", True),
+        ("session escape", True),
+        ("host resource exhaustion", True),
+    ]
+
+    def test_readme_describes_role_sensitive_failure_semantics(self):
+        """The README must not say abnormal children 'fail closed instead of
+        scoring' as a blanket claim. The actual semantics are role-sensitive:
+        ordinary-mutant abnormal termination is a named kill, unusable
+        protocol is unproved, baseline/control failure invalidates score.
+        """
+        readme = self._surfaces["readme"]
+        # The old blanket phrasing must be gone.
+        self.assertNotIn("fails closed instead of scoring", readme,
+                         "README still uses the blanket 'fails closed instead of scoring' "
+                         "which does not distinguish roles")
+        # Role-sensitive wording must be present.
+        self.assertIn("named kill", readme)
+        self.assertIn("unproved", readme)
+        self.assertIn("invalidates the score", readme)
+
+    def test_isolation_claim_contract(self):
+        for phrase, present in self._contract:
+            for name, text in self._surfaces.items():
+                with self.subTest(phrase=phrase, surface=name):
+                    if present:
+                        self.assertIn(phrase, text)
+                    else:
+                        self.assertNotIn(phrase, text)
 
 
 if __name__ == "__main__":
