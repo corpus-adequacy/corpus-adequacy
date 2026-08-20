@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
-import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -21,58 +21,142 @@ from pathlib import Path
 # rather than after it exits.
 OUTPUT_CAP_BYTES = 4 * 1024 * 1024
 
+# One fixed read size. Combined bytes held in memory stay at most
+# OUTPUT_CAP_BYTES + READ_CHUNK_BYTES: the crossing chunk is retained, then the
+# child boundary is killed. This is the documented read margin, not a second
+# cap and not a scheduling exception.
+READ_CHUNK_BYTES = 64 * 1024
+
 
 class _OutputTooLarge(Exception):
     """A child exceeded OUTPUT_CAP_BYTES; its output is not materialized."""
 
 
+def _posix_process_group() -> bool:
+    return hasattr(os, "killpg") and hasattr(os, "setsid")
+
+
 def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess:
     """subprocess.run with a ceiling on how much output is ever held.
 
-    Streams both pipes to temporary files, polls their combined size while the
-    child runs, and kills it the moment the cap is crossed. Only the first
-    OUTPUT_CAP_BYTES are ever read into memory.
+    Drains stdout and stderr concurrently through pipes. One locked counter
+    charges every chunk. Combined retained bytes never exceed
+    OUTPUT_CAP_BYTES + READ_CHUNK_BYTES. Crossing the cap kills the POSIX
+    process group (Windows: the direct child only) and raises
+    _OutputTooLarge. Timeout remains TimeoutExpired. No temporary output
+    files are used.
     """
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        # A descendant that inherits stdout/stderr keeps writing after proc.kill()
-        # and walks straight through the ceiling, so the child leads its own session
-        # and the whole group is stopped and reaped.
-        proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=out, stderr=err,
-                                start_new_session=True)
+    cap = OUTPUT_CAP_BYTES
+    posix = _posix_process_group()
+    kwargs = {
+        "cwd": str(cwd),
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    if posix:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **kwargs)
+    pgid = proc.pid
 
-        def _kill_tree() -> None:
+    lock = threading.Lock()
+    stop = threading.Event()
+    total = 0
+    overflow = False
+    timed_out = False
+    killed = False
+    chunks = {1: [], 2: []}
+    reader_error: list[BaseException] = []
+
+    def kill_boundary() -> None:
+        nonlocal killed
+        with lock:
+            if killed:
+                return
+            killed = True
+        if posix:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                os.killpg(pgid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
-                proc.kill()
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+        else:
             try:
-                proc.wait(timeout=10)
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def charge(which: int, data: bytes) -> None:
+        nonlocal total, overflow
+        with lock:
+            if overflow:
+                return
+            chunks[which].append(data)
+            total += len(data)
+            if total > cap:
+                overflow = True
+                stop.set()
+
+    def reader(stream, which: int) -> None:
+        try:
+            while not stop.is_set():
+                data = stream.read(READ_CHUNK_BYTES)
+                if not data:
+                    break
+                charge(which, data)
+                if overflow:
+                    kill_boundary()
+                    break
+        except Exception as exc:  # noqa: BLE001 - surface after join
+            reader_error.append(exc)
+            stop.set()
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    threads = (
+        threading.Thread(target=reader, args=(proc.stdout, 1)),
+        threading.Thread(target=reader, args=(proc.stderr, 2)),
+    )
+    for thread in threads:
+        thread.start()
+
+    deadline = time.monotonic() + timeout
+    try:
+        while proc.poll() is None:
+            if overflow:
+                kill_boundary()
+                break
+            if time.monotonic() > deadline:
+                timed_out = True
+                kill_boundary()
+                break
+            try:
+                proc.wait(timeout=0.05)
+                break
             except subprocess.TimeoutExpired:
                 pass
-        deadline = time.monotonic() + timeout
-        try:
-            while True:
-                try:
-                    proc.wait(timeout=0.25)
-                    break
-                except subprocess.TimeoutExpired:
-                    pass
-                if out.tell() + err.tell() > OUTPUT_CAP_BYTES:
-                    _kill_tree()
-                    raise _OutputTooLarge()
-                if time.monotonic() > deadline:
-                    _kill_tree()
-                    raise subprocess.TimeoutExpired(cmd, timeout)
-        finally:
-            # Reap the group even on the clean path: the leader can exit while a
-            # descendant it spawned is still holding the inherited handles.
-            _kill_tree()
-        if out.tell() + err.tell() > OUTPUT_CAP_BYTES:
-            raise _OutputTooLarge()
-        out.seek(0)
-        err.seek(0)
-        return subprocess.CompletedProcess(
-            cmd, proc.returncode,
-            out.read(OUTPUT_CAP_BYTES).decode("utf-8", "replace"),
-            err.read(OUTPUT_CAP_BYTES).decode("utf-8", "replace"),
-        )
+    finally:
+        stop.set()
+        kill_boundary()
+        for thread in threads:
+            thread.join(timeout=10)
+
+    if overflow:
+        raise _OutputTooLarge()
+    if timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    if reader_error:
+        raise reader_error[0]
+    stdout_text = b"".join(chunks[1]).decode("utf-8", "replace")
+    stderr_text = b"".join(chunks[2]).decode("utf-8", "replace")
+    return subprocess.CompletedProcess(
+        cmd, proc.returncode, stdout_text, stderr_text
+    )
