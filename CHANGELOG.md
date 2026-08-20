@@ -8,6 +8,10 @@ mutation starts. Acknowledgement, orphan, and stale-hole checks use the same
 label identity. Malformed or empty labels now produce a controlled manifest
 error instead of an unhandled hash-key exception.
 
+Process and batch manifests now reject declared source paths that resolve
+outside `repo_root`, including symlink escapes. Source-guard documentation now
+states its abrupt-termination limit explicitly.
+
 ## 0.1.0 — 2026-08-19
 
 First named release of the extracted tool.

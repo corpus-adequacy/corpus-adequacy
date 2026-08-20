@@ -352,6 +352,52 @@ class BatchRunner(unittest.TestCase):
         self.assertTrue(any("UNMUTATED" in f for f in rep["failures"]), rep["failures"])
 
 
+class ProcessSourceContainment(unittest.TestCase):
+    def test_a_symlinked_source_outside_repo_root_is_refused_before_mutation(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            repo = tmp / "repo"
+            repo.mkdir()
+            outside = tmp / "outside.py"
+            outside.write_text("RULE = True\n")
+            before = outside.read_bytes()
+            link = repo / "linked.py"
+            link.symlink_to(outside)
+
+            manifest = BatchRunner()._corpus(tmp)
+            raw = json.loads(manifest.read_text())
+            raw["repo_root"] = "repo"
+            raw["implementation_sources"] = ["repo/linked.py"]
+            manifest.write_text(json.dumps(raw))
+
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(manifest)
+
+            self.assertEqual(outside.read_bytes(), before)
+        self.assertIn("outside repo_root", str(cm.exception))
+        self.assertIn("linked.py", str(cm.exception))
+
+    def test_a_symlinked_source_inside_repo_root_remains_valid(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            repo = tmp / "repo"
+            repo.mkdir()
+            target = repo / "target.py"
+            target.write_text("RULE = True\n")
+            link = repo / "linked.py"
+            link.symlink_to(target)
+
+            manifest = BatchRunner()._corpus(tmp)
+            raw = json.loads(manifest.read_text())
+            raw["repo_root"] = "repo"
+            raw["implementation_sources"] = ["repo/linked.py"]
+            manifest.write_text(json.dumps(raw))
+
+            loaded = ca.load_manifest(manifest)
+
+        self.assertEqual(loaded["_source_paths"], [target.resolve()])
+
+
 class Guards(unittest.TestCase):
     def test_a_group_in_the_corpus_with_no_mutants_is_a_hard_failure(self):
         v = {"vectors": VECTORS["vectors"] + [

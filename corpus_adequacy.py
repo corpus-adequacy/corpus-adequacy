@@ -224,13 +224,22 @@ def load_manifest(path: Path) -> dict:
         if m["runner"] == "process":
             _req(m, "build", "manifest (runner=process)")
         m.setdefault("build", [])
-        srcs = m.get("implementation_sources") or [m["implementation"]]
-        m["_source_paths"] = [(base / x).resolve() for x in srcs]
-        for sp in m["_source_paths"]:
-            if not sp.is_file():
-                raise ManifestError("implementation source not found: %s" % sp)
         m.setdefault("repo_root", ".")
         m["_repo_root"] = (base / m["repo_root"]).resolve()
+        srcs = m.get("implementation_sources") or [m["implementation"]]
+        m["_source_paths"] = []
+        for source in srcs:
+            declared = base / source
+            sp = declared.resolve()
+            if not sp.is_file():
+                raise ManifestError("implementation source not found: %s" % sp)
+            try:
+                sp.relative_to(m["_repo_root"])
+            except ValueError:
+                raise ManifestError(
+                    "implementation source %s resolves outside repo_root %s"
+                    % (declared, m["_repo_root"]))
+            m["_source_paths"].append(sp)
         m.setdefault("vector_path_key", "path")
         m.setdefault("build_timeout", 1800)
         m.setdefault("vector_timeout", 120)
@@ -384,11 +393,12 @@ class _TreeLock:
 
 
 class _SourceGuard:
-    """Restores every mutated source file, including on crash.
+    """Restores every mutated source file while this Python process can unwind.
 
-    The adapter edits files in the working tree. A restore that only happens on
-    the happy path leaks a mutant into a commit, so the originals are captured
-    up front and rewritten in a finally block.
+    The adapter edits files in the working tree. The originals are captured up
+    front and rewritten in a finally block, covering normal return and ordinary
+    Python exceptions. SIGKILL, power loss, and host termination cannot run that
+    finally block, so this guard is not durable crash recovery.
     """
 
     def __init__(self, paths: list[Path], repo_root: Path | None = None) -> None:

@@ -79,6 +79,12 @@ exclusions, and what the percentage is a percentage of.
 reporting a bare boolean makes every mutant kill everything or nothing. That
 limitation belongs to the corpus and the tool says so rather than hiding it.
 
+`process` and `batch` currently mutate declared sources in place. The source
+guard restores them after normal completion and ordinary Python exceptions; it
+cannot restore after `SIGKILL`, power loss, or host termination. Until those
+runners use an isolated disposable checkout, run them only in a clean,
+disposable checkout. Resolved source paths outside `repo_root` are refused.
+
 ## Exclusion categories, and why each one is narrow
 
 | Category | Means |
