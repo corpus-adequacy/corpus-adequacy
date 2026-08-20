@@ -37,10 +37,12 @@ NO_ADDRESSABILITY_PHRASE = (
 def check_version_release_truth(root: Path) -> str:
     """One rule: version/release truth for a checkout.
 
-    1. ast.parse corpus_adequacy.py; exactly one top-level simple Assign
-       to Name('VERSION') with a strict-semver string, and exactly one
-       Name VERSION with Store or Del in the whole AST. Import aliases
-       that bind VERSION are refused.
+    1. ast.parse corpus_adequacy.py. One binding collector lists every
+       syntactic VERSION binding (Name Store/Del, def/class name,
+       arguments, except-as, import/from-import, match name/rest).
+       from-import * is unknown and refused. Exactly one VERSION
+       binding, and it is the direct top-level simple Assign. This
+       does not exec the module or prove globals()/exec reflection.
     2. CHANGELOG has exactly one Unreleased heading and exactly one dated
        heading for that VERSION (real ISO calendar date).
     3. Docs name the tag schema, the cut order, and the no-addressability
@@ -65,48 +67,98 @@ def check_version_release_truth(root: Path) -> str:
     return version
 
 
+class _BindingCollector(ast.NodeVisitor):
+    """Syntactic binding names. Does not exec or inspect runtime globals."""
+
+    def __init__(self):
+        self.names: list[str] = []
+        self.star_import = False
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.names.append(node.id)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.names.append(node.name)
+        self._bind_arguments(node.args)
+        self.generic_visit(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.names.append(node.name)
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name:
+            self.names.append(node.name)
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            if alias.asname:
+                self.names.append(alias.asname)
+            else:
+                self.names.append(alias.name.split(".")[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name == "*":
+                self.star_import = True
+                continue
+            self.names.append(alias.asname or alias.name)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        if node.name:
+            self.names.append(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        if node.name:
+            self.names.append(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        if node.rest:
+            self.names.append(node.rest)
+        self.generic_visit(node)
+
+    def _bind_arguments(self, args: ast.arguments) -> None:
+        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+            self.names.append(arg.arg)
+        if args.vararg:
+            self.names.append(args.vararg.arg)
+        if args.kwarg:
+            self.names.append(args.kwarg.arg)
+
+
 def _parse_version_text(source: str) -> str:
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
         raise ValueError("corpus_adequacy.py is not parseable: %s" % exc) from exc
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                if (alias.asname or alias.name) == "VERSION":
-                    raise ValueError("VERSION is bound by an import")
-    stores = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Name)
-        and node.id == "VERSION"
-        and isinstance(node.ctx, (ast.Store, ast.Del))
-    ]
-    if len(stores) != 1:
+    collector = _BindingCollector()
+    collector.visit(tree)
+    if collector.star_import:
+        raise ValueError("from-import * leaves VERSION unknown")
+    if collector.names.count("VERSION") != 1:
         raise ValueError(
-            "need exactly one VERSION Store or Del in the AST, found %d"
-            % len(stores)
+            "need exactly one VERSION binding, found %d"
+            % collector.names.count("VERSION")
         )
-    assignments = []
+    assignment = None
     for node in tree.body:
-        if isinstance(node, ast.AnnAssign):
-            target = node.target
-            if isinstance(target, ast.Name) and target.id == "VERSION":
-                raise ValueError("VERSION must be an Assign, not an AnnAssign")
-            continue
-        if not isinstance(node, ast.Assign):
-            continue
-        if len(node.targets) != 1:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
         if isinstance(target, ast.Name) and target.id == "VERSION":
-            assignments.append(node)
-    if len(assignments) != 1:
+            assignment = node
+            break
+    if assignment is None:
         raise ValueError(
-            "need exactly one module-level VERSION assignment, found %d"
-            % len(assignments)
+            "the VERSION binding is not a direct top-level simple Assign"
         )
-    value = assignments[0].value
+    value = assignment.value
     if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
         raise ValueError(
             "VERSION must be a quoted MAJOR.MINOR.PATCH string literal"
@@ -430,6 +482,15 @@ INVALID_SOURCES = (
         '    VERSION = "0.2.0"\n_f()\n',
     ),
     ("import-alias", 'from x import foo as VERSION\nVERSION = "0.1.0"\n'),
+    ("def-VERSION", 'VERSION = "0.1.0"\ndef VERSION():\n    pass\n'),
+    ("class-VERSION", 'VERSION = "0.1.0"\nclass VERSION:\n    pass\n'),
+    ("star-import", 'VERSION = "0.1.0"\nfrom x import *\n'),
+    (
+        "except-as-VERSION",
+        'VERSION = "0.1.0"\ntry:\n    pass\n'
+        "except Exception as VERSION:\n    pass\n",
+    ),
+    ("import-VERSION-sub", 'import VERSION.sub\nVERSION = "0.1.0"\n'),
 )
 
 INVALID_CHANGELOGS = (
