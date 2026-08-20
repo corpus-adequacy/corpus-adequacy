@@ -458,11 +458,24 @@ def _module_outcomes(m: dict, source: str, tag: str, vectors: list, tmp: Path) -
     bounded_run's stated non-claim -- the direct child is killed, the process
     tree is not.
 
-    This is process isolation, not a sandbox. The child inherits this process's
-    filesystem, network, environment and credentials, and nothing here bounds
-    its memory or its descriptors. What it bounds is time, retained output and
-    process-group lifetime, and what it buys is that a corpus which misbehaves
-    can no longer make this run say something untrue.
+    WHAT THIS DOES AND DOES NOT CLAIM
+    ---------------------------------
+    Process isolation for a trusted-local corpus, not a sandbox. The child
+    inherits this process's filesystem, network, environment and credentials,
+    and nothing here bounds its memory or its descriptors.
+
+    The protocol channel is not authenticated either. Fd 1 is duplicated before
+    any corpus code runs and the original is pointed at stderr, which stops
+    accidental pollution; it does not stop a child that scans its descriptors,
+    finds the duplicate, and writes a well-formed payload of its choosing.
+
+    So the claim is narrower than "a misbehaving corpus cannot make this run
+    say something untrue", which is what an earlier draft of this docstring
+    said. What is claimed: the controller survives whatever the corpus does,
+    and the classes measured here -- abnormal termination, and a protocol that
+    did not arrive intact -- are fail-closed, so neither can be read as a clean
+    result. A corpus written to forge a verdict is outside that claim, and
+    nothing in this file would detect one.
     """
     if not MODULE_CHILD.is_file():
         raise ManifestError("the module child shim is missing: %s" % MODULE_CHILD)

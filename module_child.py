@@ -32,6 +32,11 @@ bound it: the parent's ceiling applies to what crosses the pipes, so anything
 held in this process is output the ceiling cannot see. Redirected, it streams
 out and is charged like any other child's output.
 
+The duplicate is not hidden. A child that scans its own descriptors can find it
+and write whatever payload it likes, so this arrangement bounds accidents and
+refuses output that did not arrive intact. It does not authenticate the channel
+against a corpus written to forge a verdict, and the parent says so too.
+
 WHAT AN OUTCOME MAY BE
 ----------------------
 Whatever the entrypoint returns is carried as typed JSON, and the parent
