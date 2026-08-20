@@ -2034,91 +2034,57 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
         self.assertFalse(rep["adequate"])
 
 class MutableOutcomeIsNotAFalseKill(unittest.TestCase):
-    """F2: collect() validates with json.dumps but stores the mutable original.
+    """F2: without snapshot, a mutable alias becomes unserialisable and the
+    child crashes.  The parent sees unexpected-exit → killed: a false clean.
 
-    A later vector can mutate the stored object to contain un-serialisable
-    values (e.g. object()). When emit() calls json.dump on the whole result
-    dict, the now-corrupt entry crashes the child. The parent sees
-    unexpected-exit, which is in TERMINATED_KINDS, and credits a kill.
-
-    That is a false clean: the corpus never distinguished the mutant.
-    The transport must snapshot the validated JSON representation, or
-    report an untransportable outcome as unproved -- never as killed.
+    With snapshot the baseline and mutant outcomes are identical JSON values,
+    so the mutant survives and the corpus is correctly inadequate.
     """
 
-    def test_mutable_outcome_does_not_become_a_false_kill(self):
-        """The mutant replaces the bad-branch body with code that returns a
-        mutable list, and the non-bad branch corrupts it with object().
+    # Baseline: bad=True → return [] (fresh list); bad=False → append object()
+    # to _shared then return "ok".
+    # Mutant: replaces `return []` with `return _shared`.  At call time both
+    # return [], but the mutant's stored reference is _shared itself.  The
+    # second vector appends object() to _shared.  Without snapshot, emit()
+    # crashes on the now-corrupt entry.
+    _IMPL = (
+        '_shared = []\n'
+        'def evaluate(group, inputs):\n'
+        '    if inputs.get("bad"):\n'
+        '        return []\n'
+        '    _shared.append(object())\n'
+        '    return "ok"\n'
+    )
+    _VECTORS = {"vectors": [
+        {"vector_id": "v1", "axis": "a", "inputs": {"bad": True}},
+        {"vector_id": "v2", "axis": "a", "inputs": {}},
+    ]}
 
-        Baseline returns stable strings → clean. The mutant's 'bad' branch
-        returns a mutable _shared list (json-valid NOW), and the non-bad
-        branch appends object() to _shared and returns "ok". Vector order
-        is v1 (bad=True) then v2 (bad=False). After v2, the stored v1
-        outcome contains object(). emit() crashes → unexpected-exit →
-        false kill.
-
-        Expected after fix: collect() snapshots the JSON representation at
-        validation time, so emit() succeeds and the mutant is compared on
-        actual decoded outcomes.
-        """
-        vectors = {"vectors": [
-            {"vector_id": "v1", "axis": "a", "inputs": {"bad": True}},
-            {"vector_id": "v2", "axis": "a", "inputs": {}},
-        ]}
-        # The mutant body replaces 'return "rejected"'. It uses a
-        # module-level _shared list. First call (v1, bad=True) returns
-        # _shared (empty, json-valid). Second call (v2, bad=False) appends
-        # object() to _shared, corrupting the stored v1 reference.
-        mutant_body = (
-            'global _shared\n'
-            '        if "_shared" not in dir():\n'
-            '            _shared = []\n'
-            '        return _shared'
-        )
+    def _run(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
-            # Use a source that has the mutable corruption path in the
-            # NON-bad branch of the mutant, while the baseline is clean.
-            impl = (
-                '_shared = []\n'
-                'def evaluate(group, inputs):\n'
-                '    if inputs.get("bad"):\n'
-                '        return "rejected"\n'
-                '    _shared.append(object())\n'
-                '    return "ok"\n'
-            )
-            (tmp / "impl.py").write_text(impl)
-            (tmp / "vectors.json").write_text(json.dumps(vectors))
-            # The mutant replaces 'return "rejected"' with 'return _shared'
-            # so the bad branch returns the mutable _shared reference.
-            # After v1 stores _shared, v2 appends object() to it.
+            (tmp / "impl.py").write_text(self._IMPL)
+            (tmp / "vectors.json").write_text(json.dumps(self._VECTORS))
             m = {"schema": ca.SCHEMA, "implementation": "impl.py",
                  "entrypoint": "evaluate", "vectors": "vectors.json",
                  "group_key": "axis", "id_key": "vector_id",
                  "inputs_key": "inputs",
                  "mutants": {"a": [
-                     {"label": "rejects bad input",
-                      "anchor": 'return "rejected"',
+                     {"label": "alias",
+                      "anchor": 'return []',
                       "replacement": 'return _shared'},
-                     {"label": "CONTROL [a]", "control": True,
-                      "anchor": 'def evaluate(group, inputs):',
-                      "replacement": 'def evaluate(group, inputs):\n    return "MOVED"'},
+                     dict(CONTROL, label="CONTROL [a]"),
                  ]}}
             p = tmp / "m.json"
             p.write_text(json.dumps(m))
-            rep = ca.run(p)
-        # Baseline must be clean (stable strings, no mutation).
-        self.assertFalse(
-            any("UNMUTATED" in f for f in rep["failures"]),
-            "the unmutated run should not fail: %s" % rep["failures"])
-        v = _verdict(rep, "rejects bad input")
-        # The mutant MUST NOT be credited as killed via a transport crash.
-        # unexpected-exit here means emit() crashed on the mutated mutable
-        # object -- a false kill from a transport artefact.
-        self.assertNotEqual(v.get("how"), "unexpected-exit",
-                            "mutable outcome corruption caused a false kill: "
-                            "collect() stored a mutable reference that a later "
-                            "vector corrupted with object(), crashing emit()")
+            return ca.run(p)
+
+    def test_mutable_alias_survives_not_false_killed(self):
+        rep = self._run()
+        v = _verdict(rep, "alias")
+        self.assertEqual(v["verdict"], "survived")
+        self.assertNotEqual(v.get("how"), "unexpected-exit")
+        self.assertFalse(rep["adequate"])
 
 
 class IsolationClaimScope(unittest.TestCase):
