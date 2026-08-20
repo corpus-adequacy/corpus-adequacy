@@ -105,9 +105,15 @@ limitation belongs to the corpus and the tool says so rather than hiding it.
 `process` and `batch` measure in a bounded disposable working-tree copy of
 `repo_root`. Each run creates a unique temp root under the system temp
 directory (never under the declared checkout) and remaps mutation, build, and
-child cwd to that copy. The declared user checkout is not written. Abrupt
-`SIGKILL` of the tool cannot run Python finally, so a leftover copy may remain
-under temp; the next run uses a new unique root. The discoverability pointer is written atomically without following a symlink; only a direct child of system temp that carries the repo-keyed muttree prefix is removed. The process/batch lock is opened without following or truncating a symlink. Regular files are copied in bounded chunks. A `.git` entry is skipped before type checks; files and directories share one entry ceiling. This is not a sandbox, not a
+child cwd to that copy. The declared user checkout is not written. Cleanup
+removes only that run's root after lstat, direct-child-of-system-temp, and
+prefix checks. There is no stable pointer and no cross-run stale delete.
+Abrupt `SIGKILL` of the tool cannot run Python finally, so a leftover copy
+may remain under temp until the OS reclaims it; the next run uses a new
+unique root and does not auto-delete the orphan. The process/batch lock is
+opened without following or truncating a symlink. Regular files are copied
+in bounded chunks. A `.git` entry is skipped before type checks; files and
+directories share one entry ceiling. This is not a sandbox, not a
 git worktree, not the #4 output ceiling, not #11 module isolation, and not #2
 HEAD-vs-dirty provenance. `.git` is omitted; build rules that need git metadata
 in the tree are unsupported. A symlink, FIFO, socket, or device in the walk is

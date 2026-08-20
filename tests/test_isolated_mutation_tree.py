@@ -2,13 +2,13 @@
 """Isolated working-tree copy for process/batch mutation.
 
 SIGKILL of the tool cannot run Python finally, so a leftover copy may remain
-under temp; the next materialize removes that discoverability pointer. Tests may reap only
-children of a recorded tool PID — never other processes.
+under temp and is not auto-deleted. Tests may reap only children of a recorded
+tool PID — never other processes. The external SIGKILL test gives the child its
+own empty TMPDIR and watches for a new prefix directory there.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import signal
@@ -109,17 +109,15 @@ def _reap_tool_group(pid: int) -> None:
         pass
 
 
-def _read_pointer(repo: Path) -> Path | None:
-    ptr = iso.isolated_tree_pointer(repo)
-    if not ptr.is_file():
-        return None
-    try:
-        text = ptr.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    if not text:
-        return None
-    return Path(text)
+def _prefix_dirs(tmp: Path, repo: Path) -> list[Path]:
+    prefix = iso._tree_prefix(repo)
+    found = []
+    if not tmp.is_dir():
+        return found
+    for child in tmp.iterdir():
+        if child.name.startswith(prefix) and child.is_dir() and not child.is_symlink():
+            found.append(child)
+    return found
 
 
 def _under(path: Path, root: Path) -> bool:
@@ -130,18 +128,7 @@ def _under(path: Path, root: Path) -> bool:
         return False
 
 
-class IsolatedTreePointer(unittest.TestCase):
-    def test_pointer_is_keyed_under_system_temp_not_the_checkout(self):
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            key = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
-            expected = Path(tempfile.gettempdir()) / (
-                "corpus-adequacy-muttree-%s.ptr" % key)
-            ptr = iso.isolated_tree_pointer(root)
-            self.assertEqual(ptr, expected)
-            self.assertFalse(_under(ptr, root))
-            self.assertTrue(_under(ptr, Path(tempfile.gettempdir())))
-
+class IsolatedTreeCaps(unittest.TestCase):
     def test_ceilings_are_owned_and_are_not_the_output_cap(self):
         self.assertEqual(iso.MATERIALIZATION_CAP_BYTES, 64 * 1024 * 1024)
         self.assertGreater(iso.MATERIALIZATION_CAP_FILES, 0)
@@ -150,6 +137,13 @@ class IsolatedTreePointer(unittest.TestCase):
         src = Path(iso.__file__).read_text(encoding="utf-8")
         self.assertNotIn("OUTPUT_CAP_BYTES", src)
         self.assertNotIn("bounded_run", src)
+
+    def test_no_stable_pointer_or_cross_run_forget(self):
+        src = Path(iso.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("isolated_tree_pointer", src)
+        self.assertNotIn("_forget_previous_root", src)
+        self.assertNotIn("_write_pointer_atomic", src)
+        self.assertFalse(hasattr(iso, "isolated_tree_pointer"))
 
 
 class MaterializeHelper(unittest.TestCase):
@@ -200,7 +194,6 @@ class MaterializeHelper(unittest.TestCase):
                     self.assertEqual(outside.read_bytes(), before)
                     self.assertEqual((root / "keep.py").read_text(encoding="utf-8"), "ok\n")
                     tree.cleanup()
-                    self.assertFalse(iso.isolated_tree_pointer(root).exists())
                     link.unlink()
 
     def test_symlink_escape_is_refused_and_outside_bytes_unchanged(self):
@@ -220,7 +213,6 @@ class MaterializeHelper(unittest.TestCase):
             self.assertEqual(outside.read_bytes(), before)
             self.assertEqual((root / "keep.py").read_text(encoding="utf-8"), "ok\n")
             tree.cleanup()
-            self.assertFalse(iso.isolated_tree_pointer(root).exists())
 
     def test_tiny_cap_refuses_and_leaves_original_untouched(self):
         with tempfile.TemporaryDirectory() as d:
@@ -261,12 +253,9 @@ class MaterializeHelper(unittest.TestCase):
                 p2 = second.materialize()
                 self.assertNotEqual(p1_res, p2.resolve())
                 self.assertFalse(_under(p2.resolve(), root))
-                named = _read_pointer(root)
-                self.assertEqual(named.resolve(), p2.resolve())
             finally:
                 first.cleanup()
                 second.cleanup()
-            self.assertIsNone(_read_pointer(root))
 
     def test_file_cap_refuses_mid_walk_and_leaves_original(self):
         with tempfile.TemporaryDirectory() as d:
@@ -331,6 +320,43 @@ class MaterializeHelper(unittest.TestCase):
             self.assertEqual(n, len(payload))
             self.assertEqual(dest.read_bytes(), payload)
 
+    def test_preexisting_prefix_map_is_never_removed(self):
+        """Measured: pointer named _tree_prefix+'-victim' and materialize rmtree'd it.
+
+        Prefix/key is not ownership. Product no longer deletes cross-run paths.
+        """
+        with tempfile.TemporaryDirectory() as hook:
+            hook_path = Path(hook)
+            old_td = tempfile.tempdir
+            old_env = os.environ.get("TMPDIR")
+            os.environ["TMPDIR"] = str(hook_path)
+            tempfile.tempdir = None
+            try:
+                with tempfile.TemporaryDirectory() as d:
+                    root = Path(d)
+                    (root / "a.py").write_text("A\n", encoding="utf-8")
+                    victim = hook_path / (iso._tree_prefix(root) + "-victim")
+                    victim.mkdir()
+                    marker = victim / "keep.txt"
+                    marker.write_bytes(b"PREEXISTING_PREFIX_MAP\n")
+                    tree = iso.IsolatedMutationTree(root)
+                    try:
+                        isolated = tree.materialize()
+                        self.assertTrue(marker.is_file())
+                        self.assertEqual(marker.read_bytes(), b"PREEXISTING_PREFIX_MAP\n")
+                        self.assertNotEqual(isolated.resolve(), victim.resolve())
+                    finally:
+                        tree.cleanup()
+                    self.assertTrue(marker.is_file())
+                    self.assertEqual(marker.read_bytes(), b"PREEXISTING_PREFIX_MAP\n")
+                    self.assertTrue(victim.is_dir())
+            finally:
+                if old_env is None:
+                    os.environ.pop("TMPDIR", None)
+                else:
+                    os.environ["TMPDIR"] = old_env
+                tempfile.tempdir = old_td
+
     def test_executable_mode_is_preserved(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -377,7 +403,6 @@ class MaterializeHelper(unittest.TestCase):
                     raise RuntimeError("forced")
             self.assertIsNotNone(held)
             self.assertFalse(Path(held).exists())
-            self.assertIsNone(_read_pointer(root))
 
     def test_cleanup_is_idempotent(self):
         with tempfile.TemporaryDirectory() as d:
@@ -388,91 +413,9 @@ class MaterializeHelper(unittest.TestCase):
             tree.cleanup()
             tree.cleanup()
             self.assertFalse(Path(isolated).exists())
-            self.assertIsNone(_read_pointer(root))
 
 
 
-    def test_write_pointer_atomic_does_not_follow_a_symlink(self):
-        """Measured probe, helper-only: write_text followed the symlink."""
-        victim = Path(tempfile.mkstemp(prefix="iso-ptr-victim-direct-", dir=tempfile.gettempdir())[1])
-        ptr = Path(tempfile.gettempdir()) / "iso-ptr-atomic-probe.ptr"
-        try:
-            secret = b"POINTER_SYMLINK_PROBE_BYTES\n"
-            victim.write_bytes(secret)
-            if ptr.exists() or ptr.is_symlink():
-                ptr.unlink()
-            ptr.symlink_to(victim)
-            iso._write_pointer_atomic(ptr, "/tmp/corpus-adequacy-muttree-owned")
-            self.assertEqual(victim.read_bytes(), secret)
-            self.assertFalse(ptr.is_symlink())
-            self.assertTrue(stat.S_ISREG(os.lstat(ptr).st_mode))
-            self.assertEqual(ptr.read_text(encoding="utf-8"), "/tmp/corpus-adequacy-muttree-owned")
-        finally:
-            for path in (ptr, victim):
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-
-    def test_pointer_symlink_is_replaced_without_following_to_the_target(self):
-        """Measured probe: ptr.write_text followed a symlink and overwrote the target."""
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            (root / "a.py").write_text("A\n", encoding="utf-8")
-            victim = Path(tempfile.mkstemp(prefix="iso-ptr-victim-", dir=tempfile.gettempdir())[1])
-            try:
-                secret = b"POINTER_SYMLINK_PROBE_BYTES\n"
-                victim.write_bytes(secret)
-                ptr = iso.isolated_tree_pointer(root)
-                if ptr.exists() or ptr.is_symlink():
-                    ptr.unlink()
-                ptr.symlink_to(victim)
-                self.assertTrue(ptr.is_symlink())
-                tree = iso.IsolatedMutationTree(root)
-                try:
-                    isolated = tree.materialize()
-                    self.assertEqual(victim.read_bytes(), secret)
-                    self.assertFalse(ptr.is_symlink())
-                    try:
-                        st = os.lstat(ptr)
-                    except OSError as exc:
-                        self.fail("pointer missing after materialize: %s" % exc)
-                    self.assertTrue(stat.S_ISREG(st.st_mode))
-                    named = Path(ptr.read_text(encoding="utf-8").strip())
-                    self.assertEqual(named.resolve(), isolated.resolve())
-                finally:
-                    tree.cleanup()
-            finally:
-                try:
-                    victim.unlink()
-                except OSError:
-                    pass
-
-    def test_foreign_temp_pointer_target_is_left_intact(self):
-        """Measured probe: _forget_previous_root rmtree'd an arbitrary other temp dir."""
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            (root / "a.py").write_text("A\n", encoding="utf-8")
-            foreign = Path(tempfile.mkdtemp(prefix="iso-foreign-probe-"))
-            marker = foreign / "keep.txt"
-            marker.write_bytes(b"FOREIGN_TEMP_PROBE_BYTES\n")
-            ptr = iso.isolated_tree_pointer(root)
-            if ptr.exists() or ptr.is_symlink():
-                ptr.unlink()
-            ptr.write_text(str(foreign), encoding="utf-8")
-            tree = iso.IsolatedMutationTree(root)
-            try:
-                isolated = tree.materialize()
-                self.assertTrue(marker.is_file(), "foreign temp dir was removed")
-                self.assertEqual(marker.read_bytes(), b"FOREIGN_TEMP_PROBE_BYTES\n")
-                self.assertNotEqual(isolated.resolve(), foreign.resolve())
-                self.assertTrue(foreign.is_dir())
-            finally:
-                tree.cleanup()
-                if foreign.exists():
-                    for child in foreign.iterdir():
-                        child.unlink()
-                    foreign.rmdir()
 
 
 
@@ -565,12 +508,11 @@ class IsolatedRun(unittest.TestCase):
             tmp = Path(d)
             manifest = _write_batch_corpus(tmp)
             before = (tmp / "check.py").read_bytes()
-            home = iso.isolated_tree_pointer(tmp)
             rep = ca.run(manifest)
             self.assertEqual(rep["killed"], 1)
             self.assertTrue(rep["adequate"], rep["failures"])
             self.assertEqual((tmp / "check.py").read_bytes(), before)
-            self.assertFalse(home.exists())
+            self.assertFalse(_prefix_dirs(Path(tempfile.gettempdir()), tmp))
 
     def test_dirty_declared_source_is_measured_not_refused(self):
         with tempfile.TemporaryDirectory() as d:
@@ -584,13 +526,12 @@ class IsolatedRun(unittest.TestCase):
             (tmp / "notes.txt").write_text("UNTRACKED\n", encoding="utf-8")
             before_src = (tmp / "check.py").read_bytes()
             before_notes = (tmp / "notes.txt").read_bytes()
-            home = iso.isolated_tree_pointer(tmp)
             rep = ca.run(manifest)
             self.assertEqual(rep["killed"], 1)
             self.assertTrue(rep["adequate"], rep["failures"])
             self.assertEqual((tmp / "check.py").read_bytes(), before_src)
             self.assertEqual((tmp / "notes.txt").read_bytes(), before_notes)
-            self.assertFalse(home.exists())
+            self.assertFalse(_prefix_dirs(Path(tempfile.gettempdir()), tmp))
             self.assertIn(b"DIRTY_DECLARED", before_src)
 
     def test_symlink_escape_in_the_tree_refuses_run_and_leaves_outside(self):
@@ -607,12 +548,11 @@ class IsolatedRun(unittest.TestCase):
                 secret.write_text("OUTSIDE_SECRET\n", encoding="utf-8")
                 before = secret.read_bytes()
                 (tmp / "escape").symlink_to(secret)
-                home = iso.isolated_tree_pointer(tmp)
                 with self.assertRaises(ca.ManifestError) as cm:
                     ca.run(manifest)
                 self.assertIn("symlink", str(cm.exception).lower())
                 self.assertEqual(secret.read_bytes(), before)
-                self.assertFalse(home.exists())
+                self.assertFalse(_prefix_dirs(Path(tempfile.gettempdir()), tmp))
             finally:
                 secret = outside_dir / "secret.txt"
                 if secret.exists():
@@ -628,7 +568,6 @@ class IsolatedRun(unittest.TestCase):
                 path: path.read_bytes()
                 for path in tmp.rglob("*") if path.is_file() and not path.is_symlink()
             }
-            home = iso.isolated_tree_pointer(tmp)
             with mock.patch.object(iso, "MATERIALIZATION_CAP_BYTES", 20):
                 with self.assertRaises(ca.ManifestError) as cm:
                     ca.run(manifest)
@@ -639,7 +578,7 @@ class IsolatedRun(unittest.TestCase):
                 for path in tmp.rglob("*") if path.is_file() and not path.is_symlink()
             }
             self.assertEqual(now, before)
-            self.assertFalse(home.exists())
+            self.assertFalse(_prefix_dirs(Path(tempfile.gettempdir()), tmp))
 
     def test_vanished_declared_source_refuses_without_writing_original(self):
         with tempfile.TemporaryDirectory() as d:
@@ -653,7 +592,7 @@ class IsolatedRun(unittest.TestCase):
                 ca._run_process(loaded, manifest)
             self.assertEqual(other.read_bytes(), other_before)
             self.assertFalse((tmp / "check.py").exists())
-            self.assertFalse(iso.isolated_tree_pointer(tmp).exists())
+            self.assertFalse(_prefix_dirs(Path(tempfile.gettempdir()), tmp))
 
     def test_exception_after_materialize_cleans_home_and_releases_lock(self):
         with tempfile.TemporaryDirectory() as d:
@@ -661,12 +600,11 @@ class IsolatedRun(unittest.TestCase):
             manifest = _write_batch_corpus(tmp)
             before = (tmp / "check.py").read_bytes()
             loaded = ca.load_manifest(manifest)
-            home = iso.isolated_tree_pointer(tmp)
             with mock.patch.object(ca, "_build", side_effect=RuntimeError("forced")):
                 with self.assertRaises(RuntimeError):
                     ca._run_process(loaded, manifest)
             self.assertEqual((tmp / "check.py").read_bytes(), before)
-            self.assertFalse(home.exists())
+            self.assertFalse(_prefix_dirs(Path(tempfile.gettempdir()), tmp))
             _assert_lock_releasable(self, tmp)
 
     def test_run_capped_cwd_is_the_isolated_tree(self):
@@ -694,7 +632,7 @@ class IsolatedRun(unittest.TestCase):
                 self.assertTrue(_under(cwd, sys_tmp))
             self.assertEqual((tmp / "check.py").read_bytes(), before)
             self.assertFalse(first.exists())
-            self.assertFalse(iso.isolated_tree_pointer(tmp).exists())
+            self.assertFalse(_prefix_dirs(Path(tempfile.gettempdir()), tmp))
 
             captured.clear()
             with mock.patch.object(ca, "_run_capped", side_effect=capture):
@@ -724,8 +662,9 @@ class ExternalProcessSigkill(unittest.TestCase):
     """
 
     def test_sigkill_leaves_the_declared_checkout_byte_identical(self):
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as child_tmp:
             repo = Path(d)
+            child_tmp_path = Path(child_tmp)
             manifest = _write_batch_corpus(repo, one_mutant=True, sleep_mutant=True)
             _git(repo, "init")
             _git(repo, "add", "check.py")
@@ -737,10 +676,15 @@ class ExternalProcessSigkill(unittest.TestCase):
             before_src = (repo / "check.py").read_bytes()
             before_notes = (repo / "notes.txt").read_bytes()
             first_root = None
+            env = os.environ.copy()
+            env["TMPDIR"] = str(child_tmp_path)
+            env["TEMP"] = str(child_tmp_path)
+            env["TMP"] = str(child_tmp_path)
 
             proc = subprocess.Popen(
                 [sys.executable, str(Path(ca.__file__).resolve()), str(manifest)],
                 cwd=str(repo),
+                env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -752,8 +696,7 @@ class ExternalProcessSigkill(unittest.TestCase):
             seen = False
             try:
                 while time.monotonic() < deadline:
-                    named = _read_pointer(repo)
-                    if named is not None:
+                    for named in _prefix_dirs(child_tmp_path, repo):
                         first_root = named
                         isolated_src = named / "check.py"
                         if isolated_src.is_file():
@@ -764,6 +707,8 @@ class ExternalProcessSigkill(unittest.TestCase):
                             if "MUTANT_VISIBLE" in text:
                                 seen = True
                                 break
+                    if seen:
+                        break
                     if proc.poll() is not None:
                         break
                     time.sleep(0.05)
@@ -793,9 +738,9 @@ class ExternalProcessSigkill(unittest.TestCase):
             self.assertEqual((repo / "check.py").read_bytes(), before_src)
             self.assertEqual((repo / "notes.txt").read_bytes(), before_notes)
             self.assertIsNotNone(first_root)
+            # SIGKILL cannot run finally. The prefix orphan may remain.
+            self.assertTrue(Path(first_root).is_dir())
 
-            # SIGKILL may leave orphaned temp bytes. Next run must score,
-            # use a NEW unique root, and not write the checkout.
             follow = _write_batch_corpus(repo, one_mutant=False, sleep_mutant=False)
             (repo / "check.py").write_bytes(before_src)
             (repo / "notes.txt").write_bytes(before_notes)
@@ -815,7 +760,8 @@ class ExternalProcessSigkill(unittest.TestCase):
             self.assertTrue(captured)
             self.assertNotEqual(captured[0], Path(first_root).resolve())
             self.assertFalse(_under(captured[0], repo))
-            self.assertFalse(iso.isolated_tree_pointer(repo).exists())
+            # Next run does not auto-delete the SIGKILL orphan.
+            self.assertTrue(Path(first_root).is_dir())
 
 
 if __name__ == "__main__":

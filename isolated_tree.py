@@ -3,23 +3,21 @@
 process/batch measure in a unique temp copy of repo_root. The declared
 user checkout is not written. Each materialize creates a new root with
 tempfile.mkdtemp in the system temp directory; the root never lies under
-repo_root. A keyed pointer file under that same temp directory names the
-current unique root so an external test can find it. The pointer is
-written atomically without following a symlink. Only a target that is a
-direct child of system temp and carries the repo-keyed muttree prefix
-is accepted for removal. The pointer is not the tree and must not live
-in the checkout.
+repo_root.
 
-Abrupt SIGKILL of the tool cannot run Python finally, so orphaned temp
-bytes may remain. The next run uses a new root and may remove the previous
-pointer target. Never a sandbox. Never a git worktree. Never the #4 output
-ceiling. Never #11 module isolation. Never #2 HEAD-vs-dirty provenance.
+cleanup removes only self.root, and only when lstat shows a directory
+that is a direct child of system temp and carries the repo-keyed
+muttree prefix. There is no stable pointer and no cross-run stale
+delete. SIGKILL orphans stay inert until the OS reclaims temp.
+
+Never a sandbox. Never a git worktree. Never the #4 output ceiling.
+Never #11 module isolation. Never #2 HEAD-vs-dirty provenance.
 
 `.git` is omitted. Build rules that require git metadata in the tree are
-unsupported. Symlinks, FIFOs, sockets, and devices
-are refused fail-closed. Materialization trips file and byte ceilings
-during the walk. Executable mode bits are preserved; timestamps and
-ownership are not semantic input.
+unsupported. Symlinks, FIFOs, sockets, and devices are refused
+fail-closed. Materialization trips file and byte ceilings during the
+walk. Executable mode bits are preserved; timestamps and ownership are
+not semantic input.
 """
 
 from __future__ import annotations
@@ -34,24 +32,19 @@ from pathlib import Path
 MATERIALIZATION_CAP_BYTES = 64 * 1024 * 1024
 MATERIALIZATION_CAP_FILES = 10_000
 COPY_CHUNK_BYTES = 64 * 1024
-_POINTER_PREFIX = "corpus-adequacy-muttree-"
+_TREE_PREFIX = "corpus-adequacy-muttree-"
 
 
 class IsolationError(Exception):
     """The disposable working-tree copy could not be materialized."""
 
 
-def _pointer_key(repo_root: Path) -> str:
+def _tree_key(repo_root: Path) -> str:
     return hashlib.sha256(str(Path(repo_root).resolve()).encode("utf-8")).hexdigest()[:16]
 
 
-def isolated_tree_pointer(repo_root: Path) -> Path:
-    """Stable discoverability pointer outside repo_root. Not the tree."""
-    return Path(tempfile.gettempdir()) / ("%s%s.ptr" % (_POINTER_PREFIX, _pointer_key(repo_root)))
-
-
 def _tree_prefix(repo_root: Path) -> str:
-    return "%s%s" % (_POINTER_PREFIX, _pointer_key(repo_root))
+    return "%s%s" % (_TREE_PREFIX, _tree_key(repo_root))
 
 
 def _contained(path: Path, root: Path) -> bool:
@@ -62,8 +55,8 @@ def _contained(path: Path, root: Path) -> bool:
         return False
 
 
-def _safe_to_rmtree(path: Path, repo_root: Path) -> bool:
-    """Only a direct system-temp child with the repo-keyed muttree prefix."""
+def _owned_self_root(path: Path, repo_root: Path) -> bool:
+    """lstat / direct system-temp child / repo-keyed prefix. Not ownership."""
     try:
         st = os.lstat(path)
     except OSError:
@@ -82,40 +75,6 @@ def _safe_to_rmtree(path: Path, repo_root: Path) -> bool:
     if _contained(path, Path(repo_root)):
         return False
     return True
-
-
-def _lstat_or_none(path: Path):
-    try:
-        return os.lstat(path)
-    except OSError:
-        return None
-
-
-def _unlink_pointer_inode(path: Path) -> None:
-    """Remove the pointer path itself. Never follows a symlink."""
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-
-
-def _write_pointer_atomic(path: Path, text: str) -> None:
-    """Replace the pointer without following an existing symlink."""
-    st = _lstat_or_none(path)
-    if st is not None and not stat.S_ISREG(st.st_mode):
-        _unlink_pointer_inode(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def _write_all(fd: int, buf: bytes) -> int:
@@ -137,11 +96,7 @@ def _copy_regular_bounded(
     *,
     chunk: int | None = None,
 ) -> int:
-    """Copy one regular file in chunks. Memory is one small read, not the file.
-
-    Rechecks the type on the open fd. Stops before already+written exceeds
-    *cap*; the next read is at most one chunk (or remaining+1 to detect overflow).
-    """
+    """Copy one regular file in chunks. Memory is one small read, not the file."""
     if chunk is None:
         chunk = COPY_CHUNK_BYTES
     nofollow = getattr(os, "O_NOFOLLOW", None)
@@ -189,12 +144,6 @@ class IsolatedMutationTree:
         self.original_root = Path(repo_root) if repo_root is not None else None
         self.root: Path | None = None
 
-    @property
-    def pointer(self) -> Path | None:
-        if self.original_root is None:
-            return None
-        return isolated_tree_pointer(self.original_root)
-
     def materialize(
         self,
         repo_root: Path | None = None,
@@ -224,19 +173,13 @@ class IsolatedMutationTree:
                 "system temp dir %s lies under repo_root %s, so a copy "
                 "would nest inside itself" % (sys_tmp, src_resolved))
 
-        self._forget_previous_root(src_resolved)
-
         unique = Path(tempfile.mkdtemp(prefix=_tree_prefix(src_resolved), dir=str(sys_tmp)))
         if _contained(unique, src_resolved):
             shutil.rmtree(unique, ignore_errors=True)
             raise IsolationError("temp-root %s lies under repo_root %s" % (unique, src_resolved))
         self.root = unique
-        ptr = isolated_tree_pointer(src_resolved)
         try:
-            _write_pointer_atomic(ptr, str(unique))
-            copied_bytes = 0
-            copied_files = 0
-            self._copy_dir(src_resolved, unique, src_resolved, copied_bytes, copied_files, cap, file_cap)
+            self._copy_dir(src_resolved, unique, src_resolved, 0, 0, cap, file_cap)
         except IsolationError:
             self.cleanup()
             raise
@@ -244,23 +187,6 @@ class IsolatedMutationTree:
             self.cleanup()
             raise IsolationError("could not materialize isolated tree: %s" % exc) from exc
         return unique
-
-    def _forget_previous_root(self, repo_root: Path) -> None:
-        ptr = isolated_tree_pointer(repo_root)
-        st = _lstat_or_none(ptr)
-        if st is None:
-            return
-        if not stat.S_ISREG(st.st_mode):
-            _unlink_pointer_inode(ptr)
-            return
-        try:
-            named = Path(ptr.read_text(encoding="utf-8").strip())
-        except OSError:
-            return
-        if not named.parts:
-            return
-        if _safe_to_rmtree(named, repo_root):
-            shutil.rmtree(named, ignore_errors=True)
 
     def _copy_dir(
         self,
@@ -315,37 +241,12 @@ class IsolatedMutationTree:
 
     def cleanup(self) -> None:
         root = self.root
-        ptr = self.pointer
-        if root is not None:
-            path = Path(root)
-            if path.exists() and (self.original_root is None or _safe_to_rmtree(path, self.original_root)):
-                shutil.rmtree(path, ignore_errors=True)
-            elif path.exists() and self.original_root is None:
-                shutil.rmtree(path, ignore_errors=True)
-        if ptr is not None:
-            st = _lstat_or_none(ptr)
-            if st is None:
-                pass
-            elif not stat.S_ISREG(st.st_mode):
-                _unlink_pointer_inode(ptr)
-            else:
-                try:
-                    named = Path(ptr.read_text(encoding="utf-8").strip())
-                except OSError:
-                    named = None
-                drop = False
-                if named is None or not str(named).strip():
-                    drop = True
-                elif root is not None:
-                    try:
-                        drop = named.resolve() == Path(root).resolve() or not named.exists()
-                    except OSError:
-                        drop = True
-                else:
-                    drop = True
-                if drop:
-                    _unlink_pointer_inode(ptr)
+        repo = self.original_root
         self.root = None
+        if root is None or repo is None:
+            return
+        if _owned_self_root(root, repo):
+            shutil.rmtree(root, ignore_errors=True)
 
     def __enter__(self) -> Path:
         return self.materialize()
