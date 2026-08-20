@@ -448,6 +448,25 @@ class ManifestValidation(unittest.TestCase):
             loaded = ca.load_manifest(p)
         self.assertEqual(loaded["mutants"]["a"][0]["label"], "same-hole")
 
+    def test_label_identity_is_exact_not_trimmed_or_case_folded(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "digest.json").write_text(json.dumps({"corpus_digest": "sha256:aaa"}))
+            mutants = {"a": [dict(SURVIVOR, label="hole"),
+                              dict(SURVIVOR, label="Hole"),
+                              dict(SURVIVOR, label=" hole ")]}
+            p = _manifest(tmp, mutants, raw={
+                "corpus_digest_file": "digest.json", "corpus_digest_key": "corpus_digest",
+                "known_holes": {"sha256:aaa": [{"label": "hole", "reason": "known gap",
+                                                  "recorded": "2026-08-20"}]}})
+            rep = ca.run(p)
+        identities = {"hole", "Hole", " hole "}
+        verdicts = {row["label"]: row["verdict"] for row in rep["mutants"]
+                    if row["label"] in identities}
+        self.assertEqual(verdicts, {
+            "hole": "known-hole", "Hole": "survived", " hole ": "survived"})
+        self.assertEqual(rep["known_holes"], 1)
+
     def test_a_mutant_label_must_be_a_non_empty_string(self):
         msg = self._err({"mutants": {"a": [dict(KILLABLE, label=[])]}})
         self.assertIn("mutants[a][0]", msg)
