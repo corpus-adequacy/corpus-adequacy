@@ -90,7 +90,8 @@ from bounded_run import (  # noqa: E402
 
 SCHEMA = "corpus-adequacy.manifest.v0"
 ERROR_SCHEMA = "corpus-adequacy.error.v0"
-# One place. The report, --version, CHANGELOG, and the git tag all name this.
+# One place. The report, --version, and CHANGELOG name this.
+# A tag v+VERSION exists only after the documented cut.
 # A SHA pin is exact and opaque; this is the name a measurement can quote.
 VERSION = "0.1.0"
 
