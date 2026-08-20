@@ -10,6 +10,7 @@ rule none does, a rule declared out of scope, and a rule declared equivalent.
 
 from __future__ import annotations
 
+import gc
 import json
 import subprocess
 import sys
@@ -505,6 +506,46 @@ class ProcessSourceContainment(unittest.TestCase):
 
             self.assertEqual(outside.read_bytes(), before)
         self.assertIn("outside repo_root", str(cm.exception))
+
+    @unittest.skipIf(ca.fcntl is None, "no POSIX advisory locks on this platform")
+    def test_vector_validation_failure_does_not_leave_the_tree_lock_held(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            repo = tmp / "repo"
+            repo.mkdir()
+            source = repo / "check.py"
+            source.write_text("print('ok')\n")
+            (repo / "vectors.json").write_text(json.dumps({"vectors": [
+                {"vector_id": "v1", "inputs": {}}]}))
+            raw = {"schema": ca.SCHEMA, "runner": "process", "repo_root": "repo",
+                   "implementation": "repo/check.py",
+                   "implementation_sources": ["repo/check.py"],
+                   "build": ["true"], "entrypoint_command": ["true"],
+                   "outcome_from": "ok", "vectors": "repo/vectors.json",
+                   "group_key": "axis", "id_key": "vector_id", "inputs_key": "inputs",
+                   "mutants": {"a": [
+                       {"label": "rule", "anchor": "print('ok')",
+                        "replacement": "print('moved')"},
+                       {"label": "CONTROL", "control": True,
+                        "anchor": "print('ok')", "replacement": "print('control')"}]}}
+            manifest = tmp / "m.json"
+            manifest.write_text(json.dumps(raw))
+            loaded = ca.load_manifest(manifest)
+            captured = None
+            try:
+                ca._run_process(loaded, manifest)
+            except KeyError as exc:
+                captured = exc  # Keep the traceback and its locals alive during the lock probe.
+            self.assertIsNotNone(captured)
+
+            second = ca._TreeLock(loaded["_repo_root"])
+            try:
+                second.__enter__()
+            finally:
+                if second.held:
+                    second.__exit__()
+                captured = None
+                gc.collect()
 
 
 class Guards(unittest.TestCase):

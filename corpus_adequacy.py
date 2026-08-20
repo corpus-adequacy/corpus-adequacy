@@ -587,6 +587,14 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         _resolved_contained_source(path, m["_repo_root"])
         for path in m["_source_paths"]]
 
+    # Pure corpus/manifest validation happens before acquiring a mutation lock.
+    # A malformed vector must not leave a lock or captured source behind.
+    groups_in_corpus = {_group_of(v, m) for v in all_vectors}
+    failures.extend(structural_failures(m, groups_in_corpus))
+    acknowledged = _acknowledged_holes(m)
+    results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
+    known_holes = 0
+
     # Taken BEFORE the dirty check: a tree observed clean outside the lock can be
     # mutated by another run before the originals are captured, and then this run's
     # restore writes that mutant back as the original.
@@ -604,11 +612,6 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         lock.__exit__()
         raise
 
-    groups_in_corpus = {_group_of(v, m) for v in all_vectors}
-    failures.extend(structural_failures(m, groups_in_corpus))
-    acknowledged = _acknowledged_holes(m)
-    results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
-    known_holes = 0
     try:
         ok, detail = _build(m)
         if not ok:
