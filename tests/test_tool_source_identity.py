@@ -31,6 +31,7 @@ that the checkout or its environment is reproducible.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -121,6 +122,92 @@ def _reference_digest(root: Path, names=EXPECTED_TOOL_SOURCE_PATHS) -> str:
         h.update(b"%d\n" % len(data))
         h.update(data)
     return "sha256:" + h.hexdigest()
+
+
+_IMPL = """
+def evaluate(group, inputs):
+    if inputs.get("bad"):
+        return "rejected"
+    return "ok"
+"""
+
+_VECTORS = {"vectors": [
+    {"vector_id": "v1", "axis": "a", "inputs": {"bad": True}},
+    {"vector_id": "v2", "axis": "a", "inputs": {"n": 1}},
+]}
+
+_KILLABLE = {"label": "rejects bad input",
+             "anchor": 'if inputs.get("bad"):\n        return "rejected"',
+             "replacement": 'if False:\n        return "rejected"'}
+_CONTROL = {"label": "CONTROL harness reachability", "control": True,
+            "anchor": "def evaluate(group, inputs):",
+            "replacement": 'def evaluate(group, inputs):\n    return "MOVED"'}
+
+
+def _module_manifest(tmp: Path) -> Path:
+    """The module runner: the report return inside run()."""
+    (tmp / "impl.py").write_text(_IMPL, encoding="utf-8")
+    (tmp / "vectors.json").write_text(json.dumps(_VECTORS), encoding="utf-8")
+    manifest = tmp / "m.json"
+    manifest.write_text(json.dumps({
+        "schema": ca.SCHEMA, "implementation": "impl.py", "entrypoint": "evaluate",
+        "vectors": "vectors.json", "group_key": "axis", "id_key": "vector_id",
+        "inputs_key": "inputs", "equivalent": {},
+        "mutants": {"a": [_KILLABLE, _CONTROL]},
+    }), encoding="utf-8")
+    return manifest
+
+
+def _batch_manifest(tmp: Path) -> Path:
+    """The batch runner: the report return inside _run_process()."""
+    (tmp / "check.py").write_text(
+        "import json, sys\n"
+        "doc = json.load(open(sys.argv[1]))\n"
+        "fails = [c['id'] for c in doc['cases'] if c['n'] > 10]\n"
+        "print(json.dumps({'ok': not fails, 'failures': fails}))\n",
+        encoding="utf-8")
+    (tmp / "vectors.json").write_text(json.dumps({"cases": [
+        {"id": "c1", "n": 1}, {"id": "c2", "n": 2}]}), encoding="utf-8")
+    manifest = tmp / "m.json"
+    manifest.write_text(json.dumps({
+        "schema": ca.SCHEMA, "runner": "batch", "repo_root": ".",
+        "implementation_sources": ["check.py"],
+        "entrypoint_command": [sys.executable, "check.py", "vectors.json"],
+        "outcome_from": ["ok", "failures"], "vectors": "vectors.json",
+        "id_key": "vector_id", "default_group": "g",
+        "mutants": {"g": [
+            {"label": "threshold", "anchor": "c['n'] > 10", "replacement": "c['n'] > 1"},
+            {"label": "CONTROL", "control": True,
+             "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'"}]},
+    }), encoding="utf-8")
+    return manifest
+
+
+def _process_manifest(tmp: Path) -> Path:
+    """The process runner: the same report return, one vector per invocation."""
+    (tmp / "check.py").write_text(
+        "import json, sys\n"
+        "doc = json.load(open(sys.argv[1]))\n"
+        "print(json.dumps({'ok': doc.get('n', 0) <= 10, 'failures': []}))\n",
+        encoding="utf-8")
+    (tmp / "v1.json").write_text(json.dumps({"n": 1}), encoding="utf-8")
+    (tmp / "vectors.json").write_text(json.dumps({
+        "vectors": [{"vector_id": "v1", "path": "v1.json"}]}), encoding="utf-8")
+    manifest = tmp / "m.json"
+    manifest.write_text(json.dumps({
+        "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+        "implementation": "check.py", "implementation_sources": ["check.py"],
+        "build": [],
+        "entrypoint_command": [sys.executable, "check.py", "{vector}"],
+        "outcome_from": ["ok", "failures"], "vectors": "vectors.json",
+        "id_key": "vector_id", "vector_path_key": "path", "default_group": "g",
+        "mutants": {"g": [
+            {"label": "threshold",
+             "anchor": "doc.get('n', 0) <= 10", "replacement": "doc.get('n', 0) <= 0"},
+            {"label": "CONTROL", "control": True,
+             "anchor": "'failures': []", "replacement": "'failures': ['MOVED']"}]},
+    }), encoding="utf-8")
+    return manifest
 
 
 class DeclaredRuntimeSurface(unittest.TestCase):
@@ -490,6 +577,184 @@ class OneProducerFeedsEveryRenderer(unittest.TestCase):
             self.assertRegex(identity["tool_commit"], HEX40_RE)
         else:
             self.assertIsNone(identity["tool_commit"])
+
+
+class SnapshotIsRecheckedBeforeExactIsClaimed(unittest.TestCase):
+    """Reading the bytes and comparing them are not one instant.
+
+    `_runtime_source_bytes` reads the declared sources, then several git
+    processes run against that stored snapshot. A runtime file edited in that
+    window was reported exact for bytes that were no longer on disk, which is
+    the same false attribution this issue exists to remove, one layer in.
+    """
+
+    def _edit_on_first_show(self, root: Path, name: str, action):
+        """Deterministic: fire exactly once, on the first git show, which is
+        after the snapshot was taken and before tool_identity returns."""
+        real = ca._git_bytes
+        fired = []
+
+        def wrapper(where, *args):
+            if args and args[0] == "show" and not fired:
+                fired.append(True)
+                action(root / name)
+            return real(where, *args)
+
+        return mock.patch.object(ca, "_git_bytes", wrapper), fired
+
+    def test_a_runtime_file_edited_after_the_snapshot_is_never_exact(self):
+        for name in EXPECTED_TOOL_SOURCE_PATHS:
+            with self.subTest(name):
+                with _repo() as root:
+                    def append(path):
+                        with path.open("ab") as fh:
+                            fh.write(b"# edited after the snapshot\n")
+
+                    patcher, fired = self._edit_on_first_show(root, name, append)
+                    with patcher:
+                        identity = ca.tool_identity(root)
+                    on_disk = (root / name).read_bytes()
+                    head_bytes = _git(
+                        root, "show", "HEAD:./%s" % name
+                    ).stdout
+                self.assertTrue(fired, "the race was never triggered")
+                self.assertNotEqual(on_disk, head_bytes)
+                self.assertNotEqual(identity["tool_source_state"], "exact")
+                self.assertIsNone(identity["tool_commit"])
+
+    def test_a_runtime_file_deleted_after_the_snapshot_is_never_exact(self):
+        with _repo() as root:
+            patcher, fired = self._edit_on_first_show(
+                root, "isolated_tree.py", lambda path: path.unlink()
+            )
+            with patcher:
+                identity = ca.tool_identity(root)
+        self.assertTrue(fired)
+        self.assertNotEqual(identity["tool_source_state"], "exact")
+        self.assertIsNone(identity["tool_commit"])
+
+    def test_an_unstable_surface_addresses_no_single_byte_state(self):
+        with _repo() as root:
+            def append(path):
+                with path.open("ab") as fh:
+                    fh.write(b"# edited after the snapshot\n")
+
+            patcher, fired = self._edit_on_first_show(root, "bounded_run.py", append)
+            with patcher:
+                identity = ca.tool_identity(root)
+        self.assertTrue(fired)
+        self.assertIsNone(identity["tool_content_sha256"])
+
+    def test_a_stable_clean_surface_is_still_exact(self):
+        """Positive control: the recheck must not turn every run into dirty."""
+        with _repo() as root:
+            reads = []
+            real = ca._runtime_source_bytes
+
+            def counting(where):
+                reads.append(where)
+                return real(where)
+
+            with mock.patch.object(ca, "_runtime_source_bytes", counting):
+                identity = ca.tool_identity(root)
+            expected_head = _head(root)
+        self.assertGreaterEqual(len(reads), 2, "the snapshot was never rechecked")
+        self.assertEqual(identity["tool_source_state"], "exact")
+        self.assertEqual(identity["tool_commit"], expected_head)
+
+
+def _report_returns(source: str) -> list:
+    """Every `return` of a report literal, and whether it is wrapped.
+
+    A behavioural test can only guard the paths it happens to drive. This reads
+    the module instead, so deleting the wrapper on a return nobody exercises on
+    this platform still fails.
+    """
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        value = node.value
+        wrapped = False
+        if (isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "_with_tool_identity"
+                and len(value.args) == 1):
+            wrapped, value = True, value.args[0]
+        if not isinstance(value, ast.Dict):
+            continue
+        for key, val in zip(value.keys, value.values):
+            if (isinstance(key, ast.Constant) and key.value == "schema"
+                    and isinstance(val, ast.Constant)
+                    and val.value == "corpus-adequacy.report.v0"):
+                found.append((node.lineno, wrapped))
+    return found
+
+
+class EveryCanonicalCallerCarriesIdentity(unittest.TestCase):
+    """The two report return paths, guarded structurally and behaviourally."""
+
+    IDENTITY_FIELDS = (
+        "tool_version", "tool_commit", "tool_source_state", "tool_content_sha256",
+    )
+
+    def test_every_report_return_is_wrapped_and_both_paths_are_pinned(self):
+        source = (REPO_ROOT / "corpus_adequacy.py").read_text(encoding="utf-8")
+        returns = _report_returns(source)
+        self.assertEqual(
+            len(returns), 2,
+            "expected the module and process/batch report returns, found %r" % (returns,),
+        )
+        unwrapped = [line for line, wrapped in returns if not wrapped]
+        self.assertEqual(
+            unwrapped, [], "report returned without tool identity at line(s) %r" % unwrapped
+        )
+
+    def _assert_carries_identity(self, report: dict) -> None:
+        expected = ca.tool_identity()
+        for field in self.IDENTITY_FIELDS:
+            self.assertIn(field, report, "canonical caller dropped %s" % field)
+            self.assertEqual(report[field], expected[field])
+
+    def test_module_runner_report_carries_identity(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_module_manifest(Path(d)))
+        self.assertNotIn("runner", report)
+        self._assert_carries_identity(report)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_batch_runner_report_carries_identity(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_batch_manifest(Path(d)))
+        self.assertEqual(report["runner"], "batch")
+        self._assert_carries_identity(report)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_process_runner_report_carries_identity(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_process_manifest(Path(d)))
+        self.assertEqual(report["runner"], "process")
+        self._assert_carries_identity(report)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_batch_json_and_text_reports_carry_identity_end_to_end(self):
+        with tempfile.TemporaryDirectory() as d:
+            manifest = _batch_manifest(Path(d))
+            as_json = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "corpus_adequacy.py"),
+                 str(manifest), "--json"],
+                capture_output=True, text=True, timeout=300,
+            )
+            as_text = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "corpus_adequacy.py"), str(manifest)],
+                capture_output=True, text=True, timeout=300,
+            )
+        self.assertEqual(as_json.returncode, 0, as_json.stderr)
+        document = json.loads(as_json.stdout)
+        self.assertEqual(document["runner"], "batch")
+        self._assert_carries_identity(document)
+        self.assertEqual(as_text.returncode, 0, as_text.stderr)
+        self.assertIn(ca.format_tool_identity(), as_text.stdout)
 
 
 if __name__ == "__main__":

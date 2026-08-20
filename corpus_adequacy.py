@@ -266,6 +266,12 @@ def tool_identity(root: Path | None = None) -> dict:
     bytes addressable even when no commit may be named. A checkout without
     `.git` still carries the version and the digest.
 
+    Reading the sources and comparing them are not one instant, so the
+    snapshot is re-read once the comparison is done and any observed change
+    fails closed. That is a narrowed window, not an atomic snapshot: a change
+    made and reverted entirely between the two reads is not detectable, and in
+    that case the bytes on disk did equal HEAD at both observations.
+
     Non-claims: this is not an attestation, signature, or SBOM; it does not
     prove the recorded bytes are the code objects already loaded in
     sys.modules; and it does not make the checkout or its environment
@@ -274,6 +280,14 @@ def tool_identity(root: Path | None = None) -> dict:
     root = Path(__file__).resolve().parent if root is None else Path(root)
     sources = _runtime_source_bytes(root)
     state, commit = _tool_source_state(root, sources)
+    if state == "exact" and _runtime_source_bytes(root) != sources:
+        # The snapshot was read before the comparison ran, so the bytes could
+        # move underneath it. Re-reading proves the snapshot still describes
+        # the disk. It differs here, and the snapshot equalled HEAD, so the
+        # bytes now on disk provably do not: dirty is measured, not hedged.
+        # No single byte-state can be addressed either, so the digest is
+        # dropped rather than naming bytes that have already been replaced.
+        state, commit, sources = "dirty", None, None
     return {
         "tool_version": VERSION,
         "tool_commit": commit,

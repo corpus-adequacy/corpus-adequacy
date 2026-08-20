@@ -6,8 +6,11 @@
 is byte-identical to `HEAD:<path>`, and `null` otherwise. Reports and
 `--version` additionally carry `tool_source_state` (`exact` | `dirty` |
 `unresolved`) and `tool_content_sha256` over an ordered, length-delimited
-stream of the declared sources. One producer answers all three renderers;
-`git status` is not consulted. A modified runtime source is therefore no
+stream of the declared sources. The declared sources are re-read once the
+comparison is done and any observed change fails closed, so a runtime file
+edited while identity is being resolved is never reported exact. One producer
+answers all three renderers, on the module and the process/batch report paths
+alike; `git status` is not consulted. A modified runtime source is therefore no
 longer attributed to the clean commit. This is not an attestation, a
 signature, an SBOM, or a reproducibility claim.
 
