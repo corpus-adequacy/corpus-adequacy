@@ -245,13 +245,14 @@ def _public_markdown(text: str) -> str:
     return "".join(out)
 
 
-ATX_HEADING_RE = re.compile(r"^( {0,3})(#{1,6}[ 	]+.+)$")
+ATX_HEADING_RE = re.compile(r"^( {0,3})(##(?!#)[ 	]+.+)$")
 
 
 def _atx_heading(line: str) -> str | None:
-    """CommonMark ATX heading: 0-3 leading spaces, then hashes.
+    """CommonMark level-2 ATX heading: 0-3 leading spaces, then ##.
 
     Returns the heading without the leading spaces, or None.
+    Level 1 and 3-6 headings are not a section boundary.
     """
     match = ATX_HEADING_RE.match(line)
     if match is None:
@@ -711,6 +712,16 @@ class VersionReleaseTruth(unittest.TestCase):
             (
                 "tag-without-readme-release-text",
                 {"readme": "no release procedure here\n"},
+            ),
+            (
+                "tag-unreleased-h3-added-is-still-body",
+                {
+                    "changelog": (
+                        "# Changelog\n\n## Unreleased\n\n"
+                        "### Added\n\nLater work.\n\n"
+                        "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n"
+                    )
+                },
             ),
         )
         for name, kwargs in cases:
