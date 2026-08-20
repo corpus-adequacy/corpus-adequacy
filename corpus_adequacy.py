@@ -138,9 +138,12 @@ def _req(obj: dict, key: str, where: str):
     return obj[key]
 
 
-def label_identity(entry: dict) -> str:
-    """Return the single identity used for mutants and acknowledgements."""
-    return entry["label"]
+def label_identity(entry: dict, where: str = "entry") -> str:
+    """Return the exact string identity used for declarations and acknowledgements."""
+    label = entry["label"]
+    if not isinstance(label, str) or not label.strip():
+        raise ManifestError("%s: label must be a non-empty string" % where)
+    return label
 
 
 def _require_unique_labels(m: dict) -> None:
@@ -148,8 +151,8 @@ def _require_unique_labels(m: dict) -> None:
     seen_mutants = {}
     for declaration in ("mutants", "equivalent"):
         for group, entries in m[declaration].items():
-            for entry in entries:
-                ident = label_identity(entry)
+            for i, entry in enumerate(entries):
+                ident = label_identity(entry, "%s[%s][%d]" % (declaration, group, i))
                 if ident in seen_mutants:
                     previous_declaration, previous_group = seen_mutants[ident]
                     raise ManifestError(
@@ -161,8 +164,8 @@ def _require_unique_labels(m: dict) -> None:
 
     for digest, entries in m["known_holes"].items():
         seen_acknowledgements = set()
-        for entry in entries:
-            ident = label_identity(entry)
+        for i, entry in enumerate(entries):
+            ident = label_identity(entry, "known_holes[%s][%d]" % (digest, i))
             if ident in seen_acknowledgements:
                 raise ManifestError(
                     "known_holes[%s] repeats acknowledgement %r. Each mutant may be "
