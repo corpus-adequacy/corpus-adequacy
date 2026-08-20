@@ -282,6 +282,55 @@ class MaterializeHelper(unittest.TestCase):
             self.assertEqual(now, snapshot)
             tree.cleanup()
 
+    def test_regular_git_worktree_file_is_not_copied(self):
+        """Measured: a regular .git file (worktree pointer) was copied."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "a.py").write_text("A\n", encoding="utf-8")
+            gitfile = root / ".git"
+            gitfile.write_text("gitdir: /somewhere/else\n", encoding="utf-8")
+            tree = iso.IsolatedMutationTree(root)
+            try:
+                isolated = tree.materialize()
+                self.assertTrue((isolated / "a.py").is_file())
+                self.assertFalse((isolated / ".git").exists())
+            finally:
+                tree.cleanup()
+
+    def test_empty_dirs_count_against_the_entry_cap(self):
+        """Measured: 20 empty dirs passed file_cap=2."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "keep.py").write_text("ok\n", encoding="utf-8")
+            for i in range(20):
+                (root / ("empty%d" % i)).mkdir()
+            snapshot = sorted(p.name for p in root.iterdir())
+            tree = iso.IsolatedMutationTree(root)
+            with self.assertRaises(iso.IsolationError) as cm:
+                tree.materialize(file_cap=2)
+            self.assertIn("2", str(cm.exception))
+            self.assertEqual(sorted(p.name for p in root.iterdir()), snapshot)
+            tree.cleanup()
+
+    def test_short_os_write_still_copies_every_byte(self):
+        """Measured: os.write reported 8 bytes but copied 1."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "src.bin"
+            dest = Path(d) / "out.bin"
+            payload = b"ABCDEFGH"
+            src.write_bytes(payload)
+            real_write = iso.os.write
+
+            def one_byte(fd, data):
+                if not data:
+                    return 0
+                return real_write(fd, data[:1])
+
+            with mock.patch.object(iso.os, "write", side_effect=one_byte):
+                n = iso._copy_regular_bounded(src, dest, 0, 64, chunk=8)
+            self.assertEqual(n, len(payload))
+            self.assertEqual(dest.read_bytes(), payload)
+
     def test_executable_mode_is_preserved(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

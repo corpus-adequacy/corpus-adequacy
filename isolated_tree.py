@@ -118,6 +118,17 @@ def _write_pointer_atomic(path: Path, text: str) -> None:
         raise
 
 
+def _write_all(fd: int, buf: bytes) -> int:
+    """Write every byte. os.write may return short."""
+    sent = 0
+    while sent < len(buf):
+        n = os.write(fd, buf[sent:])
+        if n <= 0:
+            raise IsolationError("short write of %s bytes stopped at %s" % (len(buf), sent))
+        sent += n
+    return sent
+
+
 def _copy_regular_bounded(
     src: Path,
     dest: Path,
@@ -155,9 +166,8 @@ def _copy_regular_bounded(
                 break
             if used + len(buf) > cap:
                 raise IsolationError("materialization exceeds the ceiling of %d bytes" % cap)
-            os.write(out_fd, buf)
-            written += len(buf)
-        os.chmod(dest, stat.S_IMODE(st.st_mode))
+            written += _write_all(out_fd, buf)
+        os.fchmod(out_fd, stat.S_IMODE(st.st_mode))
         return written
     except Exception:
         if dest.exists():
@@ -270,23 +280,24 @@ class IsolatedMutationTree:
         with entries:
             for entry in entries:
                 name = entry.name
+                if name == ".git":
+                    continue
                 try:
                     st = entry.stat(follow_symlinks=False)
                 except OSError as exc:
                     raise IsolationError("could not lstat %s: %s" % (entry.path, exc)) from exc
                 if stat.S_ISLNK(st.st_mode):
                     raise IsolationError("symlink refused: %s" % entry.path)
+                if copied_files + 1 > file_cap:
+                    raise IsolationError(
+                        "materialization exceeds the entry ceiling of %d" % file_cap)
                 if stat.S_ISDIR(st.st_mode):
-                    if name == ".git":
-                        continue
+                    copied_files += 1
                     copied_bytes, copied_files = self._copy_dir(
                         Path(entry.path), dest_dir / name, repo_root,
                         copied_bytes, copied_files, cap, file_cap)
                     continue
                 if stat.S_ISREG(st.st_mode):
-                    if copied_files + 1 > file_cap:
-                        raise IsolationError(
-                            "materialization exceeds the file ceiling of %d" % file_cap)
                     dest = dest_dir / name
                     n = _copy_regular_bounded(
                         Path(entry.path), dest, copied_bytes, cap)
