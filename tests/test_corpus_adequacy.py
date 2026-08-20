@@ -2186,6 +2186,7 @@ class SilentClass(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             return ca.run(_silent_manifest(Path(d), extra))
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_diagnostic_only_move_is_silent_not_killed(self):
         r = self._run({"diagnostic_from": ["reason"]})
         v = {m["label"]: m for m in r["mutants"]}
@@ -2196,6 +2197,7 @@ class SilentClass(unittest.TestCase):
         self.assertEqual(r["silent"], 1)
         self.assertTrue(r["diagnostic_channel_declared"])
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_silent_counts_against_the_score_and_never_for_it(self):
         r = self._run({"diagnostic_from": ["reason"]})
         # denominator includes it, numerator does not: 0 of 1.
@@ -2203,6 +2205,7 @@ class SilentClass(unittest.TestCase):
         self.assertFalse(r["adequate"])
         self.assertTrue(any("silent" in f for f in r["failures"]))
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_without_the_channel_the_same_mutant_reads_as_survived(self):
         # The class is unreachable when nothing declares a diagnostic channel,
         # so a zero there means it was not measured rather than that none exist.
