@@ -159,6 +159,32 @@ class ContinuousCap(_WithTestCap):
             with self.assertRaises(br._OutputTooLarge):
                 br._run_capped(_probe(tmp, body), tmp, 5)
 
+    def test_exact_cap_is_success(self):
+        body = "import sys\nsys.stdout.buffer.write(b'x' * %d)\n" % TEST_CAP
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            done = br._run_capped(_probe(tmp, body), tmp, 5)
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(done.stdout, "x" * TEST_CAP)
+        self.assertEqual(done.stderr, "")
+
+    def test_one_byte_past_cap_is_too_large_and_not_retained(self):
+        self.assertTrue(hasattr(br, "_charge_before_retain"))
+        kept, overflow = br._charge_before_retain(TEST_CAP, TEST_CAP, b"Z")
+        self.assertEqual(kept, b"")
+        self.assertTrue(overflow)
+        kept, overflow = br._charge_before_retain(TEST_CAP - 1, TEST_CAP, b"xy")
+        self.assertEqual(kept, b"x")
+        self.assertTrue(overflow)
+        kept, overflow = br._charge_before_retain(0, TEST_CAP, b"x" * TEST_CAP)
+        self.assertEqual(kept, b"x" * TEST_CAP)
+        self.assertFalse(overflow)
+        body = "import sys\nsys.stdout.buffer.write(b'x' * %d)\n" % (TEST_CAP + 1)
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            with self.assertRaises(br._OutputTooLarge):
+                br._run_capped(_probe(tmp, body), tmp, 5)
+
     def test_reader_failure_stops_the_child_without_waiting_out_the_timeout(self):
         real = subprocess.Popen
 
@@ -193,6 +219,50 @@ class ContinuousCap(_WithTestCap):
             tmp = Path(raw)
             with self.assertRaises(subprocess.TimeoutExpired):
                 br._run_capped(_probe(tmp, "import time\ntime.sleep(30)\n"), tmp, 1)
+
+    def test_timeout_wins_over_a_reader_error(self):
+        real = subprocess.Popen
+
+        def spy(*args, **kwargs):
+            proc = real(*args, **kwargs)
+
+            class _LateBoom:
+                def __init__(self, raw):
+                    self._raw = raw
+
+                def read(self, n=-1):
+                    time.sleep(1.5)
+                    raise OSError("late reader boom")
+
+                def close(self):
+                    return self._raw.close()
+
+            proc.stdout = _LateBoom(proc.stdout)
+            return proc
+
+        popen = mock.patch.object(subprocess, "Popen", side_effect=spy)
+        popen.start()
+        self.addCleanup(popen.stop)
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                br._run_capped(_probe(tmp, "import time\ntime.sleep(30)\n"), tmp, 1)
+
+    def test_nonzero_and_signal_returncodes_are_preserved(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            done = br._run_capped(_probe(tmp, "import sys\nsys.exit(3)\n"), tmp, 5)
+        self.assertEqual(done.returncode, 3)
+        if not POSIX:
+            return
+        body = (
+            "import os, signal\n"
+            "os.kill(os.getpid(), signal.SIGTERM)\n"
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            done = br._run_capped(_probe(tmp, body), tmp, 5)
+        self.assertEqual(done.returncode, -signal.SIGTERM)
 
     def test_normal_completion_keeps_rc0_and_both_streams(self):
         body = (
@@ -296,7 +366,7 @@ class Mutations(unittest.TestCase):
     """Source-string edits that must bite. Not a substitute for the cases above."""
 
     def test_removing_the_cap_check_lets_a_burst_complete(self):
-        run = _mutated_run(self, "if total > cap:", "if False and total > cap:")
+        run = _mutated_run(self, "if len(data) > room:", "if False and len(data) > room:")
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             cmd = _probe(tmp, "import sys\nsys.stdout.buffer.write(b'x' * %d)\n" % BURST)

@@ -3,13 +3,13 @@
 ## Unreleased
 
 Child stdout and stderr are drained continuously through pipes. Combined
-output is held at most `OUTPUT_CAP_BYTES` plus two in-flight
-`READ_CHUNK_BYTES` reads; crossing the cap kills the POSIX process group
-and raises `_OutputTooLarge`. A clean exit reaps descendants but drains
-both pipes to EOF. Timeout remains `TimeoutExpired`. Temporary output
-files are no longer used. On Windows, process and batch already refuse
-without fcntl; this helper kills only the direct child and claims no
-process tree.
+retained output stays at most `OUTPUT_CAP_BYTES`; two reader threads may
+briefly hold `2 * READ_CHUNK_BYTES` in-flight before charge. Crossing the
+cap kills the POSIX process group and raises `_OutputTooLarge`. A clean
+exit reaps descendants but drains both pipes to EOF. Timeout remains
+`TimeoutExpired` and outranks a reader failure. Temporary output files
+are no longer used. On Windows, process and batch already refuse without
+fcntl; this helper kills only the direct child and claims no process tree.
 
 Process and batch outcome children are classified against
 `accepted_exit_codes` (default `[0]`) before stdout is parsed.

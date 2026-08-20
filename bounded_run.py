@@ -21,16 +21,27 @@ from pathlib import Path
 # rather than after it exits.
 OUTPUT_CAP_BYTES = 4 * 1024 * 1024
 
-# One fixed read size. Two reader threads may each hold a chunk before the
-# locked charge serializes, so combined bytes held in memory stay at most
-# OUTPUT_CAP_BYTES + 2 * READ_CHUNK_BYTES. Reads themselves are not locked:
-# serializing a blocking read can stall the other pipe. This is the documented
-# read margin, not a second cap and not a scheduling exception.
+# One fixed read size. Charge-before-retain keeps combined stdout+stderr at
+# most OUTPUT_CAP_BYTES. The two reader threads may each already hold a
+# chunk before that lock runs, so in-flight (not yet retained) bytes stay at
+# most 2 * READ_CHUNK_BYTES. Reads themselves are not locked: serializing a
+# blocking read can stall the other pipe.
 READ_CHUNK_BYTES = 64 * 1024
 
 
 class _OutputTooLarge(Exception):
     """A child exceeded OUTPUT_CAP_BYTES; its output is not materialized."""
+
+
+def _charge_before_retain(total: int, cap: int, data: bytes) -> tuple[bytes, bool]:
+    """Accept at most the remaining allowance. Overflowing bytes are dropped.
+
+    Exact cap is not overflow. The first byte past cap is not retained.
+    """
+    room = cap - total
+    if len(data) > room:
+        return data[:room], True
+    return data, False
 
 
 def _posix_process_group() -> bool:
@@ -40,11 +51,12 @@ def _posix_process_group() -> bool:
 def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess:
     """subprocess.run with a ceiling on how much output is ever held.
 
-    Drains stdout and stderr concurrently through pipes. One locked counter
-    charges every chunk. Combined retained bytes never exceed
-    OUTPUT_CAP_BYTES + 2 * READ_CHUNK_BYTES. Crossing the cap kills the
-    POSIX process group and raises _OutputTooLarge. Timeout remains
-    TimeoutExpired. No temporary output files are used.
+    Drains stdout and stderr concurrently through pipes. One locked
+    charge-before-retain keeps combined retained bytes at most
+    OUTPUT_CAP_BYTES. Crossing the cap kills the POSIX process group and
+    raises _OutputTooLarge. In-flight read buffers may briefly hold
+    2 * READ_CHUNK_BYTES more. Timeout remains TimeoutExpired. No
+    temporary output files are used.
 
     Windows: process/batch already refuse where fcntl is missing, and this
     helper kills only the direct child. That is not a process-tree claim.
@@ -108,9 +120,11 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
         with lock:
             if overflow:
                 return
-            chunks[which].append(data)
-            total += len(data)
-            if total > cap:
+            data, overflowed = _charge_before_retain(total, cap, data)
+            if data:
+                chunks[which].append(data)
+                total += len(data)
+            if overflowed:
                 overflow = True
                 stop.set()
 
@@ -172,10 +186,10 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
 
     if overflow:
         raise _OutputTooLarge()
-    if reader_error:
-        raise reader_error[0]
     if timed_out:
         raise subprocess.TimeoutExpired(cmd, timeout)
+    if reader_error:
+        raise reader_error[0]
     stdout_text = b"".join(chunks[1]).decode("utf-8", "replace")
     stderr_text = b"".join(chunks[2]).decode("utf-8", "replace")
     return subprocess.CompletedProcess(
