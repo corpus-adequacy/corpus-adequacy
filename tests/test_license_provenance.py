@@ -34,6 +34,11 @@ NETWORK_BOUNDARY = (
 ISOLATION_BOUNDARY = (
     "Isolation and least privilege are the caller's job; this is not a sandbox."
 )
+DO_NOT_RUN_UNTRUSTED = "Do not run a manifest you do not trust."
+THIRD_PARTY_NOT_EVIDENCE = (
+    "A third-party manifest is not independent evidence merely because it "
+    "was written elsewhere."
+)
 
 
 class LicenseProvenance(unittest.TestCase):
@@ -57,6 +62,12 @@ class LicenseProvenance(unittest.TestCase):
         self.assertIn(TRUSTED_MANIFEST_WARNING, text)
         self.assertIn(NETWORK_BOUNDARY, text)
         self.assertIn(ISOLATION_BOUNDARY, text)
+
+    def test_readme_forbids_running_an_untrusted_manifest(self):
+        self.assertIn(DO_NOT_RUN_UNTRUSTED, README.read_text(encoding="utf-8"))
+
+    def test_readme_says_a_third_party_manifest_is_not_independent_evidence(self):
+        self.assertIn(THIRD_PARTY_NOT_EVIDENCE, README.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
