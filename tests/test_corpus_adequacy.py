@@ -55,6 +55,21 @@ def _batch_python() -> str:
     return sys.executable
 
 
+def _assert_process_batch_lock_verdict(test: unittest.TestCase, rep: dict) -> None:
+    """Process/batch adequate follows the fcntl gate, not the discrimination result.
+
+    The product fail-closes when advisory locking is unavailable. That is a
+    supported refusal, not a scoring path, and must not be weakened here.
+    """
+    lock_msgs = [f for f in rep["failures"] if "no advisory lock on this platform" in f]
+    if ca.fcntl is None:
+        test.assertFalse(rep["adequate"], rep["failures"])
+        test.assertEqual(len(lock_msgs), 1, rep["failures"])
+    else:
+        test.assertTrue(rep["adequate"], rep["failures"])
+        test.assertEqual(lock_msgs, [])
+
+
 def _manifest(tmp: Path, mutants, equivalent=None, vectors=None, raw=None,
               control=True) -> Path:
     """A control is added to every group unless a test is about its absence.
@@ -334,7 +349,7 @@ class BatchRunner(unittest.TestCase):
             rep = ca.run(self._corpus(Path(d)))
         self.assertEqual(rep["runner"], "batch")
         self.assertEqual(rep["killed"], 1)
-        self.assertTrue(rep["adequate"], rep["failures"])
+        _assert_process_batch_lock_verdict(self, rep)
 
     def test_the_source_is_restored_after_a_batch_run(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1018,7 +1033,7 @@ class DeclaredOutcomeMembersMustExist(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             rep = ca.run(self._corpus(Path(d), ["ok", "failures"]))
         self.assertNotIn("never emits", " ".join(rep["failures"]))
-        self.assertTrue(rep["adequate"], rep["failures"])
+        _assert_process_batch_lock_verdict(self, rep)
 
 
 class ControlIsRequiredOnEveryRunner(unittest.TestCase):
@@ -1056,6 +1071,31 @@ class ControlIsRequiredOnEveryRunner(unittest.TestCase):
                          "the control requirement is stated more than once again")
 
 
+class ProcessBatchPlatformContract(unittest.TestCase):
+    """Windows/non-POSIX is a supported refusal path, not a process/batch scoring path."""
+
+    def test_fcntl_absence_is_the_process_batch_refusal_gate(self):
+        self.assertIs(ca._TreeLock(Path(".")).unavailable, ca.fcntl is None)
+
+    def test_refusal_assertions_pin_fcntl_none_even_on_posix_hosts(self):
+        """The Windows verdict must be asserted here, not only on a Windows runner."""
+        lock = ("no advisory lock on this platform, so a concurrent run "
+                "over this tree could not be excluded; this score is only "
+                "as good as the assumption that none was running")
+        with mock.patch.object(ca, "fcntl", None):
+            _assert_process_batch_lock_verdict(
+                self, {"adequate": False, "failures": [lock]})
+            with self.assertRaises(AssertionError):
+                _assert_process_batch_lock_verdict(
+                    self, {"adequate": True, "failures": []})
+
+    def test_batch_without_advisory_lock_is_a_refusal_not_a_score(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(BatchRunner()._corpus(Path(d)))
+        self.assertEqual(rep["killed"], 1)
+        _assert_process_batch_lock_verdict(self, rep)
+
+
 class BoundedRunPortability(unittest.TestCase):
     """Windows has no killpg/getpgid; the finally must not turn a live child into <batch>."""
 
@@ -1071,6 +1111,21 @@ class BoundedRunPortability(unittest.TestCase):
                 setattr(os, name, fn)
         self.assertEqual(result.returncode, 0)
         self.assertIn("hello", result.stdout)
+
+    def test_posix_start_new_session_valueerror_is_not_swallowed(self):
+        if not hasattr(os, "setsid"):
+            self.skipTest("no POSIX session primitive")
+        real = subprocess.Popen
+
+        def fake_popen(*args, **kwargs):
+            if kwargs.get("start_new_session"):
+                raise ValueError("start_new_session is only supported on POSIX")
+            return real(*args, **kwargs)
+
+        with mock.patch.object(subprocess, "Popen", side_effect=fake_popen):
+            with self.assertRaises(ValueError) as cm:
+                br._run_capped([sys.executable, "-c", "print('x')"], Path("."), 10)
+        self.assertIn("start_new_session", str(cm.exception))
 
 
 if __name__ == "__main__":

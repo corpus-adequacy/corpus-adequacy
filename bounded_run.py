@@ -41,6 +41,8 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
             proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=out, stderr=err,
                                     start_new_session=True)
         except ValueError:
+            if hasattr(os, "setsid"):
+                raise
             proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=out, stderr=err)
 
         def _kill_tree() -> None:
