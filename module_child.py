@@ -83,11 +83,11 @@ def collect(fn, vectors: list, arg_keys: list, result: dict) -> None:
             result["raised"].append(key)
             continue
         try:
-            json.dumps(value, allow_nan=False)
+            snapshot = json.loads(json.dumps(value, allow_nan=False))
         except (TypeError, ValueError):
             result["unsupported"].append(key)
             continue
-        result["outcomes"][key] = value
+        result["outcomes"][key] = snapshot
 
 
 def restore_path(paths: list) -> None:

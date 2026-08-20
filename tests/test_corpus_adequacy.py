@@ -2006,6 +2006,38 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
                 self.assertTrue(any("control" in f and "abnormally" in f
                                     for f in rep["failures"]), rep["failures"])
 
+    def test_systemexit_in_a_control_is_control_killed_not_control_error(self):
+        """F1 disposition: vector-level SystemExit is a caught raise, not abnormal
+        child termination. Issue #11 explicitly treats entrypoint SystemExit
+        caught at vector level as a raised outcome, while abnormal CHILD
+        termination is role-invalidating (control-error).
+
+        The distinction: collect() catches BaseException including SystemExit
+        within the child process, the child continues to process remaining
+        vectors, and reports the raise normally. The child does NOT die.
+        An abnormal child termination (process-level) would be caught by
+        the parent as unexpected-exit/signal → control-error.
+
+        So a control whose entrypoint raises SystemExit is control-killed:
+        the harness detected a behaviour change (raise vs return), which is
+        what the control exists to prove. This is correct and intentional.
+        """
+        # A control that raises SystemExit on every vector: the child catches
+        # it in collect(), reports "raised", the parent sees raised → control-killed.
+        ctrl = {"label": "CONTROL systemexit", "control": True,
+                "anchor": 'def evaluate(group, inputs):',
+                "replacement": 'def evaluate(group, inputs):\n    raise SystemExit(42)'}
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, ctrl]}, control=False))
+        v = _verdict(rep, "CONTROL systemexit")
+        # control-killed: the harness detected the raise, proving it can detect changes.
+        self.assertEqual(v["verdict"], "control-killed",
+                         "vector-level SystemExit is a detected raise, not abnormal "
+                         "child termination; expected control-killed, got %s" % v["verdict"])
+        # The run should not be invalidated by this.
+        self.assertFalse(any("control-error" in f for f in rep["failures"]),
+                         "SystemExit caught at vector level is not control-error")
+
     def test_an_outcome_the_transport_cannot_carry_is_unproved(self):
         # Not a new type system: whatever JSON carries is compared, and a value
         # it cannot carry is declined rather than guessed at.
@@ -2015,6 +2047,94 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
         self.assertEqual(v["verdict"], "unproved")
         self.assertIn("unsupported-outcome", v["how"])
         self.assertFalse(rep["adequate"])
+
+class MutableOutcomeIsNotAFalseKill(unittest.TestCase):
+    """F2: collect() validates with json.dumps but stores the mutable original.
+
+    A later vector can mutate the stored object to contain un-serialisable
+    values (e.g. object()). When emit() calls json.dump on the whole result
+    dict, the now-corrupt entry crashes the child. The parent sees
+    unexpected-exit, which is in TERMINATED_KINDS, and credits a kill.
+
+    That is a false clean: the corpus never distinguished the mutant.
+    The transport must snapshot the validated JSON representation, or
+    report an untransportable outcome as unproved -- never as killed.
+    """
+
+    def test_mutable_outcome_does_not_become_a_false_kill(self):
+        """The mutant replaces the bad-branch body with code that returns a
+        mutable list, and the non-bad branch corrupts it with object().
+
+        Baseline returns stable strings → clean. The mutant's 'bad' branch
+        returns a mutable _shared list (json-valid NOW), and the non-bad
+        branch appends object() to _shared and returns "ok". Vector order
+        is v1 (bad=True) then v2 (bad=False). After v2, the stored v1
+        outcome contains object(). emit() crashes → unexpected-exit →
+        false kill.
+
+        Expected after fix: collect() snapshots the JSON representation at
+        validation time, so emit() succeeds and the mutant is compared on
+        actual decoded outcomes.
+        """
+        vectors = {"vectors": [
+            {"vector_id": "v1", "axis": "a", "inputs": {"bad": True}},
+            {"vector_id": "v2", "axis": "a", "inputs": {}},
+        ]}
+        # The mutant body replaces 'return "rejected"'. It uses a
+        # module-level _shared list. First call (v1, bad=True) returns
+        # _shared (empty, json-valid). Second call (v2, bad=False) appends
+        # object() to _shared, corrupting the stored v1 reference.
+        mutant_body = (
+            'global _shared\n'
+            '        if "_shared" not in dir():\n'
+            '            _shared = []\n'
+            '        return _shared'
+        )
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            # Use a source that has the mutable corruption path in the
+            # NON-bad branch of the mutant, while the baseline is clean.
+            impl = (
+                '_shared = []\n'
+                'def evaluate(group, inputs):\n'
+                '    if inputs.get("bad"):\n'
+                '        return "rejected"\n'
+                '    _shared.append(object())\n'
+                '    return "ok"\n'
+            )
+            (tmp / "impl.py").write_text(impl)
+            (tmp / "vectors.json").write_text(json.dumps(vectors))
+            # The mutant replaces 'return "rejected"' with 'return _shared'
+            # so the bad branch returns the mutable _shared reference.
+            # After v1 stores _shared, v2 appends object() to it.
+            m = {"schema": ca.SCHEMA, "implementation": "impl.py",
+                 "entrypoint": "evaluate", "vectors": "vectors.json",
+                 "group_key": "axis", "id_key": "vector_id",
+                 "inputs_key": "inputs",
+                 "mutants": {"a": [
+                     {"label": "rejects bad input",
+                      "anchor": 'return "rejected"',
+                      "replacement": 'return _shared'},
+                     {"label": "CONTROL [a]", "control": True,
+                      "anchor": 'def evaluate(group, inputs):',
+                      "replacement": 'def evaluate(group, inputs):\n    return "MOVED"'},
+                 ]}}
+            p = tmp / "m.json"
+            p.write_text(json.dumps(m))
+            rep = ca.run(p)
+        # Baseline must be clean (stable strings, no mutation).
+        self.assertFalse(
+            any("UNMUTATED" in f for f in rep["failures"]),
+            "the unmutated run should not fail: %s" % rep["failures"])
+        v = _verdict(rep, "rejects bad input")
+        # The mutant MUST NOT be credited as killed via a transport crash.
+        # unexpected-exit here means emit() crashed on the mutated mutable
+        # object -- a false kill from a transport artefact.
+        self.assertNotEqual(v.get("how"), "unexpected-exit",
+                            "mutable outcome corruption caused a false kill: "
+                            "collect() stored a mutable reference that a later "
+                            "vector corrupted with object(), crashing emit()")
+
 
 class IsolationClaimScope(unittest.TestCase):
     """The public and internal claims must not overstate the isolation boundary.
@@ -2039,6 +2159,22 @@ class IsolationClaimScope(unittest.TestCase):
         ("session escape", True),
         ("host resource exhaustion", True),
     ]
+
+    def test_readme_describes_role_sensitive_failure_semantics(self):
+        """The README must not say abnormal children 'fail closed instead of
+        scoring' as a blanket claim. The actual semantics are role-sensitive:
+        ordinary-mutant abnormal termination is a named kill, unusable
+        protocol is unproved, baseline/control failure invalidates score.
+        """
+        readme = self._surfaces["readme"]
+        # The old blanket phrasing must be gone.
+        self.assertNotIn("fails closed instead of scoring", readme,
+                         "README still uses the blanket 'fails closed instead of scoring' "
+                         "which does not distinguish roles")
+        # Role-sensitive wording must be present.
+        self.assertIn("named kill", readme)
+        self.assertIn("unproved", readme)
+        self.assertIn("invalidates the score", readme)
 
     def test_isolation_claim_contract(self):
         for phrase, present in self._contract:
