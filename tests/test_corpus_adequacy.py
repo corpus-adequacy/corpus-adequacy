@@ -562,16 +562,21 @@ class ProcessSourceContainment(unittest.TestCase):
                 return result
 
             captured = None
+            report = None
             with mock.patch.object(ca, "_build", side_effect=build_then_swap):
                 try:
-                    ca._run_process(loaded, manifest)
+                    report = ca._run_process(loaded, manifest)
                 except ca.ManifestError as exc:
                     captured = exc
 
-            self.assertIsNotNone(captured)
+            # Isolation copies before _build. A parent swap of the ORIGINAL
+            # after that copy must not write outside; the run may succeed.
             self.assertEqual(outside.read_bytes(), before)
-            self.assertIn("outside repo_root", str(captured))
-            self._assert_lock_can_be_reacquired(loaded["_repo_root"])
+            if captured is not None:
+                self.assertNotIn(before + b"mutated", outside.read_bytes())
+            else:
+                self.assertIsNotNone(report)
+            self._assert_lock_can_be_reacquired(Path(tmp) / "repo")
             captured = None
             gc.collect()
 
@@ -583,7 +588,8 @@ class ProcessSourceContainment(unittest.TestCase):
             loaded = ca.load_manifest(manifest)
             before = source.read_bytes()
             captured = None
-            with mock.patch.object(ca, "_tree_is_dirty", side_effect=RuntimeError("probe")):
+            with mock.patch.object(ca.IsolatedMutationTree, "materialize",
+                                   side_effect=RuntimeError("probe")):
                 try:
                     ca._run_process(loaded, manifest)
                 except RuntimeError as exc:
@@ -989,24 +995,28 @@ class ConcurrentRunsAreExcluded(unittest.TestCase):
         self.assertEqual(second["killed"], 1)
 
     @unittest.skipIf(ca.fcntl is None, "no POSIX advisory locks on this platform")
-    def test_the_lock_is_taken_before_the_dirty_check(self):
-        """Order matters: a tree seen clean outside the lock can change before capture.
-
-        Asserted by holding the lock and passing a manifest whose declared source
-        does not exist. Unlocking first would make load/dirty checks fail on that
-        instead, so the lock message proves the lock came first.
-        """
+    def test_the_lock_is_taken_before_materialize(self):
+        """Order: a tree copied outside the lock can change under another run."""
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             manifest = self._corpus(tmp)
+            called = []
+
+            def boom(*_a, **_k):
+                called.append(True)
+                raise AssertionError("materialize must not run under a held lock")
+
             held = ca._TreeLock(tmp)
             held.__enter__()
             try:
-                with self.assertRaises(ca.ManifestError) as cm:
-                    ca.run(manifest)
+                with mock.patch.object(ca.IsolatedMutationTree, "materialize",
+                                       side_effect=boom):
+                    with self.assertRaises(ca.ManifestError) as cm:
+                        ca.run(manifest)
             finally:
                 held.__exit__()
         self.assertIn("holds the lock", str(cm.exception))
+        self.assertEqual(called, [])
 
 
 class DeclaredOutcomeMembersMustExist(unittest.TestCase):
@@ -1166,7 +1176,7 @@ class ProcessBatchPlatformContract(unittest.TestCase):
     def test_fcntl_absence_is_the_process_batch_refusal_gate(self):
         self.assertIs(ca._TreeLock(Path(".")).unavailable, ca.fcntl is None)
 
-    def test_missing_fcntl_refuses_before_dirty_source_build_or_score(self):
+    def test_missing_fcntl_refuses_before_source_build_or_score(self):
         """fcntl is None is enter-time refuse, not a scored run plus a footnote."""
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)

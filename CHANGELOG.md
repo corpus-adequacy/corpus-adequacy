@@ -42,7 +42,28 @@ outside `repo_root`, including symlink escapes, and revalidate containment befor
 source access. Invalid roots and outside paths are rejected before probing source
 existence. Source-guard documentation now states its abrupt-termination limit.
 On platforms without fcntl advisory locking, process and batch runs refuse
-before dirty check, source capture, build, child, mutation, or score.
+before source copy, build, child, mutation, or score.
+
+Process and batch mutation now happens in a unique disposable working-tree
+copy of `repo_root`, not in the declared checkout. Dirty working-tree bytes
+are measured. Symlinks and special files are refused fail-closed at
+materialization. `.git` is omitted. File and byte ceilings apply during the
+copy. Cleanup removes only that run's root after validation. There is no
+stable pointer and no cross-run stale delete. `SIGKILL` may leave orphaned
+temp bytes; they stay until the OS reclaims them, and the next run uses a
+new root without auto-deleting the orphan. The copy is not an atomic
+filesystem snapshot; concurrent external writes can produce mixed bytes.
+Cleanup is best-effort. The ignored `_tree_is_dirty` Git status call is
+removed. MaterializeHelper tests skip where `O_NOFOLLOW` is absent;
+process/batch already refuse before materialize. A cross-platform pin
+proves `_copy_regular_bounded` fails closed before creating the
+destination when `O_NOFOLLOW` is None. The process/batch lock opens
+without following or truncating a symlink. File copy is chunked so a
+post-lstat grow cannot load past the ceiling. A `.git` entry of any type is
+skipped before the type check. Files and directories share one entry
+ceiling. Short `os.write` is looped; mode is set with `fchmod` on the open fd.
+This is not a sandbox, not a git worktree, not the output ceiling, and not
+HEAD-vs-dirty provenance.
 
 ## 0.1.0 — 2026-08-19
 

@@ -76,7 +76,9 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import stat
 import sys
 import subprocess
 import tempfile
@@ -90,6 +92,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_run import (  # noqa: E402
     OUTPUT_CAP_BYTES, _OutputTooLarge, _run_capped,
 )
+from isolated_tree import IsolationError, IsolatedMutationTree  # noqa: E402
 
 SCHEMA = "corpus-adequacy.manifest.v0"
 ERROR_SCHEMA = "corpus-adequacy.error.v0"
@@ -489,9 +492,9 @@ class _TreeLock:
     disabled rule left in a working tree, which is the exact outcome
     _SourceGuard exists to prevent.
 
-    So the lock is taken BEFORE the dirty check, not after: a clean tree
-    observed outside the lock can be mutated before the originals are captured,
-    which is the same bug one step earlier.
+    So the lock is taken BEFORE the isolated copy, not after: a tree
+    observed outside the lock can change before the copy is made, which
+    is the same bug one step earlier.
 
     Non-blocking on purpose. A run that queued and started twenty minutes later
     would measure a tree nobody chose for it.
@@ -509,10 +512,10 @@ class _TreeLock:
         if self.unavailable:
             raise ManifestError(
                 "no advisory lock on this platform, so a process or batch run "
-                "cannot exclude a concurrent writer. Refusing before dirty "
-                "check, source capture, build, or mutation of %s"
+                "cannot exclude a concurrent writer. Refusing before source "
+                "copy, build, or mutation of %s"
                 % self.repo_root)
-        self._fh = open(self.path, "w", encoding="utf-8")
+        self._fh = self._open_lockfile()
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -525,6 +528,37 @@ class _TreeLock:
                 "checkout." % self.repo_root)
         self.held = True
         return self
+
+    def _open_lockfile(self):
+        """POSIX lock open: no follow, no truncate. Fail-closed on a symlink."""
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            raise ManifestError(
+                "no O_NOFOLLOW on this platform, so the lock path cannot be "
+                "opened without following a symlink. Refusing before isolation of %s"
+                % self.repo_root)
+        flags = os.O_RDWR | os.O_CREAT | nofollow
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        try:
+            fd = os.open(self.path, flags, 0o600)
+        except OSError:
+            raise ManifestError(
+                "lock path %s is not a regular file; refusing before isolation of %s"
+                % (self.path, self.repo_root))
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                os.close(fd)
+                raise ManifestError(
+                    "lock path %s is not a regular file; refusing before isolation of %s"
+                    % (self.path, self.repo_root))
+            return os.fdopen(fd, "r+")
+        except ManifestError:
+            raise
+        except Exception:
+            os.close(fd)
+            raise
 
     def __exit__(self, *exc) -> None:
         if self._fh is not None:
@@ -603,17 +637,6 @@ class _SourceGuard:
             if current.read_bytes() != data:
                 leaked.append(str(path))
         return leaked
-
-
-def _tree_is_dirty(repo_root: Path, paths: list[Path]) -> list[str]:
-    """Declared sources with uncommitted changes. Mutating those loses work."""
-    try:
-        out = subprocess.run(["git", "-C", str(repo_root), "status", "--porcelain", "--"]
-                             + [str(p) for p in paths],
-                             capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        return []          # no git: nothing to protect, and nothing to claim
-    return [ln[3:] for ln in out.stdout.splitlines() if ln.strip()]
 
 
 def _build(m: dict) -> tuple[bool, str]:
@@ -715,20 +738,34 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
     known_holes = 0
 
-    # Taken BEFORE the dirty check: a tree observed clean outside the lock can be
-    # mutated by another run before the originals are captured, and then this run's
-    # restore writes that mutant back as the original.
-    lock = _TreeLock(m["_repo_root"])
+    # Taken BEFORE the isolated copy: a tree observed outside the lock can
+    # change before materialize. Isolation copies working-tree bytes, so dirty
+    # declared sources are measured rather than refused; the lock still comes
+    # first.
+    original_root = m["_repo_root"]
+    lock = _TreeLock(original_root)
     lock.__enter__()
 
+    iso = IsolatedMutationTree(original_root)
+    guard = None
     try:
-        dirty = _tree_is_dirty(m["_repo_root"], m["_source_paths"])
-        if dirty:
-            raise ManifestError(
-                "declared sources have uncommitted changes: %s. This adapter edits them in "
-                "place, so it refuses to run rather than risk losing that work" % dirty)
-        guard = _SourceGuard(m["_source_paths"], m["_repo_root"])
+        try:
+            isolated = iso.materialize()
+        except IsolationError as exc:
+            raise ManifestError(str(exc)) from exc
+        remapped = []
+        root_res = original_root.resolve()
+        for path in m["_source_paths"]:
+            remapped.append(isolated / path.resolve().relative_to(root_res))
+        missing = [str(p) for p in remapped if not p.is_file()]
+        if missing:
+            raise ManifestError("implementation source not found: %s" % missing)
+        m["_repo_root"] = isolated
+        m["_source_paths"] = remapped
+        # Isolated tree has no .git; dirty working-tree bytes are allowed.
+        guard = _SourceGuard(m["_source_paths"], repo_root=None)
     except BaseException:
+        iso.cleanup()
         lock.__exit__()
         raise
 
@@ -874,12 +911,13 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                 equivalent += 1
     finally:
         try:
-            guard.restore()
-            leaked = guard.verify_clean()
-            if leaked:
-                failures.append("SOURCES NOT RESTORED: %s" % leaked)
-            _build(m)   # leave the tree with a binary built from the real source
+            if guard is not None:
+                guard.restore()
+                leaked = guard.verify_clean()
+                if leaked:
+                    failures.append("SOURCES NOT RESTORED: %s" % leaked)
         finally:
+            iso.cleanup()
             lock.__exit__()
 
     # A stale acknowledgement is not only one whose rule became killed. Any verdict

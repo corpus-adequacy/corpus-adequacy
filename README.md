@@ -102,16 +102,27 @@ exclusions, and what the percentage is a percentage of.
 reporting a bare boolean makes every mutant kill everything or nothing. That
 limitation belongs to the corpus and the tool says so rather than hiding it.
 
-`process` and `batch` currently mutate declared sources in place. The source
-guard restores them after normal completion and ordinary Python exceptions; it
-cannot restore after `SIGKILL`, power loss, or host termination. Until those
-runners use an isolated disposable checkout, run them only in a clean,
-disposable checkout. On platforms without `fcntl` advisory locking, `process`
-and `batch` refuse before the dirty check, source capture, build, child,
-mutation, or score. Resolved source paths outside `repo_root` are refused at
-manifest load and checked again before source access. These repeated checks are
-not an atomic defence against a hostile concurrent filesystem actor; disposable
-checkout isolation remains the durable boundary planned for these runners.
+`process` and `batch` measure in a bounded disposable working-tree copy of
+`repo_root`. Each run creates a unique temp root under the system temp
+directory (never under the declared checkout) and remaps mutation, build, and
+child cwd to that copy. The declared user checkout is not written. Cleanup
+removes only that run's root after lstat, direct-child-of-system-temp, and
+prefix checks. There is no stable pointer and no cross-run stale delete.
+Abrupt `SIGKILL` of the tool cannot run Python finally, so a leftover copy
+may remain under temp until the OS reclaims it; the next run uses a new
+unique root and does not auto-delete the orphan. The copy is not an
+atomic filesystem snapshot: concurrent external writes can produce mixed
+bytes. Cleanup is best-effort; a normal cleanup error or SIGKILL can
+leave an inert temp-root. The process/batch lock is
+opened without following or truncating a symlink. Regular files are copied
+in bounded chunks. A `.git` entry is skipped before type checks; files and
+directories share one entry ceiling. This is not a sandbox, not a
+git worktree, not the #4 output ceiling, not #11 module isolation, and not #2
+HEAD-vs-dirty provenance. `.git` is omitted; build rules that need git metadata
+in the tree are unsupported. A symlink, FIFO, socket, or device in the walk is
+refused at materialization (in addition to existing load-time source
+containment). Materialization over the file or byte ceiling is refused. On
+platforms without `fcntl`, `process` and `batch` still refuse before work.
 
 ## Exclusion categories, and why each one is narrow
 
