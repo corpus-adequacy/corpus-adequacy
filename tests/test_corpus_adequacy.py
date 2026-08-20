@@ -1579,6 +1579,28 @@ class AcceptedExitPolicy(unittest.TestCase):
         self.assertIn("test-names", msg)
         self.assertIn("process", msg)
 
+    def test_test_names_on_module_without_101_is_a_manifest_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = _manifest(Path(d), {"a": [KILLABLE]}, raw={
+                "runner": "module", "outcome_parse": "test-names"})
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(p)
+        self.assertIn("test-names", str(cm.exception))
+
+    def test_test_names_on_module_with_101_is_still_a_manifest_error(self):
+        # Runner mismatch, not the batch 101 obligation. Including [0, 101]
+        # must not let a module manifest load and ignore the parse mode.
+        with tempfile.TemporaryDirectory() as d:
+            p = _manifest(Path(d), {"a": [KILLABLE]}, raw={
+                "runner": "module", "outcome_parse": "test-names",
+                "accepted_exit_codes": [0, 101]})
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(p)
+        msg = str(cm.exception)
+        self.assertIn("test-names", msg)
+        self.assertIn("module", msg)
+        self.assertNotIn("101", msg)
+
     def test_declared_2_loads_on_generic_json(self):
         # JSON outcome_from has no protocol ID. Code 2 is declared, not inferred.
         loaded = self._load({"accepted_exit_codes": [0, 2]}, runner="process")

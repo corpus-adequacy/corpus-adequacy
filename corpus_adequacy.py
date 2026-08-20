@@ -264,6 +264,10 @@ def load_manifest(path: Path) -> dict:
     m.setdefault("runner", "module")
     if m["runner"] not in ("module", "process", "batch"):
         raise ManifestError("runner must be module, process or batch, got %r" % m["runner"])
+    if m.get("outcome_parse") == "test-names" and m["runner"] != "batch":
+        raise ManifestError(
+            "outcome_parse test-names is implemented only for runner=batch, "
+            "not runner=%s" % m["runner"])
     if m["runner"] in ("process", "batch"):
         _req(m, "entrypoint_command", "manifest (runner=%s)" % m["runner"])
         if m.get("outcome_parse") != "test-names":
