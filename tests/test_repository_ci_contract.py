@@ -509,7 +509,9 @@ class ReadmeSupportAndReleaseDocs(unittest.TestCase):
         )
 
 
-TEST_MODULES_RUNNABLE_DIRECTLY = ("test_corpus_adequacy.py",)
+# One module, because one module advertises direct execution in its docstring.
+# A tuple here would contract a rule over files nobody has measured.
+DIRECTLY_RUNNABLE_TEST_MODULE = "test_corpus_adequacy.py"
 
 
 def main_guard_violations(source: str, name: str) -> list[str]:
@@ -517,10 +519,13 @@ def main_guard_violations(source: str, name: str) -> list[str]:
 
     `unittest.main()` collects the module as it stands when the guard executes,
     and then exits. A class defined after the guard is never reached, so
-    `python3 tests/<module>` reports a smaller, silently truncated run while
-    discovery reports the full one. Measured on this repository: the guard sat
-    2140 lines into a 2556-line module and direct execution ran 148 of 293 tests
-    without a single error.
+    `python3 tests/<module>` reports a smaller, silently truncated run.
+
+    Measured on this repository at 634291a, comparing the module against itself:
+    direct execution ran 148 while loading that same module via unittest found
+    164, so 16 tests in that module were silently skipped. The guard sat 2140
+    lines into a 2556-line file. Full discovery reporting 293 is integration
+    evidence only, and is not the comparison that addresses this defect.
 
     Parsed, not grepped: a comment, a docstring or a nested `if __name__` inside
     a function would each fool a text match, and the property is about top-level
@@ -560,12 +565,10 @@ def _is_main_guard(test) -> bool:
 
 class DirectlyRunnableTestModules(unittest.TestCase):
     def test_the_main_guard_is_the_last_top_level_statement(self):
-        for name in TEST_MODULES_RUNNABLE_DIRECTLY:
-            path = Path(__file__).resolve().parent / name
-            with self.subTest(module=name):
-                problems = main_guard_violations(
-                    path.read_text(encoding="utf-8"), name)
-                self.assertEqual(problems, [], "\n".join(problems))
+        name = DIRECTLY_RUNNABLE_TEST_MODULE
+        path = Path(__file__).resolve().parent / name
+        problems = main_guard_violations(path.read_text(encoding="utf-8"), name)
+        self.assertEqual(problems, [], "\n".join(problems))
 
     def test_the_rule_catches_a_class_defined_after_the_guard(self):
         # A contract test that cannot fail is not a contract. This is the shape
