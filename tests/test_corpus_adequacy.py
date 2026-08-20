@@ -2447,10 +2447,15 @@ class HoleRatioUsesTheScoredDenominator(unittest.TestCase):
 # wrong scored rules the author excluded, and told an author to delete a valid
 # acknowledgement for a rule that is still unforced.
 #
-# Rule 3 (outcome movement still kills and still makes an acknowledgement stale)
-# is already pinned by
-# `KnownHoles.test_an_acknowledgement_for_a_rule_now_exercised_is_flagged` and
-# `…test_an_acknowledgement_lingers_when_its_rule_becomes_out_of_scope`.
+# Rule 3 is that outcome movement still kills and still retires an
+# acknowledgement. `KnownHoles` pins two neighbouring facts on the MODULE runner:
+# `test_an_acknowledgement_for_a_rule_now_exercised_is_flagged` pins kill-then-
+# stale there, and `test_an_acknowledgement_lingers_when_its_rule_becomes_out_of_
+# scope` pins staleness on a SCOPE transition, which is not outcome movement at
+# all. Neither reaches the process classifier, and a mutation that handled a
+# valid acknowledgement before `raised or moved` in `_run_process` left the whole
+# suite green. So rule 3 is pinned in THIS caller only by
+# `test_an_acknowledged_rule_the_outcome_moves_is_killed_and_goes_stale` below.
 
 
 class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
@@ -2460,10 +2465,11 @@ class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
             "ok = True\n"
             "guard = True\n"
             "killme = True\n"
+            "acked = True\n"
             'tag = "A"\n'
             "if not guard:\n"
             "    ok = False\n"
-            'print(json.dumps({"ok": ok and killme, "reason": tag}))\n',
+            'print(json.dumps({"ok": ok and killme and acked, "reason": tag}))\n',
             encoding="utf-8")
         (tmp / "vec.json").write_text("{}\n", encoding="utf-8")
         (tmp / "digest.json").write_text('{"digest":"sha256:deadbeef"}\n', encoding="utf-8")
@@ -2499,10 +2505,34 @@ class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
             rep = ca.run(self._corpus(Path(d), second))
         row = {r["label"]: r for r in rep["mutants"]}["oos-rule"]
         self.assertEqual(row["verdict"], "unexercised")
+        # The docs promise the row carries the diagnostic fact and says it.
+        self.assertEqual(row["moved_diagnostic"], 1)
+        self.assertIn("diagnostic channel moved on 1", row["how"])
+        self.assertIn("pinned outcomes did not", row["how"])
+        self.assertIn("not scored", row["how"])
         self.assertEqual(rep["silent"], 0)
         self.assertEqual(rep["unexercised_out_of_scope"], 1)
         self.assertEqual(rep["score_percent"], 100.0)
         self.assertTrue(rep["adequate"], rep["failures"])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_an_acknowledged_rule_the_outcome_moves_is_killed_and_goes_stale(self):
+        # Rule 3 in the process classifier. The KnownHoles tests that look like
+        # they cover this run the module runner, so a mutation handling a valid
+        # acknowledgement before `raised or moved` here kept the suite green.
+        second = {"label": "acked-rule", "anchor": "acked = True",
+                  "replacement": "acked = False"}
+        holes = {"sha256:deadbeef": [
+            {"label": "acked-rule", "reason": "acknowledged", "recorded": "2026-08-20"}]}
+        with tempfile.TemporaryDirectory() as d:
+            rep = ca.run(self._corpus(Path(d), second, known_holes=holes))
+        row = {r["label"]: r for r in rep["mutants"]}["acked-rule"]
+        self.assertEqual(row["verdict"], "killed")
+        self.assertEqual(rep["known_holes"], 0)
+        self.assertFalse(rep["adequate"])
+        joined = " ".join(rep["failures"])
+        self.assertIn("no longer holes", joined)
+        self.assertIn("now killed", joined)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_a_current_digest_known_hole_survives_a_diagnostic_only_move(self):
@@ -2515,6 +2545,9 @@ class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
         self.assertEqual(row["verdict"], "known-hole")
         # The row stays honest about what did see it.
         self.assertEqual(row["moved_diagnostic"], 1)
+        self.assertIn("diagnostic channel moved on 1", row["how"])
+        self.assertIn("pinned outcomes did not", row["how"])
+        self.assertIn("not scored", row["how"])
         self.assertEqual(rep["silent"], 0)
         self.assertEqual(rep["known_holes"], 1)
         self.assertEqual(rep["score_percent"], 100.0)
