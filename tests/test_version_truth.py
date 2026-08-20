@@ -332,6 +332,8 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
         ["git", "-C", str(root), *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="strict",
         env=env,
     )
 
@@ -788,6 +790,27 @@ class VersionReleaseTruth(unittest.TestCase):
             with _patch_show_ref(128):
                 with self.assertRaises(ValueError):
                     check_version_release_truth(root)
+
+    def test_git_decodes_tagged_unicode_as_utf8_strict(self):
+        self.assertIn("\u2014", _honest_changelog())
+        self.assertIn("\u2192", RELEASE_TRUTH_BLOCK)
+        recorded = []
+        real_run = subprocess.run
+
+        def wrapper(*args, **kwargs):
+            if kwargs.get("text"):
+                recorded.append(dict(kwargs))
+            return real_run(*args, **kwargs)
+
+        with _temp_tree() as root:
+            _init_git_repo(root)
+            _tag(root, "v0.1.0")
+            with patch.object(subprocess, "run", wrapper):
+                self.assertEqual(check_version_release_truth(root), "0.1.0")
+        self.assertTrue(recorded)
+        for kwargs in recorded:
+            self.assertEqual(kwargs.get("encoding"), "utf-8")
+            self.assertEqual(kwargs.get("errors"), "strict")
 
 
 if __name__ == "__main__":
