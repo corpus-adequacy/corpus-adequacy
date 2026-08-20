@@ -37,22 +37,14 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
         # A descendant that inherits stdout/stderr keeps writing after proc.kill()
         # and walks straight through the ceiling, so the child leads its own session
         # and the whole group is stopped and reaped.
-        try:
-            proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=out, stderr=err,
-                                    start_new_session=True)
-        except ValueError:
-            if hasattr(os, "setsid"):
-                raise
-            proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=out, stderr=err)
+        proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=out, stderr=err,
+                                start_new_session=True)
 
         def _kill_tree() -> None:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (AttributeError, ProcessLookupError, PermissionError, OSError):
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:

@@ -32,9 +32,6 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Echo pinned Python version
-        shell: bash
-        run: echo "PYTHON_VERSION=${PYTHON_VERSION}"
       - name: Syntax compile
         shell: bash
         run: python -m py_compile corpus_adequacy.py bounded_run.py tests/test_corpus_adequacy.py tests/test_repository_ci_contract.py

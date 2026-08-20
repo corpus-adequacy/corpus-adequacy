@@ -56,18 +56,18 @@ def _batch_python() -> str:
 
 
 def _assert_process_batch_lock_verdict(test: unittest.TestCase, rep: dict) -> None:
-    """Process/batch adequate follows the fcntl gate, not the discrimination result.
+    """A completed process/batch score is only legal when the lock was available.
 
-    The product fail-closes when advisory locking is unavailable. That is a
-    supported refusal, not a scoring path, and must not be weakened here.
+    fcntl is None is ManifestError at enter, before any source write — not
+    adequate=false after a scored run.
     """
-    lock_msgs = [f for f in rep["failures"] if "no advisory lock on this platform" in f]
-    if ca.fcntl is None:
-        test.assertFalse(rep["adequate"], rep["failures"])
-        test.assertEqual(len(lock_msgs), 1, rep["failures"])
-    else:
-        test.assertTrue(rep["adequate"], rep["failures"])
-        test.assertEqual(lock_msgs, [])
+    test.assertIsNotNone(
+        ca.fcntl,
+        "fcntl is None is refuse-before-work, not a scored report")
+    test.assertTrue(rep["adequate"], rep["failures"])
+    test.assertEqual(
+        [f for f in rep["failures"] if "no advisory lock on this platform" in f],
+        [])
 
 
 def _manifest(tmp: Path, mutants, equivalent=None, vectors=None, raw=None,
@@ -344,6 +344,7 @@ class BatchRunner(unittest.TestCase):
         p.write_text(json.dumps(m))
         return p
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_one_invocation_still_discriminates_via_the_summary(self):
         with tempfile.TemporaryDirectory() as d:
             rep = ca.run(self._corpus(Path(d)))
@@ -356,7 +357,12 @@ class BatchRunner(unittest.TestCase):
             tmp = Path(d)
             p = self._corpus(tmp)
             before = (tmp / "check.py").read_bytes()
-            ca.run(p)
+            if ca.fcntl is None:
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.run(p)
+                self.assertIn("no advisory lock", str(cm.exception))
+            else:
+                ca.run(p)
             self.assertEqual((tmp / "check.py").read_bytes(), before)
 
     def test_a_batch_manifest_needs_no_build(self):
@@ -365,6 +371,7 @@ class BatchRunner(unittest.TestCase):
             m = ca.load_manifest(self._corpus(Path(d)))
         self.assertEqual(m["build"], [])
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_an_unreadable_summary_is_a_raise_not_a_silent_pass(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
@@ -505,6 +512,7 @@ class ProcessSourceContainment(unittest.TestCase):
                         ca.load_manifest(manifest)
                     self.assertIn("repo_root must be an existing directory", str(cm.exception))
 
+    @unittest.skipIf(ca.fcntl is None, "containment after load requires an advisory lock")
     def test_a_parent_swap_after_load_is_refused_before_outside_mutation(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
@@ -526,6 +534,7 @@ class ProcessSourceContainment(unittest.TestCase):
             self.assertEqual(outside.read_bytes(), before)
         self.assertIn("outside repo_root", str(cm.exception))
 
+    @unittest.skipIf(ca.fcntl is None, "containment after capture requires an advisory lock")
     def test_a_parent_swap_after_source_capture_is_refused_before_mutation(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
@@ -1020,6 +1029,7 @@ class DeclaredOutcomeMembersMustExist(unittest.TestCase):
         q.write_text(json.dumps(m))
         return q
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_a_member_nothing_emits_is_reported_rather_than_compared_to_none(self):
         with tempfile.TemporaryDirectory() as d:
             rep = ca.run(self._corpus(Path(d), ["ok", "all_reproduced"]))
@@ -1028,6 +1038,7 @@ class DeclaredOutcomeMembersMustExist(unittest.TestCase):
         self.assertIn("never emits", msg)
         self.assertFalse(rep["adequate"])
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_a_surface_the_implementation_does_emit_is_not_flagged(self):
         # The guard must not fire on a correct manifest, or it is noise.
         with tempfile.TemporaryDirectory() as d:
@@ -1077,40 +1088,79 @@ class ProcessBatchPlatformContract(unittest.TestCase):
     def test_fcntl_absence_is_the_process_batch_refusal_gate(self):
         self.assertIs(ca._TreeLock(Path(".")).unavailable, ca.fcntl is None)
 
+    def test_missing_fcntl_refuses_before_dirty_source_build_or_score(self):
+        """fcntl is None is enter-time refuse, not a scored run plus a footnote."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = BatchRunner()._corpus(tmp)
+            source = tmp / "check.py"
+            before = source.read_bytes()
+            tree_before = {
+                path: path.read_bytes()
+                for path in tmp.rglob("*") if path.is_file()
+            }
+            built = []
+            children = []
+
+            def track_build(m):
+                built.append(True)
+                return True, ""
+
+            def track_child(*args, **kwargs):
+                children.append(True)
+                raise AssertionError("must not spawn a child")
+
+            with mock.patch.object(ca, "fcntl", None), \
+                    mock.patch.object(ca, "_build", side_effect=track_build), \
+                    mock.patch.object(ca, "_run_capped", side_effect=track_child):
+                lock = ca._TreeLock(tmp)
+                with self.assertRaises(ca.ManifestError) as entered:
+                    lock.__enter__()
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.run(manifest)
+            self.assertIn("no advisory lock", str(entered.exception))
+            self.assertIn("no advisory lock", str(cm.exception))
+            self.assertNotIn("adequate", str(cm.exception).lower())
+            self.assertEqual(source.read_bytes(), before)
+            self.assertEqual(
+                {path: path.read_bytes() for path in tmp.rglob("*") if path.is_file()},
+                tree_before,
+            )
+            self.assertEqual(built, [])
+            self.assertEqual(children, [])
+
     def test_refusal_assertions_pin_fcntl_none_even_on_posix_hosts(self):
-        """The Windows verdict must be asserted here, not only on a Windows runner."""
-        lock = ("no advisory lock on this platform, so a concurrent run "
-                "over this tree could not be excluded; this score is only "
-                "as good as the assumption that none was running")
+        """fcntl is None is ManifestError before work, not adequate=false after a score."""
         with mock.patch.object(ca, "fcntl", None):
-            _assert_process_batch_lock_verdict(
-                self, {"adequate": False, "failures": [lock]})
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca._TreeLock(Path(".")).__enter__()
+            self.assertIn("no advisory lock", str(cm.exception))
             with self.assertRaises(AssertionError):
                 _assert_process_batch_lock_verdict(
                     self, {"adequate": True, "failures": []})
+            with self.assertRaises(AssertionError):
+                _assert_process_batch_lock_verdict(
+                    self, {"adequate": False,
+                           "failures": ["no advisory lock on this platform"]})
 
     def test_batch_without_advisory_lock_is_a_refusal_not_a_score(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(BatchRunner()._corpus(Path(d)))
+            tmp = Path(d)
+            manifest = BatchRunner()._corpus(tmp)
+            before = (tmp / "check.py").read_bytes()
+            if ca.fcntl is None:
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.run(manifest)
+                self.assertIn("no advisory lock", str(cm.exception))
+                self.assertEqual((tmp / "check.py").read_bytes(), before)
+                return
+            rep = ca.run(manifest)
         self.assertEqual(rep["killed"], 1)
         _assert_process_batch_lock_verdict(self, rep)
 
 
 class BoundedRunPortability(unittest.TestCase):
-    """Windows has no killpg/getpgid; the finally must not turn a live child into <batch>."""
-
-    def test_run_capped_when_posix_process_group_apis_are_absent(self):
-        saved = {name: getattr(os, name) for name in ("killpg", "getpgid") if hasattr(os, name)}
-        try:
-            for name in list(saved):
-                delattr(os, name)
-            result = br._run_capped(
-                [sys.executable, "-c", "print('hello')"], Path("."), 10)
-        finally:
-            for name, fn in saved.items():
-                setattr(os, name, fn)
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("hello", result.stdout)
+    """Base _run_capped must not swallow a POSIX start_new_session failure."""
 
     def test_posix_start_new_session_valueerror_is_not_swallowed(self):
         if not hasattr(os, "setsid"):
