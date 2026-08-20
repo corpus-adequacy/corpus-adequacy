@@ -287,12 +287,14 @@ class ContinuousCap(_WithTestCap):
                 br._run_capped(_probe(tmp, "import time\ntime.sleep(30)\n"), tmp, 1)
 
     def test_timeout_outranks_reader_error_when_poll_blocks_past_deadline(self):
-        # Measured on e508210: first poll() 1.2s, stdout.read OSError at 1.1s,
-        # timeout=1 → OSError at 1.21s. Timeout still outranks that failure.
+        # 38c070f: first poll() blocks until the reader OSError and
+        # kill_boundary reaps the child, then returns a returncode.
+        # `while proc.poll() is None` never enters, so OSError wins.
         real = subprocess.Popen
         clock = [0.0]
         poll_entered = threading.Event()
         reader_raised = threading.Event()
+        child_reaped = threading.Event()
 
         def fake_monotonic():
             return clock[0]
@@ -300,7 +302,14 @@ class ContinuousCap(_WithTestCap):
         def spy(*args, **kwargs):
             proc = real(*args, **kwargs)
             real_poll = proc.poll
+            real_wait = proc.wait
             first = {"done": False}
+
+            def wrapping_wait(*a, **k):
+                result = real_wait(*a, **k)
+                if proc.returncode is not None:
+                    child_reaped.set()
+                return result
 
             def slow_first_poll(*a, **k):
                 if not first["done"]:
@@ -308,9 +317,16 @@ class ContinuousCap(_WithTestCap):
                     poll_entered.set()
                     if not reader_raised.wait(2):
                         raise AssertionError("reader did not fail while poll blocked")
+                    if not child_reaped.wait(2):
+                        raise AssertionError("reader-kill did not reap the child")
                     clock[0] = 1.2
+                    rc = real_poll(*a, **k)
+                    if rc is None:
+                        raise AssertionError("poll after reader-kill returned None")
+                    return rc
                 return real_poll(*a, **k)
 
+            proc.wait = wrapping_wait
             proc.poll = slow_first_poll
 
             class _Boom:
