@@ -460,19 +460,23 @@ RELEASE_PROCEDURE_BLOCK = (
 )
 
 
+def readme_support_violations(readme: str) -> list[str]:
+    """One guard: the constructed support line must be a full public line."""
+    if any(line.strip() == EXPECTED_SUPPORT_LINE for line in readme.splitlines()):
+        return []
+    return ["README must contain the exact support-matrix line"]
+
+
 class ReadmeSupportAndReleaseDocs(unittest.TestCase):
     """README names the same matrix the workflow contract already pins."""
 
     def test_readme_names_the_claimed_ci_matrix(self):
         readme = README.read_text(encoding="utf-8")
-        self.assertTrue(
-            any(line.strip() == EXPECTED_SUPPORT_LINE for line in readme.splitlines()),
-            "README must contain the exact support-matrix line",
-        )
+        self.assertEqual(readme_support_violations(readme), [])
 
     def test_scattered_matrix_tokens_without_the_line_are_rejected(self):
         readme = README.read_text(encoding="utf-8")
-        self.assertIn(EXPECTED_SUPPORT_LINE, readme)
+        self.assertEqual(readme_support_violations(readme), [])
         scattered = readme.replace(
             EXPECTED_SUPPORT_LINE,
             "CPython %s appears. Also %s / %s / %s."
@@ -483,8 +487,9 @@ class ReadmeSupportAndReleaseDocs(unittest.TestCase):
         self.assertIn("CPython %s" % PYTHON_VERSION, scattered)
         for os_name in CLAIMED_OSES:
             self.assertIn(os_name, scattered)
-        self.assertFalse(
-            any(line.strip() == EXPECTED_SUPPORT_LINE for line in scattered.splitlines())
+        self.assertEqual(
+            readme_support_violations(scattered),
+            ["README must contain the exact support-matrix line"],
         )
 
     def test_readme_states_module_is_cross_platform_and_fcntl_runners_refuse(self):
