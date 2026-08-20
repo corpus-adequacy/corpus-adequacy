@@ -57,7 +57,8 @@ def _manifest(tmp: Path, mutants, equivalent=None, vectors=None, raw=None,
     quietly reproducing the gap.
     """
     if control:
-        mutants = {g: (list(ms) + [CONTROL] if not any(x.get("control") for x in ms) else ms)
+        mutants = {g: (list(ms) + [dict(CONTROL, label=f"{CONTROL['label']} [{g}]")]
+                       if not any(x.get("control") for x in ms) else ms)
                    for g, ms in mutants.items()}
     (tmp / "impl.py").write_text(IMPL)
     (tmp / "vectors.json").write_text(json.dumps(vectors or VECTORS))
@@ -370,7 +371,8 @@ class Guards(unittest.TestCase):
 
     def test_mutants_declared_for_absent_groups_fail(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE], "zz": [KILLABLE]}))
+            absent = dict(KILLABLE, label="absent-group-rule")
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE], "zz": [absent]}))
         self.assertTrue(any("not in the corpus" in f for f in rep["failures"]))
 
 
@@ -396,6 +398,43 @@ class ManifestValidation(unittest.TestCase):
         self.assertIn("mutates nothing",
                       self._err({"mutants": {"a": [{"label": "noop", "anchor": "x",
                                                     "replacement": "x"}]}}))
+
+    def test_duplicate_mutant_labels_across_groups_are_refused(self):
+        duplicate = dict(SURVIVOR, label="same-hole")
+        msg = self._err({"mutants": {"a": [duplicate], "b": [duplicate]}})
+        self.assertIn("declared more than once", msg)
+        self.assertIn("same-hole", msg)
+
+    def test_duplicate_mutant_labels_within_one_group_are_refused(self):
+        duplicate = dict(SURVIVOR, label="same-hole")
+        msg = self._err({"mutants": {"a": [duplicate, duplicate]}})
+        self.assertIn("declared more than once", msg)
+        self.assertIn("same-hole", msg)
+
+    def test_duplicate_acknowledgements_for_one_digest_are_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "digest.json").write_text(json.dumps({"corpus_digest": "sha256:aaa"}))
+            ack = {"label": "same-hole", "reason": "known gap", "recorded": "2026-08-20"}
+            p = _manifest(tmp, {"a": [dict(SURVIVOR, label="same-hole")]}, raw={
+                "corpus_digest_file": "digest.json", "corpus_digest_key": "corpus_digest",
+                "known_holes": {"sha256:aaa": [ack, ack]}})
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(p)
+        self.assertIn("acknowledgement", str(cm.exception))
+        self.assertIn("same-hole", str(cm.exception))
+
+    def test_one_acknowledgement_may_name_its_mutant(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "digest.json").write_text(json.dumps({"corpus_digest": "sha256:aaa"}))
+            p = _manifest(tmp, {"a": [dict(SURVIVOR, label="same-hole")]}, raw={
+                "corpus_digest_file": "digest.json", "corpus_digest_key": "corpus_digest",
+                "known_holes": {"sha256:aaa": [{"label": "same-hole",
+                                                  "reason": "known gap",
+                                                  "recorded": "2026-08-20"}]}})
+            loaded = ca.load_manifest(p)
+        self.assertEqual(loaded["mutants"]["a"][0]["label"], "same-hole")
 
 
 class RuleyFindings(unittest.TestCase):
