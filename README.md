@@ -5,9 +5,9 @@ no dependency, no install, no network.
 
 The version lives in one place: `VERSION` in `corpus_adequacy.py`. Every report
 carries it as `tool_version`, plus `tool_commit` when the checkout can resolve
-`HEAD`. Pin CI to the commit SHA; quote the version a human can read. The git
-tag is `v` plus that same number. The cut order is cut → dated heading → VERSION → tag.
-Quoting a version is not a tag and does not make the tag addressable.
+`HEAD`. Pin CI to the commit SHA; quote the version a human can read.
+
+The git tag is `v` plus that same number. The cut order is cut → dated heading → VERSION → tag. Quoting a version is not a tag and does not make the tag addressable.
 
 ```
 python3 corpus_adequacy.py --version

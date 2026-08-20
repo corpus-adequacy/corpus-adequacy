@@ -28,9 +28,14 @@ SEMVER = r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
 SEMVER_RE = re.compile(r"^" + SEMVER + r"$")
 UNRELEASED_HEADING_RE = re.compile(r"^##\s+\[?Unreleased\]?\s*$")
 TAG_SCHEMA_PHRASE = "The git tag is `v` plus that same number."
-CUT_ORDER_PHRASE = "cut → dated heading → VERSION → tag"
+CUT_ORDER_PHRASE = "The cut order is cut → dated heading → VERSION → tag."
 NO_ADDRESSABILITY_PHRASE = (
     "Quoting a version is not a tag and does not make the tag addressable."
+)
+RELEASE_TRUTH_BLOCK = "%s %s %s" % (
+    TAG_SCHEMA_PHRASE,
+    CUT_ORDER_PHRASE,
+    NO_ADDRESSABILITY_PHRASE,
 )
 
 
@@ -46,9 +51,9 @@ def check_version_release_truth(root: Path) -> str:
        This does not exec the module or prove globals()/exec reflection.
     2. CHANGELOG has exactly one Unreleased heading and exactly one dated
        heading for that VERSION (real ISO calendar date).
-    3. Docs name the tag schema, the cut order, and the no-addressability
-       sentence. The literal v<VERSION> is forbidden only while that tag
-       is demonstrably absent.
+    3. Public README must contain RELEASE_TRUTH_BLOCK as one exact
+       contiguous string. The literal v<VERSION> is forbidden only
+       while that tag is demonstrably absent.
     4. No git metadata: treat as no tag. In a checkout, show-ref --verify
        --quiet maps rc 1 to absent and any other nonzero to error. A
        present tag is read via git show tag:path, run through the same
@@ -283,22 +288,12 @@ def _check_changelog_headings(changelog: str, version: str) -> None:
         )
 
 
-def _folded(text: str) -> str:
-    return " ".join(text.split())
-
-
 def _check_docs_wording(
     readme: str, changelog: str, version: str, tag_present: bool
 ) -> None:
-    folded = _folded(readme)
-    if TAG_SCHEMA_PHRASE not in folded:
-        raise ValueError("README must state the tag schema: %r" % TAG_SCHEMA_PHRASE)
-    if CUT_ORDER_PHRASE not in folded:
-        raise ValueError("README must state the cut order: %r" % CUT_ORDER_PHRASE)
-    if NO_ADDRESSABILITY_PHRASE not in folded:
+    if RELEASE_TRUTH_BLOCK not in readme:
         raise ValueError(
-            "README must state that quoting a version is not addressable: %r"
-            % NO_ADDRESSABILITY_PHRASE
+            "README must contain the exact release-truth block"
         )
     if tag_present:
         return
@@ -386,10 +381,7 @@ def _check_tagged_tree(root: Path, version: str) -> None:
 
 
 def _honest_readme(extra: str = "") -> str:
-    return (
-        "%s The tag is applied only after the cut order: %s. %s%s\n"
-        % (TAG_SCHEMA_PHRASE, CUT_ORDER_PHRASE, NO_ADDRESSABILITY_PHRASE, extra)
-    )
+    return RELEASE_TRUTH_BLOCK + extra + "\n"
 
 
 def _honest_changelog(version: str = "0.1.0") -> str:
@@ -623,6 +615,19 @@ class VersionReleaseTruth(unittest.TestCase):
                 "".join(
                     ("\t" + line if line.strip() else line)
                     for line in _honest_readme().splitlines(True)
+                ),
+            ),
+            (
+                "phrases-only-in-reference-titles",
+                (
+                    '[schema]: https://example.test "%s"\n'
+                    '[order]: https://example.test "%s"\n'
+                    '[addr]: https://example.test "%s"\n'
+                    % (
+                        TAG_SCHEMA_PHRASE,
+                        CUT_ORDER_PHRASE,
+                        NO_ADDRESSABILITY_PHRASE,
+                    )
                 ),
             ),
         )
