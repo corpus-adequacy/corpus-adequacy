@@ -97,6 +97,8 @@ from isolated_tree import IsolationError, IsolatedMutationTree  # noqa: E402
 SCHEMA = "corpus-adequacy.manifest.v0"
 ERROR_SCHEMA = "corpus-adequacy.error.v0"
 REPORT_SCHEMA = "corpus-adequacy.report.v0"
+SURVIVORS_SCHEMA = "corpus-adequacy.survivors.v0"
+ANCHOR_EXCERPT_MAX = 200
 # One place. The report, --version, and CHANGELOG name this.
 # A tag v+VERSION exists only after the documented cut.
 # A SHA pin is exact and opaque; this is the name a measurement can quote.
@@ -316,6 +318,221 @@ SCORE_MEANS = ("percent of author-declared in-scope rules killed; NOT percent of
                "means it was not measured, not that none exist")
 
 
+
+SURVIVED_OBLIGATION = (
+    "A future vector must distinguish this rule on a declared outcome. "
+    "This projection does not name such a vector.")
+SILENT_OBLIGATION = (
+    "A future vector must distinguish this rule on a declared outcome, "
+    "not only the diagnostic channel. "
+    "This projection does not name such a vector.")
+
+
+
+def _refuse_nonregular(path: Path) -> ManifestError:
+    return ManifestError(
+        "input %s is not a regular file; refusing to follow a symlink or "
+        "open a non-file" % path)
+
+
+def read_bounded_regular_file(path: Path, *, cap: int | None = None) -> bytes:
+    """Read one regular file without following a symlink.
+
+    Size is refused from fstat before any parse, using OUTPUT_CAP_BYTES
+    unless a caller passes cap. Bytes are gathered in a loop; one os.read
+    is not a complete-read guarantee. The caller may json.loads the
+    returned bytes; this function never does.
+
+    When O_NOFOLLOW is missing, lstat/open/fstat identity parity is the
+    fallback: a symlink or non-regular path is refused, and a file whose
+    (st_dev, st_ino) changed between lstat and fstat is refused.
+    """
+    if cap is None:
+        cap = OUTPUT_CAP_BYTES
+    path = Path(path)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    identity = None
+    if nofollow is not None:
+        flags |= nofollow
+    else:
+        try:
+            before = os.lstat(path)
+        except OSError:
+            raise _refuse_nonregular(path) from None
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise _refuse_nonregular(path)
+        identity = (before.st_dev, before.st_ino)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise _refuse_nonregular(path) from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise _refuse_nonregular(path)
+        if identity is not None and (st.st_dev, st.st_ino) != identity:
+            raise ManifestError(
+                "input %s changed between lstat and open; refusing" % path)
+        if st.st_size > cap:
+            raise ManifestError(
+                "input %s exceeds the projection cap of %d bytes" % (path, cap))
+        data = bytearray()
+        while len(data) <= cap:
+            chunk = os.read(fd, min(65536, cap + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > cap:
+            raise ManifestError(
+                "input %s exceeds the projection cap of %d bytes" % (path, cap))
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+def _file_sha256(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _control_stripped_one_line(text: str) -> str:
+    return "".join(ch for ch in text if ord(ch) >= 32 and ch != "\x7f")
+
+
+def _parse_projection_json(raw: bytes):
+    """One parser for --survivors report and digest-matched manifest bytes."""
+    def refuse_const(value):
+        raise ManifestError("non-finite JSON number %s" % value)
+
+    def no_duplicate_keys(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ManifestError("duplicate JSON key %r" % key)
+            obj[key] = value
+        return obj
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ManifestError("projection input is not UTF-8") from None
+    try:
+        return json.loads(
+            text, parse_constant=refuse_const, object_pairs_hook=no_duplicate_keys)
+    except RecursionError as exc:
+        raise ManifestError(str(exc)) from None
+
+
+def _require_anchor_manifest(manifest_obj) -> dict:
+    """Typed mutants map before any .get on a group or entry."""
+    if not isinstance(manifest_obj, dict):
+        raise ManifestError("manifest must be an object")
+    mutants = manifest_obj.get("mutants")
+    if mutants is None:
+        return manifest_obj
+    if not isinstance(mutants, dict):
+        raise ManifestError("manifest.mutants must be an object")
+    for group, entries in mutants.items():
+        if not isinstance(entries, list):
+            raise ManifestError("manifest.mutants[%r] must be a list" % group)
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise ManifestError(
+                    "manifest.mutants[%r][%d] must be an object" % (group, i))
+    return manifest_obj
+
+
+def _lookup_manifest_anchor(manifest_obj: dict, group: str, label: str):
+    entries = (manifest_obj.get("mutants") or {}).get(group) or []
+    for entry in entries:
+        if entry.get("label") == label:
+            return entry.get("anchor")
+    return None
+
+
+def _apply_anchor(finding: dict, manifest_obj: dict) -> None:
+    raw_anchor = _lookup_manifest_anchor(manifest_obj, finding["group"], finding["rule"])
+    if not isinstance(raw_anchor, str):
+        return
+    if len(raw_anchor) > ANCHOR_EXCERPT_MAX:
+        finding["anchor_omitted"] = "oversized"
+        return
+    excerpt = _control_stripped_one_line(raw_anchor)
+    if excerpt:
+        finding["anchor_excerpt"] = excerpt
+
+
+def _require_report_rows(report) -> list:
+    """Refuse hostile report shapes before they become KeyError or []."""
+    if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
+        raise ManifestError(
+            "survivors input must be %s, got %r"
+            % (REPORT_SCHEMA, report.get("schema") if isinstance(report, dict) else type(report).__name__))
+    mutants = report.get("mutants")
+    if not isinstance(mutants, list):
+        raise ManifestError("report.mutants must be a list")
+    for i, row in enumerate(mutants):
+        if not isinstance(row, dict):
+            raise ManifestError("report.mutants[%d] must be an object" % i)
+        for key in ("group", "label", "verdict"):
+            val = row.get(key)
+            if not isinstance(val, str) or not val:
+                raise ManifestError(
+                    "report.mutants[%d].%s must be a non-empty string" % (i, key))
+        for key in ("moved", "moved_diagnostic"):
+            if key in row and type(row[key]) is not int:
+                raise ManifestError(
+                    "report.mutants[%d].%s must be an int" % (i, key))
+    return mutants
+
+
+def survivor_findings(report, manifest=None):
+    """Project survived and silent rows. Pure; does not measure or mutate.
+
+    `rule` is the mutant label. Counts come from the findings, not from
+    producer summary fields. Producer failures stay out of the projection.
+    A Path `manifest` is read through `read_bounded_regular_file`; its exact
+    on-disk bytes must match `report.manifest_sha256` before an anchor is
+    emitted. A reserialized object digest is never used.
+    """
+    mutants = _require_report_rows(report)
+    findings = []
+    for row in mutants:
+        verdict = row.get("verdict")
+        if verdict == "survived":
+            obligation = SURVIVED_OBLIGATION
+        elif verdict == "silent":
+            obligation = SILENT_OBLIGATION
+        else:
+            continue
+        findings.append({
+            "rule": row["label"],
+            "group": row["group"],
+            "verdict": verdict,
+            "moved": row.get("moved", 0),
+            "moved_diagnostic": row.get("moved_diagnostic", 0),
+            "obligation": obligation,
+        })
+    findings.sort(key=lambda f: (f["group"], f["rule"]))
+    if manifest is not None:
+        raw = read_bounded_regular_file(Path(manifest))
+        if _file_sha256(raw) == report.get("manifest_sha256"):
+            manifest_obj = _require_anchor_manifest(_parse_projection_json(raw))
+            for finding in findings:
+                _apply_anchor(finding, manifest_obj)
+    return {
+        "schema": SURVIVORS_SCHEMA,
+        "source_schema": REPORT_SCHEMA,
+        "manifest_sha256": report.get("manifest_sha256"),
+        "survived": sum(f["verdict"] == "survived" for f in findings),
+        "silent": sum(f["verdict"] == "silent" for f in findings),
+        "finding_count": len(findings),
+        "findings": findings,
+    }
+
+
 def encode_report_v0(report: dict) -> bytes:
     """Return the sole byte representation of a successful report.
 
@@ -331,6 +548,19 @@ def encode_report_v0(report: dict) -> bytes:
     except UnicodeEncodeError:
         raise ReportEncodingError(
             "report contains text that cannot be encoded as valid UTF-8") from None
+
+
+
+def encode_survivors_v0(doc: dict) -> bytes:
+    """Sole byte form of a survivors.v0 projection. Never calls encode_report_v0."""
+    if doc.get("schema") != SURVIVORS_SCHEMA:
+        raise ValueError("encode_survivors_v0 accepts only %s" % SURVIVORS_SCHEMA)
+    try:
+        return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8")
+    except UnicodeEncodeError:
+        raise ReportEncodingError(
+            "survivors projection contains text that cannot be encoded as valid UTF-8") from None
 
 
 def _control_result(group: str, label: str, scope: str, *,
@@ -1767,16 +1997,66 @@ def structural_failures(m: dict, groups_in_corpus: set) -> list:
     return failures
 
 
+
+def _write_encoded(encoded: bytes) -> None:
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout.buffer.write(encoded)
+    else:
+        sys.stdout.write(encoded.decode("utf-8"))
+
+
+def _survivors_cli(args, ap) -> int:
+    """Early sibling path: read a report.v0 file. Never calls run()."""
+    if args.manifest is None:
+        ap.error("report is required")
+    try:
+        raw = read_bounded_regular_file(args.manifest)
+        report = _parse_projection_json(raw)
+        projected = survivor_findings(report, manifest=args.anchor_manifest)
+        encoded = encode_survivors_v0(projected) if args.json else None
+    except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError, ValueError) as exc:
+        print("could not project: %s" % exc, file=sys.stderr)
+        if args.json:
+            print(json.dumps(error_envelope(exc), indent=2, sort_keys=True))
+        return 2
+    if args.json:
+        assert encoded is not None
+        _write_encoded(encoded)
+        return 0
+    print("%d survivor findings (%d survived, %d silent)"
+          % (projected["finding_count"], projected["survived"], projected["silent"]))
+    for finding in projected["findings"]:
+        print("%-22s %-9s %s" % (finding["group"], finding["verdict"], finding["rule"]))
+        print("    %s" % finding["obligation"])
+        if "anchor_excerpt" in finding:
+            print("    anchor: %s" % finding["anchor_excerpt"])
+        elif finding.get("anchor_omitted"):
+            print("    anchor omitted: %s" % finding["anchor_omitted"])
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--version", action="store_true",
                     help="print tool version (and commit, if resolvable) and exit")
     ap.add_argument("manifest", type=Path, nargs="?")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--survivors", action="store_true",
+                    help="project survivors.v0 from an existing report.v0 file")
+    ap.add_argument("--manifest", dest="anchor_manifest", type=Path,
+                    help="optional manifest used only for a digest-matched anchor")
     args = ap.parse_args()
     if args.version:
         print(format_tool_identity())
         return 0
+    if args.anchor_manifest is not None and not args.survivors:
+        exc = ManifestError("--manifest requires --survivors")
+        print("could not measure: %s" % exc, file=sys.stderr)
+        if args.json:
+            print(json.dumps(error_envelope(exc), indent=2, sort_keys=True))
+        return 2
+    if args.survivors:
+        return _survivors_cli(args, ap)
     if args.manifest is None:
         ap.error("manifest is required")
     try:

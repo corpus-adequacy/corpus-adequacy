@@ -28,7 +28,16 @@ The git tag is `v` plus that same number. The cut order is cut → dated heading
 python3 corpus_adequacy.py --version
 python3 corpus_adequacy.py <manifest.json>
 python3 corpus_adequacy.py <manifest.json> --json
+python3 corpus_adequacy.py --survivors <report.json>
+python3 corpus_adequacy.py --survivors <report.json> --json
 ```
+
+`--survivors` is a sibling projection over an existing `report.v0` file. It does
+not measure, does not call the runner, and does not change `report.v0` bytes.
+`--json` on that path writes `corpus-adequacy.survivors.v0`. Plain `--json`
+without `--survivors` is still `report.v0`. Optional `--manifest` is used only
+when its exact file bytes match `report.manifest_sha256`; the projection never
+invents compared or unmoved vector IDs.
 
 ## Support and release
 
