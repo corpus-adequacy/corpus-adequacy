@@ -8,13 +8,18 @@ one trailing LF. The JSON CLI uses that encoder, while `error.v0` is explicitly
 refused by it. Reports carry `manifest_sha256` over the exact manifest bytes
 read and parsed for the run; whitespace and key-order changes therefore change
 the digest. This is content addressing and integrity checking, not authenticity.
+A lone Unicode surrogate is refused through the existing exit-2 `error.v0`
+path; it is neither replaced nor emitted as invalid UTF-8. Valid Unicode remains
+raw UTF-8.
 
 Reports also carry producer-owned `control_status` (`killed`, `survived`,
 `error`, or `absent-or-invalid`). One rule emits both the control row verdict
 and its direct status, so consumers no longer scan rows and independently
-reconstruct the answer. For multiple controls, error outranks survived, which
-outranks killed. The existing score, verdict precedence, exits and error
-envelope remain unchanged.
+reconstruct the answer. Completeness is checked against one declared-control
+count, so an unobserved stale, unloadable or otherwise unmeasured control reports
+`absent-or-invalid`; the precedence is error, absent-or-invalid, survived, then
+killed. The existing score, verdict precedence and exits remain unchanged, apart
+from encoding failures now using the existing exit-2 error envelope.
 
 One private `_report_v0` projector now builds every `corpus-adequacy.report.v0`,
 and both the module and process/batch constructors call it. Module reports carry

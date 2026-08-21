@@ -2813,6 +2813,23 @@ class ReportV0AddressingContract(unittest.TestCase):
         )
         self.assertNotEqual(first["manifest_sha256"], second["manifest_sha256"])
 
+    def test_json_cli_rejects_a_lone_surrogate_as_error_v0(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _manifest(Path(d), {
+                "a": [dict(KILLABLE, label="\ud800")],
+            })
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), str(path), "--json"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertTrue(proc.stdout, "encoding refusal must emit an error envelope")
+        envelope = json.loads(proc.stdout)
+        self.assertEqual(envelope["schema"], ca.ERROR_SCHEMA)
+        self.assertIn("UTF-8", envelope["error"])
+        self.assertNotIn(b"Traceback", proc.stderr)
+
 
 class ProducerOwnedControlStatus(unittest.TestCase):
     """One producer rule emits both the direct status and its row verdict."""
@@ -2846,6 +2863,62 @@ class ProducerOwnedControlStatus(unittest.TestCase):
             ))
         self.assertEqual(report["control_status"], "absent-or-invalid")
         self.assertFalse(report["adequate"])
+
+    def test_a_stale_declared_control_makes_a_killed_control_incomplete(self):
+        killed = dict(CONTROL, label="CONTROL killed")
+        stale = dict(CONTROL, label="CONTROL stale", anchor="not in implementation")
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_manifest(
+                Path(d), {"a": [KILLABLE, killed, stale]}, control=False,
+            ))
+        self.assertEqual(report["control_status"], "absent-or-invalid")
+        self.assertFalse(report["adequate"])
+        self.assertIn("control-killed", [row["verdict"] for row in report["mutants"]])
+
+    def test_multiple_control_precedence_is_fail_closed(self):
+        cases = (
+            (["killed"], 2, "absent-or-invalid"),
+            (["survived"], 2, "absent-or-invalid"),
+            (["killed", "survived"], 2, "survived"),
+            (["killed", "error"], 2, "error"),
+            (["error"], 2, "error"),
+            (["killed", "killed"], 2, "killed"),
+            ([], 0, "absent-or-invalid"),
+        )
+        for observed, declared, expected in cases:
+            with self.subTest(observed=observed, declared=declared):
+                self.assertEqual(ca._control_status(observed, declared), expected)
+
+    def test_module_report_uses_direct_status_not_the_conflicting_row(self):
+        original = ca._control_result
+
+        def conflicting(*args, **kwargs):
+            row, status = original(*args, **kwargs)
+            row["verdict"] = "control-SURVIVED"
+            return row, status
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+                ca, "_control_result", side_effect=conflicting):
+            report = ca.run(_manifest(Path(d), {"a": [KILLABLE]}))
+
+        self.assertIn("control-SURVIVED", [row["verdict"] for row in report["mutants"]])
+        self.assertEqual(report["control_status"], "killed")
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_batch_report_uses_direct_status_not_the_conflicting_row(self):
+        original = ca._control_result
+
+        def conflicting(*args, **kwargs):
+            row, status = original(*args, **kwargs)
+            row["verdict"] = "control-SURVIVED"
+            return row, status
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+                ca, "_control_result", side_effect=conflicting):
+            report = ca.run(BatchRunner()._corpus(Path(d)))
+
+        self.assertIn("control-SURVIVED", [row["verdict"] for row in report["mutants"]])
+        self.assertEqual(report["control_status"], "killed")
 
 
 if __name__ == "__main__":

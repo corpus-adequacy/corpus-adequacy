@@ -230,6 +230,9 @@ Successful JSON reports have one producer-owned byte form: UTF-8, keys sorted,
 two-space indentation, and one trailing LF. `encode_report_v0()` is the only
 serializer for that form. It refuses `corpus-adequacy.error.v0`, so a failed
 measurement cannot be addressed as a successful report by the same function.
+A lone Unicode surrogate cannot be valid UTF-8; the CLI refuses it through the
+existing exit-2 `error.v0` path rather than replacing bytes or printing a
+traceback. Valid Unicode remains unescaped UTF-8.
 
 `manifest_sha256` is SHA-256 over the exact manifest bytes read and parsed at
 the start of the run. No JSON canonicalisation occurs: changing whitespace or
@@ -240,9 +243,12 @@ an authenticity claim, or proof that the manifest declared every rule.
 `control_status` directly reports `killed`, `survived`, `error`, or
 `absent-or-invalid`; a consumer does not reconstruct it from mutant rows. The
 same producer rule emits each control row and its status. With multiple controls,
-`error` takes precedence over `survived`, which takes precedence over `killed`.
-No usable control row yields `absent-or-invalid` and the existing structural
-guard still makes the report inadequate.
+`error` takes precedence over `absent-or-invalid`, which takes precedence over
+`survived`, which takes precedence over `killed`. The aggregate compares the
+number of observed controls with the number declared; a stale, unloadable or
+otherwise unmeasured control therefore yields `absent-or-invalid` instead of a
+partial `killed`. The existing structural guard still makes that report
+inadequate.
 
 `originals_unverified_against_head` is the one exception and stays specific to
 `process` and `batch`: those runners guard a working tree, the module runner has
