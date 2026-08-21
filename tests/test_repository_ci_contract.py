@@ -30,8 +30,10 @@ UNITTEST_RUN = (
 )
 COMPILE_RUN = (
     "python -m py_compile corpus_adequacy.py bounded_run.py "
-    "adapters/tersign_evidence_record.py tests/test_corpus_adequacy.py "
-    "tests/test_repository_ci_contract.py tests/test_tersign_evidence_record.py"
+    "adapters/tersign_evidence_record.py measurements/tersign_checks.py "
+    "tests/test_corpus_adequacy.py tests/test_repository_ci_contract.py "
+    "tests/test_tersign_evidence_record.py "
+    "tests/test_tersign_verifier_measurement.py"
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_ON = {

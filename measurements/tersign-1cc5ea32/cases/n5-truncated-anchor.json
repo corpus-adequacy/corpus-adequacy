@@ -1,0 +1,11 @@
+{
+  "id": "n5-truncated-anchor",
+  "kind": "anchor_relation",
+  "expect": "reject",
+  "reason": "existence_reject",
+  "description": "Anchored digest does not bind the presented subject (truncated/substituted head). The existence bound must fail closed.",
+  "input": {
+    "subject_digest": "0x4672842890404de85d907f76149e3edb90687d233ad7efbaabf887f888053ef4",
+    "anchored_digest": "0xcf48bed1712f5b7df2a309fb52cb2b3d51ab1a04730e3b115cd3db79c96c9b1a"
+  }
+}

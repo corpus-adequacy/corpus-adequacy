@@ -1,0 +1,382 @@
+{
+  "vectors": [
+    {
+      "authored_kind": "digest_recompute",
+      "expected_reason": "recompute_mismatch",
+      "expected_verdict": "reject",
+      "vector_id": "n1-value-drift",
+      "vector_path": "cases/n1-value-drift.json"
+    },
+    {
+      "authored_kind": "canonical_bytes",
+      "expected_reason": "number_domain_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n10-float-in-digest-domain",
+      "vector_path": "cases/n10-float-in-digest-domain.json"
+    },
+    {
+      "authored_kind": "digest_recompute",
+      "expected_reason": "number_domain_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n11-integer-beyond-ijson-range",
+      "vector_path": "cases/n11-integer-beyond-ijson-range.json"
+    },
+    {
+      "authored_kind": "canonical_bytes",
+      "expected_reason": "canonicalization_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n12-codepoint-key-order",
+      "vector_path": "cases/n12-codepoint-key-order.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n13-party-alias-whitespace",
+      "vector_path": "cases/n13-party-alias-whitespace.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n14-unparseable-attestor",
+      "vector_path": "cases/n14-unparseable-attestor.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n15-claim-without-attestations",
+      "vector_path": "cases/n15-claim-without-attestations.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n16-attestation-not-an-object",
+      "vector_path": "cases/n16-attestation-not-an-object.json"
+    },
+    {
+      "authored_kind": "chain_set",
+      "expected_reason": "continuity_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n17-renumbered-omission",
+      "vector_path": "cases/n17-renumbered-omission.json"
+    },
+    {
+      "authored_kind": "phase_claim",
+      "expected_reason": "phase_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n18-unrecognized-phase",
+      "vector_path": "cases/n18-unrecognized-phase.json"
+    },
+    {
+      "authored_kind": "offer_binding",
+      "expected_reason": "binding_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n19-offer-substitution",
+      "vector_path": "cases/n19-offer-substitution.json"
+    },
+    {
+      "authored_kind": "canonical_bytes",
+      "expected_reason": "canonicalization_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n2-hoisted-integer-keys",
+      "vector_path": "cases/n2-hoisted-integer-keys.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n20-independence-scope-uncommitted",
+      "vector_path": "cases/n20-independence-scope-uncommitted.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n21-independence-scope-empty-settlement",
+      "vector_path": "cases/n21-independence-scope-empty-settlement.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n22-independence-scope-declared-override",
+      "vector_path": "cases/n22-independence-scope-declared-override.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n23-independence-scope-null-declared",
+      "vector_path": "cases/n23-independence-scope-null-declared.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n24-independence-scope-declared-no-scope",
+      "vector_path": "cases/n24-independence-scope-declared-no-scope.json"
+    },
+    {
+      "authored_kind": "boundary_binding",
+      "expected_reason": "boundary_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n25-boundary-prefix-only-no-position",
+      "vector_path": "cases/n25-boundary-prefix-only-no-position.json"
+    },
+    {
+      "authored_kind": "boundary_binding",
+      "expected_reason": "boundary_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n26-coverage-claimed-over-empty-attestation",
+      "vector_path": "cases/n26-coverage-claimed-over-empty-attestation.json"
+    },
+    {
+      "authored_kind": "decision_evidence_binding",
+      "expected_reason": "binding_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n27-authority-reduction-unbound",
+      "vector_path": "cases/n27-authority-reduction-unbound.json"
+    },
+    {
+      "authored_kind": "decision_evidence_binding",
+      "expected_reason": "binding_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n28-authority-reduction-substitution",
+      "vector_path": "cases/n28-authority-reduction-substitution.json"
+    },
+    {
+      "authored_kind": "boundary_binding",
+      "expected_reason": "boundary_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n29-suite-transition-redigests-prefix",
+      "vector_path": "cases/n29-suite-transition-redigests-prefix.json"
+    },
+    {
+      "authored_kind": "chain_link",
+      "expected_reason": "continuity_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n3-chain-link-wrong-prev",
+      "vector_path": "cases/n3-chain-link-wrong-prev.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n30-independence-urn-self-attested",
+      "vector_path": "cases/n30-independence-urn-self-attested.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n31-independence-urn-alias-trailing-slash",
+      "vector_path": "cases/n31-independence-urn-alias-trailing-slash.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n32-delivery-self-attested",
+      "vector_path": "cases/n32-delivery-self-attested.json"
+    },
+    {
+      "authored_kind": "chain_set",
+      "expected_reason": "completeness_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n4-omitted-record",
+      "vector_path": "cases/n4-omitted-record.json"
+    },
+    {
+      "authored_kind": "anchor_relation",
+      "expected_reason": "existence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n5-truncated-anchor",
+      "vector_path": "cases/n5-truncated-anchor.json"
+    },
+    {
+      "authored_kind": "phase_claim",
+      "expected_reason": "phase_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n6-phase-confusion",
+      "vector_path": "cases/n6-phase-confusion.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n7-issuer-only-independence",
+      "vector_path": "cases/n7-issuer-only-independence.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n8-unrecognized-independence-claim",
+      "vector_path": "cases/n8-unrecognized-independence-claim.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": "independence_reject",
+      "expected_verdict": "reject",
+      "vector_id": "n9-unrecognized-member-in-claim-set",
+      "vector_path": "cases/n9-unrecognized-member-in-claim-set.json"
+    },
+    {
+      "authored_kind": "digest_recompute",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p1-live-genesis-receipt",
+      "vector_path": "cases/p1-live-genesis-receipt.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p10-claim-set-independent",
+      "vector_path": "cases/p10-claim-set-independent.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p11-claim-set-silence-only",
+      "vector_path": "cases/p11-claim-set-silence-only.json"
+    },
+    {
+      "authored_kind": "digest_recompute",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p12-ijson-integer-boundary",
+      "vector_path": "cases/p12-ijson-integer-boundary.json"
+    },
+    {
+      "authored_kind": "digest_recompute",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p13-decimal-string-beside-integer",
+      "vector_path": "cases/p13-decimal-string-beside-integer.json"
+    },
+    {
+      "authored_kind": "digest_recompute",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p14-supplementary-plane-key-order",
+      "vector_path": "cases/p14-supplementary-plane-key-order.json"
+    },
+    {
+      "authored_kind": "offer_binding",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p15-offer-binding",
+      "vector_path": "cases/p15-offer-binding.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p16-independence-scope-committed",
+      "vector_path": "cases/p16-independence-scope-committed.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p17-independence-scope-derived-settlement",
+      "vector_path": "cases/p17-independence-scope-derived-settlement.json"
+    },
+    {
+      "authored_kind": "boundary_binding",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p18-boundary-binds-prefix-and-position",
+      "vector_path": "cases/p18-boundary-binds-prefix-and-position.json"
+    },
+    {
+      "authored_kind": "decision_evidence_binding",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p19-authority-reduction-bound",
+      "vector_path": "cases/p19-authority-reduction-bound.json"
+    },
+    {
+      "authored_kind": "canonical_bytes",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p2-canonical-key-order",
+      "vector_path": "cases/p2-canonical-key-order.json"
+    },
+    {
+      "authored_kind": "boundary_binding",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p20-suite-transition-preserves-prefix",
+      "vector_path": "cases/p20-suite-transition-preserves-prefix.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p21-independence-urn-identities",
+      "vector_path": "cases/p21-independence-urn-identities.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p22-delivery-commitment-recomputed",
+      "vector_path": "cases/p22-delivery-commitment-recomputed.json"
+    },
+    {
+      "authored_kind": "digest_recompute",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p3-integer-key-utf16-order",
+      "vector_path": "cases/p3-integer-key-utf16-order.json"
+    },
+    {
+      "authored_kind": "chain_link",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p4-chain-link-genesis",
+      "vector_path": "cases/p4-chain-link-genesis.json"
+    },
+    {
+      "authored_kind": "anchor_relation",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p5-live-bitcoin-anchor",
+      "vector_path": "cases/p5-live-bitcoin-anchor.json"
+    },
+    {
+      "authored_kind": "chain_set",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p6-chain-set-complete",
+      "vector_path": "cases/p6-chain-set-complete.json"
+    },
+    {
+      "authored_kind": "phase_claim",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p7-phase-consistent",
+      "vector_path": "cases/p7-phase-consistent.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p8-non-party-attestation",
+      "vector_path": "cases/p8-non-party-attestation.json"
+    },
+    {
+      "authored_kind": "independence_claim",
+      "expected_reason": null,
+      "expected_verdict": "valid",
+      "vector_id": "p9-no-independence-claim",
+      "vector_path": "cases/p9-no-independence-claim.json"
+    }
+  ]
+}

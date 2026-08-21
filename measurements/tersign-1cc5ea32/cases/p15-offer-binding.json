@@ -1,0 +1,19 @@
+{
+  "id": "p15-offer-binding",
+  "kind": "offer_binding",
+  "expect": "valid",
+  "description": "A receipt committing to the accepted offer's canonical digest, presented with that exact offer: the binding recomputes. This is the accepting twin of n19 \u2014 the mechanism that makes a receipt proof of TERMS, not merely proof of signature.",
+  "input": {
+    "offer": {
+      "resourceUrl": "https://api.example/premium",
+      "network": "eip155:8453",
+      "scheme": "exact",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "payTo": "0x2222222222222222222222222222222222222222",
+      "amount": "1"
+    },
+    "receipt": {
+      "offerDigest": "0x67513c4f44d024f5fbae8cef109257f6d8d5f47a14c0500391cc1e2dd7fd3e6b"
+    }
+  }
+}
