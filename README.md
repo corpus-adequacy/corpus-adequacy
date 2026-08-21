@@ -57,9 +57,12 @@ python3 adapters/algovoi_jcs_edge.py \
 
 The AlgoVoi adapter copies one pinned `jcs_edge_v1` anchor set
 (`chopmob-cloud/algovoi-jcs-conformance-vectors` at
-`aa53149c670f1659dad511755168ad5231dc04de`, anchor SHA-256
-`a8a1a1a8839553ea5309c381b39ba156e6b6a23a5a3e6aab59b53940cc386033`) into files
-the existing process runner can consume. Each `cases/<id>.json` is the exact
+`aa53149c670f1659dad511755168ad5231dc04de`) into files the existing process
+runner can consume. The vendored producer `manifest.json` (SHA-256
+`5e7c56fe353cd5c04adfc779191903d8cf79317301cc3402285a1881f1309865`) is the root
+of the chain: it is bounded-loaded, bound to its own digest, and the anchor
+digest, vector count and invariant count are read from its `jcs_edge_v1` entry
+rather than asserted as constants. Its prose `anchors_to` field is never parsed. Each `cases/<id>.json` is the exact
 byte slice of that row's `preimage` value plus one LF, so `1.0` and `1` stay
 distinct spellings; the adapter never parses and re-serializes a preimage. On
 this file a whole-document JSON round trip happens to be byte-identical to the

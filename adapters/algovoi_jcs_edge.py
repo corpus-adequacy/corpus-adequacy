@@ -44,6 +44,16 @@ PIN_SHA256 = "a8a1a1a8839553ea5309c381b39ba156e6b6a23a5a3e6aab59b53940cc386033"
 PIN_SIZE_BYTES = 7622
 PIN_LICENSE = "Apache-2.0"
 PIN_MANIFEST_VERSION = "0.38.0"
+# The vendored producer manifest is the root of the provenance chain: it
+# declares the anchor digest and the counts, so those are read rather than
+# asserted. `anchors_to` is prose and is deliberately never parsed.
+MANIFEST_PATH = _ROOT / "fixtures/algovoi-jcs-edge-aa53149c/manifest.json"
+PIN_MANIFEST_SHA256 = (
+    "5e7c56fe353cd5c04adfc779191903d8cf79317301cc3402285a1881f1309865")
+MANIFEST_ENTRY_KEYS = frozenset({
+    "name", "primary_file", "vector_count", "pair_invariants", "anchors_to",
+    "cross_validated", "sha256",
+})
 PIN_CANON_VERSION = "jcs-rfc8785-v1"
 PIN_SET_NAME = "jcs_edge_v1"
 PIN_VECTOR_COUNT = 10
@@ -198,13 +208,70 @@ def raw_preimage_slices(raw: bytes) -> list[bytes]:
         cursor = end
 
 
-def _vector_rows(document: dict) -> list[dict]:
+def _manifest_entry() -> dict:
+    """Load the pinned producer manifest and return the jcs_edge_v1 entry.
+
+    Everything the entry declares is derived here: the anchor digest and the
+    two counts. The manifest is bound to its own digest, so a substituted
+    producer is refused before any value is read from it.
+    """
+    raw = _load_source_bytes(MANIFEST_PATH)
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != PIN_MANIFEST_SHA256:
+        raise AdapterError("manifest digest %s does not match the pin %s"
+                           % (digest, PIN_MANIFEST_SHA256))
+    manifest = _parse_strict(raw)
+    if not isinstance(manifest, dict):
+        raise AdapterError("manifest is not an object")
+    if manifest.get("version") != PIN_MANIFEST_VERSION:
+        raise AdapterError("manifest version %r does not match the pin %r"
+                           % (manifest.get("version"), PIN_MANIFEST_VERSION))
+    if manifest.get("canon_version") != PIN_CANON_VERSION:
+        raise AdapterError("manifest canon_version %r does not match the pin %r"
+                           % (manifest.get("canon_version"), PIN_CANON_VERSION))
+    if manifest.get("license") != PIN_LICENSE:
+        raise AdapterError("manifest license %r does not match the pin %r"
+                           % (manifest.get("license"), PIN_LICENSE))
+    sets = manifest.get("anchor_sets")
+    if not isinstance(sets, list):
+        raise AdapterError("manifest anchor_sets is not a list")
+    named = [s for s in sets if isinstance(s, dict) and s.get("name") == PIN_SET_NAME]
+    if len(named) != 1:
+        raise AdapterError("manifest declares %d %r anchor sets, expected one"
+                           % (len(named), PIN_SET_NAME))
+    entry = _require_exact_keys(named[0], MANIFEST_ENTRY_KEYS,
+                                "manifest anchor set %r" % PIN_SET_NAME)
+    if entry["primary_file"] != Path(PIN_ANCHOR_PATH).name:
+        raise AdapterError("manifest primary_file %r does not match %r"
+                           % (entry["primary_file"], Path(PIN_ANCHOR_PATH).name))
+    declared = entry["sha256"]
+    if not isinstance(declared, str) or not declared.startswith("sha256:"):
+        raise AdapterError("manifest sha256 is not a sha256-prefixed digest")
+    declared_hex = _require_sha256_hex(declared[len("sha256:"):],
+                                       "manifest anchor sha256")
+    if declared_hex != PIN_SHA256:
+        raise AdapterError(
+            "manifest declares anchor digest %s; the pin is %s"
+            % (declared_hex, PIN_SHA256))
+    for key in ("vector_count", "pair_invariants"):
+        if not isinstance(entry[key], int) or isinstance(entry[key], bool):
+            raise AdapterError("manifest %s is not an integer" % key)
+    return {
+        "manifest_sha256": digest,
+        "manifest_version": manifest["version"],
+        "anchor_sha256": declared_hex,
+        "vector_count": entry["vector_count"],
+        "pair_invariants": entry["pair_invariants"],
+    }
+
+
+def _vector_rows(document: dict, expected_count: int = PIN_VECTOR_COUNT) -> list[dict]:
     vectors = document["vectors"]
     if not isinstance(vectors, list):
         raise AdapterError("vectors is not a list")
-    if len(vectors) != PIN_VECTOR_COUNT:
+    if len(vectors) != expected_count:
         raise AdapterError("expected %d vectors, found %d"
-                           % (PIN_VECTOR_COUNT, len(vectors)))
+                           % (expected_count, len(vectors)))
     rows = []
     seen: set[str] = set()
     for index, vector in enumerate(vectors):
@@ -226,7 +293,8 @@ def _vector_rows(document: dict) -> list[dict]:
     return rows
 
 
-def _invariant_disposition(document: dict, by_id: dict) -> list[dict]:
+def _invariant_disposition(document: dict, by_id: dict,
+                           expected_count: int = PIN_INVARIANT_COUNT) -> list[dict]:
     """Account for every declared invariant exactly once.
 
     `equal_sha256` is evaluated against the two declared digests. Any other
@@ -235,9 +303,9 @@ def _invariant_disposition(document: dict, by_id: dict) -> list[dict]:
     invariants = document["pair_invariants"]
     if not isinstance(invariants, list):
         raise AdapterError("pair_invariants is not a list")
-    if len(invariants) != PIN_INVARIANT_COUNT:
+    if len(invariants) != expected_count:
         raise AdapterError("expected %d pair invariants, found %d"
-                           % (PIN_INVARIANT_COUNT, len(invariants)))
+                           % (expected_count, len(invariants)))
     disposition = []
     names: set[str] = set()
     for index, entry in enumerate(invariants):
@@ -264,6 +332,10 @@ def _invariant_disposition(document: dict, by_id: dict) -> list[dict]:
                 raise AdapterError("%s references unknown vector %r"
                                    % (where, reference))
         if relation == EVALUABLE_RELATION:
+            if len(referenced) != 2:
+                raise AdapterError(
+                    "%s declares %s with %d references; exactly two are required"
+                    % (where, EVALUABLE_RELATION, len(referenced)))
             left, right = (by_id[r]["expected_sha256"] for r in referenced)
             if left != right:
                 raise AdapterError(
@@ -292,14 +364,16 @@ def adapt(source: Path, dest: Path) -> None:
     dest = Path(dest)
     _require_empty_dest(dest)
 
+    producer = _manifest_entry()
+
     raw = _load_source_bytes(source)
     if len(raw) != PIN_SIZE_BYTES:
         raise AdapterError("source is %d bytes; the pinned anchor is %d"
                            % (len(raw), PIN_SIZE_BYTES))
     digest = hashlib.sha256(raw).hexdigest()
-    if digest != PIN_SHA256:
+    if digest != producer["anchor_sha256"]:
         raise AdapterError("source digest %s does not match the pin %s"
-                           % (digest, PIN_SHA256))
+                           % (digest, producer["anchor_sha256"]))
 
     document = _parse_strict(raw)
     _require_exact_keys(document, DOCUMENT_KEYS, "document")
@@ -313,7 +387,7 @@ def adapt(source: Path, dest: Path) -> None:
         raise AdapterError("license %r does not match the pin %r"
                            % (document["license"], PIN_LICENSE))
 
-    rows = _vector_rows(document)
+    rows = _vector_rows(document, producer["vector_count"])
     by_id = {v["vector_id"]: v for v in document["vectors"]}
 
     slices = raw_preimage_slices(raw)
@@ -322,7 +396,8 @@ def adapt(source: Path, dest: Path) -> None:
             "found %d raw preimage values for %d vectors; refusing to guess"
             % (len(slices), len(rows)))
 
-    disposition = _invariant_disposition(document, by_id)
+    disposition = _invariant_disposition(document, by_id,
+                                         producer["pair_invariants"])
     sections = sorted({row["authored_section"] for row in rows})
 
     source_doc = {
@@ -332,7 +407,10 @@ def adapt(source: Path, dest: Path) -> None:
         "anchor_path": PIN_ANCHOR_PATH,
         "anchor_sha256": digest,
         "anchor_size_bytes": len(raw),
-        "manifest_version": PIN_MANIFEST_VERSION,
+        "manifest_sha256": producer["manifest_sha256"],
+        "manifest_version": producer["manifest_version"],
+        "declared_vector_count": producer["vector_count"],
+        "declared_pair_invariants": producer["pair_invariants"],
         "canon_version": document["canon_version"],
         "set_name": document["name"],
         "license": document["license"],

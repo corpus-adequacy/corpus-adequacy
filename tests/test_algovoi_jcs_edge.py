@@ -11,6 +11,7 @@ trap, and the raw-slice tests pin the mechanism independently.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -50,6 +51,33 @@ print(json.dumps({
     "lexeme": lexeme,
 }))
 '''
+
+
+ALLOWED_IMPORTS = frozenset({
+    "__future__", "argparse", "hashlib", "json", "os", "shutil", "stat",
+    "sys", "tempfile", "pathlib", "corpus_adequacy", "isolated_tree",
+})
+
+
+def adapter_imported_module_names(source_text: str | None = None) -> set[str]:
+    """Every module name the adapter imports, by AST rather than substring.
+
+    A substring check misses `from runner_python import run`; the AST does
+    not. Dynamic import is refused separately, since no static walk can name
+    a module chosen at runtime.
+    """
+    if source_text is None:
+        source_text = ADAPTER.read_text(encoding="utf-8")
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source_text)):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                names.add("." * node.level + (node.module or ""))
+            elif node.module:
+                names.add(node.module.split(".")[0])
+    return names
 
 
 def _adapt_to_temp(tmp: Path) -> Path:
@@ -157,8 +185,7 @@ class PinAndProvenance(unittest.TestCase):
                             + "\n").encode("utf-8")
             forged = tmp / "forged.json"
             forged.write_bytes(forged_bytes)
-            with mock.patch.object(adapter, "PIN_SHA256",
-                                   hashlib.sha256(forged_bytes).hexdigest()), \
+            with _producer(anchor_sha256=hashlib.sha256(forged_bytes).hexdigest()), \
                  mock.patch.object(adapter, "PIN_SIZE_BYTES", len(forged_bytes)):
                 with self.assertRaises(adapter.AdapterError) as caught:
                     adapter.adapt(forged, tmp / "out")
@@ -206,12 +233,12 @@ class VectorAccounting(unittest.TestCase):
                             + "\n").encode("utf-8")
             short = tmp / "short.json"
             short.write_bytes(forged_bytes)
-            with mock.patch.object(adapter, "PIN_SHA256",
-                                   hashlib.sha256(forged_bytes).hexdigest()), \
+            with _producer(anchor_sha256=hashlib.sha256(forged_bytes).hexdigest()), \
                  mock.patch.object(adapter, "PIN_SIZE_BYTES", len(forged_bytes)):
                 with self.assertRaises(adapter.AdapterError) as caught:
                     adapter.adapt(short, tmp / "out")
             self.assertIn("expected 10 vectors", str(caught.exception))
+            self.assertIn("found 9", str(caught.exception))
 
     def test_mutation_3_a_duplicate_vector_id_is_refused(self):
         document = json.loads(ANCHOR.read_text(encoding="utf-8"))
@@ -423,10 +450,14 @@ class EndToEnd(unittest.TestCase):
                     {
                         "label": "normalize the preimage through a JSON round trip",
                         "anchor": 'raw = open(sys.argv[1], "rb").read()',
+                        # The trailing LF is preserved deliberately. Without it
+                        # the mutant crashes and is killed as unexpected-exit,
+                        # which proves the process died, not that the corpus
+                        # distinguished a normalized preimage.
                         "replacement": (
                             'raw = json.dumps(json.loads('
                             'open(sys.argv[1], "rb").read().decode("utf-8"))'
-                            ').encode("utf-8")'),
+                            ').encode("utf-8") + b"\\n"'),
                     },
                     {
                         "label": "CONTROL blank every lexeme",
@@ -441,7 +472,43 @@ class EndToEnd(unittest.TestCase):
             declared = next(r for r in report["mutants"]
                             if r["label"].startswith("normalize"))
             self.assertEqual(declared["verdict"], "killed")
+            # A normal parsed movement, not a crash: the corpus distinguished
+            # the normalized preimage on a declared outcome.
+            self.assertNotEqual(declared["how"], "unexpected-exit")
+            self.assertGreater(declared["moved"], 0)
             self.assertEqual(report["control_status"], "killed")
+            # The control exercises the whole corpus, so this is the assertion
+            # that fails if vectors.json is ever trimmed.
+            control = next(r for r in report["mutants"]
+                           if r["label"].startswith("CONTROL"))
+            self.assertEqual(control["moved"], 10)
+
+    def test_trimming_the_corpus_to_two_vectors_fails_the_control(self):
+        """P1-3: the e2e must reach all ten cases, not only the numeric pair."""
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._prepare(Path(d))
+            rows = json.loads((repo / "vectors.json").read_text(encoding="utf-8"))
+            rows["vectors"] = [r for r in rows["vectors"]
+                               if r["vector_id"] in (FLOAT_ID, INT_ID)]
+            (repo / "vectors.json").write_text(json.dumps(rows), encoding="utf-8")
+            mutants = {
+                "algovoi": [
+                    {
+                        "label": "CONTROL blank every lexeme",
+                        "control": True,
+                        "anchor": 'lexeme = text[start:text.index("\\n", start)].strip()',
+                        "replacement": 'lexeme = ""',
+                    },
+                ]
+            }
+            manifest = _process_manifest(repo, mutants, ["raw_sha256", "lexeme"])
+            report = ca.run(manifest)
+            control = next(r for r in report["mutants"]
+                           if r["label"].startswith("CONTROL"))
+            self.assertEqual(control["moved"], 2)
+            self.assertNotEqual(
+                control["moved"], 10,
+                "a trimmed corpus must not satisfy the ten-vector assertion")
 
     def test_all_ten_cases_are_consumed_by_the_real_runner(self):
         with tempfile.TemporaryDirectory() as d:
@@ -482,3 +549,255 @@ class Portability(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
+
+
+# ---------------------------------------------------------------------------
+# Preflight hardening (PR #36 review). RED first, one shared rule per gap.
+# ---------------------------------------------------------------------------
+
+MANIFEST = FIXTURE_DIR / "manifest.json"
+
+# Independent literals. These are asserted against the emitted document, never
+# compared to the adapter's own constants, so mutating a constant turns RED.
+LITERAL_REPOSITORY = "chopmob-cloud/algovoi-jcs-conformance-vectors"
+LITERAL_COMMIT = "aa53149c670f1659dad511755168ad5231dc04de"
+LITERAL_MANIFEST_VERSION = "0.38.0"
+LITERAL_MANIFEST_SHA256 = (
+    "5e7c56fe353cd5c04adfc779191903d8cf79317301cc3402285a1881f1309865")
+
+
+def _forged_source(tmp: Path, mutate) -> Path:
+    """Write a forged anchor whose size and digest are recomputed.
+
+    Without this the pin gate rejects the forgery first and the parser,
+    document, vector and invariant guards under test never run.
+    """
+    document = json.loads(ANCHOR.read_text(encoding="utf-8"))
+    raw = mutate(document)
+    if raw is None:
+        raw = (json.dumps(document, ensure_ascii=True, indent=2) + "\n").encode("utf-8")
+    path = tmp / "forged.json"
+    path.write_bytes(raw)
+    return path
+
+
+def _producer(**overrides):
+    """Patch the manifest-derived producer so a forged anchor reaches the
+    guard under test instead of stopping at the digest gate."""
+    base = {
+        "manifest_sha256": LITERAL_MANIFEST_SHA256,
+        "manifest_version": LITERAL_MANIFEST_VERSION,
+        "anchor_sha256": adapter.PIN_SHA256,
+        "vector_count": 10,
+        "pair_invariants": 2,
+    }
+    base.update(overrides)
+    return mock.patch.object(adapter, "_manifest_entry", lambda: base)
+
+
+class ManifestBinding(unittest.TestCase):
+    """P1-1: provenance must be bound to loaded bytes, not to constants."""
+
+    def test_vendored_manifest_matches_the_measured_digest(self):
+        raw = MANIFEST.read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), LITERAL_MANIFEST_SHA256)
+
+    def test_mutating_the_repository_constant_breaks_the_literal_assertion(self):
+        """Repository and commit are not in the manifest, so the literal in
+        this file is what carries them. This proves that assertion bites."""
+        with mock.patch.object(adapter, "PIN_REPOSITORY", "attacker/elsewhere"), \
+             mock.patch.object(adapter, "PIN_COMMIT", "0" * 40):
+            with tempfile.TemporaryDirectory() as d:
+                dest = _adapt_to_temp(Path(d))
+                source = json.loads((dest / "source.json").read_text(encoding="utf-8"))
+                self.assertNotEqual(source["repository"], LITERAL_REPOSITORY)
+                self.assertNotEqual(source["commit"], LITERAL_COMMIT)
+
+    def test_manifest_version_is_derived_not_asserted(self):
+        with mock.patch.object(adapter, "PIN_MANIFEST_VERSION", "9.9.9"):
+            with tempfile.TemporaryDirectory() as d:
+                with self.assertRaises(adapter.AdapterError) as caught:
+                    _adapt_to_temp(Path(d))
+                self.assertIn("manifest version", str(caught.exception))
+
+    def test_counts_and_digest_come_from_the_manifest_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = _adapt_to_temp(Path(d))
+            source = json.loads((dest / "source.json").read_text(encoding="utf-8"))
+            self.assertEqual(source["repository"], LITERAL_REPOSITORY)
+            self.assertEqual(source["commit"], LITERAL_COMMIT)
+            self.assertEqual(source["manifest_version"], LITERAL_MANIFEST_VERSION)
+            self.assertEqual(source["manifest_sha256"], LITERAL_MANIFEST_SHA256)
+            self.assertEqual(source["declared_vector_count"], 10)
+            self.assertEqual(source["declared_pair_invariants"], 2)
+
+    def test_a_substituted_manifest_is_refused_by_its_own_digest(self):
+        """The manifest is the root of the chain, so it is bound to its digest.
+        The substitute is otherwise valid, so only the digest gate can catch it."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+            manifest["published_at"] = "1999-01-01"
+            forged = tmp / "manifest.json"
+            forged.write_bytes(json.dumps(manifest).encode("utf-8"))
+            self.assertNotEqual(hashlib.sha256(forged.read_bytes()).hexdigest(),
+                                LITERAL_MANIFEST_SHA256)
+            with mock.patch.object(adapter, "MANIFEST_PATH", forged):
+                with self.assertRaises(adapter.AdapterError) as caught:
+                    adapter.adapt(ANCHOR, tmp / "out")
+            self.assertIn("manifest digest", str(caught.exception))
+
+    def test_a_manifest_declaring_another_vector_count_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+            entry = next(e for e in manifest["anchor_sets"] if e["name"] == "jcs_edge_v1")
+            entry["vector_count"] = 9
+            forged = tmp / "manifest.json"
+            forged.write_bytes(json.dumps(manifest).encode("utf-8"))
+            with mock.patch.object(adapter, "MANIFEST_PATH", forged), \
+                 mock.patch.object(adapter, "PIN_MANIFEST_SHA256",
+                                   hashlib.sha256(forged.read_bytes()).hexdigest()):
+                with self.assertRaises(adapter.AdapterError) as caught:
+                    adapter.adapt(ANCHOR, tmp / "out")
+            self.assertIn("vector", str(caught.exception))
+
+    def test_anchors_to_prose_is_not_used_as_a_section_inventory(self):
+        """Naming the key in the allowlist is fine; reading its value is not."""
+        source_text = ADAPTER.read_text(encoding="utf-8")
+        for read in ('entry["anchors_to"]', ".get(\"anchors_to\")",
+                     "['anchors_to']", ".get('anchors_to')"):
+            self.assertNotIn(read, source_text)
+
+
+# HELD, not landed: the P1-2 exponent-overflow walk belongs in the shared
+# `_parse_projection_json`, but editing any declared runtime source moves
+# `tool_content_sha256` and breaks
+# `test_tersign_verifier_measurement.test_current_tool_source_matches_the_measured_report`,
+# which pins the tool bytes recorded in the committed Tersign measurement.
+# Landing it requires re-measuring that report, which belongs to #30, not #28.
+# The tests are written and pass with the one-line walk applied; they are held
+# here rather than shipped red or shipped with a silent re-measurement.
+
+
+class SingleBoundedRead(unittest.TestCase):
+    """P2-5: the shared loader owns cap and growth semantics."""
+
+    def test_exactly_two_bounded_reads_each_with_an_explicit_cap(self):
+        source_text = ADAPTER.read_text(encoding="utf-8")
+        calls = source_text.count("read_bounded_regular_file(")
+        self.assertEqual(calls, 1, "one call site; both loads route through it")
+        self.assertIn("cap=SOURCE_CAP_BYTES", source_text)
+        self.assertNotIn(".read_bytes()", source_text)
+
+
+class InvariantArity(unittest.TestCase):
+    """P2-6: equal_sha256 with one reference must not leak ValueError."""
+
+    def test_equal_sha256_with_one_reference_raises_adapter_error(self):
+        document = json.loads(ANCHOR.read_text(encoding="utf-8"))
+        by_id = {v["vector_id"]: v for v in document["vectors"]}
+        document["pair_invariants"][1] = {
+            "name": "single-ref-equal",
+            "vector": FLOAT_ID,
+            "relation": "equal_sha256",
+            "why": "one reference is not a pair",
+        }
+        with self.assertRaises(adapter.AdapterError) as caught:
+            adapter._invariant_disposition(document, by_id)
+        self.assertIn("exactly two", str(caught.exception))
+
+    def test_cli_exits_2_on_a_single_reference_equal_sha256(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+
+            def mutate(document):
+                document["pair_invariants"][1] = {
+                    "name": "single-ref-equal",
+                    "vector": FLOAT_ID,
+                    "relation": "equal_sha256",
+                    "why": "one reference is not a pair",
+                }
+                return None
+
+            forged = _forged_source(tmp, mutate)
+            raw = forged.read_bytes()
+            with _producer(anchor_sha256=hashlib.sha256(raw).hexdigest()), \
+                 mock.patch.object(adapter, "PIN_SIZE_BYTES", len(raw)):
+                with self.assertRaises(adapter.AdapterError):
+                    adapter.adapt(forged, tmp / "out")
+            result = subprocess.run(
+                [sys.executable, str(ADAPTER), str(forged), str(tmp / "out2")],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+
+
+class ImportAllowlist(unittest.TestCase):
+    """P2-7: AST allowlist, not substring matching."""
+
+    def test_only_allowlisted_modules_are_imported(self):
+        names = adapter_imported_module_names()
+        self.assertTrue(names)
+        self.assertEqual(names - ALLOWED_IMPORTS, set())
+
+    def test_a_from_runner_python_import_would_be_caught(self):
+        extra = "from runner_python import run\n"
+        names = adapter_imported_module_names(
+            ADAPTER.read_text(encoding="utf-8") + extra)
+        self.assertIn("runner_python", names)
+        self.assertNotEqual(names - ALLOWED_IMPORTS, set())
+
+    def test_dynamic_import_is_refused(self):
+        source_text = ADAPTER.read_text(encoding="utf-8")
+        for dynamic in ("__import__", "importlib"):
+            self.assertNotIn(dynamic, source_text)
+
+
+class ForgedSourceClosure(unittest.TestCase):
+    """P2-4: forged-source tests must reach the guard they name."""
+
+    def test_duplicate_document_key_reaches_the_parser_guard(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            raw = ANCHOR.read_bytes().replace(
+                b'{\n  "name": "jcs_edge_v1",',
+                b'{\n  "name": "jcs_edge_v1",\n  "name": "twice",', 1)
+            forged = tmp / "dup.json"
+            forged.write_bytes(raw)
+            with _producer(anchor_sha256=hashlib.sha256(raw).hexdigest()), \
+                 mock.patch.object(adapter, "PIN_SIZE_BYTES", len(raw)):
+                with self.assertRaises(adapter.AdapterError) as caught:
+                    adapter.adapt(forged, tmp / "out")
+            self.assertIn("duplicate JSON key", str(caught.exception))
+
+    def test_unknown_document_field_reaches_the_document_guard(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+
+            def mutate(document):
+                document["surprise"] = 1
+                return None
+
+            forged = _forged_source(tmp, mutate)
+            raw = forged.read_bytes()
+            with _producer(anchor_sha256=hashlib.sha256(raw).hexdigest()), \
+                 mock.patch.object(adapter, "PIN_SIZE_BYTES", len(raw)):
+                with self.assertRaises(adapter.AdapterError) as caught:
+                    adapter.adapt(forged, tmp / "out")
+            self.assertIn("unknown fields", str(caught.exception))
+
+    def test_unknown_vector_field_reaches_the_vector_guard(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+
+            def mutate(document):
+                document["vectors"][0]["surprise"] = 1
+                return None
+
+            forged = _forged_source(tmp, mutate)
+            raw = forged.read_bytes()
+            with _producer(anchor_sha256=hashlib.sha256(raw).hexdigest()), \
+                 mock.patch.object(adapter, "PIN_SIZE_BYTES", len(raw)):
+                with self.assertRaises(adapter.AdapterError) as caught:
+                    adapter.adapt(forged, tmp / "out")
+            self.assertIn("vectors[0]", str(caught.exception))

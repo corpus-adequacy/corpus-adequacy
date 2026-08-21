@@ -1,0 +1,692 @@
+{
+  "name": "AlgoVoi JCS Conformance Vectors",
+  "version": "0.38.0",
+  "published_at": "2026-05-23",
+  "updated_at": "2026-07-24",
+  "canon_version": "jcs-rfc8785-v1",
+  "hash_note": "Per-file sha256 is computed over LF-normalised bytes; .gitattributes pins eol=lf so `sha256sum <file>` on a fresh checkout reproduces these values. The authoritative conformance signal is the per-vector canonical-bytes recompute carried inside each vector file (line-ending independent); the file hash is a convenience integrity check.",
+  "anchor_sets": [
+    {
+      "name": "action_ref_exactly_once_v1",
+      "primary_file": "action_ref_exactly_once_v1.json",
+      "vector_count": 6,
+      "pair_invariants": 5,
+      "supersets": "action_ref_transactional_v0",
+      "anchors_to": "draft-hopley-x402-retention-chain-02 Section 7 (Payment Action Lifecycle)",
+      "cross_validated": "10-impl direct (2026-06-09, 48/48 for 8; Elixir + Kotlin added 2026-07-09, see _attestations/2026-07-09-elixir-kotlin-corpus-extension.md)",
+      "sha256": "sha256:e0872c9fedb12cc4e704880d3dc37edcf90d76abbc7eed7b4b4d37ea39e9e8ee"
+    },
+    {
+      "name": "action_ref_namespace_v0",
+      "primary_file": "action_ref_namespace_v0.json",
+      "vector_count": 8,
+      "pair_invariants": 4,
+      "cross_validated": "10-impl (8-impl direct 2026-05-24; Elixir + Kotlin added 2026-07-19, see _attestations/2026-07-19-elixir-kotlin-remaining-3-sets.md)",
+      "sha256": "sha256:e95bfb171cffb3ae6b7f3e842ea39b35b6e975ff6d5d31928430ab30fd08617c"
+    },
+    {
+      "name": "action_ref_transactional_v0",
+      "primary_file": "action_ref_transactional_v0.json",
+      "vector_count": 8,
+      "pair_invariants": 5,
+      "cross_validated": "10-impl (8-impl direct 2026-05-24; Elixir + Kotlin added 2026-07-19, see _attestations/2026-07-19-elixir-kotlin-remaining-3-sets.md)",
+      "sha256": "sha256:2ee0c52f39dbfd1726fe95236a2500a505859d8a2737252991e5549ea9f57fea"
+    },
+    {
+      "name": "adversarial_isolation_v1",
+      "primary_file": "adversarial_isolation_v1.json",
+      "vector_count": 12,
+      "reject_count": 11,
+      "control_count": 1,
+      "anchors_to": "draft-hopley-x402-retention-chain-02 Sections 7.5 + 8.8 (Input Validation + Adversarial Boundary)",
+      "claims_note": "Claim 1 (input bytes) is 8-lang; Claim 2 (rejection) is reference-impl PoR, NOT an 8-lang byte claim.",
+      "cross_validated": "Claim 1: 8-impl direct (2026-06-09, 96/96 input bytes). Claim 2: reference-impl rejection PoR (12/12), not an 8-lang byte claim.",
+      "sha256": "sha256:4bbfce38d358cb6c5bebe8614af82244cacceba740cbf966c00f590d5348b64c"
+    },
+    {
+      "name": "jcs_edge_v1",
+      "primary_file": "jcs_edge_v1.json",
+      "vector_count": 10,
+      "pair_invariants": 2,
+      "anchors_to": "RFC 8785 sections 3.2.2.2, 3.2.2.3, 3.2.3, 3.2.4",
+      "cross_validated": "10-impl direct (2026-07-19, 100/100; first set exercised across all ten from inception; caught + patched the inline PHP U+2028/float gap, see _attestations/2026-07-19-jcs-edge-v1-ten-impl.md)",
+      "sha256": "sha256:a8a1a1a8839553ea5309c381b39ba156e6b6a23a5a3e6aab59b53940cc386033"
+    },
+    {
+      "name": "ap2_omh_v0",
+      "primary_file": "ap2-omh-v0.json",
+      "vector_count": 7,
+      "cross_validated": "5-impl (original gist generation, 2026-05)",
+      "sha256": "sha256:0b5770e7a6470c6db085c4c017583ff27cf3c083f843c7af07ceb01983440020"
+    },
+    {
+      "name": "cancellation_receipt_v1",
+      "primary_file": "cancellation_receipt_v1.json",
+      "vector_count": 8,
+      "anchors_to": "draft-hopley-x402-cancellation-receipt",
+      "cross_validated": "10-impl direct (2026-05-25 for 8; Elixir + Kotlin added 2026-07-09, see _attestations/2026-07-09-elixir-kotlin-corpus-extension.md)",
+      "sha256": "sha256:0d5c3f762c7933f216185228f2f0d5158a0e74c52ecfe9455510a98efa398127"
+    },
+    {
+      "name": "compliance_receipt_v1",
+      "primary_file": "compliance_receipt_v1.json",
+      "vector_count": 8,
+      "pair_invariants": 5,
+      "chain_invariants": 3,
+      "anchors_to": "draft-hopley-x402-compliance-receipt",
+      "cross_validated": "10-impl direct (2026-05-24, 2026-05-25 for 8; Elixir + Kotlin added 2026-07-09, see _attestations/2026-07-09-elixir-kotlin-corpus-extension.md)",
+      "sha256": "sha256:33af2ea0ab1d358f90b38a63c4778af93836b677466fb16ab7b90fb8196c922d"
+    },
+    {
+      "name": "composite_trust_query_v1",
+      "primary_file": "composite_trust_query_v1.json",
+      "vector_count": 8,
+      "anchors_to": "draft-hopley-x402-composite-trust-query",
+      "cross_validated": "10-impl direct (2026-05-25 for 8; Elixir + Kotlin added 2026-07-09, see _attestations/2026-07-09-elixir-kotlin-corpus-extension.md)",
+      "sha256": "sha256:0180d2a8a1423145d4abe3ce8c37351fe409104e284c0fe8c5ce82a8ce243918"
+    },
+    {
+      "name": "epi_interop_v0",
+      "primary_file": "epi_interop_v0.json",
+      "vector_count": 5,
+      "anchors_to": "draft-hopley-x402-canonicalisation-jcs-v1",
+      "cross_validated": "Python + Rust direct (2026-06-17); Elixir + Kotlin added 2026-07-09, see _attestations/2026-07-09-epi-elixir-kotlin.md",
+      "sha256": "sha256:03717edfa0cca566132032f1c41c761c61bf3994a597c862d12e3646b3cf7cbd"
+    },
+    {
+      "name": "epi_pqc_v0",
+      "primary_file": "epi_pqc_v0.json",
+      "vector_count": 4,
+      "anchors_to": "draft-hopley-x402-canonicalisation-jcs-v1",
+      "cross_validated": "Python + Rust direct (2026-06-17); Elixir + Kotlin (JCS vectors only) added 2026-07-09, see _attestations/2026-07-09-epi-elixir-kotlin.md",
+      "sha256": "sha256:9d81c5117a95f13123a279e549a447969ebcccf445eda996fa806b53f1ccbc36"
+    },
+    {
+      "name": "multichain_ed25519_substrate_v0",
+      "primary_file": "fixture.json",
+      "vector_count": 3,
+      "fixture_type": "ed25519_multi_chain_signing",
+      "chains": [
+        "algorand",
+        "solana",
+        "stellar"
+      ],
+      "rfc_anchors": [
+        "RFC 8032",
+        "BIP44"
+      ],
+      "sha256": "sha256:2e0c95ae8823ce685df52a9f924891e51c91563b44653a5d82791bb4b9558f93"
+    },
+    {
+      "name": "pef_v1",
+      "primary_file": "pef_v1.json",
+      "vector_count": 8,
+      "anchors_to": "draft-hopley-x402-payment-evidence-frame",
+      "cross_validated": "10-impl direct (2026-05-30 for 8; Elixir + Kotlin added 2026-07-09, see _attestations/2026-07-09-elixir-kotlin-corpus-extension.md)",
+      "sha256": "sha256:7c797cf6695f7d03c9a8d74fed14842145c65c0fd1fc6eeb4e77b4ac322df0df"
+    },
+    {
+      "name": "per_chain_envelope_v0",
+      "primary_file": "per_chain_envelope_v0.json",
+      "vector_count": 19,
+      "cross_validated": "5-impl (original gist generation, 2026-05)",
+      "sha256": "sha256:720404b634bd3bd19e0c7371a90f01fa99d39cf59b4bb0109ad14e9a1cf15fca"
+    },
+    {
+      "name": "privacy_class_v0_1",
+      "primary_file": "privacy_class_v0.1.json",
+      "vector_count": 13,
+      "cross_validated": "5-impl (original gist generation, 2026-05)",
+      "sha256": "sha256:0feab689ed1519e04ef57c3349fb97ad9deb59017a4d21d87b23207781b2a2ec"
+    },
+    {
+      "name": "refund_receipt_v1",
+      "primary_file": "refund_receipt_v1.json",
+      "vector_count": 8,
+      "anchors_to": "draft-hopley-x402-refund-receipt",
+      "cross_validated": "10-impl direct (2026-05-25 for 8; Elixir + Kotlin added 2026-07-09, see _attestations/2026-07-09-elixir-kotlin-corpus-extension.md)",
+      "sha256": "sha256:a4329fb1775549544627566a98253732fc67f574c50957d5e6f23dcad16c49e6"
+    },
+    {
+      "name": "retention_chain_v0",
+      "primary_file": "retention_chain_v0.json",
+      "vector_count": 3,
+      "chain_invariants": 3,
+      "anchors_to": "draft-hopley-x402-retention-chain-02",
+      "cross_validated": "10-impl direct (2026-06-16 for 8; Elixir + Kotlin added 2026-07-09, see _attestations/2026-07-09-elixir-kotlin-corpus-extension.md)",
+      "sha256": "sha256:a1c8a3a591980917f2a5706097094a988715b5b674bd8a0837b5a5db74269da8"
+    },
+    {
+      "name": "retention_chain_v1",
+      "primary_file": "retention_chain_v1.json",
+      "vector_count": 14,
+      "chain_invariants": 14,
+      "part_a": "6-link extended chain (seq 0-5, issuer_id=algovoi:compliance)",
+      "part_b": "4 multi-issuer isolation vectors (issuer_a + issuer_b, seq 0-1 each)",
+      "part_c": "4 seq-gap adversarial pair (proper seq2 vs gap seq2 -- chain_ref differs)",
+      "anchors_to": "draft-hopley-x402-retention-chain-02",
+      "cross_validated": "10-impl direct (2026-06-17 for 8; Elixir + Kotlin added 2026-07-09; see _attestations/2026-07-09-elixir-9th-language.md and 2026-07-09-kotlin-10th-language.md)",
+      "sha256": "sha256:7db074ad0737468c29fcfad71d5d7e70354d3710a377603585e1a899d195602a"
+    },
+    {
+      "name": "rfc9421_proxy_chain_v0",
+      "primary_file": "request.fixture.json",
+      "vector_count": 1,
+      "fixture_type": "algovoi_v0_signing_base_survival",
+      "rfc_anchors": [
+        "RFC 9530",
+        "RFC 8032"
+      ],
+      "signing_base_mode": "algovoi-v0",
+      "note": "Legacy algovoi-v0 signing base (pre-RFC-9421-default): lowercased @method, 'created' carried as a covered component, no @signature-params line. Verified with mode='algovoi-v0'. The genuinely RFC 9421 Ã‚Â§2.5-conformant companion is rfc9421_proxy_chain_v1.",
+      "cross_validated": "8-impl algovoi-v0 signing-base survival, 24/24 (2026-05-24)",
+      "sha256": "sha256:5224a7b088732b01beea6c4027e13a5929714170aa4e9eb57911d54284f0dfbf"
+    },
+    {
+      "name": "rfc9421_proxy_chain_v1",
+      "primary_file": "request.fixture.json",
+      "vector_count": 1,
+      "fixture_type": "rfc9421_conformant_signature_survival",
+      "rfc_anchors": [
+        "RFC 9421",
+        "RFC 9530",
+        "RFC 8032"
+      ],
+      "signing_base_mode": "rfc9421",
+      "note": "RFC 9421 Ã‚Â§2.5-conformant signing base: @method case-preserved (GET), 'created' as a signature parameter (not a covered component), trailing @signature-params line. Conformant companion to the legacy rfc9421_proxy_chain_v0.",
+      "cross_validated": "8-impl 8/8 Ed25519-verified (Python algovoi-rfc9421-verifier mode=rfc9421, Node, Go, Rust, Java, PHP/libsodium, .NET, Ruby), 2026-06-13",
+      "sha256": "sha256:7e5e8f1012eabd6aaae52b0ae4e77e4c8b0392077b620d2d944002a0531901e8"
+    },
+    {
+      "name": "rfc9421_receipt_evidence_v0",
+      "primary_file": "rfc9421_receipt_evidence_v0.json",
+      "vector_count": 6,
+      "anchors_to": "draft-hopley-x402-rfc9421-binding",
+      "cross_validated": "Python direct (2026-06-17)",
+      "sha256": "sha256:168ad5fedddb115c282efc7ee3a7f187f4979de13870d2e1c87f9b59b22ac280"
+    },
+    {
+      "name": "service_trust_v0",
+      "primary_file": "service_trust_v0.json",
+      "vector_count": 5,
+      "sha256": "sha256:c3767c6f700bc062b1dbc55a6a1ccf354c960531caa12f63ca4c0ace5437bca1"
+    },
+    {
+      "name": "settlement_action_binding_v1",
+      "primary_file": "settlement_action_binding_v1.json",
+      "vector_count": 7,
+      "anchors_to": "draft-hopley-x402-retention-chain",
+      "cross_validated": "10-impl (8-impl direct 2026-06-18; Elixir + Kotlin added 2026-07-19, see _attestations/2026-07-19-elixir-kotlin-remaining-3-sets.md)",
+      "sha256": "sha256:33dae7fd0b0590548f8755bc451bbe6db2f9cf99e263a01260ce3255970a05f1"
+    },
+    {
+      "name": "settlement_attestation_v1",
+      "primary_file": "settlement_attestation_v1.json",
+      "vector_count": 9,
+      "anchors_to": "draft-hopley-x402-settlement-attestation",
+      "cross_validated": "10-impl direct (2026-05-25 for 8; Elixir + Kotlin added 2026-07-09, see _attestations/2026-07-09-elixir-kotlin-corpus-extension.md)",
+      "sha256": "sha256:26630183f50316df5ea5265cbabff2200e2f2884f0e80fdff39dff86f41969b2"
+    },
+    {
+      "name": "zkp_receipt_v1",
+      "primary_file": "zkp_receipt_v1.json",
+      "vector_count": 8,
+      "chains": [
+        "algorand",
+        "base",
+        "solana",
+        "voi",
+        "stellar",
+        "hedera",
+        "tempo"
+      ],
+      "anchors_to": "eprint-2026/109852",
+      "cross_validated": "8-impl (5 directly executed = 40/40; remaining 3 by transitivity, primitive-only payload; 2026-06-04). NOT counted in the directly-executed cumulative.",
+      "sha256": "sha256:ea0add29a6e028e2d27bca9acafe950d9b7a4d41daff3eb1c41fab255b628811"
+    },
+    {
+      "name": "compliance_gate_lite_v1",
+      "primary_file": "compliance_gate_lite_v1.json",
+      "vector_count": 12,
+      "anchors_to": "draft-hopley-x402-retention-chain",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-19)",
+      "sha256": "sha256:8ff03e3fd707d848d5589fdedbcef290528adb97494b3e9533a33f81823e51eb"
+    },
+    {
+      "name": "policy_binding_v1",
+      "primary_file": "policy_binding_v1.json",
+      "vector_count": 14,
+      "anchors_to": "draft-hopley-x402-retention-chain",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-19)",
+      "sha256": "sha256:223d908cd1b1a0110cdefedcc725fd6c9900e35e0424cd3908e23d47fabe5b0d"
+    },
+    {
+      "name": "spend_guardrail_lite_v1",
+      "primary_file": "spend_guardrail_lite_v1.json",
+      "vector_count": 10,
+      "anchors_to": "draft-hopley-x402-retention-chain",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-21)",
+      "sha256": "sha256:661fa083ede45761a7fa6c2e2dd782e2a758885235c6e992d29422ee8d0fb31b"
+    },
+    {
+      "name": "spend_decision_v1",
+      "primary_file": "spend_decision_v1.json",
+      "vector_count": 7,
+      "anchors_to": "draft-hopley-x402-retention-chain",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-21)",
+      "sha256": "sha256:c0c7a40fc270585380340ae1a36be2cfc42cbce2ee50ed27ee2e9b75e081fefb"
+    },
+    {
+      "name": "execution_ref_v1",
+      "primary_file": "execution_ref_v1.json",
+      "vector_count": 9,
+      "anchors_to": "draft-hopley-x402-retention-chain (execution tier; composes onto spend_decision_v1 decision_ref)",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-24, 11/11 each)",
+      "sha256": "sha256:db09ce7c9e987233939bf895c5060b44f822af6b45c4ea3a09c7d74dd1e523c5"
+    },
+    {
+      "name": "substrate_guard_v1",
+      "primary_file": "substrate_guard_v1.json",
+      "vector_count": 15,
+      "anchors_to": "draft-hopley-x402-retention-chain Â§7.5 (Input Validation), resource-bounds edition",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-21)",
+      "sha256": "sha256:f7d2aa8e3a147de4aef31ef213bbafe63c7ed52e2b275c89881440cd402fcdbf"
+    },
+    {
+      "name": "agent_passport_lite_v1",
+      "primary_file": "agent_passport_lite_v1.json",
+      "vector_count": 11,
+      "anchors_to": "Agent identity reference; passport_ref is the agent_ref consumed by spend_guardrail_lite_v1. Instance of the binding framework (no new IETF section).",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-23)",
+      "sha256": "sha256:db9eb88349709ca725a2ab7a3eb25463a547f32cd8f2c5debacbcaf01f0364d0"
+    },
+    {
+      "name": "payment_mandate_lite_v1",
+      "primary_file": "payment_mandate_lite_v1.json",
+      "vector_count": 11,
+      "anchors_to": "Spend-authority terms reference; mandate_ref is the mandate_ref consumed by spend_guardrail_lite_v1 (mandate_1/2 == its bound mandate_ref), so the decision chain composes. Instance of the binding framework (no new IETF section).",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-23)",
+      "sha256": "sha256:2a880c77c28045d88180273608b5aa3f667d7eeb2626cd67106b9025a9161a39"
+    },
+    {
+      "name": "cancellation_receipt_lite_v1",
+      "primary_file": "cancellation_receipt_lite_v1.json",
+      "vector_count": 10,
+      "anchors_to": "Cancellation reference closing the spend-authority lifecycle; cancellation_ref binds a closed-enum reason to the mandate_ref being cancelled (cn-001/002/003 cancel mandate_1, the mandate_ref spend_guardrail_lite_v1 binds). Instance of the binding framework (no new IETF section).",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-23)",
+      "sha256": "sha256:35c6a0507a6f4b21efa06134250238f5cc76cfcfae0c08228867fcfcb6147258"
+    },
+    {
+      "name": "refund_receipt_lite_v1",
+      "primary_file": "refund_receipt_lite_v1.json",
+      "vector_count": 11,
+      "anchors_to": "Refund reference closing the spend-authority lifecycle after settlement; refund_ref binds a closed-enum result (FULL/PARTIAL/REJECTED) + amount to the subject_ref being refunded (rf-001/002/003 refund the ALLOW guardrail_ref spend_guardrail_lite_v1 / spend_decision_chain_v1 produced). Instance of the binding framework (no new IETF section).",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-24)",
+      "sha256": "sha256:2a77d07175c7313c6615dd774f1e6d2959fca6bac8d94272053ef75a3d0a1706"
+    },
+    {
+      "name": "composite_trust_query_lite_v1",
+      "primary_file": "composite_trust_query_lite_v1.json",
+      "vector_count": 13,
+      "anchors_to": "Composite trust verdict capping the spend-authority lifecycle; trust_query_ref binds a closed-enum outcome (TRUSTED/PROVISIONAL/INSUFFICIENT_EVIDENCE/UNTRUSTED) to an ordered subject_refs list (order + membership byte-load-bearing). tq-001/002/003 assess the full chain [passport_ref, mandate_ref, policy_bound_ref, guardrail_ref(ALLOW)] from spend_decision_chain_v1, so the verdict caps the open lifecycle. Lite binds only; scoring stays commercial. Instance of the binding framework (no new IETF section).",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-24)",
+      "sha256": "sha256:c2b2f451d3e5a7a259b74f4677068c18c6daeabb6cabdcc2d5d7818b22f2085f"
+    },
+    {
+      "name": "delegation_ref_v1",
+      "primary_file": "delegation_ref_v1.json",
+      "vector_count": 10,
+      "anchors_to": "Cross-party authority delegation: delegation_ref binds delegator + delegate + scope + integer-millisecond validity window + a prev_delegation_ref chain link into a tamper-evident, content-addressed reference; delegations chain A->B->C so a widened scope, extended expiry, swapped delegate, or broken link is detectable offline. The multi-party extension of the spend-authority chain; the cross-party scope-consistency proof is the commercial Orchestrator capability. Instance of the binding framework (no new IETF section).",
+      "cross_validated": "Python + TypeScript byte-for-byte (2026-06-25)",
+      "sha256": "sha256:84439070f9ccd59625042ea7e7e81c87cd60eaa7d0465996ab8e93e3c84fd20b"
+    },
+    {
+      "name": "card_ref_v1",
+      "primary_file": "card_ref_v1.json",
+      "vector_count": 6,
+      "anchors_to": "A2A AgentCard content-addressed reference. card_ref = 'sha256:' + SHA-256(JCS(AgentCard without the signatures field)); the preimage is exactly the A2A spec 8.4.2 signing payload, so card_ref is the content-address of the same bytes A2A 8.4.1 canonicalizes (RFC 8785 JCS) for AgentCard signing. AlgoVoi-authored open primitive; recomputes offline with RFC 8785 + SHA-256, no JWS or JWKS.",
+      "cross_validated": "Python + Node byte-for-byte (2026-06-27, 6/6 each: 2 positives incl the A2A canonical-bytes hash + 2 invariants [signatures excluded, key reorder] + 2 negatives [changed skill, changed scheme]); VM2 clean-box validated against published algovoi-substrate / @algovoi/substrate (6/6 Python + 6/6 Node in fresh python:3.12-slim and node:20-slim).",
+      "sha256": "sha256:1b5aa611ee4eea7d3c010a6f7183320492d3c11f5f78ac905249d423778a561b"
+    },
+    {
+      "name": "task_ref_v1",
+      "primary_file": "task_ref_v1.json",
+      "vector_count": 6,
+      "anchors_to": "A2A Task delegation content-addressed reference. task_ref = 'sha256:' + SHA-256(JCS({card_ref, created_at_ms, instructions_hash})). Binds agent identity (card_ref) to task instruction (instructions_hash) at a millisecond-precise instant; composes onto card_ref_v1. AlgoVoi-authored open primitive; recomputes offline with RFC 8785 + SHA-256, no JWS or JWKS.",
+      "cross_validated": "Python + Node byte-for-byte (2026-06-30, 6/6 each: 2 positives + 1 field-reorder invariant + 3 negatives [changed card_ref, changed instructions_hash, 1ms timestamp change]).",
+      "sha256": "sha256:2a5bfc72d3ec08d9a6fc3c24a4e62517235c3a6713c127f1ca592ed8df49f74e"
+    },
+    {
+      "name": "artifact_ref_v1",
+      "primary_file": "artifact_ref_v1.json",
+      "vector_count": 9,
+      "anchors_to": "A2A Task output content-addressed reference. artifact_ref = 'sha256:' + SHA-256(JCS({artifact_type, output_hash, produced_at_ms, task_ref})). Transitively binds agent identity + task instruction + output via the task_ref field; completes the three-ref chain card_ref -> task_ref -> artifact_ref. artifact_type is a closed enum: TEXT | FILE | DATA | ERROR. AlgoVoi-authored open primitive; recomputes offline with RFC 8785 + SHA-256, no JWS or JWKS.",
+      "cross_validated": "Python + Node byte-for-byte (2026-06-30, 9/9 each: 2 positives + 2 type-coverage [FILE, ERROR] + 1 field-reorder invariant + 4 negatives [changed task_ref, changed output_hash, changed artifact_type, 1ms timestamp change]).",
+      "sha256": "sha256:f403753ab54a5d5b7cdebdc730f7d5ae86e82255ad2247f6b696c94b3c8afd43"
+    },
+    {
+      "name": "keystone_decision_audit_v1",
+      "primary_file": "keystone_decision_audit_v1.json",
+      "vector_count": 2,
+      "negative_count": 4,
+      "invariant_count": 2,
+      "anchors_to": "AlgoVoi keystone DECISION flow point (decision-audit binding; algovoi-keystone-secure-lite; commercial Keystone Secure signs the same construction)",
+      "cross_validated": "Python recompute byte-for-byte from algovoi-substrate + worktree substrate2 keystone_secure (2026-07-08, 8/8)",
+      "sha256": "sha256:f5788c934100a9f8326d34e05f697b7a8c6888f267fe8b5051cfb32ff169eb50"
+    },
+    {
+      "name": "keystone_guard_context_v1",
+      "primary_file": "keystone_guard_context_v1.json",
+      "vector_count": 1,
+      "negative_count": 4,
+      "invariant_count": 2,
+      "anchors_to": "AlgoVoi keystone GUARD flow point (admission-context binding; algovoi-keystone-secure-lite; commercial Keystone Secure signs the same construction)",
+      "cross_validated": "Python recompute byte-for-byte from algovoi-substrate + worktree substrate2 keystone_secure (2026-07-08, 7/7)",
+      "sha256": "sha256:4454638a602439ab135903477a8f808a71fd57352309d6b510b919b50042629b"
+    },
+    {
+      "name": "jws_anchor_v1",
+      "primary_file": "jws_anchor_v1.json",
+      "vector_count": 6,
+      "invariant_count": 4,
+      "anchors_to": "Signed-token anchoring rule: raw signed bytes for a JWS/SD-JWT, RFC 8785 JCS for an unsigned object. Ed25519 per RFC 8032 section 7.1.",
+      "cross_validated": "Two populations, stated separately. JCS side: 3 JCS-dependent points x 10 implementations = 30/30 (2026-07-21, VM2 clean-box; derived via derive_jcs_side.py which fails closed if it cannot reproduce the set's own values). Signature + anchoring side: 8 crypto-capable implementations pass (Python, Node, Go, Rust, Java, PHP/libsodium, .NET, Ruby), same population as rfc9421_proxy_chain_v1; Elixir and Kotlin are JCS-side only and are NOT claimed for signature verification. See _attestations/2026-07-21-jws-anchor-v1-ten-impl.md",
+      "sha256": "sha256:79d4756af4ad61461822bd21f2c10447fec054220827f241ea170093dc07bd38"
+    },
+    {
+      "name": "atb_trust_v1",
+      "primary_file": "atb_trust_v1.json",
+      "vector_count": 6,
+      "negative_count": 2,
+      "anchors_to": "AlgoVoi keystone trust query: atb_trust_ref == trust_query_ref = sha256(JCS({subject_refs, trust_outcome})). 4 positive recompute byte-for-byte + 2 negative diverge. Byte-identical to the trust_query_ref that composite_trust_query_v1 caps.",
+      "cross_validated": "Python reference implementation (runner_python.py), recompute byte-for-byte; ref is byte-identical to composite_trust_query_v1's trust_query_ref. Not yet multi-implementation cross-validated.",
+      "sha256": "sha256:1208f0935e86a168d55d2400ed1acc1704f42fb59c6946ac62cf6469ad6f0b47"
+    },
+    {
+      "name": "revocation_ref_v1",
+      "primary_file": "revocation_ref_v1.json",
+      "vector_count": 16,
+      "negative_count": 9,
+      "anchors_to": "substrate2/keystone revocation_ref + verify_revocation_chain: revocation link reproduces (2 positive), malformed rejected fail-closed (9 negative), tamper detected (1), chain integrity (1 valid + 3 invalid chains).",
+      "cross_validated": "Python reference implementation (runner_python.py), recompute byte-for-byte + fail-closed rejection. Not yet multi-implementation cross-validated.",
+      "sha256": "sha256:04811c81878b665368d08345e4eb3030f02d2a098c9b5ee01670e50b02b1643d"
+    }
+  ],
+  "total_anchor_sets": 45,
+  "total_vectors": 374,
+  "total_vectors_note": "45 sets / 374 entries (independently recomputed 2026-08-04; reconciled to register two previously-unlisted JCS sets atb_trust_v1 (6) + revocation_ref_v1 (16); the non-JCS verdict set trust_gate_v1 is in gate_sets and is NOT folded into these totals) (incl. task_ref_v1 + artifact_ref_v1 + composite_trust_query_lite_v1 + refund_receipt_lite_v1 + cancellation_receipt_lite_v1 + payment_mandate_lite_v1 + agent_passport_lite_v1) (incl. policy_binding_v1 + compliance_gate_lite_v1 + spend_guardrail_lite_v1 + spend_decision_v1 + substrate_guard_v1, Python+TS byte-for-byte) = JCS canonicalisation vectors across the receipt lifecycle, lifecycle/binding, A2A ref chain (card_ref -> task_ref -> artifact_ref), .epi interop+PQC, RFC 9421 receipt evidence, and adversarial fixtures. spend_decision_v1 anchors the decision_ref construction (ALLOW/DENY/REFER) and the spend_decision chain prev_entry_hash linkage; its ALLOW/DENY refs are byte-identical to spend_guardrail_lite_v1. substrate_guard_v1 is the resource-bounds edition of input validation: profile_ref content-addresses the limits in force, and guard(value, profile) rejects a well-formed but resource-hostile payload (size/depth/keys/array/string/nodes/unsafe-number) with a named code BEFORE canonicalization; every bound is a pure structural property so it is identical across implementations. settlement_action_binding_v1 cross-validated 10-impl (8-impl 48/48 2026-06-18; Elixir + Kotlin 2026-07-19); epi sets Python+Rust direct; see _attestations for the per-set runner matrix. jws_anchor_v1 is the anchoring sibling to jcs_edge_v1: it pins WHICH BYTES are hashed for a signed receipt rather than the canonicalisation of an object, so 5 of its 6 vectors carry anchor_rule signed_bytes (sha256 over the raw signed JWS/SD-JWT bytes) and only 1 is an RFC 8785 JCS anchor. Its cross-validation is therefore recorded as two separate populations, ten implementations for the JCS-dependent points and eight crypto-capable implementations for Ed25519 verification, never flattened into a single grid.",
+  "cross_validation": {
+    "implementations": 10,
+    "languages": [
+      "Python",
+      "JavaScript",
+      "Go",
+      "Rust",
+      "Java",
+      "PHP",
+      "C#/.NET",
+      "Ruby",
+      "Elixir",
+      "Kotlin/JVM"
+    ],
+    "languages_note": "Ten independent, non-overlapping JCS RFC 8785 implementations (Python, JavaScript, Go, Rust, Java, PHP, C#/.NET, Ruby, Elixir, Kotlin/JVM), including the RFC 8785 author's own Java implementation (Anders Rundgren); Kotlin/JVM reuses that same Java implementation.",
+    "method_note": "Agreements are reported per dated attestation run. The cumulative directly-executed JCS total is 880/880 as of 2026-06-18 (192+320+64+48+24+40+32+112+48), the final +48 being settlement_action_binding_v1 (8-impl, 2026-06-18). Elixir and Kotlin (the 9th and 10th implementations) were then executed against all 14 directly-executed sets: +172 on 2026-07-09 (11 sets, 86 x 2) and +44 on 2026-07-19 (the remaining 3 sets action_ref_namespace_v0/action_ref_transactional_v0/settlement_action_binding_v1, 22 x 2), bringing the combined directly-executed total to 1096/1096 across ten implementations. jcs_edge_v1 (2026-07-19) adds 10 vectors x 10 implementations = 100/100 across all ten from inception, for a combined 1196/1196. policy_binding_v1 and compliance_gate_lite_v1 are Python+TypeScript byte-for-byte and are NOT folded into the 8-impl directly-executed cumulative. zkp_receipt_v1 (2026-06-04) was directly executed across 5 implementations (40/40); the remaining 3 are asserted by transitivity and are deliberately NOT added to the directly-executed cumulative. adversarial_isolation_v1 Claim 1 (96/96 input bytes) is counted separately and NOT folded into the positive-vector cumulative. epi_interop_v0 and epi_pqc_v0 JCS runs (2026-06-16) ARE included: they confirm the same RFC 8785 canonicalisation discipline holds over external EPI-format payloads.",
+    "runs": [
+      {
+        "date": "2026-05-24",
+        "sets": [
+          "action_ref_namespace_v0",
+          "action_ref_transactional_v0",
+          "compliance_receipt_v1"
+        ],
+        "vectors": 24,
+        "implementations": 8,
+        "agreements": "192/192",
+        "executed": "direct",
+        "attestation": "_attestations/2026-05-24-8-impl-cross-validation.md"
+      },
+      {
+        "date": "2026-05-25",
+        "sets": [
+          "compliance_receipt_v1",
+          "settlement_attestation_v1",
+          "cancellation_receipt_v1",
+          "refund_receipt_v1",
+          "composite_trust_query_v1"
+        ],
+        "vectors": 40,
+        "implementations": 8,
+        "agreements": "320/320",
+        "executed": "direct",
+        "attestation": "_attestations/2026-05-25-8-impl-5-format-cross-validation.md"
+      },
+      {
+        "date": "2026-05-30",
+        "sets": [
+          "pef_v1"
+        ],
+        "vectors": 8,
+        "implementations": 8,
+        "agreements": "64/64",
+        "executed": "direct",
+        "attestation": "_attestations/2026-05-30-8-impl-pef-v1.md"
+      },
+      {
+        "date": "2026-06-04",
+        "sets": [
+          "zkp_receipt_v1"
+        ],
+        "vectors": 8,
+        "implementations": 8,
+        "agreements": "40/40 direct (5 impls); remaining 3 by transitivity",
+        "executed": "partial",
+        "attestation": "_attestations/2026-06-04-zkp-receipt-v1-cross-validation.md"
+      },
+      {
+        "date": "2026-06-09",
+        "sets": [
+          "action_ref_exactly_once_v1"
+        ],
+        "vectors": 6,
+        "implementations": 8,
+        "agreements": "48/48",
+        "executed": "direct",
+        "attestation": "_attestations/2026-06-09-action-ref-exactly-once-v1.md"
+      },
+      {
+        "date": "2026-06-09",
+        "sets": [
+          "adversarial_isolation_v1"
+        ],
+        "vectors": 12,
+        "implementations": 8,
+        "agreements": "Claim 1 (input bytes) 96/96 direct; Claim 2 (rejection) 12/12 reference-impl PoR (not an 8-lang byte claim)",
+        "executed": "direct (Claim 1) + reference-impl (Claim 2)",
+        "attestation": "_attestations/2026-06-09-adversarial-isolation-v1.md"
+      },
+      {
+        "date": "2026-06-16",
+        "sets": [
+          "retention_chain_v0"
+        ],
+        "vectors": 3,
+        "implementations": 8,
+        "agreements": "24/24",
+        "executed": "direct",
+        "attestation": "_attestations/2026-06-16-retention-chain-v0-cross-validation.md"
+      },
+      {
+        "date": "2026-06-16",
+        "sets": [
+          "epi_interop_v0"
+        ],
+        "vectors": 5,
+        "implementations": 8,
+        "agreements": "40/40",
+        "executed": "direct",
+        "note": "interop set; JCS + SHA-256 check only; runners in vectors/epi_interop_v0/"
+      },
+      {
+        "date": "2026-06-16",
+        "sets": [
+          "epi_pqc_v0"
+        ],
+        "vectors": 4,
+        "implementations": 8,
+        "agreements": "32/32",
+        "executed": "direct",
+        "note": "proposal set; JCS + SHA-256 check only; Falcon-1024 + key-lineage verified by Python only (7/7 full checks); runners in vectors/epi_pqc_v0/"
+      },
+      {
+        "date": "2026-06-17",
+        "sets": [
+          "retention_chain_v1"
+        ],
+        "vectors": 14,
+        "implementations": 8,
+        "agreements": "112/112",
+        "executed": "direct",
+        "attestation": "_attestations/2026-06-17-retention-chain-v1-cross-validation.md"
+      }
+    ],
+    "cumulative_direct_jcs": "832/832 byte-for-byte positive-vector agreements (as of 2026-06-17: 192+320+64+48+24+40+32+112). Separately, adversarial_isolation_v1 adds 96/96 byte-for-byte agreements on adversarial INPUTS (Claim 1); its rejection proof (Claim 2, 12/12) is reference-impl behaviour and is NOT folded into the positive-vector cumulative.",
+    "signature_survival": {
+      "set": "rfc9421_proxy_chain_v0",
+      "signing_base_mode": "algovoi-v0",
+      "date": "2026-05-24",
+      "agreements": "24/24",
+      "note": "8 implementations x 3 checks (signing-base + content-digest + Ed25519 verify) through a 3-hop TLS-re-terminating proxy chain, over the legacy algovoi-v0 signing base (lowercased @method, no @signature-params line). The RFC 9421 Ã‚Â§2.5-conformant companion is signature_survival_rfc9421 below.",
+      "attestation": "_attestations/2026-05-24-rfc9421-8-impl-cross-validation.md"
+    },
+    "signature_survival_rfc9421": {
+      "set": "rfc9421_proxy_chain_v1",
+      "signing_base_mode": "rfc9421",
+      "date": "2026-06-13",
+      "agreements": "8/8",
+      "note": "RFC 9421 Ã‚Â§2.5-conformant signing base (@method case-preserved, created as a parameter, trailing @signature-params line). All 8 independent implementations verify the full chain (signing-base reconstruction + RFC 9530 content-digest + Ed25519): Python (algovoi-rfc9421-verifier mode=rfc9421), Node, Go, Rust (ed25519-dalek), Java (JDK 17 stdlib), PHP (libsodium), .NET (NSec.Cryptography), Ruby. Verified 2026-06-13, matching the v0 set's 8/8 on the same host."
+    }
+  },
+  "interop_sets": [
+    {
+      "name": "epi_interop_v0",
+      "primary_file": "epi_interop_v0.json",
+      "vector_count": 5,
+      "category": "interop",
+      "cross_validated": "10-impl direct JCS (2026-06-16 for 8; Elixir + Kotlin added 2026-07-09, see _attestations/2026-07-09-epi-elixir-kotlin.md); original 2-impl interop (AlgoVoi rfc8785@0.1.4 + EPI Recorder, 2026-06-11)",
+      "source": {
+        "repo": "https://github.com/mohdibrahimaiml/epi-recorder",
+        "file": "tests/compatibility/golden/canonical_hash_vectors.json",
+        "file_sha256": "205a911cbd984c0bbff2dce029db6d4b9220b398da646789c16a0b8f7aeaa34b"
+      },
+      "sha256": "sha256:03717edfa0cca566132032f1c41c761c61bf3994a597c862d12e3646b3cf7cbd"
+    }
+  ],
+  "total_interop_sets": 1,
+  "total_interop_vectors": 5,
+  "interop_note": "Interop sets cross-validate the JCS canonicalisation method against an external implementation. epi_interop_v0 was originally 2-impl (AlgoVoi + EPI Recorder, 2026-06-11) and upgraded to 8-impl direct JCS (2026-06-16). The 8-impl JCS run IS included in cumulative_direct_jcs. Interop sets are NOT counted in total_anchor_sets / total_vectors.",
+  "proposal_sets": [
+    {
+      "name": "epi_pqc_v0",
+      "primary_file": "epi_pqc_v0.json",
+      "vector_count": 4,
+      "category": "proposal",
+      "status": "PROPOSED optional post-quantum signature suite (falcon1024) + F7 key-lineage for the .epi format; JCS canonicalisation 10-impl direct (2026-06-16 for 8; Elixir + Kotlin added 2026-07-09, JCS vectors only, see _attestations/2026-07-09-epi-elixir-kotlin.md); Falcon-1024 + key-lineage 1-impl AlgoVoi (rfc8785 + pqcrypto)",
+      "source": {
+        "discussion": "https://github.com/microsoft/agent-governance-toolkit/discussions/806",
+        "spec": "https://epilabs.org"
+      },
+      "sha256": "sha256:9d81c5117a95f13123a279e549a447969ebcccf445eda996fa806b53f1ccbc36"
+    },
+    {
+      "name": "svm_create_ata_v0",
+      "primary_file": "svm_create_ata_v0.json",
+      "vector_count": 4,
+      "category": "proposal",
+      "status": "PROPOSED SVM create-ATA facilitator conformance: byte-pin assertions for the optional idempotent create-associated-token-account at instruction index 2 in the x402 exact SVM scheme (data==0x01, six-account layout, funder/destination/token-program pins); 1 positive + 3 negatives; single-impl AlgoVoi, standalone Solana byte-pin set, NOT a JCS canonicalisation vector Ships the AlgoVoi reference validator (reference_validator.py, defines conformance and recomputes the derived ATA) and the normative SPEC.md. Ships a working griefing-free recipient-provisioning solution (solution.py) for #1020 and a NOTICE (Apache-2.0 attribution).",
+      "source": {
+        "discussion": "https://github.com/x402-foundation/x402/issues/2395",
+        "pr": "https://github.com/x402-foundation/x402/pull/2798"
+      },
+      "sha256": "sha256:b7ed5a5cdcf245d9b98ac41b201e8f0592ca0c452c333c9bbb5c23d502d20c74"
+    }
+  ],
+  "total_proposal_sets": 2,
+  "total_proposal_vectors": 8,
+  "proposal_note": "Proposal sets are single-implementation AlgoVoi fixtures published for standards discussion (here: the .epi PQC profile, microsoft/agent-governance-toolkit Discussion #806). They are NOT cross-validated and NOT folded into the conformance or interop totals. svm_create_ata_v0 is a single-impl AlgoVoi Solana byte-pin set for the x402 exact SVM create-ATA facilitator check (x402 #2395 / PR #2798); byte-pin assertions, not JCS canonicalisation, NOT cross-validated, NOT folded into any total.",
+  "validation_records": [
+    {
+      "name": "rfc9421_receipt_evidence_v0",
+      "primary_file": "rfc9421_receipt_evidence_v0.json",
+      "vector_count": 6,
+      "category": "validation_record",
+      "status": "AlgoVoi validation + change-management record of the L2 receipt-evidence (key-source provenance) layer specified at a2aproject/A2A#1829; imports L1 rfc9421_proxy_chain_v1 by digest; 1-impl reproducible (rfc8785); NOT cross-validated, NOT in conformance/interop totals",
+      "l2_design_venue": "a2aproject/A2A#1829",
+      "imports": {
+        "signing_base_set": "rfc9421_proxy_chain_v1",
+        "signing_base_source_sha256": "7e5e8f1012eabd6aaae52b0ae4e77e4c8b0392077b620d2d944002a0531901e8"
+      },
+      "sha256": "sha256:168ad5fedddb115c282efc7ee3a7f187f4979de13870d2e1c87f9b59b22ac280"
+    }
+  ],
+  "total_validation_records": 1,
+  "total_validation_record_vectors": 6,
+  "validation_record_note": "Validation records are AlgoVoi's independent reproduction of an external L2 layer against the pinned L1 anchor, recorded for change management. The L2 design belongs to the adopting effort; AlgoVoi does not author it. Only attributed L2 (digest pin + NOTICE) is recorded. NOT cross-validated, NOT folded into the conformance or interop totals.",
+  "license": "Apache-2.0",
+  "grammar_sets": [
+    {
+      "name": "caip_edge_v1",
+      "primary_file": "caip_edge_v1.json",
+      "vector_count": 102,
+      "accept_count": 16,
+      "negative_count": 86,
+      "category": "grammar",
+      "anchors_to": "ChainAgnostic/CAIPs CAIP-2, CAIP-10, CAIP-19 identifier grammar",
+      "cross_validated": "7-engine verdict agreement (2026-07-21, 102/102 each): Python, JavaScript(Node), Go(RE2), Rust(regex crate), Rust(no-regex hand parser), Java, PHP(PCRE), Ruby(Onigmo). Naive ^...$ over-acceptance measured per engine (Python 3, Java 8, PHP 3, Ruby 5, Go 0, Rust 0, JS 0; JS with m-flag 9, Rust with (?m) 5). See _attestations/2026-07-21-caip-edge-v1-seven-engine.md",
+      "sha256": "sha256:929df0b7cfe0ea1cde4f6735d082da9a7bbb5e99857f72e7630bd2ef787ab746"
+    }
+  ],
+  "total_grammar_sets": 1,
+  "total_grammar_vectors": 102,
+  "grammar_note": "Grammar sets pin identifier-level accept/reject verdicts for a chain-agnostic identifier grammar. They are NOT JCS canonicalisation vectors: they carry no per-vector canonical-bytes recompute, so they are NOT folded into total_anchor_sets / total_vectors. The conformance signal is verdict agreement across independent implementations over byte-identical inputs (corpus.tsv hex and caip_edge_v1.json base64 decode to the same bytes). Claim separation follows the adversarial-set rule: the input bytes are pinned, and the rejection verdicts are reference-implementation proof-of-record across the listed engines, not a canonical-byte claim.",
+  "parse_sets": [
+    {
+      "name": "jcs_parse_v1",
+      "primary_file": "jcs_parse_v1.json",
+      "vector_count": 8,
+      "accept": 3,
+      "reject": 5,
+      "reject_codes": [
+        "REJECT_DUPLICATE_MEMBER"
+      ],
+      "anchors_to": "RFC 8259 section 4 (object member uniqueness)",
+      "cross_validated": "reference-implementation proof-of-record only (Python); not cross-validated",
+      "sha256": "sha256:eaa1d8179cafc5740ce04e9ea10668cd4b16ec5727e37bf57221239bfc51e78b"
+    }
+  ],
+  "total_parse_sets": 1,
+  "total_parse_vectors": 8,
+  "parse_note": "Parse sets pin accept/reject verdicts over RAW INPUT BYTES for defects that do not survive parsing, so they carry no per-vector canonical-bytes recompute and are NOT folded into total_anchor_sets / total_vectors. Same claim separation as grammar_sets. RFC 8785 canonicalises an already-parsed value, so a duplicate object member is gone before the canonicaliser runs: json.loads('{\"a\":1,\"a\":2}') yields {'a': 2}, and the canonical bytes of that parsed value verify for a document the raw input never unambiguously stated. RFC 8259 section 4 records three real divergent behaviours (last-only, parse error, report-all), which is why the check belongs at parse and why the verdict, not a canonical byte string, is the conformance signal. Reference-impl proof-of-record (Python object_pairs_hook); not cross-validated.",
+  "gate_sets": [
+    {
+      "name": "trust_gate_v1",
+      "primary_file": "trust_gate_v1.json",
+      "vector_count": 15,
+      "category": "verdict",
+      "anchors_to": "gateway/app/routers/verify.py _TRUST_GATE_DENY / _trust_gate_blocks: 4x3 verdict x mode decision matrix + 3 fail-open edges. A decision table, NOT a JCS-hash set (no per-vector canonical bytes).",
+      "cross_validated": "8-impl fail-open parity 120/120 (composition/keystone_gauntlet/run_trust_gate_gauntlet.sh); Python reference runner_python.py 15/15.",
+      "sha256": "sha256:590f888883b9a745f18c260b9034dd41d5bb8643a00f6476a431a33eb62cc584"
+    }
+  ],
+  "total_gate_sets": 1,
+  "total_gate_vectors": 15,
+  "gate_note": "Gate sets pin a decision table's accept/deny verdicts (verdict x mode) over pinned inputs. They carry no per-vector canonical bytes, so like grammar_sets and parse_sets they are NOT folded into total_anchor_sets / total_vectors. The conformance signal is verdict agreement (fail-open/fail-closed) across implementations, not a canonical-byte claim.",
+  "companion_sets": {
+    "settlement_evidence_binding_v1": {
+      "repo": "avm-proofpack",
+      "path": "vectors/settlement_evidence_binding/",
+      "canon": "NON-JCS: bundle_sha256 = SHA-256(dump_bundle indent-2/sort_keys bytes); attestation_content_hash IS JCS",
+      "binds": "a captured avm-proofpack bundle to the round-bearing settlement_attestation_v1 (settlement-attestation-v1-009) via settled_payment_ref + settlement_round",
+      "note": "the raw on-chain anchor + its 17 tamper negatives live in avm-proofpack vectors/positive and vectors/negative"
+    }
+  }
+}

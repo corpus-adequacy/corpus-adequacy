@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+The AlgoVoi adapter binds its provenance to loaded bytes. The pinned producer
+`manifest.json` (SHA-256
+`5e7c56fe353cd5c04adfc779191903d8cf79317301cc3402285a1881f1309865`) is vendored,
+bounded-loaded through the same single call site as the anchor, and bound to its
+own digest; version, canon version and license are verified against it, and the
+anchor digest, vector count and invariant count are derived from its
+`jcs_edge_v1` entry instead of being emitted as constants. The prose
+`anchors_to` field is not parsed. `equal_sha256` now requires exactly two
+references and raises `AdapterError` rather than leaking `ValueError`. Imports
+are checked against an AST allowlist, so `from runner_python import run` and
+dynamic import are refused. The end-to-end round-trip mutant preserves the
+trailing LF, so it is killed by a normal parsed movement over all ten vectors
+rather than by `unexpected-exit`, and the control row is asserted to move
+exactly ten. No release.
+
 `adapters/algovoi_jcs_edge.py` adapts one pinned AlgoVoi `jcs_edge_v1` anchor
 set (`aa53149c670f1659dad511755168ad5231dc04de`, anchor SHA-256
 `a8a1a1a8839553ea5309c381b39ba156e6b6a23a5a3e6aab59b53940cc386033`, 7,622
