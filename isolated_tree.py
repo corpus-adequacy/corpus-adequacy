@@ -81,7 +81,7 @@ def _owned_self_root(path: Path, repo_root: Path) -> bool:
     return True
 
 
-def _write_all(fd: int, buf: bytes) -> int:
+def write_all(fd: int, buf: bytes) -> int:
     """Write every byte. os.write may return short.
 
     Partial progress advances the offset. Zero progress is refusal, not a
@@ -137,7 +137,7 @@ def _copy_regular_bounded(
                 break
             if used + len(buf) > cap:
                 raise IsolationError("materialization exceeds the ceiling of %d bytes" % cap)
-            written += _write_all(out_fd, buf)
+            written += write_all(out_fd, buf)
         os.fchmod(out_fd, stat.S_IMODE(st.st_mode))
         return written
     except Exception:

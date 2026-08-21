@@ -312,7 +312,7 @@ def adapt(source: Path, dest: Path) -> None:
                 flags |= os.O_CLOEXEC
             fd = os.open(out, flags, 0o600)
             try:
-                iso._write_all(fd, data)
+                iso.write_all(fd, data)
             except iso.IsolationError as exc:
                 raise AdapterError(str(exc)) from exc
             finally:

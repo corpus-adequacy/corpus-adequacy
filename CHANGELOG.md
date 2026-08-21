@@ -9,11 +9,14 @@ checkout (`tersignhq/evidence-record-conformance` at
 `(expect, reason|null)`. Reads reuse `read_bounded_regular_file` and the
 existing strict JSON parser. On Windows that reader and the adapter writer
 set `O_BINARY` so newline translation cannot change the pin. Case-file emit
-reuses `isolated_tree._write_all` so a short `os.write` cannot publish
-truncated bytes; zero progress refuses and EINTR retries. Adapter failure
-exits 2. This is not a Tersign partnership, certification, or a claim that
-the wrapper makes the whole suite two-sided. Reason completeness is only the
-pinned manifest. No release.
+calls the one public `isolated_tree.write_all` (the former private helper,
+same function) so a short `os.write` cannot publish truncated bytes; zero
+progress refuses and EINTR retries. That is a shared production change to
+`isolated_tree.py`, a declared `TOOL_SOURCE_PATHS` member, so tool-content
+identity is dirty against HEAD until this tree is the commit being
+measured. Adapter failure exits 2. This is not a Tersign partnership,
+certification, or a claim that the wrapper makes the whole suite
+two-sided. Reason completeness is only the pinned manifest. No release.
 
 `--survivors` projects `corpus-adequacy.survivors.v0` from an existing
 `report.v0` file: survived and silent rows become bound rule findings with a

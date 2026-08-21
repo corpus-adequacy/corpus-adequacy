@@ -411,19 +411,16 @@ class HostileInput(unittest.TestCase):
             n10 = dest / "cases" / ("%s.json" % N10)
             self.assertEqual(len(n10.read_bytes()), 641)
 
-    def test_emit_uses_one_write_all_not_a_bare_os_write(self):
+    def test_emit_calls_the_public_write_all(self):
+        """Name check only. Partial/zero/EINTR behavior is in the tests above."""
         src = Path(ter.__file__).read_text(encoding="utf-8")
-        self.assertIn("_write_all", src)
+        self.assertIn("write_all", src)
+        self.assertNotIn("._write_all", src)
         self.assertNotRegex(
             src,
             r"os\.write\(fd, data\)\s*$",
             msg="bare os.write(fd, data) is the ignored-short-write defect",
         )
-        helper = Path(iso.__file__).read_text(encoding="utf-8")
-        self.assertIn("while sent < len(buf)", helper)
-        self.assertIn("n <= 0", helper)
-        self.assertIn("EINTR", helper)
-        self.assertNotIn("if n == 0:\n            continue", helper)
 
     def test_mid_copy_failure_leaves_no_consumable_dest(self):
         with tempfile.TemporaryDirectory() as d:
