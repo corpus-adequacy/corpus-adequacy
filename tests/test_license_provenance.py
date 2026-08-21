@@ -78,5 +78,37 @@ class LicenseProvenance(unittest.TestCase):
         self.assertIn(THIRD_PARTY_NOT_EVIDENCE, README.read_text(encoding="utf-8"))
 
 
+
+class VendoredTersignVerifierLicense(unittest.TestCase):
+    """Apache-2.0 text at tersignhq/evidence-record-conformance@1cc5ea32."""
+
+    FIXTURE = REPO_ROOT / "fixtures" / "tersign-verify-1cc5ea32"
+    LICENSE = FIXTURE / "LICENSE"
+    SOURCE = FIXTURE / "SOURCE.txt"
+    PIN_SHA256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    PIN_SPDX = "SPDX-License-Identifier: Apache-2.0"
+    EOL = "fixtures/tersign-verify-1cc5ea32/** text eol=lf"
+
+    def test_vendored_license_is_present(self):
+        self.assertTrue(self.LICENSE.is_file(), "vendored Tersign LICENSE is missing")
+
+    def test_vendored_license_is_the_pinned_apache_text(self):
+        digest = hashlib.sha256(self.LICENSE.read_bytes()).hexdigest()
+        self.assertEqual(digest, self.PIN_SHA256)
+        self.assertNotEqual(digest, UPSTREAM_LICENSE_SHA256)
+
+    def test_source_txt_names_spdx_and_license_digest(self):
+        text = self.SOURCE.read_text(encoding="utf-8")
+        self.assertIn(self.PIN_SPDX, text)
+        self.assertIn(self.PIN_SHA256, text)
+
+    def test_gitattributes_pins_the_verify_fixture_to_lf(self):
+        lines = GITATTRIBUTES.read_text(encoding="utf-8").splitlines()
+        self.assertIn(self.EOL, lines)
+
+    def test_upstream_pin_has_no_notice(self):
+        self.assertFalse((self.FIXTURE / "NOTICE").exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

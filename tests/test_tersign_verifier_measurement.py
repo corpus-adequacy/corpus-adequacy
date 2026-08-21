@@ -26,13 +26,19 @@ import corpus_adequacy as ca  # noqa: E402
 import tersign_evidence_record as ter  # noqa: E402
 
 WRAPPER = REPO_ROOT / "measurements" / "tersign_checks.py"
-VERIFY_FIXTURE = REPO_ROOT / "fixtures" / "tersign-verify-1cc5ea32" / "verify.py"
-KECCAK_FIXTURE = REPO_ROOT / "fixtures" / "tersign-verify-1cc5ea32" / "keccak.py"
+VERIFY_DIR = REPO_ROOT / "fixtures" / "tersign-verify-1cc5ea32"
+VERIFY_FIXTURE = VERIFY_DIR / "verify.py"
+KECCAK_FIXTURE = VERIFY_DIR / "keccak.py"
+LICENSE_FIXTURE = VERIFY_DIR / "LICENSE"
+SOURCE_TXT = VERIFY_DIR / "SOURCE.txt"
 CORPUS_FIXTURE = REPO_ROOT / "fixtures" / "tersign-evidence-record-1cc5ea32"
 
 PIN_COMMIT = "1cc5ea32b3da4f195b55782c8a3573d8564673a7"
 PIN_VERIFY = "ec6a6fe6d5caa0e56a2a85b9b35557f2efb6aede7689b3e21c3466e6b7502a42"
 PIN_KECCAK = "f541c8a43a288f61a147dd43accea048eb9f55a095ca3b9dbf3f88341d469190"
+PIN_LICENSE = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+PIN_SPDX = "SPDX-License-Identifier: Apache-2.0"
+ROOT_MIT = "fa103e85c81b02db33f34ea4c59b1a4a7f18e0052042879906ce82f9597b1b7c"
 
 SAFE_INT = "remove the greater-than 2^53-1 refusal"
 INTEGRAL_FLOAT = "accept integer-valued floats and serialize them as integers"
@@ -195,6 +201,16 @@ class PinAndPlacement(unittest.TestCase):
         self.assertEqual(_sha(VERIFY_FIXTURE), PIN_VERIFY)
         self.assertEqual(_sha(KECCAK_FIXTURE), PIN_KECCAK)
         self.assertEqual(ter.PIN_COMMIT, PIN_COMMIT)
+        self.assertTrue(LICENSE_FIXTURE.is_file(), "vendored upstream LICENSE is missing")
+        self.assertEqual(_sha(LICENSE_FIXTURE), PIN_LICENSE)
+        self.assertNotEqual(_sha(LICENSE_FIXTURE), ROOT_MIT)
+        self.assertFalse((VERIFY_DIR / "NOTICE").exists(), "upstream pin has no NOTICE")
+        source = SOURCE_TXT.read_text(encoding="utf-8")
+        self.assertIn(PIN_COMMIT, source)
+        self.assertIn(PIN_SPDX, source)
+        self.assertIn(PIN_LICENSE, source)
+        attrs = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("fixtures/tersign-verify-1cc5ea32/** text eol=lf", attrs)
 
     def test_wrapper_is_not_a_tool_source_member(self):
         self.assertTrue(WRAPPER.exists())
