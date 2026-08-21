@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "adapters"))
 import corpus_adequacy as ca  # noqa: E402
+import isolated_tree as iso  # noqa: E402
 import tersign_evidence_record as ter  # noqa: E402
 ADAPTER = REPO_ROOT / "adapters" / "tersign_evidence_record.py"
 
@@ -317,6 +318,112 @@ class HostileInput(unittest.TestCase):
             with self.assertRaises(ter.AdapterError):
                 ter.adapt(src, dest)
             self.assertEqual(marker.read_text(encoding="utf-8"), "here")
+
+    def test_short_os_write_refuses_and_leaves_no_consumable_dest(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = _copy_source(tmp)
+            dest = tmp / "out"
+            dest.mkdir()
+            real_write = os.write
+            seen_fds = set()
+            short_calls = []
+
+            def first_half_then_zero(fd, data):
+                if fd not in seen_fds:
+                    seen_fds.add(fd)
+                    chunk = data[: max(1, len(data) // 2)]
+                    wrote = real_write(fd, chunk)
+                    short_calls.append(wrote)
+                    return wrote
+                return 0
+
+            with mock.patch.object(os, "write", side_effect=first_half_then_zero):
+                with self.assertRaises((ter.AdapterError, OSError)) as ctx:
+                    ter.adapt(src, dest)
+            self.assertGreaterEqual(len(short_calls), 1)
+            self.assertRegex(str(ctx.exception).lower(), r"write|short|progress")
+            if dest.exists():
+                self.assertFalse((dest / "cases").exists())
+                self.assertFalse((dest / "vectors.json").exists())
+                self.assertFalse((dest / "source.json").exists())
+                self.assertEqual(list(dest.iterdir()), [])
+            self.assertFalse(any(tmp.glob("tersign-adapt-*")))
+
+    def test_partial_progress_still_emits_exact_n10_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = _copy_source(tmp)
+            dest = tmp / "out"
+            dest.mkdir()
+            real_write = os.write
+
+            def half_of_remaining(fd, data):
+                if not data:
+                    return 0
+                return real_write(fd, data[: max(1, len(data) // 2)])
+
+            with mock.patch.object(os, "write", side_effect=half_of_remaining):
+                ter.adapt(src, dest)
+            n10 = dest / "cases" / ("%s.json" % N10)
+            raw = n10.read_bytes()
+            self.assertEqual(len(raw), 641)
+            self.assertEqual(
+                hashlib.sha256(raw).hexdigest(),
+                "fd2c1edd4a24d1e45f90ca2072fa7a797fb03d7cd66b494a541092e6a23a4703",
+            )
+
+    def test_zero_progress_write_is_refusal_not_a_spin(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = _copy_source(tmp)
+            dest = tmp / "out"
+            dest.mkdir()
+
+            def always_zero(fd, data):
+                return 0
+
+            with mock.patch.object(os, "write", side_effect=always_zero):
+                with self.assertRaises((ter.AdapterError, OSError)):
+                    ter.adapt(src, dest)
+            if dest.exists():
+                self.assertFalse((dest / "cases").exists())
+                self.assertEqual(list(dest.iterdir()), [])
+            self.assertFalse(any(tmp.glob("tersign-adapt-*")))
+
+    def test_eintr_then_complete_write_still_emits(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = _copy_source(tmp)
+            dest = tmp / "out"
+            dest.mkdir()
+            real_write = os.write
+            interrupted = {"left": 1}
+
+            def eintr_then_write(fd, data):
+                if interrupted["left"]:
+                    interrupted["left"] -= 1
+                    raise InterruptedError("EINTR")
+                return real_write(fd, data)
+
+            with mock.patch.object(os, "write", side_effect=eintr_then_write):
+                ter.adapt(src, dest)
+            n10 = dest / "cases" / ("%s.json" % N10)
+            self.assertEqual(len(n10.read_bytes()), 641)
+
+    def test_emit_uses_one_write_all_not_a_bare_os_write(self):
+        src = Path(ter.__file__).read_text(encoding="utf-8")
+        self.assertIn("_write_all", src)
+        self.assertNotRegex(
+            src,
+            r"os\.write\(fd, data\)\s*$",
+            msg="bare os.write(fd, data) is the ignored-short-write defect",
+        )
+        helper = Path(iso.__file__).read_text(encoding="utf-8")
+        self.assertIn("while sent < len(buf)", helper)
+        self.assertIn("n <= 0", helper)
+        self.assertIn("EINTR", helper)
+        self.assertNotIn("if n == 0:\n            continue", helper)
 
     def test_mid_copy_failure_leaves_no_consumable_dest(self):
         with tempfile.TemporaryDirectory() as d:

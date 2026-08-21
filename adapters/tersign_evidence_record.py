@@ -23,6 +23,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 import corpus_adequacy as ca  # noqa: E402
+import isolated_tree as iso  # noqa: E402
 
 SOURCE_SCHEMA = "corpus-adequacy.tersign-evidence-record.source.v0"
 PIN_REPOSITORY = "tersignhq/evidence-record-conformance"
@@ -311,7 +312,9 @@ def adapt(source: Path, dest: Path) -> None:
                 flags |= os.O_CLOEXEC
             fd = os.open(out, flags, 0o600)
             try:
-                os.write(fd, data)
+                iso._write_all(fd, data)
+            except iso.IsolationError as exc:
+                raise AdapterError(str(exc)) from exc
             finally:
                 os.close(fd)
         (temp / "vectors.json").write_bytes(_encode({"vectors": rows}))

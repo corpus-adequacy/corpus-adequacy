@@ -8,7 +8,9 @@ checkout (`tersignhq/evidence-record-conformance` at
 `cases/`, and `source.json`. Kind stays metadata. The typed outcome is
 `(expect, reason|null)`. Reads reuse `read_bounded_regular_file` and the
 existing strict JSON parser. On Windows that reader and the adapter writer
-set `O_BINARY` so newline translation cannot change the pin. Adapter failure
+set `O_BINARY` so newline translation cannot change the pin. Case-file emit
+reuses `isolated_tree._write_all` so a short `os.write` cannot publish
+truncated bytes; zero progress refuses and EINTR retries. Adapter failure
 exits 2. This is not a Tersign partnership, certification, or a claim that
 the wrapper makes the whole suite two-sided. Reason completeness is only the
 pinned manifest. No release.
