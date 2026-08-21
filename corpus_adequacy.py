@@ -401,6 +401,46 @@ def _control_stripped_one_line(text: str) -> str:
     return "".join(ch for ch in text if ord(ch) >= 32 and ch != "\x7f")
 
 
+def _parse_projection_json(raw: bytes):
+    """One parser for --survivors report and digest-matched manifest bytes."""
+    def refuse_const(value):
+        raise ManifestError("non-finite JSON number %s" % value)
+
+    def no_duplicate_keys(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ManifestError("duplicate JSON key %r" % key)
+            obj[key] = value
+        return obj
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ManifestError("projection input is not UTF-8") from None
+    return json.loads(
+        text, parse_constant=refuse_const, object_pairs_hook=no_duplicate_keys)
+
+
+def _require_anchor_manifest(manifest_obj) -> dict:
+    """Typed mutants map before any .get on a group or entry."""
+    if not isinstance(manifest_obj, dict):
+        raise ManifestError("manifest must be an object")
+    mutants = manifest_obj.get("mutants")
+    if mutants is None:
+        return manifest_obj
+    if not isinstance(mutants, dict):
+        raise ManifestError("manifest.mutants must be an object")
+    for group, entries in mutants.items():
+        if not isinstance(entries, list):
+            raise ManifestError("manifest.mutants[%r] must be a list" % group)
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise ManifestError(
+                    "manifest.mutants[%r][%d] must be an object" % (group, i))
+    return manifest_obj
+
+
 def _lookup_manifest_anchor(manifest_obj: dict, group: str, label: str):
     entries = (manifest_obj.get("mutants") or {}).get(group) or []
     for entry in entries:
@@ -476,13 +516,9 @@ def survivor_findings(report, manifest=None):
     if manifest is not None:
         raw = read_bounded_regular_file(Path(manifest))
         if _file_sha256(raw) == report.get("manifest_sha256"):
-            try:
-                manifest_obj = json.loads(raw)
-            except json.JSONDecodeError:
-                manifest_obj = None
-            if isinstance(manifest_obj, dict):
-                for finding in findings:
-                    _apply_anchor(finding, manifest_obj)
+            manifest_obj = _require_anchor_manifest(_parse_projection_json(raw))
+            for finding in findings:
+                _apply_anchor(finding, manifest_obj)
     return {
         "schema": SURVIVORS_SCHEMA,
         "source_schema": REPORT_SCHEMA,
@@ -1972,7 +2008,7 @@ def _survivors_cli(args, ap) -> int:
         ap.error("report is required")
     try:
         raw = read_bounded_regular_file(args.manifest)
-        report = json.loads(raw)
+        report = _parse_projection_json(raw)
         if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
             raise ManifestError(
                 "survivors input must be %s, got %r"

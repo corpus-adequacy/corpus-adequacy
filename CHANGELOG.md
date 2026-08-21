@@ -18,6 +18,10 @@ lstat/open/fstat identity parity and still refuses a symlink or
 non-regular path. Reads loop until EOF or cap+1. `--manifest` without
 `--survivors` exits 2. Hostile report or mutant shapes raise instead of
 KeyError or an empty projection.
+A digest-matched `--manifest` is parsed by the same strict JSON reader
+and typed before anchor lookup, so a list-shaped `mutants` map exits 2
+without a traceback. Duplicate keys and non-finite numbers are refused
+there too.
 
 
 Successful `corpus-adequacy.report.v0` output now has one deterministic

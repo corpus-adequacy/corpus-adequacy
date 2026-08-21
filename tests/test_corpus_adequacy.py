@@ -3239,6 +3239,63 @@ class SurvivorFindings(unittest.TestCase):
                 else:
                     self.fail("hostile input produced a projection")
 
+    def _digest_matched_pair(self, manifest_bytes):
+        report = self._report(
+            [self._row("survived", "only")],
+            manifest_sha256="sha256:" + hashlib.sha256(manifest_bytes).hexdigest(),
+        )
+        return report, manifest_bytes
+
+    def test_digest_matched_list_mutants_exits_2_without_traceback(self):
+        raw = b'{"mutants":[{"x":1}]}'
+        report, _ = self._digest_matched_pair(raw)
+        with tempfile.TemporaryDirectory() as d:
+            report_path = Path(d) / "report.json"
+            manifest_path = Path(d) / "bad-manifest.json"
+            report_path.write_bytes(ca.encode_report_v0(report))
+            manifest_path.write_bytes(raw)
+            with self.assertRaises(ca.ManifestError):
+                ca.survivor_findings(report, manifest=manifest_path)
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), "--survivors",
+                 str(report_path), "--manifest", str(manifest_path)],
+                capture_output=True, timeout=30)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn(b"could not project", proc.stderr)
+        self.assertNotIn(b"Traceback", proc.stderr)
+        self.assertNotIn(b"AttributeError", proc.stderr)
+
+    def test_digest_matched_nested_manifest_shapes_are_refused(self):
+        cases = (
+            b'{"mutants":[{"x":1}]}',
+            b'{"mutants":{"g":"not-a-list"}}',
+            b'{"mutants":{"g":[null]}}',
+            b'{"mutants":{"g":["entry"]}}',
+            b'[]',
+        )
+        for raw in cases:
+            with self.subTest(raw=raw):
+                report, _ = self._digest_matched_pair(raw)
+                with tempfile.TemporaryDirectory() as d:
+                    path = Path(d) / "m.json"
+                    path.write_bytes(raw)
+                    with self.assertRaises(ca.ManifestError):
+                        ca.survivor_findings(report, manifest=path)
+
+    def test_projection_json_refuses_nan_and_duplicate_keys(self):
+        report, _ = self._digest_matched_pair(b'{"mutants":{}}')
+        with tempfile.TemporaryDirectory() as d:
+            nan = Path(d) / "nan.json"
+            nan.write_bytes(b'{"mutants":{"g":[{"label":"only","anchor":NaN}]}}')
+            report["manifest_sha256"] = "sha256:" + hashlib.sha256(nan.read_bytes()).hexdigest()
+            with self.assertRaises(ca.ManifestError):
+                ca.survivor_findings(report, manifest=nan)
+            dup = Path(d) / "dup.json"
+            dup.write_bytes(b'{"mutants":{"g":[]},"mutants":[{"x":1}]}')
+            report["manifest_sha256"] = "sha256:" + hashlib.sha256(dup.read_bytes()).hexdigest()
+            with self.assertRaises(ca.ManifestError):
+                ca.survivor_findings(report, manifest=dup)
+
     def test_anchor_requires_exact_manifest_file_bytes(self):
         manifest_obj = {
             "schema": ca.SCHEMA,
