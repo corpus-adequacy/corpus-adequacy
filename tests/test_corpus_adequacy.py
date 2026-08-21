@@ -10,6 +10,7 @@ rule none does, a rule declared out of scope, and a rule declared equivalent.
 
 from __future__ import annotations
 
+import ast
 import gc
 import hashlib
 import inspect
@@ -2919,6 +2920,457 @@ class ProducerOwnedControlStatus(unittest.TestCase):
 
         self.assertIn("control-SURVIVED", [row["verdict"] for row in report["mutants"]])
         self.assertEqual(report["control_status"], "killed")
+
+
+class SurvivorFindings(unittest.TestCase):
+    """Issue #27: project survived and silent rows as bound rule findings."""
+
+    def test_one_survived_and_one_silent_bind_two_findings(self):
+        report = {
+            "schema": ca.REPORT_SCHEMA,
+            "manifest_sha256": "sha256:" + "0" * 64,
+            "mutants": [
+                {
+                    "group": "axis-a",
+                    "label": "rejects bad input",
+                    "verdict": "survived",
+                    "scope": "declared",
+                    "moved": 0,
+                    "how": "no vector distinguishes it",
+                },
+                {
+                    "group": "axis-b",
+                    "label": "diagnostic-only rule",
+                    "verdict": "silent",
+                    "scope": "declared",
+                    "moved": 0,
+                    "moved_diagnostic": 2,
+                    "how": "no vector's declared outcome distinguishes it",
+                },
+            ],
+            "failures": [
+                "1 mutant(s) survived; the required score is 100% of non-equivalent mutants",
+                "1 mutant(s) were silent: no declared outcome moved",
+            ],
+            "survived": 1,
+            "silent": 1,
+            "killed": 0,
+        }
+        projected = ca.survivor_findings(report)
+        self.assertEqual(projected["schema"], "corpus-adequacy.survivors.v0")
+        findings = projected["findings"]
+        self.assertEqual(len(findings), 2)
+        by_rule = {finding["rule"]: finding for finding in findings}
+        self.assertEqual(set(by_rule), {"rejects bad input", "diagnostic-only rule"})
+
+        survived = by_rule["rejects bad input"]
+        self.assertEqual(survived["group"], "axis-a")
+        self.assertEqual(survived["verdict"], "survived")
+        self.assertEqual(survived["moved"], 0)
+        self.assertEqual(survived["moved_diagnostic"], 0)
+        self.assertEqual(
+            survived["obligation"],
+            "A future vector must distinguish this rule on a declared outcome. "
+            "This projection does not name such a vector.",
+        )
+
+        silent = by_rule["diagnostic-only rule"]
+        self.assertEqual(silent["group"], "axis-b")
+        self.assertEqual(silent["verdict"], "silent")
+        self.assertEqual(silent["moved"], 0)
+        self.assertEqual(silent["moved_diagnostic"], 2)
+        self.assertEqual(
+            silent["obligation"],
+            "A future vector must distinguish this rule on a declared outcome, "
+            "not only the diagnostic channel. "
+            "This projection does not name such a vector.",
+        )
+        self.assertNotEqual(survived["obligation"], silent["obligation"])
+
+    def _row(self, verdict, label, group="g", **extra):
+        row = {"group": group, "label": label, "verdict": verdict, "moved": 0}
+        row.update(extra)
+        return row
+
+    def _report(self, mutants, **extra):
+        report = {
+            "schema": ca.REPORT_SCHEMA,
+            "manifest_sha256": extra.pop("manifest_sha256", "sha256:" + "0" * 64),
+            "mutants": mutants,
+            "failures": extra.pop("failures", []),
+            "survived": extra.pop(
+                "survived", sum(1 for row in mutants if row.get("verdict") == "survived")),
+            "silent": extra.pop(
+                "silent", sum(1 for row in mutants if row.get("verdict") == "silent")),
+            "killed": extra.pop("killed", 0),
+        }
+        report.update(extra)
+        return report
+
+    def test_killed_and_excluded_verdicts_are_not_findings(self):
+        report = self._report([
+            self._row("survived", "keep-survived"),
+            self._row("silent", "keep-silent", moved_diagnostic=1),
+            self._row("killed", "drop-killed", moved=3),
+            self._row("equivalent", "drop-equivalent"),
+            self._row("unexercised", "drop-oos"),
+            self._row("unproved", "drop-unproved"),
+            self._row("known-hole", "drop-hole"),
+            self._row("control-killed", "drop-control"),
+        ])
+        rules = [finding["rule"] for finding in ca.survivor_findings(report)["findings"]]
+        self.assertEqual(rules, ["keep-silent", "keep-survived"])
+
+    def test_survived_and_silent_obligations_are_distinct(self):
+        report = self._report([
+            self._row("survived", "r-survived"),
+            self._row("silent", "r-silent", moved_diagnostic=1),
+        ])
+        by_rule = {f["rule"]: f for f in ca.survivor_findings(report)["findings"]}
+        self.assertNotEqual(by_rule["r-survived"]["obligation"],
+                            by_rule["r-silent"]["obligation"])
+        self.assertNotIn("diagnostic", by_rule["r-survived"]["obligation"])
+        self.assertIn("diagnostic", by_rule["r-silent"]["obligation"])
+
+    def test_rule_is_the_mutant_label(self):
+        report = self._report([self._row("survived", "the-label", group="the-group")])
+        finding = ca.survivor_findings(report)["findings"][0]
+        self.assertEqual(finding["rule"], "the-label")
+        self.assertNotEqual(finding["rule"], "the-group")
+        self.assertNotEqual(finding["rule"], 0)
+
+    def test_findings_are_sorted_by_group_then_rule(self):
+        report = self._report([
+            self._row("survived", "z-rule", group="b"),
+            self._row("silent", "a-rule", group="b", moved_diagnostic=1),
+            self._row("survived", "m-rule", group="a"),
+        ])
+        pairs = [(f["group"], f["rule"]) for f in ca.survivor_findings(report)["findings"]]
+        self.assertEqual(pairs, [("a", "m-rule"), ("b", "a-rule"), ("b", "z-rule")])
+
+    def test_projection_is_not_part_of_report_v0(self):
+        report = self._report([self._row("survived", "only")])
+        before = ca.encode_report_v0(report)
+        projected = ca.survivor_findings(report)
+        self.assertNotIn("findings", report)
+        self.assertNotEqual(projected["schema"], ca.REPORT_SCHEMA)
+        self.assertEqual(ca.encode_report_v0(report), before)
+        with self.assertRaises(ValueError):
+            ca.encode_survivors_v0(report)
+
+    def test_counts_are_derived_from_findings(self):
+        report = self._report(
+            [self._row("survived", "one"), self._row("killed", "ignore", moved=1)],
+            survived=99, silent=7, killed=1,
+        )
+        projected = ca.survivor_findings(report)
+        self.assertEqual(projected["survived"], 1)
+        self.assertEqual(projected["silent"], 0)
+        self.assertEqual(projected["finding_count"], 1)
+
+    def test_producer_failures_are_not_findings(self):
+        failure = "1 mutant(s) survived; the required score is 100% of non-equivalent mutants"
+        report = self._report(
+            [self._row("survived", "only")],
+            failures=[failure],
+        )
+        projected = ca.survivor_findings(report)
+        self.assertEqual([f["rule"] for f in projected["findings"]], ["only"])
+        self.assertNotIn(failure, projected["findings"])
+        self.assertTrue(all(isinstance(f, dict) for f in projected["findings"]))
+        self.assertTrue(all("obligation" in f for f in projected["findings"]))
+
+    def test_report_v0_helpers_are_byte_identical_to_base(self):
+        src = Path(ca.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        hashes = {}
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name in (
+                    "encode_report_v0", "_report_v0"):
+                hashes[node.name] = hashlib.sha256(
+                    ast.get_source_segment(src, node).encode()).hexdigest()
+        self.assertEqual(hashes, {
+            "encode_report_v0":
+                "36f8d4604ee5e3050975196c857ae95e225d19d49ab12e9a3a77efa61289c2d4",
+            "_report_v0":
+                "9e0f0fe2df144ed74e11f36da1ef3b3d53d7a85df09819bbb543a3e96618963f",
+        })
+
+    def test_survivors_encoder_has_one_pinned_utf8_wire_form(self):
+        doc = {"z": "caf\u00e9", "schema": ca.SURVIVORS_SCHEMA, "a": 1}
+        expected = (
+            b'{\n'
+            b'  "a": 1,\n'
+            b'  "schema": "corpus-adequacy.survivors.v0",\n'
+            b'  "z": "caf\xc3\xa9"\n'
+            b'}\n'
+        )
+        encoded = ca.encode_survivors_v0(doc)
+        self.assertEqual(encoded, expected)
+        self.assertTrue(encoded.endswith(b"\n"))
+        self.assertEqual(encoded.decode("utf-8"), encoded.decode("utf-8"))
+
+    def test_survivors_encoder_does_not_call_report_encoder(self):
+        with mock.patch.object(
+                ca, "encode_report_v0",
+                side_effect=AssertionError("encode_survivors_v0 called encode_report_v0")):
+            encoded = ca.encode_survivors_v0({"schema": ca.SURVIVORS_SCHEMA, "a": 1})
+        self.assertTrue(encoded.endswith(b"\n"))
+
+    def test_bounded_loader_refuses_oversized_before_json_loads(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "too-big.json"
+            path.write_bytes(b'{"k":"' + (b"x" * 80) + b'"}')
+            with mock.patch.object(ca, "OUTPUT_CAP_BYTES", 32), \
+                    mock.patch.object(
+                        json, "loads",
+                        side_effect=AssertionError("json.loads ran after the cap")):
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.read_bounded_regular_file(path)
+        self.assertIn("cap", str(cm.exception).lower())
+
+    def test_projection_cap_is_the_existing_output_cap(self):
+        self.assertFalse(hasattr(ca, "PROJECTION_INPUT_CAP_BYTES"))
+        self.assertIs(ca.OUTPUT_CAP_BYTES, __import__("bounded_run").OUTPUT_CAP_BYTES)
+        src = inspect.getsource(ca.read_bounded_regular_file)
+        self.assertIn("OUTPUT_CAP_BYTES", src)
+        self.assertNotIn("PROJECTION_INPUT_CAP_BYTES", src)
+        self.assertNotIn("1024 * 1024", src)
+        module_src = Path(ca.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("PROJECTION_INPUT_CAP_BYTES", module_src)
+        self.assertNotIn("1024 * 1024", module_src)
+
+    @unittest.skipIf(not hasattr(os, "O_NOFOLLOW"), "O_NOFOLLOW is required")
+    def test_bounded_loader_refuses_a_symlink(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "real.json"
+            target.write_text('{"schema":"%s","mutants":[]}' % ca.REPORT_SCHEMA)
+            link = Path(d) / "link.json"
+            link.symlink_to(target)
+            with mock.patch.object(
+                    json, "loads",
+                    side_effect=AssertionError("json.loads followed a symlink")):
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.read_bounded_regular_file(link)
+        self.assertRegex(str(cm.exception).lower(), r"regular|symlink|follow")
+
+    def test_bounded_loader_without_nofollow_uses_identity_parity(self):
+        with tempfile.TemporaryDirectory() as d:
+            regular = Path(d) / "ok.json"
+            regular.write_bytes(b'{"ok": true}')
+            target = Path(d) / "real.json"
+            target.write_bytes(b'{"ok": true}')
+            link = Path(d) / "link.json"
+            link.symlink_to(target)
+            directory = Path(d) / "dir"
+            directory.mkdir()
+            with mock.patch.object(os, "O_NOFOLLOW", None, create=True):
+                self.assertEqual(
+                    ca.read_bounded_regular_file(regular), b'{"ok": true}')
+                with self.assertRaises(ca.ManifestError) as cm_link:
+                    ca.read_bounded_regular_file(link)
+                with self.assertRaises(ca.ManifestError) as cm_dir:
+                    ca.read_bounded_regular_file(directory)
+        self.assertRegex(str(cm_link.exception).lower(), r"regular|symlink|follow")
+        self.assertRegex(str(cm_dir.exception).lower(), r"regular|symlink")
+        src = inspect.getsource(ca.read_bounded_regular_file)
+        self.assertIn("lstat", src)
+        self.assertIn("fstat", src)
+        self.assertIn("st_ino", src)
+
+    def test_bounded_loader_reads_in_a_loop_and_accepts_exact_cap(self):
+        payload = b"x" * 32
+        with tempfile.TemporaryDirectory() as d:
+            exact = Path(d) / "exact.bin"
+            exact.write_bytes(payload)
+            over = Path(d) / "over.bin"
+            over.write_bytes(payload + b"y")
+            reads = []
+            real_read = os.read
+
+            def tiny_read(fd, _n):
+                chunk = real_read(fd, 1)
+                reads.append(len(chunk))
+                return chunk
+
+            with mock.patch.object(ca, "OUTPUT_CAP_BYTES", 32),                     mock.patch.object(ca.os, "read", side_effect=tiny_read):
+                self.assertEqual(ca.read_bounded_regular_file(exact), payload)
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.read_bounded_regular_file(over)
+        self.assertGreater(len(reads), 1)
+        self.assertIn("cap", str(cm.exception).lower())
+
+    def test_manifest_flag_without_survivors_exits_2(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (mock.patch.object(sys, "argv",
+                                ["corpus_adequacy.py", "m.json", "--manifest", "a.json"]),
+              mock.patch.object(sys, "stdout", stdout),
+              mock.patch.object(sys, "stderr", stderr),
+              mock.patch.object(
+                  ca, "run",
+                  side_effect=AssertionError("--manifest without --survivors called run()"))):
+            rc = ca.main()
+        self.assertEqual(rc, 2)
+        self.assertIn("--manifest", stderr.getvalue())
+        self.assertIn("--survivors", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_malformed_report_rows_are_refused_not_empty_or_keyerror(self):
+        cases = (
+            [],
+            "not-a-report",
+            {"schema": ca.REPORT_SCHEMA, "mutants": "survived"},
+            {"schema": ca.REPORT_SCHEMA, "mutants": [None]},
+            {"schema": ca.REPORT_SCHEMA, "mutants": [{"verdict": "survived"}]},
+            {"schema": ca.REPORT_SCHEMA,
+             "mutants": [{"label": 1, "group": "g", "verdict": "survived"}]},
+            {"schema": ca.REPORT_SCHEMA,
+             "mutants": {"g": [{"label": "x", "verdict": "survived"}]}},
+        )
+        for report in cases:
+            with self.subTest(report=report):
+                try:
+                    ca.survivor_findings(report)
+                except (ca.ManifestError, ValueError):
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    self.fail("hostile input leaked %s: %s" % (type(exc).__name__, exc))
+                else:
+                    self.fail("hostile input produced a projection")
+
+    def test_anchor_requires_exact_manifest_file_bytes(self):
+        manifest_obj = {
+            "schema": ca.SCHEMA,
+            "mutants": {
+                "g": [{
+                    "label": "only",
+                    "anchor": "if True:\n    return 1",
+                    "replacement": "if False:\n    return 1",
+                }],
+            },
+        }
+        compact = json.dumps(manifest_obj, separators=(",", ":")).encode("utf-8")
+        spaced = compact + b"\n"
+        self.assertNotEqual(
+            hashlib.sha256(spaced).hexdigest(),
+            hashlib.sha256(json.dumps(json.loads(spaced)).encode("utf-8")).hexdigest(),
+        )
+        report = self._report(
+            [self._row("survived", "only")],
+            manifest_sha256="sha256:" + hashlib.sha256(spaced).hexdigest(),
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "m.json"
+            path.write_bytes(spaced)
+            matched = ca.survivor_findings(report, manifest=path)
+            mismatched = ca.survivor_findings(
+                dict(report, manifest_sha256="sha256:" + "ab" * 32),
+                manifest=path,
+            )
+        self.assertEqual(matched["findings"][0]["anchor_excerpt"], "if True:    return 1")
+        self.assertNotIn("anchor_excerpt", mismatched["findings"][0])
+        self.assertNotIn("anchor_omitted", mismatched["findings"][0])
+
+    def test_anchor_is_control_stripped_and_oversized_is_omitted(self):
+        short_anchor = "keep\x01this\nline"
+        long_anchor = "x" * 201
+        manifest_obj = {
+            "schema": ca.SCHEMA,
+            "mutants": {
+                "g": [
+                    {"label": "ctrl", "anchor": short_anchor, "replacement": "a"},
+                    {"label": "huge", "anchor": long_anchor, "replacement": "b"},
+                ],
+            },
+        }
+        raw = json.dumps(manifest_obj).encode("utf-8")
+        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        report = self._report(
+            [self._row("survived", "ctrl"), self._row("survived", "huge")],
+            manifest_sha256=digest,
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "m.json"
+            path.write_bytes(raw)
+            projected = ca.survivor_findings(report, manifest=path)
+        by_rule = {f["rule"]: f for f in projected["findings"]}
+        self.assertEqual(by_rule["ctrl"]["anchor_excerpt"], "keepthisline")
+        self.assertNotIn("\x01", by_rule["ctrl"]["anchor_excerpt"])
+        self.assertNotIn("\n", by_rule["ctrl"]["anchor_excerpt"])
+        self.assertEqual(by_rule["huge"].get("anchor_omitted"), "oversized")
+        self.assertNotIn("anchor_excerpt", by_rule["huge"])
+
+    def test_survivors_cli_does_not_call_run(self):
+        report = self._report([self._row("survived", "only")], adequate=False)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "report.json"
+            path.write_bytes(ca.encode_report_v0(report))
+            stdout = io.BytesIO()
+
+            class BinaryStdout:
+                buffer = stdout
+
+                def write(self, _text):
+                    raise AssertionError("survivors JSON was routed through text encoding")
+
+            with (mock.patch.object(sys, "argv",
+                                    ["corpus_adequacy.py", "--survivors", str(path), "--json"]),
+                  mock.patch.object(sys, "stdout", BinaryStdout()),
+                  mock.patch.object(ca, "run",
+                                    side_effect=AssertionError("--survivors called run()"))):
+                rc = ca.main()
+        self.assertEqual(rc, 0)
+        body = json.loads(stdout.getvalue())
+        self.assertEqual(body["schema"], ca.SURVIVORS_SCHEMA)
+        self.assertEqual(body["finding_count"], 1)
+
+    def test_plain_json_still_emits_report_v0(self):
+        report = {"schema": ca.REPORT_SCHEMA, "adequate": True, "mutants": []}
+        stdout = io.StringIO()
+        with (mock.patch.object(sys, "argv", ["corpus_adequacy.py", "m.json", "--json"]),
+              mock.patch.object(sys, "stdout", stdout),
+              mock.patch.object(ca, "run", return_value=report),
+              mock.patch.object(ca, "encode_report_v0",
+                                wraps=ca.encode_report_v0) as encoder):
+            rc = ca.main()
+        self.assertEqual(rc, 0)
+        encoder.assert_called_once_with(report)
+        self.assertEqual(json.loads(stdout.getvalue())["schema"], ca.REPORT_SCHEMA)
+
+    def test_survivors_cli_refuses_oversized_and_symlink_inputs(self):
+        report = self._report([self._row("survived", "only")])
+        with tempfile.TemporaryDirectory() as d:
+            regular = Path(d) / "report.json"
+            regular.write_bytes(ca.encode_report_v0(report))
+            huge = Path(d) / "huge.json"
+            huge.write_bytes(b"{" + (b"x" * 80) + b"}")
+            link = Path(d) / "link.json"
+            if hasattr(os, "O_NOFOLLOW"):
+                link.symlink_to(regular)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (mock.patch.object(ca, "OUTPUT_CAP_BYTES", 32),
+                  mock.patch.object(sys, "argv",
+                                    ["corpus_adequacy.py", "--survivors", str(huge), "--json"]),
+                  mock.patch.object(sys, "stdout", stdout),
+                  mock.patch.object(sys, "stderr", stderr),
+                  mock.patch.object(
+                      json, "loads",
+                      side_effect=AssertionError("json.loads ran after the cap"))):
+                rc = ca.main()
+            self.assertEqual(rc, 2)
+            self.assertIn("could not project", stderr.getvalue())
+            self.assertNotIn("could not measure", stderr.getvalue())
+            env = json.loads(stdout.getvalue())
+            self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+            if hasattr(os, "O_NOFOLLOW"):
+                linked = subprocess.run(
+                    [sys.executable, str(ca.__file__), "--survivors", str(link)],
+                    capture_output=True, timeout=30)
+                self.assertEqual(linked.returncode, 2)
+                self.assertIn("could not project", linked.stderr.decode())
+
 
 
 if __name__ == "__main__":

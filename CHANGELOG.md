@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+`--survivors` projects `corpus-adequacy.survivors.v0` from an existing
+`report.v0` file: survived and silent rows become bound rule findings with a
+verdict-specific discrimination obligation. `encode_survivors_v0` is its own
+encoder (UTF-8, sorted keys, two-space indent, trailing LF) and never calls
+`encode_report_v0`. Report and optional manifest inputs go through one bounded
+regular-file / no-follow reader; the existing `OUTPUT_CAP_BYTES` ceiling is applied before `json.loads`.
+An `anchor_excerpt` is emitted only when SHA-256 of the exact manifest file
+bytes matches `report.manifest_sha256`. Oversized anchors are omitted with a
+typed reason. `report.v0` bytes, `_report_v0`, `encode_report_v0`, plain
+`--json`, measurement exits and VERSION are unchanged. No `report.v1`.
+
+On platforms without `O_NOFOLLOW`, the same reader falls back to
+lstat/open/fstat identity parity and still refuses a symlink or
+non-regular path. Reads loop until EOF or cap+1. `--manifest` without
+`--survivors` exits 2. Hostile report or mutant shapes raise instead of
+KeyError or an empty projection.
+
+
 Successful `corpus-adequacy.report.v0` output now has one deterministic
 `encode_report_v0()` byte form: UTF-8, sorted keys, two-space indentation and
 one trailing LF. The JSON CLI uses that encoder, while `error.v0` is explicitly
