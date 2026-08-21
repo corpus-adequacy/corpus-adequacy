@@ -304,7 +304,12 @@ def adapt(source: Path, dest: Path) -> None:
         for filename, data in collected:
             vector_id = filename[:-5]
             out = cases / (vector_id + ".json")
-            fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_BINARY"):
+                flags |= os.O_BINARY
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            fd = os.open(out, flags, 0o600)
             try:
                 os.write(fd, data)
             finally:

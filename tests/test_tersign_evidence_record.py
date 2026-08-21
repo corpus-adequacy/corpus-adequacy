@@ -113,6 +113,10 @@ class HappyPath(unittest.TestCase):
             self.assertTrue(source["source_validation"]["two_sided_per_kind"])
 
     def test_emitted_case_bytes_match_source_bytes(self):
+        pin = "fd2c1edd4a24d1e45f90ca2072fa7a797fb03d7cd66b494a541092e6a23a4703"
+        fixture = (FIXTURE / "vectors" / ("%s.json" % N10)).read_bytes()
+        self.assertEqual(hashlib.sha256(fixture).hexdigest(), pin)
+        self.assertNotIn(b"\r\n", fixture)
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             src = _copy_source(tmp)
@@ -122,10 +126,16 @@ class HappyPath(unittest.TestCase):
             n10 = dest / "cases" / ("%s.json" % N10)
             raw = n10.read_bytes()
             self.assertEqual(raw, (src / "vectors" / ("%s.json" % N10)).read_bytes())
-            self.assertEqual(hashlib.sha256(raw).hexdigest(),
-                             "fd2c1edd4a24d1e45f90ca2072fa7a797fb03d7cd66b494a541092e6a23a4703")
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), pin)
             self.assertIn(b"1.1", raw)
             self.assertNotIn(b"1.10", raw)
+            self.assertNotIn(b"\r\n", raw)
+
+    def test_windows_opens_are_binary(self):
+        reader = Path(ca.__file__).read_text(encoding="utf-8")
+        adapter = Path(ter.__file__).read_text(encoding="utf-8")
+        self.assertIn("O_BINARY", reader)
+        self.assertIn("O_BINARY", adapter)
 
     def test_output_is_deterministic(self):
         with tempfile.TemporaryDirectory() as d:

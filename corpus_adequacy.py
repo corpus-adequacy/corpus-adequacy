@@ -352,6 +352,8 @@ def read_bounded_regular_file(path: Path, *, cap: int | None = None) -> bytes:
     path = Path(path)
     nofollow = getattr(os, "O_NOFOLLOW", None)
     flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     identity = None
