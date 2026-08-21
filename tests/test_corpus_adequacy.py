@@ -3296,6 +3296,72 @@ class SurvivorFindings(unittest.TestCase):
             with self.assertRaises(ca.ManifestError):
                 ca.survivor_findings(report, manifest=dup)
 
+    def _deep_json_that_overflows_the_decoder(self):
+        depth = 2000
+        while depth <= 200000:
+            raw = b"[" * depth + b"]" * depth
+            self.assertLess(len(raw), ca.OUTPUT_CAP_BYTES)
+            try:
+                json.loads(raw.decode("utf-8"))
+            except RecursionError:
+                return raw
+            depth *= 2
+        self.fail("decoder accepted every nested array under the cap")
+
+    def test_deeply_nested_projection_json_exits_2_without_traceback(self):
+        raw = self._deep_json_that_overflows_the_decoder()
+        with tempfile.TemporaryDirectory() as d:
+            report_path = Path(d) / "deep.json"
+            report_path.write_bytes(raw)
+            with self.assertRaises(ca.ManifestError):
+                ca._parse_projection_json(raw)
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), "--survivors", str(report_path)],
+                capture_output=True, timeout=30)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn(b"could not project", proc.stderr)
+        self.assertNotIn(b"Traceback", proc.stderr)
+        self.assertNotIn(b"RecursionError", proc.stderr)
+
+    def test_digest_matched_deep_manifest_exits_2_without_traceback(self):
+        raw = self._deep_json_that_overflows_the_decoder()
+        report, _ = self._digest_matched_pair(raw)
+        with tempfile.TemporaryDirectory() as d:
+            report_path = Path(d) / "report.json"
+            manifest_path = Path(d) / "deep-manifest.json"
+            report_path.write_bytes(ca.encode_report_v0(report))
+            manifest_path.write_bytes(raw)
+            with self.assertRaises(ca.ManifestError):
+                ca.survivor_findings(report, manifest=manifest_path)
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), "--survivors",
+                 str(report_path), "--manifest", str(manifest_path)],
+                capture_output=True, timeout=30)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn(b"could not project", proc.stderr)
+        self.assertNotIn(b"Traceback", proc.stderr)
+        self.assertNotIn(b"RecursionError", proc.stderr)
+
+    def test_cli_and_function_share_one_report_schema_refusal(self):
+        report = {"schema": "other.v0", "mutants": []}
+        with self.assertRaises(ca.ManifestError) as ctx:
+            ca.survivor_findings(report)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), "--survivors", str(path)],
+                capture_output=True, timeout=30)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(
+            proc.stderr.decode("utf-8").splitlines()[0],
+            "could not project: %s" % ctx.exception,
+        )
+        tree = ast.parse(Path(ca.__file__).read_text(encoding="utf-8"))
+        cli = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_survivors_cli")
+        names = {node.id for node in ast.walk(cli) if isinstance(node, ast.Name)}
+        self.assertNotIn("REPORT_SCHEMA", names)
+
     def test_anchor_requires_exact_manifest_file_bytes(self):
         manifest_obj = {
             "schema": ca.SCHEMA,
@@ -3357,6 +3423,27 @@ class SurvivorFindings(unittest.TestCase):
         self.assertNotIn("\n", by_rule["ctrl"]["anchor_excerpt"])
         self.assertEqual(by_rule["huge"].get("anchor_omitted"), "oversized")
         self.assertNotIn("anchor_excerpt", by_rule["huge"])
+
+    def test_raw_control_anchor_is_oversized_before_stripping(self):
+        raw_anchor = "\x01" * 5000
+        self.assertGreater(len(raw_anchor), ca.ANCHOR_EXCERPT_MAX)
+        self.assertEqual(ca._control_stripped_one_line(raw_anchor), "")
+        manifest_obj = {
+            "schema": ca.SCHEMA,
+            "mutants": {"g": [{"label": "only", "anchor": raw_anchor, "replacement": "b"}]},
+        }
+        raw = json.dumps(manifest_obj).encode("utf-8")
+        report = self._report(
+            [self._row("survived", "only")],
+            manifest_sha256="sha256:" + hashlib.sha256(raw).hexdigest(),
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "m.json"
+            path.write_bytes(raw)
+            projected = ca.survivor_findings(report, manifest=path)
+        finding = projected["findings"][0]
+        self.assertEqual(finding.get("anchor_omitted"), "oversized")
+        self.assertNotIn("anchor_excerpt", finding)
 
     def test_survivors_cli_does_not_call_run(self):
         report = self._report([self._row("survived", "only")], adequate=False)

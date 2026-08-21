@@ -22,6 +22,11 @@ A digest-matched `--manifest` is parsed by the same strict JSON reader
 and typed before anchor lookup, so a list-shaped `mutants` map exits 2
 without a traceback. Duplicate keys and non-finite numbers are refused
 there too.
+Deeply nested projection JSON is refused as ManifestError instead of
+leaking RecursionError. Raw anchor size is measured before
+control-stripping, so an oversized control-only anchor is omitted as
+oversized. Report schema is checked once in `_require_report_rows`; the
+CLI no longer repeats it.
 
 
 Successful `corpus-adequacy.report.v0` output now has one deterministic

@@ -418,8 +418,11 @@ def _parse_projection_json(raw: bytes):
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         raise ManifestError("projection input is not UTF-8") from None
-    return json.loads(
-        text, parse_constant=refuse_const, object_pairs_hook=no_duplicate_keys)
+    try:
+        return json.loads(
+            text, parse_constant=refuse_const, object_pairs_hook=no_duplicate_keys)
+    except RecursionError as exc:
+        raise ManifestError(str(exc)) from None
 
 
 def _require_anchor_manifest(manifest_obj) -> dict:
@@ -453,20 +456,20 @@ def _apply_anchor(finding: dict, manifest_obj: dict) -> None:
     raw_anchor = _lookup_manifest_anchor(manifest_obj, finding["group"], finding["rule"])
     if not isinstance(raw_anchor, str):
         return
-    excerpt = _control_stripped_one_line(raw_anchor)
-    if len(excerpt) > ANCHOR_EXCERPT_MAX:
+    if len(raw_anchor) > ANCHOR_EXCERPT_MAX:
         finding["anchor_omitted"] = "oversized"
         return
+    excerpt = _control_stripped_one_line(raw_anchor)
     if excerpt:
         finding["anchor_excerpt"] = excerpt
 
 
 def _require_report_rows(report) -> list:
     """Refuse hostile report shapes before they become KeyError or []."""
-    if not isinstance(report, dict):
-        raise ManifestError("survivors input must be an object")
-    if report.get("schema") != REPORT_SCHEMA:
-        raise ManifestError("survivors input must be %s" % REPORT_SCHEMA)
+    if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
+        raise ManifestError(
+            "survivors input must be %s, got %r"
+            % (REPORT_SCHEMA, report.get("schema") if isinstance(report, dict) else type(report).__name__))
     mutants = report.get("mutants")
     if not isinstance(mutants, list):
         raise ManifestError("report.mutants must be a list")
@@ -2009,10 +2012,6 @@ def _survivors_cli(args, ap) -> int:
     try:
         raw = read_bounded_regular_file(args.manifest)
         report = _parse_projection_json(raw)
-        if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
-            raise ManifestError(
-                "survivors input must be %s, got %r"
-                % (REPORT_SCHEMA, report.get("schema") if isinstance(report, dict) else type(report).__name__))
         projected = survivor_findings(report, manifest=args.anchor_manifest)
         encoded = encode_survivors_v0(projected) if args.json else None
     except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError, ValueError) as exc:
