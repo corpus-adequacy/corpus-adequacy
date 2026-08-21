@@ -11,6 +11,7 @@ rule none does, a rule declared out of scope, and a rule declared equivalent.
 from __future__ import annotations
 
 import gc
+import hashlib
 import inspect
 import io
 import json
@@ -156,6 +157,7 @@ class ControlMutants(unittest.TestCase):
             rep = ca.run(_manifest(Path(d), {"a": [ctrl]}))
         self.assertEqual(rep["killed"], 0, "a control must not count as a kill")
         self.assertIn("control-killed", [r["verdict"] for r in rep["mutants"]])
+        self.assertEqual(rep["control_status"], "killed")
 
     def test_a_surviving_control_invalidates_the_whole_run(self):
         # The distinction the control exists for: all-survivors because the corpus is
@@ -164,6 +166,7 @@ class ControlMutants(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, ctrl]}))
         self.assertFalse(rep["adequate"])
+        self.assertEqual(rep["control_status"], "survived")
         self.assertTrue(any("harness cannot detect" in f for f in rep["failures"]),
                         rep["failures"])
 
@@ -1684,6 +1687,7 @@ class ChildExitRunSemantics(unittest.TestCase):
                 rep = ca.run(p)
         verdicts = {r["label"]: r for r in rep["mutants"]}
         self.assertEqual(verdicts["CONTROL"]["verdict"], "control-error")
+        self.assertEqual(rep["control_status"], "error")
         self.assertNotEqual(verdicts["CONTROL"]["verdict"], "control-killed")
         self.assertIn("unexpected-exit", verdicts["CONTROL"]["how"])
         self.assertFalse(rep["adequate"])
@@ -2003,6 +2007,7 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
                 self.assertIsNone(rep["score_percent"])
                 self.assertFalse(rep["adequate"])
                 self.assertEqual(_verdict(rep, "CONTROL [a]")["verdict"], "control-error")
+                self.assertEqual(rep["control_status"], "error")
                 self.assertTrue(any("control" in f and "abnormally" in f
                                     for f in rep["failures"]), rep["failures"])
 
@@ -2568,7 +2573,7 @@ class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
 
 
 REQUIRED_REPORT_KEYS = frozenset({
-    "schema", "manifest", "runner",
+    "schema", "manifest", "manifest_sha256", "runner", "control_status",
     "killed", "survived", "silent", "diagnostic_channel_declared",
     "known_holes", "corpus_digest", "acknowledged_digests",
     "hole_ratio", "equivalent", "unexercised_out_of_scope", "unproved",
@@ -2664,10 +2669,12 @@ class ReportProjectorIsPlatformIndependent(unittest.TestCase):
     """
 
     def _project(self, runner: str, **over):
-        m = {"runner": runner, "known_holes": {}, "_corpus_digest": None}
+        m = {"runner": runner, "known_holes": {}, "_corpus_digest": None,
+             "_manifest_sha256": "sha256:" + "0" * 64}
         m.update(over.pop("manifest", {}))
         kw = dict(killed=1, survived=0, silent=0, equivalent=0, out_of_scope=0,
-                  unproved=0, known_holes=0, score=100.0, results=[], failures=[])
+                  unproved=0, known_holes=0, score=100.0, results=[], failures=[],
+                  control_status="killed")
         kw.update(over)
         return ca._report_v0(Path("m.json"), m, **kw)
 
@@ -2737,6 +2744,181 @@ class ReportProjectorIsPlatformIndependent(unittest.TestCase):
     def test_adequate_is_exactly_no_failures(self):
         self.assertIs(self._project("module")["adequate"], True)
         self.assertIs(self._project("module", failures=["x"])["adequate"], False)
+
+
+class ReportV0AddressingContract(unittest.TestCase):
+    """The producer owns the exact report and manifest byte identities."""
+
+    def test_report_encoder_has_one_pinned_utf8_wire_form(self):
+        report = {"z": "caf\u00e9", "schema": ca.REPORT_SCHEMA, "a": 1}
+        expected = (
+            b'{\n'
+            b'  "a": 1,\n'
+            b'  "schema": "corpus-adequacy.report.v0",\n'
+            b'  "z": "caf\xc3\xa9"\n'
+            b'}\n'
+        )
+        encoded = ca.encode_report_v0(report)
+        self.assertEqual(encoded, expected)
+        self.assertEqual(
+            hashlib.sha256(encoded).hexdigest(),
+            "8ecdc8cdab9f1065a57768e556261ac9730cf3d5253e51a5b7c6e58b458cb0fc",
+        )
+
+    def test_json_cli_writes_the_canonical_encoder_bytes(self):
+        report = {"schema": ca.REPORT_SCHEMA, "adequate": True}
+        stdout = io.StringIO()
+        with (mock.patch.object(sys, "argv", ["corpus_adequacy.py", "m.json", "--json"]),
+              mock.patch.object(sys, "stdout", stdout),
+              mock.patch.object(ca, "run", return_value=report),
+              mock.patch.object(ca, "encode_report_v0", return_value=b"wire-report\n")
+              as encoder):
+            rc = ca.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(stdout.getvalue(), "wire-report\n")
+        encoder.assert_called_once_with(report)
+
+    def test_json_cli_prefers_the_binary_stream_over_locale_encoding(self):
+        class BinaryStdout:
+            def __init__(self):
+                self.buffer = io.BytesIO()
+
+            def write(self, _text):
+                raise AssertionError("the JSON report was routed through text encoding")
+
+        report = {"schema": ca.REPORT_SCHEMA, "adequate": True}
+        stdout = BinaryStdout()
+        with (mock.patch.object(sys, "argv", ["corpus_adequacy.py", "m.json", "--json"]),
+              mock.patch.object(sys, "stdout", stdout),
+              mock.patch.object(ca, "run", return_value=report)):
+            rc = ca.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(stdout.buffer.getvalue(), ca.encode_report_v0(report))
+
+    def test_error_envelopes_cannot_enter_the_report_encoder(self):
+        with self.assertRaises(ValueError):
+            ca.encode_report_v0({"schema": ca.ERROR_SCHEMA, "error": "bad manifest"})
+
+    def test_manifest_digest_addresses_the_exact_bytes_that_were_parsed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _manifest(Path(d), {"a": [KILLABLE]})
+            first_bytes = path.read_bytes()
+            first = ca.run(path)
+            path.write_bytes(first_bytes + b"\n")
+            second = ca.run(path)
+
+        self.assertEqual(
+            first["manifest_sha256"],
+            "sha256:" + hashlib.sha256(first_bytes).hexdigest(),
+        )
+        self.assertNotEqual(first["manifest_sha256"], second["manifest_sha256"])
+
+    def test_json_cli_rejects_a_lone_surrogate_as_error_v0(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _manifest(Path(d), {
+                "a": [dict(KILLABLE, label="\ud800")],
+            })
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), str(path), "--json"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertTrue(proc.stdout, "encoding refusal must emit an error envelope")
+        envelope = json.loads(proc.stdout)
+        self.assertEqual(envelope["schema"], ca.ERROR_SCHEMA)
+        self.assertIn("UTF-8", envelope["error"])
+        self.assertNotIn(b"Traceback", proc.stderr)
+
+
+class ProducerOwnedControlStatus(unittest.TestCase):
+    """One producer rule emits both the direct status and its row verdict."""
+
+    def test_control_rule_keeps_direct_status_and_row_verdict_in_parity(self):
+        cases = (
+            (True, None, "killed", "control-killed"),
+            (False, None, "survived", "control-SURVIVED"),
+            (False, "unexpected-exit", "error", "control-error"),
+        )
+        for detected, error, status, verdict in cases:
+            with self.subTest(status=status):
+                row, direct = ca._control_result(
+                    "g", "CONTROL", "declared", detected=detected,
+                    moved=1 if detected else 0, error=error,
+                )
+                self.assertEqual(direct, status)
+                self.assertEqual(row["verdict"], verdict)
+
+    def test_report_status_is_not_reconstructed_from_mutant_rows(self):
+        report = ReportProjectorIsPlatformIndependent()._project(
+            "module", control_status="killed",
+            results=[{"verdict": "control-SURVIVED"}],
+        )
+        self.assertEqual(report["control_status"], "killed")
+
+    def test_missing_control_is_named_without_scanning_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_manifest(
+                Path(d), {"a": [KILLABLE]}, control=False,
+            ))
+        self.assertEqual(report["control_status"], "absent-or-invalid")
+        self.assertFalse(report["adequate"])
+
+    def test_a_stale_declared_control_makes_a_killed_control_incomplete(self):
+        killed = dict(CONTROL, label="CONTROL killed")
+        stale = dict(CONTROL, label="CONTROL stale", anchor="not in implementation")
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_manifest(
+                Path(d), {"a": [KILLABLE, killed, stale]}, control=False,
+            ))
+        self.assertEqual(report["control_status"], "absent-or-invalid")
+        self.assertFalse(report["adequate"])
+        self.assertIn("control-killed", [row["verdict"] for row in report["mutants"]])
+
+    def test_multiple_control_precedence_is_fail_closed(self):
+        cases = (
+            (["killed"], 2, "absent-or-invalid"),
+            (["survived"], 2, "absent-or-invalid"),
+            (["killed", "survived"], 2, "survived"),
+            (["killed", "error"], 2, "error"),
+            (["error"], 2, "error"),
+            (["killed", "killed"], 2, "killed"),
+            ([], 0, "absent-or-invalid"),
+        )
+        for observed, declared, expected in cases:
+            with self.subTest(observed=observed, declared=declared):
+                self.assertEqual(ca._control_status(observed, declared), expected)
+
+    def test_module_report_uses_direct_status_not_the_conflicting_row(self):
+        original = ca._control_result
+
+        def conflicting(*args, **kwargs):
+            row, status = original(*args, **kwargs)
+            row["verdict"] = "control-SURVIVED"
+            return row, status
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+                ca, "_control_result", side_effect=conflicting):
+            report = ca.run(_manifest(Path(d), {"a": [KILLABLE]}))
+
+        self.assertIn("control-SURVIVED", [row["verdict"] for row in report["mutants"]])
+        self.assertEqual(report["control_status"], "killed")
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_batch_report_uses_direct_status_not_the_conflicting_row(self):
+        original = ca._control_result
+
+        def conflicting(*args, **kwargs):
+            row, status = original(*args, **kwargs)
+            row["verdict"] = "control-SURVIVED"
+            return row, status
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+                ca, "_control_result", side_effect=conflicting):
+            report = ca.run(BatchRunner()._corpus(Path(d)))
+
+        self.assertIn("control-SURVIVED", [row["verdict"] for row in report["mutants"]])
+        self.assertEqual(report["control_status"], "killed")
 
 
 if __name__ == "__main__":
