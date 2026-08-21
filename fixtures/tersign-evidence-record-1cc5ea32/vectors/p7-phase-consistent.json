@@ -1,0 +1,13 @@
+{
+  "id": "p7-phase-consistent",
+  "kind": "phase_claim",
+  "expect": "valid",
+  "description": "Acceptance twin of n6: a delivery-phase record presented as delivery evidence is consistent. Both verdicts are exercised for the phase criterion \u2014 an unconditional rejector must fail this vector.",
+  "input": {
+    "record": {
+      "economic_phase": "delivery",
+      "deliverable_digest": "0x4672842890404de85d907f76149e3edb90687d233ad7efbaabf887f888053ef4"
+    },
+    "presented_as": "delivery"
+  }
+}

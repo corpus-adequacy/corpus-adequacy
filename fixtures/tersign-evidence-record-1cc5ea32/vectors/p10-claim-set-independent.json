@@ -1,0 +1,25 @@
+{
+  "id": "p10-claim-set-independent",
+  "kind": "independence_claim",
+  "expect": "valid",
+  "description": "The claim expressed as a SET rather than a single string, with an attestation from outside the transaction's parties. A single-valued claim field cannot carry two orthogonal criteria without one silencing the other; the set form is where that field lands. Membership must not depend on the value being hashable \u2014 a list claim previously raised TypeError, producing no verdict at all. Reported by @Rul1an (issue #1).",
+  "input": {
+    "claimed": [
+      "independent"
+    ],
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6",
+        "role": "counter-signing ledger"
+      }
+    ]
+  }
+}

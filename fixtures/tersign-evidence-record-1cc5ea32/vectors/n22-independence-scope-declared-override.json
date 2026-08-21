@@ -1,0 +1,35 @@
+{
+  "id": "n22-independence-scope-declared-override",
+  "kind": "independence_claim",
+  "expect": "reject",
+  "reason": "independence_reject",
+  "description": "The override attack, pinned: n21's unresolvable settlement PLUS a declared `record_commits` list asserting the very scope the derivation denies. When the derivation was first shipped as a fallback behind the declared read, this input scored valid \u2014 the declared list overrode the derived commitments, making the derived-not-declared property decorative. The declared field's PRESENCE is now the reject, whatever it holds: a commitment scope a record asserts about itself is not evidence of that scope. Reported with this exact reproduction by @Rul1an (issue #4, second report).",
+  "input": {
+    "claimed": "independent",
+    "covers": [
+      "settlement"
+    ],
+    "settlement_result": {
+      "success": true,
+      "transaction": "",
+      "network": "eip155:8453"
+    },
+    "record_commits": [
+      "settlement"
+    ],
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6",
+        "role": "counter-signing ledger"
+      }
+    ]
+  }
+}

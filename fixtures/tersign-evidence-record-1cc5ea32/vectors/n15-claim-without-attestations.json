@@ -1,0 +1,14 @@
+{
+  "id": "n15-claim-without-attestations",
+  "kind": "independence_claim",
+  "expect": "reject",
+  "reason": "independence_reject",
+  "description": "Independence claimed, no attestations present at all. A claim that cannot be evaluated must not pass by absence of evidence \u2014 failing closed also means returning a verdict where the previous implementation raised KeyError and produced none.",
+  "input": {
+    "claimed": "independent",
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ]
+  }
+}

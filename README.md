@@ -39,6 +39,17 @@ without `--survivors` is still `report.v0`. Optional `--manifest` is used only
 when its exact file bytes match `report.manifest_sha256`; the projection never
 invents compared or unmoved vector IDs.
 
+```
+python3 adapters/tersign_evidence_record.py <tersign-checkout> <empty-dest>
+```
+
+The Tersign adapter copies one pinned evidence-record source
+(`1cc5ea32b3da4f195b55782c8a3573d8564673a7`) into files the existing process
+runner can consume. It does not import `verify.py`. Kind is not an outcome.
+`source.json` records the pin and the source-gate results; it is not a
+`survivors.v0` document and does not score the suite. This is not authenticity,
+endorsement, completeness, a Tersign partnership, or a certification.
+
 ## Support and release
 
 Maintained on CPython 3.13 on ubuntu-latest, macos-latest, and windows-latest.

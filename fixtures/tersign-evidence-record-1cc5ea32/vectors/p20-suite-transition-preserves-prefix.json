@@ -1,0 +1,32 @@
+{
+  "id": "p20-suite-transition-preserves-prefix",
+  "kind": "boundary_binding",
+  "expect": "valid",
+  "description": "The algorithm-transition accepting twin, requested by Songbo Bu on the IETF web-bot-auth list (2026-08-09): an algorithm-transition vector that preserves the prior prefix without rewriting it. A transition event that moves the stream's digest suite forward (here keccak256 \u2192 sha3-256, for the continuation) binds the prefix under the suite IN FORCE WHEN THE PREFIX WAS WRITTEN: the prior records stay byte-for-byte as committed, their original digest remains the binding, and the event binds its own position exactly as p18 requires. The successor suite governs records after the boundary \u2014 never the history the boundary extends.",
+  "input": {
+    "prefix": [
+      {
+        "event": "record",
+        "seq": 1
+      },
+      {
+        "event": "record",
+        "seq": 2
+      },
+      {
+        "event": "record",
+        "seq": 3
+      }
+    ],
+    "boundary_event": {
+      "event": "digest_suite_transition",
+      "ruleVersion": "suite-transition-v1",
+      "fromSuite": "keccak256-jcs",
+      "toSuite": "sha3-256-jcs",
+      "prefixDigest": "0x359d141c2ce3530ee54762bc13d9a51676cdec13becc24deddc45fb536bbd086",
+      "position": 3,
+      "attestedPrefixLength": 3
+    },
+    "covered_through": 3
+  }
+}

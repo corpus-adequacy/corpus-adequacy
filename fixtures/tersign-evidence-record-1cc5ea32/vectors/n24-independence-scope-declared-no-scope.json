@@ -1,0 +1,27 @@
+{
+  "id": "n24-independence-scope-declared-no-scope",
+  "kind": "independence_claim",
+  "expect": "reject",
+  "reason": "independence_reject",
+  "description": "The second half of the presence rule, which n22 and n23 do not reach: `record_commits` present with NO scope asserted at all. Both of those carry `covers`, so a verifier that puts the presence check INSIDE its commitment-scope branch passes the whole corpus while accepting this \u2014 a misreading available from this suite's own README, where the rule is introduced under the commitment-scope property and both illustrating vectors assert a scope. The differential harness generates this shape but cannot pin it: its oracle is divergence between engines, and two engines making the same misreading move together. Reported, with a patched stand-in engine and the result table, by @Rul1an (issue #4).",
+  "input": {
+    "claimed": "independent",
+    "record_commits": [
+      "settlement"
+    ],
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6",
+        "role": "counter-signing ledger"
+      }
+    ]
+  }
+}
