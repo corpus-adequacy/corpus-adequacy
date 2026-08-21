@@ -1,0 +1,13 @@
+{
+  "id": "n10-float-in-digest-domain",
+  "kind": "canonical_bytes",
+  "expect": "reject",
+  "reason": "number_domain_reject",
+  "description": "A non-integer JSON number in the digest domain. RFC 8785 \u00a73.2.2.3 serializes numbers via ECMAScript Number::toString over IEEE 754 doubles, so a fractional value's bytes depend on the producer's number pipeline \u2014 and the digest binds the nearest double, not the decimal the source system held. The domain refuses the class rather than reproducing its damage deterministically.",
+  "input": {
+    "payload": {
+      "amount": 1.1
+    },
+    "claimed_canonical": "{\"amount\":1.1}"
+  }
+}

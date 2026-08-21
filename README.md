@@ -63,6 +63,10 @@ two-sidedness) are out of scope for this wrapper and are not declared as
 survivors. This run measures a reviewed declared subset at one pin. It is not a
 complete inventory, upstream correctness, equivalence, endorsement, or a release.
 
+The addressable measurement lives at `measurements/tersign-1cc5ea32/` (manifest,
+adapted vectors, cases). The durable entrypoint is `python3`, not a host
+interpreter path. Full `report.v0` bytes are recorded after that source commit.
+
 ## Support and release
 
 Maintained on CPython 3.13 on ubuntu-latest, macos-latest, and windows-latest.

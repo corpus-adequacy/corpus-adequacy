@@ -1,0 +1,19 @@
+{
+  "id": "n31-independence-urn-alias-trailing-slash",
+  "kind": "independence_claim",
+  "expect": "reject",
+  "reason": "independence_reject",
+  "description": "Alias bypass under URN identities \u2014 n13's attack one syntax over. The deployer signs as `org:caldera-robotics/` (trailing slash) while the parties list carries `org:caldera-robotics`; a byte-exact comparison reads it as an outside attestor. The verifier does not own any scheme's equivalence rules, so it folds toward SAME PARTY (case, trailing `/` `.` `#`) and rejects. Found by the adversarial self-review that shipped p21 \u2014 the first URN normaliser was case-significant and accepted this. Known open sibling, deliberately NOT pinned as passing: percent-encoding (`org:caldera%2Drobotics`) still reads as distinct; decoding is scheme-specific and an open-ended normaliser is its own attack surface, so that boundary is stated here rather than hidden.",
+  "input": {
+    "claimed": "independent",
+    "parties": [
+      "org:caldera-robotics",
+      "agent:caldera/ap-pilot"
+    ],
+    "attestations": [
+      {
+        "by": "org:caldera-robotics/"
+      }
+    ]
+  }
+}

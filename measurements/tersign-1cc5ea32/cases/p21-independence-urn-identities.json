@@ -1,0 +1,18 @@
+{
+  "id": "p21-independence-urn-identities",
+  "kind": "independence_claim",
+  "expect": "valid",
+  "description": "Identity-syntax portability, accepting twin. The same independence predicate as p8, under scheme-qualified identities (org:/agent:) instead of 0x-addresses: the attestor is a party outside the transaction, so the claim holds. Shaped on the accepting custody twin of a foreign corpus, which this criterion rejected on the identifier alone until 2026-08-19. An engine bound to one identity syntax must fail this vector.",
+  "input": {
+    "claimed": "independent",
+    "parties": [
+      "org:caldera-robotics",
+      "agent:caldera/ap-pilot"
+    ],
+    "attestations": [
+      {
+        "by": "org:trustline-custody/eu-west"
+      }
+    ]
+  }
+}

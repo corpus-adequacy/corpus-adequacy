@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -216,6 +217,16 @@ class PinAndPlacement(unittest.TestCase):
         self.assertTrue(WRAPPER.exists())
         self.assertNotIn("measurements/", "\n".join(ca.TOOL_SOURCE_PATHS))
         self.assertNotIn("tersign_checks.py", ca.TOOL_SOURCE_PATHS)
+        durable = REPO_ROOT / "measurements" / "tersign-1cc5ea32" / "tersign_checks.py"
+        self.assertEqual(_sha(durable), _sha(WRAPPER))
+        self.assertEqual(
+            _sha(REPO_ROOT / "measurements" / "tersign-1cc5ea32" / "verify.py"),
+            PIN_VERIFY,
+        )
+        self.assertEqual(
+            _sha(REPO_ROOT / "measurements" / "tersign-1cc5ea32" / "keccak.py"),
+            PIN_KECCAK,
+        )
 
     def test_wrapper_does_not_import_producer_or_verify_main(self):
         tree = ast.parse(WRAPPER.read_text(encoding="utf-8"))
@@ -230,6 +241,91 @@ class PinAndPlacement(unittest.TestCase):
         src = WRAPPER.read_text(encoding="utf-8")
         self.assertNotIn("verify.main", src)
         self.assertIn("CHECKS[kind]", src)
+
+
+class WrapperReaderParity(unittest.TestCase):
+    """Wrapper `_read_bounded` must match `ca.read_bounded_regular_file`.
+
+    Forced no-O_NOFOLLOW fallback: lstat / open / fstat identity parity.
+    Tests may import corpus_adequacy; the wrapper still must not.
+    """
+
+    def _nofollow_off(self):
+        return mock.patch.object(os, "O_NOFOLLOW", None, create=True)
+
+    def test_wrapper_source_uses_lstat_fstat_identity(self):
+        src = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("fstat", src)
+        self.assertIn("st_ino", src)
+        self.assertIn("lstat", src)
+
+    def test_regular_file_bytes_match_canonical(self):
+        wrap = _load_wrapper()
+        payload = b'{"kind":"regular"}'
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "regular.json"
+            path.write_bytes(payload)
+            with self._nofollow_off():
+                self.assertEqual(wrap._read_bounded(path), payload)
+                self.assertEqual(ca.read_bounded_regular_file(path), payload)
+                self.assertEqual(
+                    wrap._read_bounded(path),
+                    ca.read_bounded_regular_file(path),
+                )
+
+    def test_symlink_is_refused_by_both(self):
+        wrap = _load_wrapper()
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "real.json"
+            target.write_bytes(b'{"kind":"target"}')
+            link = Path(d) / "link.json"
+            link.symlink_to(target)
+            with self._nofollow_off():
+                with self.assertRaises(Exception):
+                    wrap._read_bounded(link)
+                with self.assertRaises(ca.ManifestError):
+                    ca.read_bounded_regular_file(link)
+
+    def test_oversize_is_refused_by_both(self):
+        wrap = _load_wrapper()
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "over.json"
+            path.write_bytes(b"x" * 32)
+            with self._nofollow_off(), mock.patch.object(wrap, "OUTPUT_CAP_BYTES", 16):
+                with self.assertRaises(Exception):
+                    wrap._read_bounded(path)
+                with self.assertRaises(ca.ManifestError):
+                    ca.read_bounded_regular_file(path, cap=16)
+
+    def test_swap_between_lstat_and_open_is_refused_by_both(self):
+        wrap = _load_wrapper()
+        with tempfile.TemporaryDirectory() as d:
+            expected = Path(d) / "expected.json"
+            other = Path(d) / "other.json"
+            expected.write_bytes(b'{"kind":"expected"}')
+            other.write_bytes(b'{"kind":"swapped"}')
+            real_open = os.open
+            expected_key = os.path.realpath(expected)
+            other_key = os.path.realpath(other)
+
+            def hijack(path, flags, *args, **kwargs):
+                opened = os.path.realpath(os.fspath(path))
+                if opened == expected_key:
+                    return real_open(other_key, flags, *args, **kwargs)
+                return real_open(path, flags, *args, **kwargs)
+
+            with self._nofollow_off(), mock.patch.object(os, "open", side_effect=hijack):
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.read_bounded_regular_file(expected)
+                self.assertIn("changed between lstat and open", str(cm.exception))
+                try:
+                    got = wrap._read_bounded(expected)
+                except Exception:
+                    return
+                self.fail(
+                    "wrapper returned %r instead of refusing a swapped inode"
+                    % got
+                )
 
 
 class WrapperContract(unittest.TestCase):
@@ -253,12 +349,63 @@ class WrapperContract(unittest.TestCase):
                 self.assertEqual(emitted["verdict"], row["expected_verdict"])
                 self.assertEqual(emitted["reason"], row["expected_reason"])
 
-    def test_nonzero_exit_is_not_parsed_as_an_outcome(self):
-        wrap = _load_wrapper()
-        self.assertEqual(wrap.ACCEPTED_EXIT, 0)
-        src = WRAPPER.read_text(encoding="utf-8")
-        self.assertIn("sys.exit(1)", src)
-        self.assertNotIn("json.loads", src.split("sys.exit(1)")[0][-80:] if "sys.exit(1)" in src else src)
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_parseable_json_then_exit_1_is_unexpected_exit(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            script = tmp / "child.py"
+            script.write_text(
+                "import json, sys\n"
+                'print(json.dumps({"verdict": "valid", "reason": None}))\n'
+                "sys.exit(1)\n",
+                encoding="utf-8",
+            )
+            m = {
+                "runner": "process",
+                "id_key": "vector_id",
+                "vector_path_key": "vector_path",
+                "entrypoint_command": [sys.executable, str(script)],
+                "_repo_root": tmp,
+                "vector_timeout": 10,
+                "accepted_exit_codes": [0],
+                "outcome_from": ["verdict", "reason"],
+            }
+            vectors = [{"vector_id": "v1", "vector_path": "unused.json"}]
+            with mock.patch.object(ca.json, "loads", wraps=json.loads) as loads:
+                outcomes, _diags, raised = ca._process_outcomes(m, vectors)
+            self.assertEqual(loads.call_count, 0)
+            self.assertEqual(outcomes, {})
+            self.assertEqual(raised, {"v1": "unexpected-exit"})
+
+    def test_durable_manifest_keeps_accepted_exit_zero(self):
+        path = REPO_ROOT / "measurements" / "tersign-1cc5ea32" / "manifest.json"
+        self.assertTrue(path.is_file(), "durable process manifest is missing")
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        self.assertEqual(data["accepted_exit_codes"], [0])
+        self.assertEqual(data["entrypoint_command"][0], "python3")
+        self.assertNotIn("sys.executable", raw)
+
+    def test_parse_before_classify_mutation_bites(self):
+        payload = '{"verdict":"valid","reason":null}'
+        completed = subprocess.CompletedProcess(
+            args=["child"], returncode=1, stdout=payload, stderr="",
+        )
+        m = {
+            "runner": "process",
+            "accepted_exit_codes": [0],
+            "outcome_from": ["verdict", "reason"],
+        }
+        value, _diag, kind = ca.child_outcome(m, completed)
+        self.assertEqual(kind, "unexpected-exit")
+        self.assertIsNone(value)
+
+        def parse_before_classify(manifest, child):
+            doc = json.loads(child.stdout)
+            return tuple(doc.get(k) for k in manifest["outcome_from"]), None, None
+
+        mut_value, _mut_diag, _mut_kind = parse_before_classify(m, completed)
+        self.assertEqual(mut_value, ("valid", None))
 
 
 class DeclaredInventory(unittest.TestCase):

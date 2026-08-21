@@ -1,4 +1,6 @@
 tersignhq/evidence-record-conformance@1cc5ea32b3da4f195b55782c8a3573d8564673a7
+tree 8003d51692a1e77d7bca8ec07015ca3c03c00242
+vectors_tree d84527932ee96004b9cf6329d554eb7e039e5221
 SPDX-License-Identifier: Apache-2.0
 verify.py sha256 ec6a6fe6d5caa0e56a2a85b9b35557f2efb6aede7689b3e21c3466e6b7502a42
 keccak.py sha256 f541c8a43a288f61a147dd43accea048eb9f55a095ca3b9dbf3f88341d469190

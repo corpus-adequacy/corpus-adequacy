@@ -1,0 +1,46 @@
+{
+  "id": "p19-authority-reduction-bound",
+  "kind": "decision_evidence_binding",
+  "expect": "valid",
+  "description": "Accepting twin: the protected record commits to the exact canonical decision-evidence object, so the presented requested-to-effective authority reduction is structurally distinguishable from another reduction.",
+  "input": {
+    "record": {
+      "outcome": "allowed",
+      "decisionEvidenceDigest": "0x68b2b24ff10af252ca43df157efcf23d05098d8deafa0bb22126bee8c6c2f097"
+    },
+    "decision_evidence": {
+      "requested": {
+        "capabilities": [
+          "read"
+        ],
+        "budgets": {
+          "nodes": "10"
+        }
+      },
+      "hostAllowed": {
+        "capabilities": [
+          "read"
+        ],
+        "budgets": {
+          "nodes": "10"
+        }
+      },
+      "effective": {
+        "capabilities": [
+          "read"
+        ],
+        "budgets": {
+          "nodes": "10"
+        }
+      },
+      "delta": {
+        "removed": {},
+        "reducedBudgets": {}
+      },
+      "policy": {
+        "id": "host-default",
+        "version": "1"
+      }
+    }
+  }
+}

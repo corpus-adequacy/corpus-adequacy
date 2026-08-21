@@ -1,0 +1,29 @@
+{
+  "id": "p1-live-genesis-receipt",
+  "kind": "digest_recompute",
+  "expect": "valid",
+  "description": "Live ledger record: the tersign ledger's genesis (demo) receipt. The keccak256 content address recomputes from the committed canonical bytes, and the same bytes are served by the ledger's public genesis endpoint. The payload's embedded resourceUrl is the historical demo resource the genesis record was issued against (on the ledger's legacy workers.dev alias, which still serves as an origin) \u2014 the record's validity derives from digest, counter-signature and anchor, never from URL liveness.",
+  "input": {
+    "payload": {
+      "format": "eip712",
+      "payload": {
+        "issuedAt": 1783761710,
+        "network": "eip155:8453",
+        "payer": "0x36f82906859E5B0bd076069f8cdfAea355358b14",
+        "resourceUrl": "https://tersign-ledger.kevinn-zhang.workers.dev/v1/receipts/genesis/demo",
+        "transaction": "",
+        "version": 1
+      },
+      "signature": "0x88e3f596dc8e6e5f2aeac45b45eac4484c09e2f58a2b787c73469e5927706b18341c362491ecdc0df8764831b07f499210523eb11200bacf340869f50a4c46e81b"
+    },
+    "expected_digest": "0xe5874f1ffe87f0a6dd9eb157730f67b86ee4538b125fe30fcc4e165213dd3fc4"
+  },
+  "provenance": {
+    "ledger": "https://tersign.ai",
+    "record": "curl https://tersign.ai/v1/genesis",
+    "verify": "curl https://tersign.ai/v1/receipts/0xe5874f1ffe87f0a6dd9eb157730f67b86ee4538b125fe30fcc4e165213dd3fc4/verify",
+    "countersignature": "0xfccc1add7301c688e03311ff04b9aecac4f0d81a468fc95128b24aa0c8aff2bf3b148181befffc6dbe739b1991d936cd434a2fa2bcb8ea1f49a06b8f7a3fff1d1c",
+    "ledger_signer": "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6",
+    "note": "countersignature is secp256k1 personal_sign over the chain-link digest (crypto-profile check, outside the stdlib core)"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "id": "p8-non-party-attestation",
+  "kind": "independence_claim",
+  "expect": "valid",
+  "description": "Acceptance twin of n7: the independence claim holds when at least one attestation comes from outside the transaction's parties \u2014 here, a counter-signing ledger that is neither payer nor payee. An unconditional rejector must fail this vector.",
+  "input": {
+    "claimed": "independent",
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6",
+        "role": "counter-signing ledger"
+      }
+    ]
+  }
+}

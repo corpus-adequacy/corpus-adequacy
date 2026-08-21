@@ -1,0 +1,24 @@
+{
+  "id": "n8-unrecognized-independence-claim",
+  "kind": "independence_claim",
+  "expect": "reject",
+  "reason": "independence_reject",
+  "description": "A record asserting a STRONGER property than independence ('effect_corroborated') while attested only by parties. An exact-equality trigger reads the unfamiliar string, concludes no independence was claimed, and returns valid \u2014 the check switches off exactly where more was asserted. A conformant verifier fails closed on a claim it cannot interpret. Reported against this suite by @Rul1an (issue #1).",
+  "input": {
+    "claimed": "effect_corroborated",
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x3333333333333333333333333333333333333333",
+        "role": "payee"
+      }
+    ]
+  }
+}

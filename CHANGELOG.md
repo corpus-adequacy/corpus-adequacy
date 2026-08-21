@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+The isolated Tersign CHECKS wrapper uses the same no-`O_NOFOLLOW` fallback as
+`read_bounded_regular_file` (lstat/open/fstat `(st_dev, st_ino)` parity) without
+importing the scorer. NOTICE absence is bound to the pinned upstream tree
+`8003d51692a1e77d7bca8ec07015ca3c03c00242`. The claimed process run is the
+durable `measurements/tersign-1cc5ea32/manifest.json` (`python3`,
+`accepted_exit_codes` `[0]`). Report bytes are a later provenance commit.
+No release.
+
 `measurements/tersign_checks.py` is a process-runner wrapper over the pinned
 Tersign verifier (`verify.py` / `keccak.py` at
 `1cc5ea32b3da4f195b55782c8a3573d8564673a7`). It dispatches `CHECKS[kind](input)`

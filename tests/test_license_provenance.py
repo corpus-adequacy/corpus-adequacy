@@ -88,6 +88,10 @@ class VendoredTersignVerifierLicense(unittest.TestCase):
     PIN_SHA256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
     PIN_SPDX = "SPDX-License-Identifier: Apache-2.0"
     EOL = "fixtures/tersign-verify-1cc5ea32/** text eol=lf"
+    UPSTREAM_TREE = FIXTURE / "UPSTREAM_TREE.txt"
+    PIN_COMMIT = "1cc5ea32b3da4f195b55782c8a3573d8564673a7"
+    PIN_TREE = "8003d51692a1e77d7bca8ec07015ca3c03c00242"
+    PIN_VECTORS_TREE = "d84527932ee96004b9cf6329d554eb7e039e5221"
 
     def test_vendored_license_is_present(self):
         self.assertTrue(self.LICENSE.is_file(), "vendored Tersign LICENSE is missing")
@@ -106,8 +110,34 @@ class VendoredTersignVerifierLicense(unittest.TestCase):
         lines = GITATTRIBUTES.read_text(encoding="utf-8").splitlines()
         self.assertIn(self.EOL, lines)
 
-    def test_upstream_pin_has_no_notice(self):
+    def test_local_fixture_has_no_notice_file(self):
         self.assertFalse((self.FIXTURE / "NOTICE").exists())
+
+    def test_upstream_tree_inventory_exists(self):
+        self.assertTrue(
+            self.UPSTREAM_TREE.is_file(),
+            "UPSTREAM_TREE.txt is the source of truth for NOTICE absence",
+        )
+
+    def test_upstream_tree_inventory_pins_commit_and_trees(self):
+        self.assertTrue(self.UPSTREAM_TREE.is_file())
+        lines = self.UPSTREAM_TREE.read_text(encoding="utf-8").splitlines()
+        self.assertGreaterEqual(len(lines), 3)
+        self.assertEqual(lines[0], "commit %s" % self.PIN_COMMIT)
+        self.assertEqual(lines[1], "tree %s" % self.PIN_TREE)
+        self.assertEqual(lines[2], "vectors_tree %s" % self.PIN_VECTORS_TREE)
+
+    def test_upstream_tree_inventory_has_no_notice_path(self):
+        """NOTICE absence is read from the tree inventory only, not SOURCE.txt."""
+        self.assertTrue(self.UPSTREAM_TREE.is_file())
+        lines = self.UPSTREAM_TREE.read_text(encoding="utf-8").splitlines()
+        for path in lines[3:]:
+            self.assertNotEqual(path, "NOTICE")
+            self.assertFalse(path.endswith("/NOTICE"), path)
+
+    def test_source_txt_mentions_the_pinned_tree(self):
+        text = self.SOURCE.read_text(encoding="utf-8")
+        self.assertIn("tree %s" % self.PIN_TREE, text)
 
 
 if __name__ == "__main__":

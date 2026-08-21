@@ -1,0 +1,27 @@
+{
+  "id": "n17-renumbered-omission",
+  "kind": "chain_set",
+  "expect": "reject",
+  "reason": "continuity_reject",
+  "description": "Omission hidden by renumbering: record 2 dropped, record 3 relabeled seq 2 with its prev pointer rewritten \u2014 the sequence closure LOOKS complete. The relabeled record still carries the link computed for its ORIGINAL position (artifact || old-prev || old-seq), and the per-record link recomputation diverges. In production each link is counter-signed at transaction time, so a forger cannot recompute them to match; the stale link is exactly the artifact of that constraint.",
+  "input": {
+    "head": {
+      "seq": 2,
+      "digest": "0xdb17ed57683dea4c9ff668a1e769503e933fcc4e133ea0a823f7ddfc7b6106cd"
+    },
+    "records": [
+      {
+        "seq": 1,
+        "artifact_digest": "0x4672842890404de85d907f76149e3edb90687d233ad7efbaabf887f888053ef4",
+        "prev_digest": null,
+        "link": "0xf34b26b3f8a9ab82f55baa26c92201624f09195ec0074fcc2af3e58c61b13079"
+      },
+      {
+        "seq": 2,
+        "artifact_digest": "0xdb17ed57683dea4c9ff668a1e769503e933fcc4e133ea0a823f7ddfc7b6106cd",
+        "prev_digest": "0x4672842890404de85d907f76149e3edb90687d233ad7efbaabf887f888053ef4",
+        "link": "0x657fcd8b25c7e8f9fa0b2f50b7f18e67781d9837014605e2ae6668ac95804f15"
+      }
+    ]
+  }
+}
