@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+`adapters/algovoi_jcs_edge.py` adapts one pinned AlgoVoi `jcs_edge_v1` anchor
+set (`aa53149c670f1659dad511755168ad5231dc04de`, anchor SHA-256
+`a8a1a1a8839553ea5309c381b39ba156e6b6a23a5a3e6aab59b53940cc386033`, 7,622
+bytes, manifest `0.38.0`, canon `jcs-rfc8785-v1`) for the existing process
+runner. Case bytes are exact source slices of each `preimage` value plus one
+LF, so the `1.0` and `1` spellings survive; there is no numeric round trip. A
+whole-document JSON round trip is byte-identical to this source, so the
+mechanism boundary is pinned by its own tests rather than by output equality.
+Ten vectors are emitted and consumed through the real `corpus_adequacy.run()`.
+Both declared `pair_invariants` are accounted for exactly once: `equal_sha256`
+is evaluated against the declared digests, and the prose relation is typed
+`refused`. Upstream LICENSE and NOTICE are retained under
+`fixtures/algovoi-jcs-edge-aa53149c/`. No new scorer, no generic JCS parser.
+Not authenticity, endorsement, complete RFC 8785 coverage, correctness of the
+authored labels or of the upstream reference implementation, or adequacy of any
+implementation. No release.
+
 The isolated Tersign CHECKS wrapper uses the same no-`O_NOFOLLOW` fallback as
 `read_bounded_regular_file` (lstat/open/fstat `(st_dev, st_ino)` parity) without
 importing the scorer. NOTICE absence is bound to the pinned upstream tree
