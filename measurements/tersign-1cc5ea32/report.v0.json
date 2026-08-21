@@ -1,0 +1,145 @@
+{
+  "acknowledged_digests": 0,
+  "adequate": false,
+  "control_status": "killed",
+  "corpus_digest": null,
+  "declared_total": 12,
+  "diagnostic_channel_declared": false,
+  "equivalent": 0,
+  "failures": [
+    "2 mutant(s) survived; the required score is 100% of non-equivalent mutants"
+  ],
+  "hole_ratio": 0.0,
+  "killed": 10,
+  "known_holes": 0,
+  "manifest": "measurements/tersign-1cc5ea32/manifest.json",
+  "manifest_sha256": "sha256:9c4c9583ed7166cec9a26b24bc42ad5db32a4c744bce3d6b41128ff428a07487",
+  "mutants": [
+    {
+      "group": "tersign",
+      "how": "no vector distinguishes it. An implementation can delete this rule and still reproduce the digest",
+      "label": "accept integer-valued floats and serialize them as integers",
+      "moved": 0,
+      "scope": "declared",
+      "verdict": "survived"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "remove the greater-than 2^53-1 refusal",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "harness detects a change on this path",
+      "label": "CONTROL tighten the safe-integer bound to greater-than-or-equal",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "control-killed"
+    },
+    {
+      "group": "tersign",
+      "how": "harness detects a change on this path",
+      "label": "CONTROL permit ordinary fractional floats through canonicalization",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "control-killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "digest_recompute accepts a mismatched expected digest",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "2 vector(s) moved",
+      "label": "canonical_bytes accepts non-canonical claimed bytes",
+      "moved": 2,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "chain_link accepts a recomputed link mismatch",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "chain_set skips committed-sequence completeness",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "anchor_relation accepts a subject/anchor digest mismatch",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "phase_claim accepts a phase/presented mismatch",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "4 vector(s) moved",
+      "label": "independence_claim accepts party-only attestation",
+      "moved": 4,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "offer_binding reads a different commitment field",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "decision_evidence_binding reads a different commitment field",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "no vector distinguishes it. An implementation can delete this rule and still reproduce the digest",
+      "label": "boundary_binding skips empty-attested coverage refusal",
+      "moved": 0,
+      "scope": "declared",
+      "verdict": "survived"
+    }
+  ],
+  "originals_unverified_against_head": [],
+  "out_of_scope_ratio": 0.0,
+  "runner": "process",
+  "schema": "corpus-adequacy.report.v0",
+  "score_means": "percent of author-declared in-scope rules killed; NOT percent of the rules the implementation actually has. Silent mutants count in the denominator and never the numerator. Without diagnostic_from the silent class is unreachable, so a zero there means it was not measured, not that none exist",
+  "score_percent": 83.3,
+  "silent": 0,
+  "survived": 2,
+  "tool_commit": "7ec3caeab415064b88a7fd288f7ec8da096a77f4",
+  "tool_content_sha256": "sha256:8c367574fc7be11d3eb0329bee861e58681c1b4ae0c5531a410e046654fb5b5b",
+  "tool_source_state": "exact",
+  "tool_version": "0.1.0",
+  "unexercised_out_of_scope": 0,
+  "unproved": 0
+}

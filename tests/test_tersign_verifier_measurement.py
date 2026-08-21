@@ -479,5 +479,73 @@ class ProcessMeasurement(unittest.TestCase):
                 self.test_typed_run_kills_reason_drift_and_keeps_honest_survivors()
 
 
+
+MEASURED_ON = "7ec3caeab415064b88a7fd288f7ec8da096a77f4"
+DURABLE = REPO_ROOT / "measurements" / "tersign-1cc5ea32"
+REPORT_PATH = DURABLE / "report.v0.json"
+PROVENANCE_PATH = DURABLE / "PROVENANCE.md"
+REPORT_SHA256 = "b1a10e8cafabb33969e3fcaa9f4bc65de005fbc3673ef297158cbb581746c043"
+WRAPPER_SHA256 = "f1347dc0738404490139d7f41dc605f6cb7fa72c6083948c66c7008127b20644"
+ADAPTER_SHA256 = "ae8d69df38f16e24157b2de50522bfaae3e184a2524d5fb9b5cc92fc6acafaa1"
+VECTORS_SHA256 = "678315a30887a5b899e8cc0cc36c4c8e8361cc4a587c7ed839b4f51ef717475d"
+MANIFEST_SHA256 = "9c4c9583ed7166cec9a26b24bc42ad5db32a4c744bce3d6b41128ff428a07487"
+TOOL_CONTENT = "sha256:8c367574fc7be11d3eb0329bee861e58681c1b4ae0c5531a410e046654fb5b5b"
+
+
+class ClaimedReport(unittest.TestCase):
+    """Frozen report.v0 from the source commit; this head only records it."""
+
+    def test_report_bytes_are_the_measured_file(self):
+        self.assertTrue(REPORT_PATH.is_file())
+        self.assertEqual(_sha(REPORT_PATH), REPORT_SHA256)
+
+    def test_report_names_the_source_commit_not_a_later_head(self):
+        doc = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(doc["schema"], "corpus-adequacy.report.v0")
+        self.assertEqual(doc["tool_commit"], MEASURED_ON)
+        self.assertEqual(doc["tool_source_state"], "exact")
+        self.assertEqual(doc["tool_content_sha256"], TOOL_CONTENT)
+        self.assertEqual(doc["manifest_sha256"], "sha256:" + MANIFEST_SHA256)
+        self.assertEqual(doc["killed"], 10)
+        self.assertEqual(doc["survived"], 2)
+        self.assertEqual(doc["declared_total"], 12)
+        self.assertEqual(doc["silent"], 0)
+        self.assertEqual(doc["equivalent"], 0)
+        self.assertEqual(doc["unproved"], 0)
+        self.assertFalse(doc["adequate"])
+        self.assertEqual(doc["control_status"], "killed")
+
+    def test_current_tool_source_matches_the_measured_report(self):
+        ident = ca.tool_identity()
+        self.assertEqual(ident["tool_content_sha256"], TOOL_CONTENT)
+        self.assertEqual(ident["tool_content_sha256"], json.loads(REPORT_PATH.read_text())["tool_content_sha256"])
+
+    def test_implementation_identities_are_named(self):
+        self.assertEqual(_sha(WRAPPER), WRAPPER_SHA256)
+        self.assertEqual(_sha(DURABLE / "tersign_checks.py"), WRAPPER_SHA256)
+        self.assertEqual(
+            _sha(REPO_ROOT / "adapters" / "tersign_evidence_record.py"),
+            ADAPTER_SHA256,
+        )
+        self.assertEqual(_sha(DURABLE / "vectors.json"), VECTORS_SHA256)
+        self.assertEqual(_sha(DURABLE / "manifest.json"), MANIFEST_SHA256)
+        self.assertEqual(_sha(VERIFY_FIXTURE), PIN_VERIFY)
+        self.assertEqual(_sha(KECCAK_FIXTURE), PIN_KECCAK)
+
+    def test_provenance_binds_the_source_commit(self):
+        text = PROVENANCE_PATH.read_text(encoding="utf-8")
+        self.assertIn(MEASURED_ON, text)
+        self.assertIn("later artifact-commit", text)
+        self.assertIn(WRAPPER_SHA256, text)
+        self.assertIn(ADAPTER_SHA256, text)
+        self.assertIn(PIN_VERIFY, text)
+        self.assertIn(PIN_KECCAK, text)
+        self.assertIn(VECTORS_SHA256, text)
+        self.assertIn(REPORT_SHA256, text)
+        self.assertIn("1cc5ea32b3da4f195b55782c8a3573d8564673a7", text)
+        self.assertIn("8003d51692a1e77d7bca8ec07015ca3c03c00242", text)
+        self.assertIn("Not a complete inventory", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
