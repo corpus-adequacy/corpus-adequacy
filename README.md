@@ -50,6 +50,19 @@ runner can consume. It does not import `verify.py`. Kind is not an outcome.
 `survivors.v0` document and does not score the suite. This is not authenticity,
 endorsement, completeness, a Tersign partnership, or a certification.
 
+```
+python3 measurements/tersign_checks.py <adapted-case.json>
+```
+
+The Tersign CHECKS wrapper is a process-runner implementation: it dispatches
+`CHECKS[kind](input)` and emits `{verdict, reason|null}`. `verify.py`,
+`keccak.py`, and the wrapper are the implementation sources. `accepted_exit_codes`
+is `[0]`; nonzero stdout is not an outcome. Detail is dropped. The three
+`verify.py` `main()` suite gates (kind agreement, reason closure, per-kind
+two-sidedness) are out of scope for this wrapper and are not declared as
+survivors. This run measures a reviewed declared subset at one pin. It is not a
+complete inventory, upstream correctness, equivalence, endorsement, or a release.
+
 ## Support and release
 
 Maintained on CPython 3.13 on ubuntu-latest, macos-latest, and windows-latest.

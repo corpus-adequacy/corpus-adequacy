@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+`measurements/tersign_checks.py` is a process-runner wrapper over the pinned
+Tersign verifier (`verify.py` / `keccak.py` at
+`1cc5ea32b3da4f195b55782c8a3573d8564673a7`). It dispatches `CHECKS[kind](input)`
+and emits `{verdict, reason|null}`. `accepted_exit_codes` is `[0]`. The declared
+inventory includes the integral-float survivor, safe-integer reason drift, two
+canonical-region controls, one unique mutation per remaining CHECK, and keeps
+the masked boundary mutation as a measured survivor. The three `main()` suite
+gates are omitted, not reported as survivors. No completeness, equivalence, or
+release claim.
+
 `adapters/tersign_evidence_record.py` adapts one pinned Tersign evidence-record
 checkout (`tersignhq/evidence-record-conformance` at
 `1cc5ea32b3da4f195b55782c8a3573d8564673a7`) into `vectors.json`, exact-byte
