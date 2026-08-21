@@ -1,0 +1,13 @@
+{
+  "id": "p14-supplementary-plane-key-order",
+  "kind": "digest_recompute",
+  "expect": "valid",
+  "description": "Keys where UTF-16 code-unit order diverges from code-point order: U+10000 encodes as a surrogate pair whose first unit (0xD800) sorts BELOW U+FF61, so RFC 8785 puts the supplementary-plane key FIRST while a code-point sort puts it LAST. The suite's README asserted this property; until this vector, no vector exercised it.",
+  "input": {
+    "payload": {
+      "\uff61": 1,
+      "\ud800\udc00": 2
+    },
+    "expected_digest": "0xecb8402c2b3a26aebd5f69e0a91c8f6c16d0a2cc679bc689b51f0d5bc4b36929"
+  }
+}

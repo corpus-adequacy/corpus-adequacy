@@ -1,0 +1,12 @@
+{
+  "id": "p12-ijson-integer-boundary",
+  "kind": "digest_recompute",
+  "expect": "valid",
+  "description": "The largest I-JSON-interoperable integer, 2^53-1: inside the domain, digested identically by every RFC 8785 implementation. The accepting twin of n11 \u2014 a verifier that refuses the boundary value itself fails this vector.",
+  "input": {
+    "payload": {
+      "n": 9007199254740991
+    },
+    "expected_digest": "0x1bbcd0a5a14e5f06f15a65af355156e744a40fdf8897bcb1081812ab1470a0e7"
+  }
+}

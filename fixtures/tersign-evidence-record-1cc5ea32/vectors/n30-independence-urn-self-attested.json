@@ -1,0 +1,19 @@
+{
+  "id": "n30-independence-urn-self-attested",
+  "kind": "independence_claim",
+  "expect": "reject",
+  "reason": "independence_reject",
+  "description": "Identity-syntax portability, rejecting twin. Same identities, but the sole attestor IS the deployer \u2014 attested only by parties to the transaction. Must reject for the independence reason, not for an unparseable identifier: a normaliser that rejected p21 and this vector on the same identifier branch would agree with the expected verdict here for the wrong reason, which is exactly what the accepting twin exists to separate.",
+  "input": {
+    "claimed": "independent",
+    "parties": [
+      "org:caldera-robotics",
+      "agent:caldera/ap-pilot"
+    ],
+    "attestations": [
+      {
+        "by": "org:caldera-robotics"
+      }
+    ]
+  }
+}

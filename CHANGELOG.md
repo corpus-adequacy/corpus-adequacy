@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+`adapters/tersign_evidence_record.py` adapts one pinned Tersign evidence-record
+checkout (`tersignhq/evidence-record-conformance` at
+`1cc5ea32b3da4f195b55782c8a3573d8564673a7`) into `vectors.json`, exact-byte
+`cases/`, and `source.json`. Kind stays metadata. The typed outcome is
+`(expect, reason|null)`. Reads reuse `read_bounded_regular_file` and the
+existing strict JSON parser. On Windows that reader and the adapter writer
+set `O_BINARY` so newline translation cannot change the pin. Case-file emit
+calls the one public `isolated_tree.write_all` (the former private helper,
+same function) so a short `os.write` cannot publish truncated bytes; zero
+progress refuses and EINTR retries. That is a shared production change to
+`isolated_tree.py`, a declared `TOOL_SOURCE_PATHS` member, so tool-content
+identity is dirty against HEAD until this tree is the commit being
+measured. Adapter failure exits 2. This is not a Tersign partnership,
+certification, or a claim that the wrapper makes the whole suite
+two-sided. Reason completeness is only the pinned manifest. No release.
+
 `--survivors` projects `corpus-adequacy.survivors.v0` from an existing
 `report.v0` file: survived and silent rows become bound rule findings with a
 verdict-specific discrimination obligation. `encode_survivors_v0` is its own

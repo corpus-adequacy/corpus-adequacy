@@ -1,0 +1,13 @@
+{
+  "id": "n11-integer-beyond-ijson-range",
+  "kind": "digest_recompute",
+  "expect": "reject",
+  "reason": "number_domain_reject",
+  "description": "2^53 \u2014 one past the I-JSON interoperable bound. Beyond 2^53-1, distinct integers share a double representation, so implementations disagree on the serialized form. The rejecting twin of p12.",
+  "input": {
+    "payload": {
+      "n": 9007199254740992
+    },
+    "expected_digest": "0x0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

@@ -25,6 +25,7 @@ not semantic input.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import shutil
@@ -80,13 +81,25 @@ def _owned_self_root(path: Path, repo_root: Path) -> bool:
     return True
 
 
-def _write_all(fd: int, buf: bytes) -> int:
-    """Write every byte. os.write may return short."""
+def write_all(fd: int, buf: bytes) -> int:
+    """Write every byte. os.write may return short.
+
+    Partial progress advances the offset. Zero progress is refusal, not a
+    spin. EINTR retries the same remaining slice.
+    """
     sent = 0
     while sent < len(buf):
-        n = os.write(fd, buf[sent:])
+        try:
+            n = os.write(fd, buf[sent:])
+        except InterruptedError:
+            continue
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
         if n <= 0:
-            raise IsolationError("short write of %s bytes stopped at %s" % (len(buf), sent))
+            raise IsolationError(
+                "short write of %s bytes stopped at %s" % (len(buf), sent))
         sent += n
     return sent
 
@@ -124,7 +137,7 @@ def _copy_regular_bounded(
                 break
             if used + len(buf) > cap:
                 raise IsolationError("materialization exceeds the ceiling of %d bytes" % cap)
-            written += _write_all(out_fd, buf)
+            written += write_all(out_fd, buf)
         os.fchmod(out_fd, stat.S_IMODE(st.st_mode))
         return written
     except Exception:

@@ -1,0 +1,20 @@
+{
+  "id": "n19-offer-substitution",
+  "kind": "offer_binding",
+  "expect": "reject",
+  "reason": "binding_reject",
+  "description": "The offer-substitution class (reported upstream as x402-foundation/x402#3006): a second offer sharing resourceUrl/network with the accepted one but carrying different amount and payTo, presented against a receipt bound to the first offer's digest. Changing any term changes the canonical bytes, so the digest diverges and the substitution rejects \u2014 the regression criterion 'changing any one of amount, asset, payTo, scheme breaks verification', executable.",
+  "input": {
+    "offer": {
+      "resourceUrl": "https://api.example/premium",
+      "network": "eip155:8453",
+      "scheme": "exact",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "payTo": "0x3333333333333333333333333333333333333333",
+      "amount": "100"
+    },
+    "receipt": {
+      "offerDigest": "0x67513c4f44d024f5fbae8cef109257f6d8d5f47a14c0500391cc1e2dd7fd3e6b"
+    }
+  }
+}

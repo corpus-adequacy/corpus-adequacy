@@ -1,0 +1,14 @@
+{
+  "id": "n12-codepoint-key-order",
+  "kind": "canonical_bytes",
+  "expect": "reject",
+  "reason": "canonicalization_reject",
+  "description": "The adversarial twin of p14: canonical bytes claimed in CODE-POINT key order \u2014 the exact output of an implementation sorting by code point (e.g. Python sorted() over str). Must reject: RFC 8785 orders by UTF-16 code units.",
+  "input": {
+    "payload": {
+      "\uff61": 1,
+      "\ud800\udc00": 2
+    },
+    "claimed_canonical": "{\"\uff61\":1,\"\ud800\udc00\":2}"
+  }
+}
