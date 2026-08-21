@@ -312,10 +312,50 @@ SCORE_MEANS = ("percent of author-declared in-scope rules killed; NOT percent of
                "means it was not measured, not that none exist")
 
 
+def encode_report_v0(report: dict) -> bytes:
+    """Return the sole byte representation of a successful report.
+
+    UTF-8, sorted keys, two-space indentation and one trailing LF are part of
+    the v0 byte contract. Error envelopes have their own schema and must never
+    be addressable as successful report bytes through this function.
+    """
+    if report.get("schema") != REPORT_SCHEMA:
+        raise ValueError("encode_report_v0 accepts only %s" % REPORT_SCHEMA)
+    return (json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8")
+
+
+def _control_result(group: str, label: str, scope: str, *,
+                    detected: bool, moved: int, error=None):
+    """Produce one control row and its direct summary from the same rule."""
+    if error is not None:
+        status, verdict, how = "error", "control-error", str(error)
+    elif detected:
+        status, verdict, how = (
+            "killed", "control-killed", "harness detects a change on this path")
+    else:
+        status, verdict, how = (
+            "survived", "control-SURVIVED", "THE HARNESS DETECTS NOTHING")
+    return ({"group": group, "label": label, "verdict": verdict,
+             "scope": scope, "moved": moved, "how": how}, status)
+
+
+def _control_status(statuses: list[str]) -> str:
+    """Summarise every declared control without asking a consumer to scan rows."""
+    if not statuses:
+        return "absent-or-invalid"
+    if "error" in statuses:
+        return "error"
+    if "survived" in statuses:
+        return "survived"
+    return "killed"
+
+
 def _report_v0(manifest_path: Path, m: dict, *,
                killed: int, survived: int, silent: int, equivalent: int,
                out_of_scope: int, unproved: int, known_holes: int,
                score, results: list, failures: list,
+               control_status: str = "absent-or-invalid",
                originals_unverified_against_head=None) -> dict:
     """The one `report.v0` shape, for every runner.
 
@@ -339,7 +379,9 @@ def _report_v0(manifest_path: Path, m: dict, *,
     report = {
         "schema": REPORT_SCHEMA,
         "manifest": str(manifest_path),
+        "manifest_sha256": m.get("_manifest_sha256"),
         "runner": m["runner"],
+        "control_status": control_status,
         "killed": killed,
         "survived": survived,
         "silent": silent,
@@ -468,10 +510,14 @@ def _require_unique_labels(m: dict) -> None:
 
 
 def load_manifest(path: Path) -> dict:
-    m = json.loads(path.read_text(encoding="utf-8"))
+    manifest_bytes = path.read_bytes()
+    m = json.loads(manifest_bytes)
     if m.get("schema") != SCHEMA:
         raise ManifestError("schema must be %r, got %r" % (SCHEMA, m.get("schema")))
     base = path.parent
+    # Exact on-disk bytes are the input parsed above. Whitespace and key order
+    # therefore remain addressable rather than being silently canonicalised.
+    m["_manifest_sha256"] = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
     _req(m, "vectors", "manifest")
     if m.get("runner", "module") == "module":
         _req(m, "implementation", "manifest")
@@ -1152,6 +1198,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     failures.extend(structural_failures(m, groups_in_corpus))
     acknowledged = _acknowledged_holes(m)
     results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
+    control_statuses: list[str] = []
     silent = 0
     known_holes = 0
 
@@ -1290,19 +1337,20 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                     # invalidates the run.
                     if raised:
                         how = ", ".join(sorted(set(raised.values())))
-                        results.append({"group": group, "label": mut["label"],
-                                        "verdict": "control-error", "scope": scope,
-                                        "moved": 0, "how": how})
+                        row, status = _control_result(
+                            group, mut["label"], scope, detected=False,
+                            moved=0, error=how)
+                        results.append(row)
+                        control_statuses.append(status)
                         failures.append(
                             "control %r ended abnormally (%s); that is not a kill and "
                             "this run has no adequacy score" % (mut["label"], how))
                         continue
                     ok = bool(moved)
-                    results.append({"group": group, "label": mut["label"],
-                                    "verdict": "control-killed" if ok else "control-SURVIVED",
-                                    "scope": scope, "moved": len(moved),
-                                    "how": ("harness detects a change on this path"
-                                            if ok else "THE HARNESS DETECTS NOTHING")})
+                    row, status = _control_result(
+                        group, mut["label"], scope, detected=ok, moved=len(moved))
+                    results.append(row)
+                    control_statuses.append(status)
                     if not ok:
                         failures.append(
                             "control %r survived: the harness cannot detect a change on this "
@@ -1414,6 +1462,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         killed=killed, survived=survived, silent=silent, equivalent=equivalent,
         out_of_scope=out_of_scope, unproved=unproved, known_holes=known_holes,
         score=score, results=results, failures=failures,
+        control_status=_control_status(control_statuses),
         originals_unverified_against_head=guard.unverified)
 
 
@@ -1431,6 +1480,7 @@ def run(manifest_path: Path) -> dict:
     failures.extend(structural_failures(m, groups_in_corpus))
     acknowledged = _acknowledged_holes(m)
     results, killed, survived, equivalent, out_of_scope = [], 0, 0, 0, 0
+    control_statuses: list[str] = []
     # The module runner refuses `diagnostic_from` at load, so the silent class
     # cannot occur here. It is still reported: a consumer reading `.get("silent",
     # 0)` on a report that omits the key gets the false-measured answer the field
@@ -1505,9 +1555,11 @@ def run(manifest_path: Path) -> dict:
                     if mut.get("control"):
                         # The control is what proves the harness detects anything, so
                         # its child dying is not a kill. It leaves the run with no score.
-                        results.append({"group": group, "label": mut["label"],
-                                        "verdict": "control-error", "scope": scope,
-                                        "moved": 0, "how": kind})
+                        row, status = _control_result(
+                            group, mut["label"], scope, detected=False,
+                            moved=0, error=kind)
+                        results.append(row)
+                        control_statuses.append(status)
                         failures.append(
                             "control %r ended abnormally (%s); that is not a kill and "
                             "this run has no adequacy score" % (mut["label"], kind))
@@ -1532,11 +1584,10 @@ def run(manifest_path: Path) -> dict:
                 moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
                 if mut.get("control"):
                     ok = bool(raised or moved)
-                    results.append({"group": group, "label": mut["label"],
-                                    "verdict": "control-killed" if ok else "control-SURVIVED",
-                                    "scope": scope, "moved": len(moved),
-                                    "how": ("harness detects a change on this path"
-                                            if ok else "THE HARNESS DETECTS NOTHING")})
+                    row, status = _control_result(
+                        group, mut["label"], scope, detected=ok, moved=len(moved))
+                    results.append(row)
+                    control_statuses.append(status)
                     if not ok:
                         failures.append(
                             "control %r survived: the harness cannot detect a change on this "
@@ -1614,7 +1665,8 @@ def run(manifest_path: Path) -> dict:
         manifest_path, m,
         killed=killed, survived=survived, silent=silent, equivalent=equivalent,
         out_of_scope=out_of_scope, unproved=unproved, known_holes=known_holes,
-        score=score, results=results, failures=failures)
+        score=score, results=results, failures=failures,
+        control_status=_control_status(control_statuses))
 
 
 def null_result_reading(known_holes, equivalent, out_of_scope):
@@ -1711,7 +1763,12 @@ def main() -> int:
         return 2
 
     if args.json:
-        print(json.dumps(rep, indent=2, sort_keys=True))
+        encoded = encode_report_v0(rep)
+        if hasattr(sys.stdout, "buffer"):
+            sys.stdout.buffer.write(encoded)
+        else:
+            # StringIO and embedded callers may expose only a text stream.
+            sys.stdout.write(encoded.decode("utf-8"))
     else:
         print(format_tool_identity(rep))
         for r in rep["mutants"]:

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+Successful `corpus-adequacy.report.v0` output now has one deterministic
+`encode_report_v0()` byte form: UTF-8, sorted keys, two-space indentation and
+one trailing LF. The JSON CLI uses that encoder, while `error.v0` is explicitly
+refused by it. Reports carry `manifest_sha256` over the exact manifest bytes
+read and parsed for the run; whitespace and key-order changes therefore change
+the digest. This is content addressing and integrity checking, not authenticity.
+
+Reports also carry producer-owned `control_status` (`killed`, `survived`,
+`error`, or `absent-or-invalid`). One rule emits both the control row verdict
+and its direct status, so consumers no longer scan rows and independently
+reconstruct the answer. For multiple controls, error outranks survived, which
+outranks killed. The existing score, verdict precedence, exits and error
+envelope remain unchanged.
+
 One private `_report_v0` projector now builds every `corpus-adequacy.report.v0`,
 and both the module and process/batch constructors call it. Module reports carry
 `runner` for the first time, so a consumer no longer has to re-read the manifest

@@ -226,6 +226,24 @@ private projector that both constructors call. A report names its own producer
 in `runner`, so a consumer never has to re-read the manifest to learn which
 runner made it.
 
+Successful JSON reports have one producer-owned byte form: UTF-8, keys sorted,
+two-space indentation, and one trailing LF. `encode_report_v0()` is the only
+serializer for that form. It refuses `corpus-adequacy.error.v0`, so a failed
+measurement cannot be addressed as a successful report by the same function.
+
+`manifest_sha256` is SHA-256 over the exact manifest bytes read and parsed at
+the start of the run. No JSON canonicalisation occurs: changing whitespace or
+key order changes the digest because it changes the governed input bytes.
+This provides content addressing and an integrity check. It is not a signature,
+an authenticity claim, or proof that the manifest declared every rule.
+
+`control_status` directly reports `killed`, `survived`, `error`, or
+`absent-or-invalid`; a consumer does not reconstruct it from mutant rows. The
+same producer rule emits each control row and its status. With multiple controls,
+`error` takes precedence over `survived`, which takes precedence over `killed`.
+No usable control row yields `absent-or-invalid` and the existing structural
+guard still makes the report inadequate.
+
 `originals_unverified_against_head` is the one exception and stays specific to
 `process` and `batch`: those runners guard a working tree, the module runner has
 no such guard, and a field present-but-meaningless everywhere would be worse than
@@ -235,8 +253,9 @@ The module runner refuses `diagnostic_from`, so its `silent` is always `0` and
 its `diagnostic_channel_declared` always `false`. Both are reported rather than
 omitted, so a consumer can tell a measured zero from an unmeasured one.
 
-This is shape parity. It says nothing about whether two runners measuring the
-same corpus would agree, and nothing about adequacy, completeness or safety.
+This is shape and encoding parity. It says nothing about whether two runners
+measuring the same corpus would agree, and nothing about adequacy, completeness
+or safety.
 
 ## Related work
 
