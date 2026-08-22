@@ -210,6 +210,76 @@ class PublicationPage(unittest.TestCase):
             with self.assertRaises(rpp.PublicationError):
                 _render(root, source_commit="c" * 40)
 
+    def test_projection_digest_changes_when_only_source_commit_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            index_bytes, records = rpp.load_listed_records(root)
+            renderer = rpp.read_bounded_regular_file(Path(rpp.__file__))
+            digest_a = rpp.compute_projection_digest(
+                index_bytes, records, renderer, "a" * 40
+            )
+            digest_b = rpp.compute_projection_digest(
+                index_bytes, records, renderer, "b" * 40
+            )
+            self.assertNotEqual(digest_a, digest_b)
+            self.assertEqual(
+                rpp.compute_projection_digest(
+                    index_bytes, records, renderer, "a" * 40
+                ),
+                digest_a,
+            )
+            page = _render(root, source_commit="a" * 40)
+            self.assertEqual(rpp.projection_digest_from_html(page), digest_a)
+
+    def test_projection_digest_changes_when_only_version_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            index_bytes, records = rpp.load_listed_records(root)
+            renderer = rpp.read_bounded_regular_file(Path(rpp.__file__))
+            commit = "a" * 40
+            digest = rpp.compute_projection_digest(
+                index_bytes, records, renderer, commit
+            )
+            with mock.patch.object(rpp.ca, "VERSION", "9.9.9"):
+                mutated = rpp.compute_projection_digest(
+                    index_bytes, records, renderer, commit
+                )
+            self.assertNotEqual(digest, mutated)
+
+    def test_mutation_omit_source_commit_or_version_from_digest_is_red(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            index_bytes, records = rpp.load_listed_records(root)
+            renderer = rpp.read_bounded_regular_file(Path(rpp.__file__))
+            commit = "a" * 40
+            canonical = rpp.compute_projection_digest(
+                index_bytes, records, renderer, commit
+            )
+
+            def omitted(source_commit: str | None, version: str | None) -> str:
+                hasher = hashlib.sha256()
+
+                def add(label: bytes, payload: bytes) -> None:
+                    hasher.update(label)
+                    hasher.update(b"\0")
+                    hasher.update(len(payload).to_bytes(8, "big"))
+                    hasher.update(payload)
+
+                add(b"index", index_bytes)
+                for record in records:
+                    add(b"report", record["report_bytes"])
+                    add(b"source", record["source_bytes"])
+                add(b"renderer", renderer)
+                if source_commit is not None:
+                    add(b"source_commit", source_commit.encode("ascii"))
+                if version is not None:
+                    add(b"version", version.encode("ascii"))
+                return hasher.hexdigest()
+
+            self.assertNotEqual(canonical, omitted(None, ca.VERSION))
+            self.assertNotEqual(canonical, omitted(commit, None))
+            self.assertNotEqual(canonical, omitted(None, None))
+
     def test_html_escape_every_interpolated_field(self):
         payload = XSS_PAYLOAD
         onerror = "onerror="
@@ -575,7 +645,7 @@ EXIT_1_VISIBLE = (
 EXIT_2_VISIBLE = "exit 2 is refusal"
 EQUAL_COUNTS = "Equal counts do not imply identical report bytes."
 REPORT_TOOL_COMMIT_LABEL = "report tool_commit"
-PROJECTION_COMMIT_LABEL = "Pages projection source-commit"
+EVIDENCE_LINK_COMMIT_LABEL = "evidence-link commit"
 
 
 def _visible_body(page: str) -> str:
@@ -753,7 +823,7 @@ class FirstRunOrientation(unittest.TestCase):
         self.assertIn(EXIT_2_VISIBLE, visible)
         self.assertIn(EQUAL_COUNTS, visible)
         self.assertIn(REPORT_TOOL_COMMIT_LABEL, fold)
-        self.assertIn(PROJECTION_COMMIT_LABEL, fold)
+        self.assertIn(EVIDENCE_LINK_COMMIT_LABEL, fold)
         self.assertIn(tool_commit, fold)
         self.assertIn(source_commit, fold)
         self.assertIn(tool_content, fold)
@@ -762,7 +832,7 @@ class FirstRunOrientation(unittest.TestCase):
         commit_block = fold[fold.find(REPORT_TOOL_COMMIT_LABEL):]
         self.assertLess(
             commit_block.find(tool_commit),
-            commit_block.find(PROJECTION_COMMIT_LABEL),
+            commit_block.find(EVIDENCE_LINK_COMMIT_LABEL),
         )
         self.assertIn(_release_href(), page)
         for href in re.findall(r'releases/tag/([^"\s]+)', page):
@@ -861,7 +931,7 @@ class FirstRunOrientation(unittest.TestCase):
     def test_mutation_collapsed_commit_fields_is_red(self):
         page, source_commit, doc = self._fixture_page()
         mutated = page.replace(REPORT_TOOL_COMMIT_LABEL, "commit", 1)
-        mutated = mutated.replace(PROJECTION_COMMIT_LABEL, "commit", 1)
+        mutated = mutated.replace(EVIDENCE_LINK_COMMIT_LABEL, "commit", 1)
         self._assert_mutant_is_red(mutated, source_commit, doc)
 
     def test_mutation_exit_1_only_in_comment_title_or_css_is_red(self):
