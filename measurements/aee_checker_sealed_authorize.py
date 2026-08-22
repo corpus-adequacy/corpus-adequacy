@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase C GO-RUN authorization for issue #211. Stdlib only.
+"""Phase C GO-RUN authorization for the frozen inverse-AEE experiment. Stdlib only.
 
 Binds exact prepare.v0 bytes. Does not run the checker. Public non-claims:
 not MC/DC, not atomic-subcondition adequacy, not complete mutation

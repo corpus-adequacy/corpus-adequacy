@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase C GO-RUN authorization contract for issue #211. Standard library only.
+"""Phase C GO-RUN authorization contract for the frozen inverse-AEE experiment. Standard library only.
 
 Binds exact prepare.v0 bytes. Does not run the checker, baseline, control,
 or mutants. Does not emit report.v0. Public non-claims: not MC/DC, not
