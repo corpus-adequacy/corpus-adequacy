@@ -7,8 +7,9 @@ Deeply nested measurement JSON below the byte cap is a controlled refusal
 uses the same envelope with `could not project`. A within-cap anchor that
 is empty after control stripping stays an intentional omission. No
 `report.v0` byte or scoring change. The same refusal applies to the
-shared vectors document. Historical Tersign tool-content binds
-MEASURED_ON sources through `_tool_content_digest`, not current HEAD.
+shared vectors document. Released v0.1.0 tool bytes, digested with `_tool_content_digest`, match
+the frozen report `tool_content_sha256`. MEASURED_ON is report provenance,
+not a Git object a fresh clone must contain.
 
 ## 0.1.0 — 2026-08-22
 

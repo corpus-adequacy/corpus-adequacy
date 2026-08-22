@@ -481,6 +481,7 @@ class ProcessMeasurement(unittest.TestCase):
 
 
 MEASURED_ON = "a2f723fe5ae5036e97090b9691316e483c3f1acc"
+RELEASED_TOOL_COMMIT = "fbcdcb7a496f98420232260411d1afad6777ec11"
 DURABLE = REPO_ROOT / "measurements" / "tersign-1cc5ea32"
 REPORT_PATH = DURABLE / "report.v0.json"
 PROVENANCE_PATH = DURABLE / "PROVENANCE.md"
@@ -493,7 +494,11 @@ TOOL_CONTENT = "sha256:2580d5ee6353ba00dce4b8c6e355393b5457d92153b8da1f4ea9f4516
 
 
 class ClaimedReport(unittest.TestCase):
-    """Frozen report.v0 from the source commit; this head only records it."""
+    """Frozen report.v0 from the source commit; this head only records it.
+
+    MEASURED_ON is report provenance. It is not a Git object a fresh clone
+    must contain.
+    """
 
     def test_report_bytes_are_the_measured_file(self):
         self.assertTrue(REPORT_PATH.is_file())
@@ -515,11 +520,18 @@ class ClaimedReport(unittest.TestCase):
         self.assertFalse(doc["adequate"])
         self.assertEqual(doc["control_status"], "killed")
 
-    def test_measured_report_tool_content_binds_historical_sources(self):
+    def test_v010_tag_peels_to_the_released_tool_commit(self):
+        peeled = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "v0.1.0^{commit}"],
+            capture_output=True, text=True, check=True, timeout=10)
+        self.assertEqual(peeled.stdout.strip(), RELEASED_TOOL_COMMIT)
+
+    def test_released_tool_content_matches_the_measured_report(self):
         sources = []
         for rel in ca.TOOL_SOURCE_PATHS:
             shown = subprocess.run(
-                ["git", "-C", str(REPO_ROOT), "show", "%s:%s" % (MEASURED_ON, rel)],
+                ["git", "-C", str(REPO_ROOT), "show",
+                 "%s:%s" % (RELEASED_TOOL_COMMIT, rel)],
                 capture_output=True, check=True, timeout=10)
             sources.append((rel, shown.stdout))
         digest = ca._tool_content_digest(sources)
