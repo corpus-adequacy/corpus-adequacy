@@ -156,7 +156,7 @@ class PinAndProvenance(unittest.TestCase):
     def test_vendored_anchor_matches_the_declared_digest_and_size(self):
         raw = ANCHOR.read_bytes()
         self.assertEqual(len(raw), adapter.PIN_SIZE_BYTES)
-        self.assertEqual(hashlib.sha256(raw).hexdigest(), adapter.PIN_SHA256)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), LITERAL_ANCHOR_SHA256)
 
     def test_mutation_1_a_different_digest_is_refused(self):
         """The forgery is otherwise valid, so only the digest gate can catch it."""
@@ -197,7 +197,7 @@ class PinAndProvenance(unittest.TestCase):
             source = json.loads((dest / "source.json").read_text(encoding="utf-8"))
             self.assertEqual(source["repository"], adapter.PIN_REPOSITORY)
             self.assertEqual(source["commit"], adapter.PIN_COMMIT)
-            self.assertEqual(source["anchor_sha256"], adapter.PIN_SHA256)
+            self.assertEqual(source["anchor_sha256"], LITERAL_ANCHOR_SHA256)
             self.assertEqual(source["manifest_version"], adapter.PIN_MANIFEST_VERSION)
             self.assertEqual(source["license"], "Apache-2.0")
             self.assertEqual(source["authored_sections"],
@@ -316,6 +316,15 @@ class InvariantDisposition(unittest.TestCase):
             adapter._invariant_disposition(document, by_id)
         self.assertIn("unknown vector", str(caught.exception))
 
+    def test_a_duplicate_invariant_name_is_refused(self):
+        """#28 names duplicate invariant names as a hard error."""
+        document = json.loads(ANCHOR.read_text(encoding="utf-8"))
+        by_id = {v["vector_id"]: v for v in document["vectors"]}
+        document["pair_invariants"][1]["name"] = document["pair_invariants"][0]["name"]
+        with self.assertRaises(adapter.AdapterError) as caught:
+            adapter._invariant_disposition(document, by_id)
+        self.assertIn("duplicate invariant name", str(caught.exception))
+
     def test_an_unknown_invariant_field_is_refused(self):
         document = json.loads(ANCHOR.read_text(encoding="utf-8"))
         by_id = {v["vector_id"]: v for v in document["vectors"]}
@@ -340,11 +349,16 @@ class HostileInput(unittest.TestCase):
                 adapter.adapt(link, tmp / "out")
             self.assertIn("regular file", str(caught.exception))
 
+    def test_the_source_cap_is_a_literal_contract(self):
+        """Pinned independently of the constant. A probe sized from
+        SOURCE_CAP_BYTES rises with the mutation and can never report it."""
+        self.assertEqual(adapter.SOURCE_CAP_BYTES, 1 << 20)
+
     def test_mutation_9_an_oversized_source_is_refused_before_materialization(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             big = tmp / "big.json"
-            big.write_bytes(b"{}" + b" " * (adapter.SOURCE_CAP_BYTES + 1))
+            big.write_bytes(b"{}" + b" " * ((1 << 20) + 1))
             with self.assertRaises(adapter.AdapterError) as caught:
                 adapter.adapt(big, tmp / "out")
             self.assertIn("cap", str(caught.exception))
@@ -359,9 +373,14 @@ class HostileInput(unittest.TestCase):
                 adapter.adapt(forged, tmp / "out")
 
     def test_non_finite_constants_are_refused(self):
-        raw = b'{"name": "jcs_edge_v1", "vectors": [NaN]}'
-        with self.assertRaises(adapter.AdapterError):
-            adapter._parse_strict(raw)
+        """Both classes: the named tokens and exponent overflow."""
+        for raw in (b'{"name": "jcs_edge_v1", "vectors": [NaN]}',
+                    b'{"name": "jcs_edge_v1", "vectors": [Infinity]}',
+                    b'{"name": "jcs_edge_v1", "vectors": [1e999]}',
+                    b'{"name": "jcs_edge_v1", "vectors": [[{"a": -1e999}]]}'):
+            with self.subTest(raw=raw):
+                with self.assertRaises(adapter.AdapterError):
+                    adapter._parse_strict(raw)
 
     def test_malformed_utf8_is_refused(self):
         with self.assertRaises(adapter.AdapterError):
@@ -564,6 +583,10 @@ LITERAL_COMMIT = "aa53149c670f1659dad511755168ad5231dc04de"
 LITERAL_MANIFEST_VERSION = "0.38.0"
 LITERAL_MANIFEST_SHA256 = (
     "5e7c56fe353cd5c04adfc779191903d8cf79317301cc3402285a1881f1309865")
+# Independent oracle. The adapter derives this from the manifest entry; the
+# test asserts it against a literal, so dropping the derivation turns RED.
+LITERAL_ANCHOR_SHA256 = (
+    "a8a1a1a8839553ea5309c381b39ba156e6b6a23a5a3e6aab59b53940cc386033")
 
 
 def _forged_source(tmp: Path, mutate) -> Path:
@@ -587,7 +610,7 @@ def _producer(**overrides):
     base = {
         "manifest_sha256": LITERAL_MANIFEST_SHA256,
         "manifest_version": LITERAL_MANIFEST_VERSION,
-        "anchor_sha256": adapter.PIN_SHA256,
+        "anchor_sha256": LITERAL_ANCHOR_SHA256,
         "vector_count": 10,
         "pair_invariants": 2,
     }
@@ -681,14 +704,60 @@ class ManifestBinding(unittest.TestCase):
 
 
 class SingleBoundedRead(unittest.TestCase):
-    """P2-5: the shared loader owns cap and growth semantics."""
+    """P2-5: one call site, proved behaviourally rather than by text scan."""
 
-    def test_exactly_two_bounded_reads_each_with_an_explicit_cap(self):
+    def test_one_bounded_call_site_with_an_explicit_cap(self):
         source_text = ADAPTER.read_text(encoding="utf-8")
-        calls = source_text.count("read_bounded_regular_file(")
-        self.assertEqual(calls, 1, "one call site; both loads route through it")
+        self.assertEqual(source_text.count("read_bounded_regular_file("), 1)
         self.assertIn("cap=SOURCE_CAP_BYTES", source_text)
-        self.assertNotIn(".read_bytes()", source_text)
+
+    @unittest.skipIf(not hasattr(os, "O_NOFOLLOW"), "O_NOFOLLOW is required")
+    def test_the_manifest_load_refuses_a_symlink(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            link = tmp / "manifest.json"
+            try:
+                link.symlink_to(MANIFEST)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is not permitted here")
+            with mock.patch.object(adapter, "MANIFEST_PATH", link):
+                with self.assertRaises(adapter.AdapterError) as caught:
+                    adapter.adapt(ANCHOR, tmp / "out")
+            self.assertRegex(str(caught.exception).lower(), r"regular|symlink|follow")
+
+    def test_the_manifest_load_refuses_an_oversized_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            big = tmp / "manifest.json"
+            big.write_bytes(b"{}" + b" " * ((1 << 20) + 1))
+            with mock.patch.object(adapter, "MANIFEST_PATH", big):
+                with self.assertRaises(adapter.AdapterError) as caught:
+                    adapter.adapt(ANCHOR, tmp / "out")
+            self.assertIn("cap", str(caught.exception))
+
+    @unittest.skipIf(not hasattr(os, "mkfifo"), "os.mkfifo is unavailable")
+    def test_the_manifest_load_refuses_a_fifo(self):
+        import signal
+
+        class _Blocked(BaseException):
+            """Not an OSError, so the loader cannot convert it into a refusal."""
+
+        def alarm(_signum, _frame):
+            raise _Blocked("the manifest load blocked on a FIFO")
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            pipe = tmp / "manifest.json"
+            os.mkfifo(pipe)
+            previous = signal.signal(signal.SIGALRM, alarm)
+            signal.alarm(5)
+            try:
+                with mock.patch.object(adapter, "MANIFEST_PATH", pipe):
+                    with self.assertRaises(adapter.AdapterError):
+                        adapter.adapt(ANCHOR, tmp / "out")
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous)
 
 
 class InvariantArity(unittest.TestCase):

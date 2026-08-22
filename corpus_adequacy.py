@@ -356,6 +356,11 @@ def read_bounded_regular_file(path: Path, *, cap: int | None = None) -> bytes:
         flags |= os.O_BINARY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NONBLOCK"):
+        # A FIFO is openable and parks open() until a writer arrives, so the
+        # S_ISREG check below would never run. Opening non-blocking makes the
+        # refusal immediate; on a regular file the flag has no effect.
+        flags |= os.O_NONBLOCK
     identity = None
     if nofollow is not None:
         flags |= nofollow
@@ -403,10 +408,31 @@ def _control_stripped_one_line(text: str) -> str:
     return "".join(ch for ch in text if ord(ch) >= 32 and ch != "\x7f")
 
 
+_INF = float("inf")
+
+
 def _parse_projection_json(raw: bytes):
     """One parser for --survivors report and digest-matched manifest bytes."""
     def refuse_const(value):
         raise ManifestError("non-finite JSON number %s" % value)
+
+    def refuse_nonfinite(value):
+        """One iterative finite walk. `parse_constant` sees the named NaN and
+        Infinity tokens only; an exponent that overflows, such as 1e999,
+        arrives as an ordinary float and would otherwise be accepted.
+        Iterative so a deep document cannot trade a refusal for a
+        RecursionError."""
+        stack = [value]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, float):
+                if item != item or item in (_INF, -_INF):
+                    raise ManifestError("non-finite JSON number %r" % item)
+            elif isinstance(item, dict):
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+        return value
 
     def no_duplicate_keys(pairs):
         obj = {}
@@ -421,8 +447,8 @@ def _parse_projection_json(raw: bytes):
     except UnicodeDecodeError:
         raise ManifestError("projection input is not UTF-8") from None
     try:
-        return json.loads(
-            text, parse_constant=refuse_const, object_pairs_hook=no_duplicate_keys)
+        return refuse_nonfinite(json.loads(
+            text, parse_constant=refuse_const, object_pairs_hook=no_duplicate_keys))
     except RecursionError as exc:
         raise ManifestError(str(exc)) from None
 

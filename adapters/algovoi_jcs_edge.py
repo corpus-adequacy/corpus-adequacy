@@ -40,7 +40,6 @@ SOURCE_SCHEMA = "corpus-adequacy.algovoi-jcs-edge.source.v0"
 PIN_REPOSITORY = "chopmob-cloud/algovoi-jcs-conformance-vectors"
 PIN_COMMIT = "aa53149c670f1659dad511755168ad5231dc04de"
 PIN_ANCHOR_PATH = "vectors/jcs_edge_v1/jcs_edge_v1.json"
-PIN_SHA256 = "a8a1a1a8839553ea5309c381b39ba156e6b6a23a5a3e6aab59b53940cc386033"
 PIN_SIZE_BYTES = 7622
 PIN_LICENSE = "Apache-2.0"
 PIN_MANIFEST_VERSION = "0.38.0"
@@ -48,6 +47,9 @@ PIN_MANIFEST_VERSION = "0.38.0"
 # declares the anchor digest and the counts, so those are read rather than
 # asserted. `anchors_to` is prose and is deliberately never parsed.
 MANIFEST_PATH = _ROOT / "fixtures/algovoi-jcs-edge-aa53149c/manifest.json"
+# The single root of the provenance chain. The anchor digest is not pinned
+# here: it is declared by this manifest, and this manifest is bound to these
+# bytes, so one constant carries the whole chain.
 PIN_MANIFEST_SHA256 = (
     "5e7c56fe353cd5c04adfc779191903d8cf79317301cc3402285a1881f1309865")
 MANIFEST_ENTRY_KEYS = frozenset({
@@ -249,10 +251,6 @@ def _manifest_entry() -> dict:
         raise AdapterError("manifest sha256 is not a sha256-prefixed digest")
     declared_hex = _require_sha256_hex(declared[len("sha256:"):],
                                        "manifest anchor sha256")
-    if declared_hex != PIN_SHA256:
-        raise AdapterError(
-            "manifest declares anchor digest %s; the pin is %s"
-            % (declared_hex, PIN_SHA256))
     for key in ("vector_count", "pair_invariants"):
         if not isinstance(entry[key], int) or isinstance(entry[key], bool):
             raise AdapterError("manifest %s is not an integer" % key)

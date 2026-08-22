@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+`read_bounded_regular_file` opens non-blocking where the platform provides
+`O_NONBLOCK`. A FIFO is openable and parks `open()` until a writer arrives, so
+the `S_ISREG` check after it never ran and a special file hung the caller
+instead of being refused. The flag has no effect on a regular file. Its test
+raises a non-`OSError` alarm on purpose: `TimeoutError` is an `OSError`, which
+the loader converts into a refusal, so an `OSError`-based alarm passes after a
+real five-second block. Elapsed time is asserted as a second signal.
+
+`_parse_projection_json` refuses non-finite numbers reached by exponent
+overflow. `parse_constant` sees only the named `NaN` and `Infinity` tokens, so
+a nested `1e999` or `-1e999` previously parsed as `inf`. One iterative finite
+walk covers every runner and projection, iterative so a deep document cannot
+trade a refusal for a `RecursionError`.
+
+Both edits move declared runtime-source bytes, so the Tersign measurement was
+re-run on the new tool bytes through its own producer command and its recorded
+`tool_commit` and `tool_content_sha256` updated from that run. No digest was
+transcribed by hand.
+
+The AlgoVoi adapter now has a single provenance root. `PIN_SHA256` is removed:
+the anchor digest is declared by the pinned manifest entry and the manifest is
+bound to its own digest, so one constant carries the chain. The tests keep the
+expected anchor digest as an independent literal oracle. `SOURCE_CAP_BYTES` is
+pinned by a literal contract and the oversize fixture is sized from a literal,
+so raising the constant can no longer raise the probe with it. The manifest
+load is guarded behaviourally against symlink, oversize and FIFO rather than by
+a source-text scan, and a duplicate invariant name is now a tested hard error.
+No release.
+
 The AlgoVoi adapter binds its provenance to loaded bytes. The pinned producer
 `manifest.json` (SHA-256
 `5e7c56fe353cd5c04adfc779191903d8cf79317301cc3402285a1881f1309865`) is vendored,
