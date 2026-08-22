@@ -73,6 +73,7 @@ from aee_checker_sealed_materialize import (  # noqa: E402
     verify_materialized,
 )
 from aee_checker_sealed_oci import (  # noqa: E402
+    DEFAULT_MOUNT_SPEC,
     EXPECTED_REFUSALS,
     INSPECT_SNAPSHOT_KEYS,
     PROBE_MECHANISMS,

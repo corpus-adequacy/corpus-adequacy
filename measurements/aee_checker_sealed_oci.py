@@ -39,6 +39,32 @@ EXPECTED_REFUSALS = {
 }
 PROBE_ROW_KEYS = ("control", "inspect", "mechanism", "refusal")
 _INSPECT_ABSENT = ("no such object", "no such container")
+DEFAULT_MOUNT_SPEC = (
+    ("input", "/input"),
+    ("vendor", "/vendor"),
+    ("tool", "/tool"),
+)
+
+
+def _require_mount_spec(mount_spec) -> tuple[tuple[str, str], ...]:
+    if type(mount_spec) not in (list, tuple) or not mount_spec:
+        raise PrepareError("mount specification")
+    normalized = []
+    keys = set()
+    destinations = set()
+    for item in mount_spec:
+        if type(item) not in (list, tuple) or len(item) != 2:
+            raise PrepareError("mount specification")
+        key, destination = item
+        if (not isinstance(key, str) or not key or
+                not isinstance(destination, str) or not destination.startswith("/")):
+            raise PrepareError("mount specification")
+        if key in keys or destination in destinations:
+            raise PrepareError("mount specification")
+        keys.add(key)
+        destinations.add(destination)
+        normalized.append((key, destination))
+    return tuple(normalized)
 
 
 def require_docker_ready() -> str:
@@ -95,7 +121,8 @@ def _tmpfs_spec(value) -> dict:
     return {"nr_inodes": inodes, "size": size}
 
 
-def validate_inspect_contract(inspect, *, sealed: bool) -> dict:
+def validate_inspect_contract(
+        inspect, *, sealed: bool, mount_spec=DEFAULT_MOUNT_SPEC) -> dict:
     if type(inspect) is not dict:
         raise PrepareError("inspect missing")
     host, cfg = inspect.get("HostConfig"), inspect.get("Config")
@@ -106,7 +133,9 @@ def validate_inspect_contract(inspect, *, sealed: bool) -> dict:
     if host.get("CapDrop") != ["ALL"]:
         raise PrepareError("cap-drop")
     sec = host.get("SecurityOpt") or []
-    if not any(str(item).replace("=", ":") == "no-new-privileges:true" for item in sec):
+    no_new_privileges = any(
+        str(item).replace("=", ":") == "no-new-privileges:true" for item in sec)
+    if not no_new_privileges:
         raise PrepareError("no-new-privileges")
     if cfg.get("User") != "65532:65532":
         raise PrepareError("user")
@@ -126,31 +155,36 @@ def validate_inspect_contract(inspect, *, sealed: bool) -> dict:
     mounts = inspect.get("Mounts")
     if type(mounts) is not list:
         raise PrepareError("readonly mount")
-    found = []
+    required_destinations = {
+        destination for _, destination in _require_mount_spec(mount_spec)
+    }
+    found = set()
     for mount in mounts:
+        if type(mount) is not dict:
+            raise PrepareError("readonly mount")
         dest = mount.get("Destination")
-        if dest in ("/input", "/vendor", "/tool"):
-            if mount.get("RW") is not False:
-                raise PrepareError("readonly mount")
-            found.append(dest)
-    if sorted(found) != ["/input", "/tool", "/vendor"]:
+        if (dest not in required_destinations or dest in found or
+                mount.get("Type") != "bind" or mount.get("RW") is not False):
+            raise PrepareError("readonly mount")
+        found.add(dest)
+    if found != required_destinations:
         raise PrepareError("readonly mount")
     env = cfg.get("Env") or []
     offline = any(item == "CARGO_NET_OFFLINE=true" for item in env)
     if sealed != offline:
         raise PrepareError("offline env")
     return {
-        "cap_drop": ["ALL"],
-        "memory": MEMORY_4G,
-        "memory_swap": MEMORY_4G,
+        "cap_drop": list(host["CapDrop"]),
+        "memory": host["Memory"],
+        "memory_swap": host["MemorySwap"],
         "network_mode": network,
-        "no_new_privileges": True,
+        "no_new_privileges": no_new_privileges,
         "offline_env": offline,
-        "pids": 512,
-        "read_only_root": True,
-        "readonly_mounts": ["/input", "/tool", "/vendor"],
+        "pids": host["PidsLimit"],
+        "read_only_root": host["ReadonlyRootfs"],
+        "readonly_mounts": sorted(found),
         "tmpfs": parsed,
-        "user": "65532:65532",
+        "user": cfg["User"],
     }
 
 
@@ -208,7 +242,7 @@ def require_container_absent(name: str) -> None:
 
 def docker_create_argv(
         *, image_id: str, name: str, mounts: dict, command: list[str],
-        sealed: bool = True) -> list[str]:
+        sealed: bool = True, mount_spec=DEFAULT_MOUNT_SPEC) -> list[str]:
     image_id = require_image_id(image_id)
     tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (TMPFS_BYTES, TMPFS_INODES)
     argv = [
@@ -227,11 +261,13 @@ def docker_create_argv(
     ]
     if sealed:
         argv.extend(["--env", "CARGO_NET_OFFLINE=true"])
-    for dest in ("input", "vendor", "tool"):
+    for key, destination in _require_mount_spec(mount_spec):
+        if key not in mounts:
+            raise PrepareError("mount source missing: %s" % key)
         argv.extend([
             "--mount",
-            "type=bind,source=%s,destination=/%s,readonly" % (
-                Path(mounts[dest]).resolve(), dest),
+            "type=bind,source=%s,destination=%s,readonly" % (
+                Path(mounts[key]).resolve(), destination),
         ])
     argv.extend([image_id, "/probe", *command])
     return argv
@@ -299,7 +335,7 @@ def defense_in_depth_from_inspect(inspect) -> dict:
 
 def run_inert_probe(
         *, image_id: str, mode: str, mounts: dict, name_prefix: str,
-        sealed: bool = True) -> dict:
+        sealed: bool = True, mount_spec=DEFAULT_MOUNT_SPEC) -> dict:
     require_local_image(image_id)
     name = "%s%s-%s" % (name_prefix, mode.replace("-", ""), token_hex(4))
     created = False
@@ -310,7 +346,7 @@ def run_inert_probe(
     try:
         docker_bounded(docker_create_argv(
             image_id=image_id, name=name, mounts=mounts, command=[mode],
-            sealed=sealed)[1:])
+            sealed=sealed, mount_spec=mount_spec)[1:])
         created = True
         try:
             proc = br._run_capped(
@@ -324,7 +360,8 @@ def run_inert_probe(
         except subprocess.TimeoutExpired:
             state = "deadline"
         inspect = parse_inspect_payload(docker_bounded(["inspect", name]))
-        contract = validate_inspect_contract(inspect, sealed=sealed)
+        contract = validate_inspect_contract(
+            inspect, sealed=sealed, mount_spec=mount_spec)
     except PrepareError as exc:
         error = exc
     finally:

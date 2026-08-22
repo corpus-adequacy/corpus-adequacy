@@ -752,7 +752,8 @@ class PublicStrings(unittest.TestCase):
 
 
 class InspectContract(unittest.TestCase):
-    def _ok(self, *, network_mode="none", offline=True, **host_over):
+    def _ok(self, *, network_mode="none", offline=True, mounts=None,
+            config_over=None, **host_over):
         host = {
             "NetworkMode": network_mode,
             "ReadonlyRootfs": True,
@@ -770,10 +771,12 @@ class InspectContract(unittest.TestCase):
         env = ["PATH=/usr/bin"]
         if offline:
             env.append("CARGO_NET_OFFLINE=true")
+        config = {"User": "65532:65532", "Env": env}
+        config.update(config_over or {})
         return {
             "HostConfig": host,
-            "Config": {"User": "65532:65532", "Env": env},
-            "Mounts": [
+            "Config": config,
+            "Mounts": mounts if mounts is not None else [
                 {"Destination": "/input", "RW": False, "Type": "bind"},
                 {"Destination": "/vendor", "RW": False, "Type": "bind"},
                 {"Destination": "/tool", "RW": False, "Type": "bind"},
@@ -809,10 +812,78 @@ class InspectContract(unittest.TestCase):
 
     def test_valid_sealed_inspect_records_the_contract(self):
         snap = run.validate_inspect_contract(self._ok(), sealed=True)
+        self.assertEqual(snap["cap_drop"], ["ALL"])
+        self.assertEqual(snap["memory"], MEMORY_4G)
+        self.assertEqual(snap["memory_swap"], MEMORY_4G)
         self.assertEqual(snap["network_mode"], "none")
+        self.assertTrue(snap["no_new_privileges"])
+        self.assertEqual(snap["pids"], 512)
         self.assertTrue(snap["read_only_root"])
+        self.assertEqual(snap["readonly_mounts"], ["/input", "/tool", "/vendor"])
         self.assertEqual(snap["user"], "65532:65532")
         self.assertTrue(snap["offline_env"])
+
+    def test_every_fixed_projected_field_has_a_biting_guard(self):
+        cases = (
+            ("read-only root", {"ReadonlyRootfs": False}, None),
+            ("cap drop", {"CapDrop": []}, None),
+            ("security option", {"SecurityOpt": []}, None),
+            ("memory", {"Memory": MEMORY_4G - 1}, None),
+            ("memory swap", {"MemorySwap": MEMORY_4G - 1}, None),
+            ("pids", {"PidsLimit": 511}, None),
+            ("user", {}, {"User": "0:0"}),
+            ("offline environment", {}, {"Env": ["PATH=/usr/bin"]}),
+        )
+        for name, host_over, config_over in cases:
+            with self.subTest(name=name):
+                with self.assertRaises(run.PrepareError):
+                    run.validate_inspect_contract(
+                        self._ok(config_over=config_over, **host_over), sealed=True)
+
+    def test_mount_contract_drives_argv_validation_and_projection(self):
+        custom = run.DEFAULT_MOUNT_SPEC + (("subject", "/subject"),)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            mounts = {key: root / key for key, _ in custom}
+            for path in mounts.values():
+                path.mkdir()
+            argv = run.docker_create_argv(
+                image_id="sha256:" + ("cd" * 32),
+                name="aee-sealed-custom-mount",
+                mounts=mounts,
+                command=["ok"],
+                mount_spec=custom,
+            )
+        mount_args = [argv[i + 1] for i, value in enumerate(argv) if value == "--mount"]
+        self.assertEqual(
+            [arg.split("destination=", 1)[1].split(",", 1)[0] for arg in mount_args],
+            ["/input", "/vendor", "/tool", "/subject"],
+        )
+        observed = [
+            {"Destination": dest, "RW": False, "Type": "bind"}
+            for _, dest in custom
+        ]
+        snap = run.validate_inspect_contract(
+            self._ok(mounts=observed), sealed=True, mount_spec=custom)
+        self.assertEqual(
+            snap["readonly_mounts"], ["/input", "/subject", "/tool", "/vendor"])
+
+    def test_mount_validation_refuses_extra_non_bind_and_duplicate_rows(self):
+        good = self._ok()["Mounts"]
+        malformed = (
+            good[:-1],
+            good + [{"Destination": "/other", "RW": False, "Type": "bind"}],
+            [{**row, "Type": "volume"} if row["Destination"] == "/tool" else row
+             for row in good],
+            good + [{"Destination": "/input", "RW": False, "Type": "bind"}],
+            [{**row, "RW": True} if row["Destination"] == "/vendor" else row
+             for row in good],
+        )
+        for mounts in malformed:
+            with self.subTest(mounts=mounts):
+                with self.assertRaises(run.PrepareError):
+                    run.validate_inspect_contract(
+                        self._ok(mounts=mounts), sealed=True)
 
     def test_missing_container_is_absent_not_an_infrastructure_failure(self):
         self.assertEqual(
