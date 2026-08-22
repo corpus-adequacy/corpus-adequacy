@@ -91,6 +91,27 @@ class PublicationHandoff(unittest.TestCase):
         self.assertIn("validated source.json metadata bytes", block)
         self.assertNotIn("source corpus", block.lower())
         self.assertNotIn("upstream content", block.lower())
+        evidence_start = form.find("id: public-evidence-url")
+        self.assertNotEqual(evidence_start, -1)
+        evidence = form[evidence_start : evidence_start + 500]
+        self.assertIn(
+            "Immutable URL to the public report/evidence bytes",
+            evidence,
+        )
+        self.assertIn("not a mutable branch or latest URL", evidence)
+        weakened = evidence.replace(
+            "Immutable URL to the public report/evidence bytes "
+            "(commit- or digest-pinned; not a mutable branch or latest URL).",
+            "Public URL to the report.",
+            1,
+        )
+        self.assertNotIn("not a mutable branch or latest URL", weakened)
+        with self.assertRaises(AssertionError):
+            self.assertIn("not a mutable branch or latest URL", weakened)
+            self.assertIn(
+                "Immutable URL to the public report/evidence bytes",
+                weakened,
+            )
 
     def test_fixture_digest_swap_changes_url(self):
         url = handoff.handoff_url(VALID / "report.v0.json")

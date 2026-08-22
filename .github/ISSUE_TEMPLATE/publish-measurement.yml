@@ -122,6 +122,7 @@ body:
     id: public-evidence-url
     attributes:
       label: Public evidence URL
+      description: Immutable URL to the public report/evidence bytes (commit- or digest-pinned; not a mutable branch or latest URL).
     validations:
       required: true
   - type: textarea
