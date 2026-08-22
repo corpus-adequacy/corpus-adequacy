@@ -658,10 +658,17 @@ def partition_declared_mutants(mutants: dict) -> tuple:
 
 
 def _append_group_equivalents(results: list, m: dict, group: str,
-                              baselines: dict) -> int:
-    """Emit one group's declared equivalents after that group's ordinary rows."""
-    if group not in baselines:
+                              baselines: dict, emitted: set) -> int:
+    """Emit one group's declared equivalents once.
+
+    Equivalents are declarations, not ordinary executions. The ordinary wave
+    calls this after each group so no-control row order stays group then
+    that group's equivalents. A later pass over remaining baseline groups
+    keeps declarations on a control abort that never entered wave 1.
+    """
+    if group not in baselines or group in emitted:
         return 0
+    emitted.add(group)
     added = 0
     for eq in m["equivalent"].get(group, []):
         results.append({"group": group, "label": eq["label"], "verdict": "equivalent",
@@ -1674,6 +1681,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
 
         controls, ordinary = partition_declared_mutants(m["mutants"])
         prev_ordinary = None
+        emitted_equivalents: set = set()
         for wave_index, wave in enumerate((controls, ordinary)):
             if wave_index == 1 and declared_controls and _control_status(
                     control_statuses, declared_controls) != "killed":
@@ -1682,7 +1690,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                 if (wave_index == 1 and prev_ordinary is not None
                         and group != prev_ordinary):
                     equivalent += _append_group_equivalents(
-                        results, m, prev_ordinary, baselines)
+                        results, m, prev_ordinary, baselines, emitted_equivalents)
                 if wave_index == 1:
                     prev_ordinary = group
                 if group not in baselines:
@@ -1855,7 +1863,10 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                     survived += 1
         if prev_ordinary is not None:
             equivalent += _append_group_equivalents(
-                results, m, prev_ordinary, baselines)
+                results, m, prev_ordinary, baselines, emitted_equivalents)
+        for group in sorted(m["mutants"]):
+            equivalent += _append_group_equivalents(
+                results, m, group, baselines, emitted_equivalents)
     finally:
         try:
             if guard is not None:

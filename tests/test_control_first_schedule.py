@@ -88,7 +88,7 @@ class PartitionHelper(unittest.TestCase):
 
 
 class ControlFirstCallLog(unittest.TestCase):
-    def _batch_manifest(self, tmp: Path, mutants: dict) -> Path:
+    def _batch_manifest(self, tmp: Path, mutants: dict, equivalent=None) -> Path:
         (tmp / "check.py").write_text(SOURCE, encoding="utf-8")
         (tmp / "vectors.json").write_text(json.dumps({"cases": [{"id": "c1", "n": 1}]}))
         raw = {
@@ -102,12 +102,14 @@ class ControlFirstCallLog(unittest.TestCase):
             "id_key": "vector_id",
             "default_group": "g",
             "mutants": mutants,
+            "equivalent": equivalent or {},
         }
         path = tmp / "m.json"
         path.write_text(json.dumps(raw), encoding="utf-8")
         return path
 
-    def _run_logged(self, tmp: Path, mutants: dict, *, control="killed"):
+    def _run_logged(self, tmp: Path, mutants: dict, *, control="killed",
+                    equivalent=None):
         calls = []
 
         def fake_build(m):
@@ -136,7 +138,8 @@ class ControlFirstCallLog(unittest.TestCase):
                 return {key: "moved" for key in keys}, {}, {}
             return {key: name for key in keys}, {}, {}
 
-        loaded = ca.load_manifest(self._batch_manifest(tmp, mutants))
+        loaded = ca.load_manifest(
+            self._batch_manifest(tmp, mutants, equivalent=equivalent))
         with mock.patch.object(ca, "_build", side_effect=fake_build), \
                 mock.patch.object(ca, "_process_outcomes", side_effect=fake_outcomes):
             report = ca._run_process(loaded, tmp / "m.json")
@@ -206,6 +209,24 @@ class ControlFirstCallLog(unittest.TestCase):
             calls, report = self._run_logged(
                 Path(d), {"g": self._control_anchor_spec(anchor="{missing}")})
         self._assert_control_error_skips_ordinary(report, calls)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_invalid_control_keeps_declared_equivalents(self):
+        equivalent = {"g": [{"label": "eq-g", "reason": "same g"}]}
+        with tempfile.TemporaryDirectory() as d:
+            calls, report = self._run_logged(
+                Path(d), {"g": _aee_spec()}, control="survived",
+                equivalent=equivalent)
+        self.assertEqual(calls, ["baseline", "CONTROL"])
+        self.assertFalse(any(row["label"] in SEALED_IDS for row in report["mutants"]))
+        self.assertEqual(
+            [(row["group"], row["label"], row["verdict"])
+             for row in report["mutants"] if row["verdict"] == "equivalent"],
+            [("g", "eq-g", "equivalent")],
+        )
+        self.assertEqual(report["equivalent"], 1)
+        self.assertIsNone(report["score_percent"])
+        self._assert_invalid_control_failures(report)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_duplicate_control_anchor_is_control_error_and_skips_ordinary(self):
