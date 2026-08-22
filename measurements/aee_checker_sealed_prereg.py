@@ -17,6 +17,8 @@ from pathlib import Path
 UNPROVED_EXIT_CODES = [75]
 ACCEPTED_EXIT_CODES = [0]
 OUTCOME_FROM = ["verdict", "result", "tiersWithPinnedKey", "tiersWithoutKey"]
+DIAGNOSTIC_FROM = ["reason"]
+PINNED_BUILD = ["cargo", "build", "--locked", "--release"]
 SELECTED_COUNT = 7
 GROUP = "sealed"
 CONTROL_ANCHOR = (
@@ -284,13 +286,15 @@ def _manifest(found: dict) -> dict:
         "repo_root": ".",
         "implementation": "src/check.rs",
         "implementation_sources": ["src/check.rs"],
-        "build": [],
+        "build": list(PINNED_BUILD),
         "entrypoint_command": [
             "python3", "aee_checker_sealed.py",
             "--checker", "./target/release/aee-checker",
+            "--expected-count", "250",
             "corpus/vectors",
         ],
         "outcome_from": list(OUTCOME_FROM),
+        "diagnostic_from": list(DIAGNOSTIC_FROM),
         "accepted_exit_codes": list(ACCEPTED_EXIT_CODES),
         "unproved_exit_codes": list(UNPROVED_EXIT_CODES),
         "vectors": "corpus/vectors/MANIFEST.json",
@@ -372,6 +376,10 @@ def validate_prereg(dest: Path) -> None:
                           % UNPROVED_EXIT_CODES)
     if manifest.get("accepted_exit_codes") != ACCEPTED_EXIT_CODES:
         raise PreregError("accepted_exit_codes must be %s" % ACCEPTED_EXIT_CODES)
+    if manifest.get("build") != PINNED_BUILD:
+        raise PreregError("build must be exactly cargo build --locked --release")
+    if manifest.get("diagnostic_from") != DIAGNOSTIC_FROM:
+        raise PreregError("diagnostic_from must be the normalized prose reason")
     if "code" in manifest.get("outcome_from", []) or "code" in (manifest.get("diagnostic_from") or []):
         raise PreregError("code must stay out of outcome_from and diagnostic_from")
     selected_spans = [s["span"] for s in selected]

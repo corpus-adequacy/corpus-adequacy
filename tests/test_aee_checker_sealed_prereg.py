@@ -9,18 +9,23 @@ mutation proof. The biting tests mutate prereg artifacts.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "measurements"))
 sys.path.insert(0, str(REPO_ROOT / "adapters"))
 
+import bounded_run as br  # noqa: E402
+import corpus_adequacy as ca  # noqa: E402
 import aee_checker_sealed as wrapper  # noqa: E402
 import aee_checker_sealed_prereg as prereg  # noqa: E402
 
@@ -218,12 +223,14 @@ class FrozenPin(unittest.TestCase):
         self.assertEqual(manifest["runner"], "batch")
         self.assertEqual(manifest["accepted_exit_codes"], [0])
         self.assertEqual(manifest["unproved_exit_codes"], [75])
+        self.assertEqual(manifest["build"], ["cargo", "build", "--locked", "--release"])
         self.assertEqual(
             manifest["outcome_from"],
             ["verdict", "result", "tiersWithPinnedKey", "tiersWithoutKey"],
         )
+        self.assertEqual(manifest["diagnostic_from"], ["reason"])
         self.assertNotIn("code", manifest["outcome_from"])
-        self.assertNotIn("code", manifest.get("diagnostic_from") or [])
+        self.assertNotIn("code", manifest["diagnostic_from"])
         mutants = manifest["mutants"]["sealed"]
         ordinary = [e for e in mutants if not e.get("control")]
         controls = [e for e in mutants if e.get("control")]
@@ -257,11 +264,11 @@ class WrapperContract(unittest.TestCase):
     def _fake(self, tmp: Path, body: str) -> Path:
         path = tmp / "fake_checker.py"
         path.write_text(body, encoding="utf-8")
-        path.chmod(0o755)
         return path
 
     def _run(self, checker: Path, extra=None):
-        cmd = [sys.executable, str(ADAPTER), "--checker", str(checker), str(checker.parent)]
+        cmd = [sys.executable, str(ADAPTER), "--checker", str(checker),
+               "--expected-count", "1", str(checker.parent)]
         if extra:
             cmd.extend(extra)
         return subprocess.run(cmd, capture_output=True, text=True)
@@ -269,14 +276,15 @@ class WrapperContract(unittest.TestCase):
     def test_wrapper_reads_json_file_not_human_stdout(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
-            checker = self._fake(tmp, r"""#!/usr/bin/env python3
+            checker = self._fake(tmp, r"""
 import json, sys
 from pathlib import Path
 print('{"verdict":"FROM-STDOUT","result":null,"tiersWithPinnedKey":[],"tiersWithoutKey":[]}')
 out = sys.argv[sys.argv.index("--json") + 1]
 Path(out).write_text(json.dumps({
     "vectors": [{"id": "v1", "verdict": "valid", "result": "ok",
-                 "code": "secret", "tiersWithPinnedKey": ["t"], "tiersWithoutKey": []}]
+                 "reason": "prose", "code": "secret",
+                 "tiersWithPinnedKey": ["t"], "tiersWithoutKey": []}]
 }) + "\n", encoding="utf-8")
 sys.exit(1)
 """)
@@ -285,6 +293,7 @@ sys.exit(1)
         doc = json.loads(proc.stdout)
         self.assertEqual(doc["verdict"], ["valid"])
         self.assertEqual(doc["result"], ["ok"])
+        self.assertEqual(doc["reason"], ["prose"])
         self.assertNotEqual(doc["verdict"], ["FROM-STDOUT"])
         self.assertNotIn("code", doc)
         self.assertNotIn("secret", proc.stdout)
@@ -292,7 +301,7 @@ sys.exit(1)
     def test_inner_protocol_failure_exits_the_issue_45_unproved_code(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
-            checker = self._fake(tmp, r"""#!/usr/bin/env python3
+            checker = self._fake(tmp, """
 import sys
 print("human table only")
 sys.exit(0)
@@ -307,5 +316,156 @@ sys.exit(0)
         self.assertEqual(prereg.UNPROVED_EXIT_CODES, [75])
 
 
+class ReviewFixes(unittest.TestCase):
+    """Coordinator review at 52428a4. Synthetic checker only."""
+
+    GOOD_ROW = {
+        "id": "v1", "verdict": "valid", "result": "ok",
+        "reason": "prose A", "code": "MUST-NOT-APPEAR",
+        "tiersWithPinnedKey": ["t"], "tiersWithoutKey": [],
+    }
+
+    def _fake(self, tmp: Path, body: str) -> Path:
+        path = tmp / "fake_checker.py"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def _writer(self, tmp: Path, doc, rc=0) -> Path:
+        payload = json.dumps(doc)
+        return self._fake(tmp, f"""
+import sys
+from pathlib import Path
+print("human table")
+Path(sys.argv[sys.argv.index("--json") + 1]).write_text({payload!r} + "\\n")
+sys.exit({rc})
+""")
+
+    def _run(self, checker: Path, extra=None):
+        # In-process so cap patches reach the same bounded_run / corpus_adequacy
+        # names the wrapper uses. Child-exec coverage stays in WrapperContract.
+        argv = ["--checker", str(checker), "--expected-count", "1",
+                str(checker.parent)]
+        if extra:
+            argv.extend(extra)
+        buf = io.StringIO()
+        with mock.patch.object(sys, "stdout", buf):
+            rc = wrapper.main(argv)
+        return SimpleNamespace(returncode=rc, stdout=buf.getvalue(), stderr="")
+
+    def test_inner_rc2_with_valid_json_is_unproved_before_parse(self):
+        with tempfile.TemporaryDirectory() as d:
+            checker = self._writer(Path(d), {"vectors": [self.GOOD_ROW]}, rc=2)
+            proc = self._run(checker)
+        self.assertEqual(proc.returncode, 75, proc.stdout)
+        self.assertFalse(proc.stdout.strip())
+
+    def test_overcap_inner_stdout_uses_bounded_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            checker = self._fake(tmp, """
+import sys
+from pathlib import Path
+print("x" * 200)
+Path(sys.argv[sys.argv.index("--json") + 1]).write_text(
+    '{"vectors":[{"id":"v1","verdict":"valid","result":"ok",'
+    '"reason":"r","tiersWithPinnedKey":[],"tiersWithoutKey":[]}]}\\n')
+sys.exit(0)
+""")
+            with mock.patch.object(br, "OUTPUT_CAP_BYTES", 32):
+                proc = self._run(checker)
+        self.assertEqual(proc.returncode, 75)
+        src = ADAPTER.read_text(encoding="utf-8")
+        self.assertIn("_run_capped", src)
+        self.assertNotIn("subprocess.run(", src)
+
+    def test_report_file_cap_uses_read_bounded_regular_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            checker = self._writer(Path(d), {"vectors": [self.GOOD_ROW]})
+            with mock.patch.object(ca, "OUTPUT_CAP_BYTES", 16):
+                proc = self._run(checker)
+        self.assertEqual(proc.returncode, 75)
+        self.assertIn("read_bounded_regular_file", ADAPTER.read_text(encoding="utf-8"))
+
+    def test_build_missing_empty_or_unlocked_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prereg"
+            dest.mkdir()
+            prereg.emit_prereg(SYNTHETIC.encode("utf-8"), dest)
+            manifest = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
+            for bad in ([], ["cargo", "build"], ["cargo", "build", "--release"], None):
+                raw = dict(manifest)
+                if bad is None:
+                    raw.pop("build", None)
+                else:
+                    raw["build"] = bad
+                _dump(dest / "manifest.json", raw)
+                with self.assertRaises(prereg.PreregError) as ctx:
+                    prereg.validate_prereg(dest)
+                self.assertIn("build", str(ctx.exception).lower(), bad)
+
+    def test_missing_or_duplicate_row_identity_is_unproved(self):
+        cases = [
+            {"vectors": [dict(self.GOOD_ROW, id="")]},
+            {"vectors": [dict(self.GOOD_ROW), dict(self.GOOD_ROW)]},
+            {"vectors": [{k: v for k, v in self.GOOD_ROW.items()
+                          if k != "tiersWithoutKey"}]},
+            {"vectors": []},
+        ]
+        for doc in cases:
+            with self.subTest(doc=doc):
+                with tempfile.TemporaryDirectory() as d:
+                    checker = self._writer(Path(d), doc)
+                    proc = self._run(checker)
+                self.assertEqual(proc.returncode, 75, proc.stdout)
+                self.assertFalse(proc.stdout.strip())
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_diagnostic_only_reason_move_is_silent(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "check.py").write_text(
+                "import json\n"
+                'reason = "prose A"\n'
+                "print(json.dumps({\n"
+                '  "verdict": ["valid"], "result": ["ok"],\n'
+                '  "tiersWithPinnedKey": [[]], "tiersWithoutKey": [[]],\n'
+                '  "reason": [reason],\n'
+                "}))\n",
+                encoding="utf-8")
+            (tmp / "vectors.json").write_text("{}", encoding="utf-8")
+            raw = {
+                "schema": ca.SCHEMA, "runner": "batch", "repo_root": ".",
+                "implementation": "check.py",
+                "implementation_sources": ["check.py"],
+                "build": [],
+                "entrypoint_command": [sys.executable, "check.py"],
+                "outcome_from": [
+                    "verdict", "result", "tiersWithPinnedKey", "tiersWithoutKey",
+                ],
+                "diagnostic_from": ["reason"],
+                "accepted_exit_codes": [0],
+                "unproved_exit_codes": [75],
+                "vectors": "vectors.json",
+                "id_key": "vector_id",
+                "default_group": "sealed",
+                "mutants": {"sealed": [
+                    {"label": "reason-only", "anchor": 'reason = "prose A"',
+                     "replacement": 'reason = "prose B"'},
+                    {"label": "CONTROL", "control": True,
+                     "anchor": "print(json.dumps",
+                     "replacement": "raise SystemExit(1)\nprint(json.dumps"}],
+                },
+            }
+            manifest = tmp / "m.json"
+            manifest.write_text(json.dumps(raw), encoding="utf-8")
+            rep = ca.run(manifest)
+        row = next(r for r in rep["mutants"] if r["label"] == "reason-only")
+        self.assertEqual(row["verdict"], "silent")
+        self.assertEqual(row["moved"], 0)
+        self.assertGreaterEqual(row["moved_diagnostic"], 1)
+        self.assertTrue(rep["diagnostic_channel_declared"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
