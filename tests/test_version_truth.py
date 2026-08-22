@@ -38,7 +38,7 @@ RELEASE_TRUTH_BLOCK = "%s %s %s" % (
     CUT_ORDER_PHRASE,
     NO_ADDRESSABILITY_PHRASE,
 )
-RELEASE_DATES = {"0.1.0": "2026-08-22"}
+RELEASE_DATES = {"0.1.0": "2026-08-22", "0.1.1": "2026-08-22"}
 
 
 def check_version_release_truth(root: Path) -> str:
@@ -619,7 +619,7 @@ INVALID_CHANGELOGS = (
 
 class VersionReleaseTruth(unittest.TestCase):
     def test_checkout_satisfies_version_release_truth(self):
-        self.assertEqual(check_version_release_truth(REPO_ROOT), "0.1.0")
+        self.assertEqual(check_version_release_truth(REPO_ROOT), "0.1.1")
 
     def test_release_date_is_pinned_independently(self):
         with _temp_tree(
