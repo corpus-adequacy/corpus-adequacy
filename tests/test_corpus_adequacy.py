@@ -3154,6 +3154,56 @@ class SurvivorFindings(unittest.TestCase):
                     ca.read_bounded_regular_file(link)
         self.assertRegex(str(cm.exception).lower(), r"regular|symlink|follow")
 
+    @unittest.skipIf(not hasattr(os, "mkfifo"), "os.mkfifo is unavailable")
+    def test_bounded_loader_refuses_a_fifo_without_blocking(self):
+        """A FIFO is openable and parks open() until a writer arrives, so the
+        S_ISREG check after os.open never runs.
+
+        The alarm raises a BaseException on purpose. TimeoutError is an
+        OSError, and the loader converts OSError into ManifestError, so an
+        OSError-based alarm is swallowed and this test passes after a real
+        five-second block. Elapsed time is asserted as a second, independent
+        signal so a future regression cannot hide in the exception type.
+        """
+        import signal
+        import time
+
+        class _Blocked(BaseException):
+            """Not an OSError, so the loader cannot convert it into a refusal."""
+
+        def alarm(_signum, _frame):
+            raise _Blocked("read_bounded_regular_file blocked on a FIFO")
+
+        with tempfile.TemporaryDirectory() as d:
+            pipe = Path(d) / "pipe"
+            os.mkfifo(pipe)
+            previous = signal.signal(signal.SIGALRM, alarm)
+            signal.alarm(5)
+            started = time.monotonic()
+            try:
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.read_bounded_regular_file(pipe)
+                elapsed = time.monotonic() - started
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous)
+        self.assertRegex(str(cm.exception).lower(), r"regular|special|follow")
+        self.assertLess(elapsed, 1.0,
+                        "refusal must precede materialization, not follow a block")
+
+    def test_bounded_loader_refuses_non_finite_exponent_overflow(self):
+        """`parse_constant` sees the named NaN and Infinity tokens only. An
+        exponent that overflows arrives as an ordinary float."""
+        for probe in (b'{"a": 1e999}', b'{"a": -1e999}',
+                      b'{"a": [[{"b": 1e999}]]}'):
+            with self.subTest(probe=probe):
+                with self.assertRaises(ca.ManifestError):
+                    ca._parse_projection_json(probe)
+
+    def test_bounded_loader_still_parses_large_finite_numbers(self):
+        value = ca._parse_projection_json(b'{"a": [1, 1.0, -2.5, 1e308]}')
+        self.assertEqual(value["a"], [1, 1.0, -2.5, 1e308])
+
     def test_bounded_loader_without_nofollow_uses_identity_parity(self):
         with tempfile.TemporaryDirectory() as d:
             regular = Path(d) / "ok.json"

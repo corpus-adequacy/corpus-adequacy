@@ -2,6 +2,92 @@
 
 ## Unreleased
 
+The AlgoVoi adapter's mechanism boundary is pinned against a whole-document
+re-serialize, not only the per-preimage form. The previous probe used the
+pinned fixture, whose round trip is byte-identical, so a scanner that
+re-serialized the whole document before slicing satisfied it. The new probe
+uses `1.50` and `1E2`, which move under any round trip, with a companion test
+proving the probe discriminates.
+
+The oversize refusal is pinned as an ordering, not merely as an outcome. The
+read loop caps at `cap + 1` on its own, so a refusal alone was satisfied with
+the `fstat` pre-check removed; `os.read` is now patched so zero payload reads
+is the property under test.
+
+`tests/test_algovoi_jcs_edge.py` runs the same tests under direct execution as
+under discovery. Thirteen top-level statements followed the `__main__` guard,
+so five classes were undefined when the module was run directly. The guard is
+now the last statement, checked by AST for the structural rule and by
+subprocess for the effect. The subprocess probe asserts count parity only:
+asserting the inner run's exit status would make it fail for every unrelated
+mutation and destroy per-guard ownership.
+
+A stale comment claiming the exponent-overflow walk was held back is removed;
+it landed in a2f723fe and the Tersign re-measurement landed in fd25f2e.
+
+Test-only. No product or tool bytes change, so no re-measurement. No release.
+
+`read_bounded_regular_file` opens non-blocking where the platform provides
+`O_NONBLOCK`. A FIFO is openable and parks `open()` until a writer arrives, so
+the `S_ISREG` check after it never ran and a special file hung the caller
+instead of being refused. The flag has no effect on a regular file. Its test
+raises a non-`OSError` alarm on purpose: `TimeoutError` is an `OSError`, which
+the loader converts into a refusal, so an `OSError`-based alarm passes after a
+real five-second block. Elapsed time is asserted as a second signal.
+
+`_parse_projection_json` refuses non-finite numbers reached by exponent
+overflow. `parse_constant` sees only the named `NaN` and `Infinity` tokens, so
+a nested `1e999` or `-1e999` previously parsed as `inf`. One iterative finite
+walk covers every runner and projection, iterative so a deep document cannot
+trade a refusal for a `RecursionError`.
+
+Both edits move declared runtime-source bytes, so the Tersign measurement was
+re-run on the new tool bytes through its own producer command and its recorded
+`tool_commit` and `tool_content_sha256` updated from that run. No digest was
+transcribed by hand.
+
+The AlgoVoi adapter now has a single provenance root. `PIN_SHA256` is removed:
+the anchor digest is declared by the pinned manifest entry and the manifest is
+bound to its own digest, so one constant carries the chain. The tests keep the
+expected anchor digest as an independent literal oracle. `SOURCE_CAP_BYTES` is
+pinned by a literal contract and the oversize fixture is sized from a literal,
+so raising the constant can no longer raise the probe with it. The manifest
+load is guarded behaviourally against symlink, oversize and FIFO rather than by
+a source-text scan, and a duplicate invariant name is now a tested hard error.
+No release.
+
+The AlgoVoi adapter binds its provenance to loaded bytes. The pinned producer
+`manifest.json` (SHA-256
+`5e7c56fe353cd5c04adfc779191903d8cf79317301cc3402285a1881f1309865`) is vendored,
+bounded-loaded through the same single call site as the anchor, and bound to its
+own digest; version, canon version and license are verified against it, and the
+anchor digest, vector count and invariant count are derived from its
+`jcs_edge_v1` entry instead of being emitted as constants. The prose
+`anchors_to` field is not parsed. `equal_sha256` now requires exactly two
+references and raises `AdapterError` rather than leaking `ValueError`. Imports
+are checked against an AST allowlist, so `from runner_python import run` and
+dynamic import are refused. The end-to-end round-trip mutant preserves the
+trailing LF, so it is killed by a normal parsed movement over all ten vectors
+rather than by `unexpected-exit`, and the control row is asserted to move
+exactly ten. No release.
+
+`adapters/algovoi_jcs_edge.py` adapts one pinned AlgoVoi `jcs_edge_v1` anchor
+set (`aa53149c670f1659dad511755168ad5231dc04de`, anchor SHA-256
+`a8a1a1a8839553ea5309c381b39ba156e6b6a23a5a3e6aab59b53940cc386033`, 7,622
+bytes, manifest `0.38.0`, canon `jcs-rfc8785-v1`) for the existing process
+runner. Case bytes are exact source slices of each `preimage` value plus one
+LF, so the `1.0` and `1` spellings survive; there is no numeric round trip. A
+whole-document JSON round trip is byte-identical to this source, so the
+mechanism boundary is pinned by its own tests rather than by output equality.
+Ten vectors are emitted and consumed through the real `corpus_adequacy.run()`.
+Both declared `pair_invariants` are accounted for exactly once: `equal_sha256`
+is evaluated against the declared digests, and the prose relation is typed
+`refused`. Upstream LICENSE and NOTICE are retained under
+`fixtures/algovoi-jcs-edge-aa53149c/`. No new scorer, no generic JCS parser.
+Not authenticity, endorsement, complete RFC 8785 coverage, correctness of the
+authored labels or of the upstream reference implementation, or adequacy of any
+implementation. No release.
+
 The isolated Tersign CHECKS wrapper uses the same no-`O_NOFOLLOW` fallback as
 `read_bounded_regular_file` (lstat/open/fstat `(st_dev, st_ino)` parity) without
 importing the scorer. NOTICE absence is bound to the pinned upstream tree
