@@ -45,6 +45,13 @@ SEALED_IDS = tuple("sealed-%d" % i for i in range(1, 8))
 UNPROVED_STATES = frozenset({
     "wrapper-75", "timeout", "signal", "output-cap", "protocol",
 })
+KNOWN_STATES = UNPROVED_STATES | frozenset({"ok"})
+KNOWN_MUTANT_STATUSES = frozenset({
+    "killed", "survived", "silent", "equivalent", "unproved",
+})
+KNOWN_DISPOSITIONS = frozenset({
+    "passed", "void", "unproved", "killed", "survived", "silent", "equivalent",
+})
 NON_CLAIMS = (
     "MC/DC",
     "atomic-subcondition adequacy",
@@ -136,6 +143,32 @@ def load_frozen_sites(pins_dir: Path) -> dict:
         raise _wrap(exc) from exc
 
 
+def authorized_step_spec() -> tuple:
+    return (
+        {"id": "baseline", "kind": "baseline", "scored": False},
+        {"id": "control", "kind": "must-die", "scored": False},
+    ) + tuple(
+        {"id": site_id, "kind": "mutant", "operator": GO_RUN_OPERATOR}
+        for site_id in SEALED_IDS
+    )
+
+
+def require_authorized_sequence(steps) -> tuple:
+    spec = authorized_step_spec()
+    if type(steps) is not tuple and type(steps) is not list:
+        raise AuthorizeError("sequence")
+    if len(steps) != len(spec):
+        raise AuthorizeError("sequence")
+    for got, want in zip(steps, spec):
+        if type(got) is not dict:
+            raise AuthorizeError("sequence")
+        _exact(got, tuple(want.keys()), "sequence")
+        for key, value in want.items():
+            if type(got[key]) is not type(value) or got[key] != value:
+                raise AuthorizeError("sequence")
+    return tuple(steps)
+
+
 def required_sequence(sites_doc: dict) -> tuple:
     sites = sites_doc.get("sites")
     if type(sites) is not list:
@@ -145,36 +178,41 @@ def required_sequence(sites_doc: dict) -> tuple:
         raise AuthorizeError("sequence")
     if any(site.get("replacement") != "false" for site in sites):
         raise AuthorizeError("operator must be whole-condition-to-false")
-    steps = (
-        {"id": "baseline", "kind": "baseline", "scored": False},
-        {"id": "control", "kind": "must-die", "scored": False},
-    )
-    for site_id in SEALED_IDS:
-        steps += ({
-            "id": site_id,
-            "kind": "mutant",
-            "operator": GO_RUN_OPERATOR,
-        },)
-    return steps
+    return require_authorized_sequence(authorized_step_spec())
+
+
+def voids_before_scored(step: dict, disposition: str) -> bool:
+    return step.get("kind") in ("baseline", "must-die") and disposition == "void"
 
 
 def classify_observation(step: dict, observation: dict) -> str:
+    """Map one observation onto the closed disposition vocabulary.
+
+    Unknown or unproved state is void for baseline/control and unproved for
+    mutants. Those unknown cases are never killed.
+    """
     state = observation.get("state")
-    if state in UNPROVED_STATES:
-        return "unproved"
+    status = observation.get("status")
+    incomplete = state != "ok"
     kind = step.get("kind")
     if kind == "baseline":
-        return "passed" if observation.get("status") == "passed" else "void"
+        if incomplete:
+            return "void"
+        return "passed" if status == "passed" else "void"
     if kind == "must-die":
+        if incomplete:
+            return "void"
         if observation.get("scored") is not False:
             return "void"
-        if observation.get("status") != "killed":
+        if status != "killed":
             return "void"
         return "passed"
     if kind == "mutant":
         if step.get("operator") != GO_RUN_OPERATOR:
             return "void"
-        return observation.get("status") or "unproved"
+        if incomplete or status not in KNOWN_MUTANT_STATUSES:
+            return "unproved"
+        return status
     raise AuthorizeError("unknown step")
 
 

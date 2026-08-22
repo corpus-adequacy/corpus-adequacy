@@ -10,6 +10,7 @@ sandbox-efficacy, not certification, not ranking.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import sys
 import unittest
@@ -232,19 +233,22 @@ class SequenceAndDisposition(unittest.TestCase):
     def test_baseline_failure_or_control_not_killed_voids(self):
         steps = auth.required_sequence(_sites())
         self.assertEqual(
-            auth.classify_observation(steps[0], {"status": "failed"}),
+            auth.classify_observation(steps[0], {"state": "ok", "status": "failed"}),
             "void",
         )
         self.assertEqual(
-            auth.classify_observation(steps[1], {"status": "survived", "scored": False}),
+            auth.classify_observation(
+                steps[1], {"state": "ok", "status": "survived", "scored": False}),
             "void",
         )
         self.assertEqual(
-            auth.classify_observation(steps[1], {"status": "killed", "scored": True}),
+            auth.classify_observation(
+                steps[1], {"state": "ok", "status": "killed", "scored": True}),
             "void",
         )
         self.assertEqual(
-            auth.classify_observation(steps[1], {"status": "killed", "scored": False}),
+            auth.classify_observation(
+                steps[1], {"state": "ok", "status": "killed", "scored": False}),
             "passed",
         )
 
@@ -254,6 +258,110 @@ class SequenceAndDisposition(unittest.TestCase):
             got = auth.classify_observation(step, {"state": state, "status": "killed"})
             self.assertEqual(got, "unproved", state)
             self.assertNotEqual(got, "killed")
+
+    def test_baseline_and_control_unproved_states_are_void(self):
+        steps = auth.required_sequence(_sites())
+        for state in ("wrapper-75", "timeout", "signal", "output-cap", "protocol"):
+            self.assertEqual(
+                auth.classify_observation(steps[0], {"state": state, "status": "passed"}),
+                "void",
+                state,
+            )
+            self.assertEqual(
+                auth.classify_observation(
+                    steps[1], {"state": state, "status": "killed", "scored": False}),
+                "void",
+                state,
+            )
+
+    def test_authorized_sequence_pins_kinds_operator_and_scored(self):
+        steps = auth.required_sequence(_sites())
+        pinned = auth.require_authorized_sequence(steps)
+        self.assertEqual(pinned[0], {"id": "baseline", "kind": "baseline", "scored": False})
+        self.assertEqual(pinned[1], {"id": "control", "kind": "must-die", "scored": False})
+        for step in pinned[2:]:
+            self.assertEqual(step["kind"], "mutant")
+            self.assertEqual(step["operator"], "whole-condition-to-false")
+            self.assertNotEqual(step.get("scored"), False)
+
+    def test_missing_state_is_incomplete_void_or_unproved(self):
+        steps = auth.required_sequence(_sites())
+        self.assertEqual(
+            auth.classify_observation(steps[0], {"status": "passed"}),
+            "void",
+        )
+        self.assertEqual(
+            auth.classify_observation(steps[1], {"status": "killed", "scored": False}),
+            "void",
+        )
+        self.assertEqual(
+            auth.classify_observation(steps[2], {"status": "killed"}),
+            "unproved",
+        )
+
+    def test_baseline_or_control_scored_zero_is_refused(self):
+        steps = list(auth.required_sequence(_sites()))
+        steps[0] = dict(steps[0], scored=0)
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+        steps = list(auth.required_sequence(_sites()))
+        steps[1] = dict(steps[1], scored=0)
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+
+    def test_extra_key_or_explicit_mutant_scored_is_refused(self):
+        steps = list(auth.required_sequence(_sites()))
+        steps[0] = dict(steps[0], operator=auth.GO_RUN_OPERATOR)
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+        for scored in (True, "banana", 1, None):
+            steps = list(auth.required_sequence(_sites()))
+            steps[2] = dict(steps[2], scored=scored)
+            with self.assertRaises(auth.AuthorizeError, msg=repr(scored)):
+                auth.require_authorized_sequence(steps)
+
+    def test_removing_exact_key_check_from_sequence_validator_bites(self):
+        src = inspect.getsource(auth.require_authorized_sequence)
+        self.assertTrue("_exact(" in src or "exact_object(" in src, src)
+        self.assertIn("set(", inspect.getsource(common.exact_object))
+
+    def test_right_ids_with_wrong_kind_or_operator_are_refused(self):
+        steps = list(auth.required_sequence(_sites()))
+        steps[0] = dict(steps[0], kind="mutant")
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+        steps = list(auth.required_sequence(_sites()))
+        steps[2] = dict(steps[2], operator="flip-to-true")
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+        steps = list(auth.required_sequence(_sites()))
+        steps[1] = dict(steps[1], scored=True)
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+
+    def test_unknown_state_with_status_killed_is_never_killed(self):
+        step = {"id": "sealed-1", "kind": "mutant", "operator": "whole-condition-to-false"}
+        got = auth.classify_observation(step, {"state": "mystery", "status": "killed"})
+        self.assertIn(got, ("unproved", "void"))
+        self.assertNotEqual(got, "killed")
+
+    def test_unknown_mutant_status_is_never_returned_as_killed(self):
+        step = {"id": "sealed-1", "kind": "mutant", "operator": "whole-condition-to-false"}
+        got = auth.classify_observation(step, {"status": "banana"})
+        self.assertIn(got, ("unproved", "void"))
+        self.assertNotEqual(got, "banana")
+        self.assertNotEqual(got, "killed")
+
+    def test_unknown_baseline_or_control_status_voids_never_killed(self):
+        steps = auth.required_sequence(_sites())
+        self.assertEqual(
+            auth.classify_observation(steps[0], {"status": "killed"}),
+            "void",
+        )
+        self.assertEqual(
+            auth.classify_observation(steps[1], {"state": "mystery", "status": "killed", "scored": False}),
+            "void",
+        )
 
 
 class PublicNonClaims(unittest.TestCase):
