@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import tempfile
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -27,11 +28,14 @@ from aee_checker_sealed_common import (  # noqa: E402
     load_strict,
     verify_file_digest,
 )
-from aee_checker_sealed_materialize import require_vendor_toolchain  # noqa: E402
 from aee_checker_sealed_run import (  # noqa: E402
     PHASE_A_INSTRUMENT_COMMIT,
     PHASE_A_PIN_DIGESTS,
+    PREPARE_KEYS,
+    PREPARE_PART_KEYS,
     PREPARE_SCHEMA,
+    emit_prepare_v0,
+    execution_identity,
 )
 
 AUTHORIZE_SCHEMA = "corpus-adequacy.aee-checker-sealed.authorize.v0"
@@ -97,6 +101,15 @@ def load_prepare(raw: bytes) -> dict:
         raise _wrap(exc) from exc
     if doc.get("schema") != PREPARE_SCHEMA:
         raise AuthorizeError("prepare_schema drift")
+    _exact(doc, PREPARE_KEYS, "prepare.v0")
+    parts = {key: doc[key] for key in PREPARE_PART_KEYS}
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            emitted = emit_prepare_v0(parts, Path(tmp) / "prepare.v0.json")
+        except PrepareError as exc:
+            raise _wrap(exc) from exc
+    if emitted != raw:
+        raise AuthorizeError("prepare is not canonical emit_prepare_v0 bytes")
     return doc
 
 
@@ -108,18 +121,17 @@ def require_bound_prepare(doc: dict) -> dict:
         raise AuthorizeError("execution.commit/content_sha256 required")
     if execution.get("commit") == PHASE_A_INSTRUMENT_COMMIT:
         raise AuthorizeError("execution commit conflated with instrument")
+    try:
+        identity = execution_identity(_ROOT)
+    except PrepareError as exc:
+        raise _wrap(exc) from exc
+    if execution.get("content_sha256") != identity["content_sha256"]:
+        raise AuthorizeError("execution.content_sha256 is not producer identity")
     image = doc.get("image")
     if type(image) is not dict:
         raise AuthorizeError("image missing")
     if not image.get("id") or not image.get("platform"):
         raise AuthorizeError("image.id/platform required")
-    toolchain = doc.get("toolchain")
-    if type(toolchain) is not dict:
-        raise AuthorizeError("toolchain missing")
-    try:
-        require_vendor_toolchain(toolchain)
-    except PrepareError as exc:
-        raise AuthorizeError("toolchain: %s" % exc) from exc
     return doc
 
 

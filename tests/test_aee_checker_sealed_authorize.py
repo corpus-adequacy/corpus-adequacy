@@ -171,10 +171,31 @@ class ValidatorBites(unittest.TestCase):
         source = Path(auth.__file__).read_text(encoding="utf-8")
         self.assertIn("load_strict", source)
         self.assertIn("PREPARE_SCHEMA", source)
-        self.assertIn("require_vendor_toolchain", source)
+        self.assertIn("emit_prepare_v0", source)
+        self.assertIn("PREPARE_KEYS", source)
+        self.assertIn("PREPARE_PART_KEYS", source)
         raw = _prepare_raw()
         doc = auth.load_prepare(raw)
         self.assertEqual(doc["schema"], run.PREPARE_SCHEMA)
+
+    def test_malformed_prepare_with_matching_digest_is_refused(self):
+        cases = (
+            (lambda doc: doc.__setitem__("phase", "result"), r"phase|canonical|emit"),
+            (lambda doc: doc.__setitem__("outcomes", ["fake killed"]), r"exact keys|unknown|outcomes"),
+            (lambda doc: doc["materialized"].__setitem__("subject_binary", True),
+             r"subject binary"),
+            (lambda doc: doc["network"].__setitem__("sealed_oci", "online"), r"network"),
+            (lambda doc: doc["execution"].__setitem__("content_sha256", "00" * 32),
+             r"content|canonical|emit|execution"),
+        )
+        for mutator, needle in cases:
+            mutated = _rewrite_prepare(mutator)
+            bound = _authorize_doc(mutated)
+            self.assertEqual(
+                bound["prepare_sha256"], hashlib.sha256(mutated).hexdigest())
+            with self.assertRaises(auth.AuthorizeError, msg=needle) as ctx:
+                auth.validate_authorize(_dump(bound), mutated)
+            self.assertRegex(str(ctx.exception).lower(), needle, needle)
 
 
 class SequenceAndDisposition(unittest.TestCase):
