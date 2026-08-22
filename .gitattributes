@@ -32,3 +32,6 @@ measurements/aee_checker_sealed_oci.py text eol=lf
 measurements/aee_checker_sealed_run.py text eol=lf
 tests/test_aee_checker_sealed_run.py text eol=lf
 execution/aee-checker-sealed/** text eol=lf
+measurements/aee_checker_sealed_authorize.py text eol=lf
+measurements/aee-go-run/** text eol=lf
+tests/test_aee_checker_sealed_authorize.py text eol=lf

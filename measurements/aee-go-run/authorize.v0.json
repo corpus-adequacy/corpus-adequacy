@@ -1,0 +1,6 @@
+{
+  "phase": "authorize",
+  "prepare_schema": "corpus-adequacy.aee-checker-sealed.prepare.v0",
+  "prepare_sha256": "5d9f48549d5f1565f60fb44505a0f966e49583fc97358ccf5328140884893baa",
+  "schema": "corpus-adequacy.aee-checker-sealed.authorize.v0"
+}
