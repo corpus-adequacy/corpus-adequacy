@@ -405,21 +405,35 @@ def vendor_create_argv(*, name: str, subject: Path, vendor: Path, budget=None) -
     ]
 
 
-def reclaim_bind_owner(name: str, dest: str = "/out") -> None:
-    proc = docker_ok(["exec", name, "stat", "-c", "%u:%g", dest])
-    owner = (proc.stdout or "").strip()
+def host_bind_owner(dest: Path) -> str:
+    info = Path(dest).stat()
+    uid, gid = info.st_uid, info.st_gid
+    if type(uid) is not int or type(gid) is not int or uid < 0 or gid < 0:
+        raise PrepareError("host bind owner is not readable")
+    return "%d:%d" % (uid, gid)
+
+
+def copy_tmpfs_argv(name: str, owner: str) -> list[str]:
     if owner.count(":") != 1:
-        raise PrepareError("bind-mount owner is not readable")
+        raise PrepareError("host bind owner is not readable")
     uid, gid = owner.split(":")
     if not uid.isdigit() or not gid.isdigit():
-        raise PrepareError("bind-mount owner is not readable")
-    docker_ok(["exec", name, "chown", "-R", owner, dest])
+        raise PrepareError("host bind owner is not readable")
+    return [
+        "exec", "--user", owner, name,
+        "cp", "-R", "--no-preserve=ownership", "/vendor/.", "/out/",
+    ]
+
+
+def copy_tmpfs_as_bind_owner(name: str, dest: Path) -> None:
+    docker_ok(copy_tmpfs_argv(name, host_bind_owner(dest)))
 
 
 def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -> dict:
     require_vendor_outside(subject, vendor)
     vendor = Path(vendor)
     vendor.mkdir(parents=True, exist_ok=True)
+    owner = host_bind_owner(vendor)
     budget = _budget(budget)
     if toolchain is None:
         toolchain = pull_rust_image(budget=budget)
@@ -438,8 +452,7 @@ def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -
         )
         if proc.returncode != 0:
             raise PrepareError("cargo vendor --locked failed")
-        docker_ok(["exec", name, "cp", "-a", "/vendor/.", "/out/"])
-        reclaim_bind_owner(name)
+        docker_ok(copy_tmpfs_argv(name, owner))
     finally:
         if created:
             try:

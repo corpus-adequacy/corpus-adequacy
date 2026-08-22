@@ -1164,21 +1164,62 @@ class MaterializeBytes(unittest.TestCase):
         self.assertIn('["start", name]', vendor)
         self.assertNotIn("start\", \"-a\"", vendor)
         self.assertIn("docker\", \"exec\"", vendor)
-        self.assertIn('"/vendor/.", "/out/"', vendor)
-        self.assertLess(vendor.index("cargo\", \"vendor\""), vendor.index('"/out/"'))
-        self.assertLess(vendor.index('"/out/"'), vendor.index("reclaim_bind_owner"))
-        self.assertLess(vendor.index("reclaim_bind_owner"), vendor.index("rm"))
-        reclaim = inspect.getsource(run.reclaim_bind_owner)
-        self.assertIn("chown", reclaim)
-        self.assertIn("stat", reclaim)
-        self.assertNotIn("sudo", reclaim)
-        self.assertNotIn("except", reclaim)
+        self.assertLess(vendor.index("host_bind_owner"), vendor.index("vendor_create_argv"))
+        self.assertLess(vendor.index("cargo\", \"vendor\""), vendor.index("copy_tmpfs_argv"))
+        self.assertLess(vendor.index("copy_tmpfs_argv"), vendor.index("rm"))
+        self.assertNotIn("chown", vendor)
+        self.assertNotIn("reclaim_bind_owner", vendor)
+        self.assertNotIn("stat\", \"-c\"", vendor)
+        owner_src = inspect.getsource(run.host_bind_owner)
+        self.assertIn("st_uid", owner_src)
+        self.assertIn("st_gid", owner_src)
+        self.assertNotIn("docker", owner_src)
+        self.assertNotIn("stat\", \"-c\"", owner_src)
+        copy = inspect.getsource(run.copy_tmpfs_argv)
+        self.assertIn('"/vendor/."', copy)
+        self.assertIn("--user", copy)
+        self.assertIn("--no-preserve=ownership", copy)
+        self.assertIn("cp\", \"-R\"", copy)
+        self.assertNotIn("chown", copy)
+        self.assertNotIn("sudo", copy)
+        self.assertNotIn("except", copy)
+        self.assertNotIn("docker\", \"cp\"", copy)
+        self.assertNotIn("stat\", \"-c\"", copy)
         self.assertIn("pull_rust_image", materialize)
         self.assertIn("require_container_absent", vendor)
         live = inspect.getsource(
             LiveInertProbes.test_prepare_emits_artifact_without_subject_binary_or_outcomes)
         self.assertNotIn("skipTest", live)
         self.assertNotIn("image inspect", live)
+
+    def test_copy_argv_carries_host_dest_owner(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "out"
+            dest.mkdir()
+            owner = run.host_bind_owner(dest)
+            self.assertEqual(owner, "%d:%d" % (dest.stat().st_uid, dest.stat().st_gid))
+            argv = run.copy_tmpfs_argv("aee-x", owner)
+            self.assertEqual(argv[argv.index("--user") + 1], owner)
+            self.assertIn("--no-preserve=ownership", argv)
+
+    def test_forced_copy_failure_leaves_owner_removable_partial_output(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "out"
+            dest.mkdir()
+            partial = dest / "keep"
+            nested = dest / "sub" / "LICENSE-APACHE"
+            nested.parent.mkdir()
+            partial.write_text("partial", encoding="utf-8")
+            nested.write_text("x", encoding="utf-8")
+            with mock.patch.object(mat, "docker_ok", side_effect=run.PrepareError("copy failed")):
+                with self.assertRaises(run.PrepareError):
+                    run.copy_tmpfs_as_bind_owner("aee-x", dest)
+            if hasattr(os, "getuid"):
+                self.assertEqual(partial.stat().st_uid, os.getuid())
+                self.assertEqual(nested.stat().st_uid, os.getuid())
+            partial.unlink()
+            nested.unlink()
+            nested.parent.rmdir()
 
     def test_emit_refuses_host_or_unprovenanced_toolchain(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1640,17 +1681,20 @@ class LiveInertProbes(unittest.TestCase):
             stopped.mkdir()
             created = []
             try:
+                owner = run.host_bind_owner(live)
+                run.pull_rust_image()
                 run.docker_bounded([
                     "create", "--name", live_name,
                     "--tmpfs", "/vendor:rw,size=1048576,nr_inodes=128",
                     "--mount", "type=bind,source=%s,destination=/out" % live,
-                    self.image_id, "sleep", "60",
+                    run.RUST_IMAGE, "sleep", "60",
                 ])
                 created.append(live_name)
                 run.docker_bounded(["start", live_name])
                 run.docker_ok(["exec", live_name, "sh", "-c", "echo packed > /vendor/keep"])
-                run.docker_ok(["exec", live_name, "cp", "-a", "/vendor/.", "/out/"])
-                run.reclaim_bind_owner(live_name)
+                argv = run.copy_tmpfs_argv(live_name, owner)
+                self.assertEqual(argv[argv.index("--user") + 1], owner)
+                run.docker_ok(argv)
                 self.assertTrue((live / "keep").is_file())
                 run.docker_bounded([
                     "create", "--name", stop_name,
@@ -1670,15 +1714,17 @@ class LiveInertProbes(unittest.TestCase):
 
     def test_container_written_host_bytes_are_owner_removable(self):
         name = "aee-tmpfs-owner-%s" % hashlib.sha256(os.urandom(8)).hexdigest()[:8]
+        run.pull_rust_image()
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "out"
             dest.mkdir()
+            owner = run.host_bind_owner(dest)
             try:
                 run.docker_bounded([
                     "create", "--name", name,
                     "--tmpfs", "/vendor:rw,size=1048576,nr_inodes=128",
                     "--mount", "type=bind,source=%s,destination=/out" % dest,
-                    self.image_id, "sleep", "60",
+                    run.RUST_IMAGE, "sleep", "60",
                 ])
                 run.docker_bounded(["start", name])
                 run.docker_ok([
@@ -1686,8 +1732,12 @@ class LiveInertProbes(unittest.TestCase):
                     "mkdir -p /vendor/sub && echo packed > /vendor/keep "
                     "&& echo x > /vendor/sub/LICENSE-APACHE",
                 ])
-                run.docker_ok(["exec", name, "cp", "-a", "/vendor/.", "/out/"])
-                run.reclaim_bind_owner(name)
+                argv = run.copy_tmpfs_argv(name, owner)
+                self.assertEqual(argv[argv.index("--user") + 1], owner)
+                run.docker_ok(argv)
+                with mock.patch.object(mat, "docker_ok", side_effect=run.PrepareError("copy failed")):
+                    with self.assertRaises(run.PrepareError):
+                        run.copy_tmpfs_as_bind_owner(name, dest)
                 keep = dest / "keep"
                 license_apache = dest / "sub" / "LICENSE-APACHE"
                 self.assertTrue(keep.is_file())
