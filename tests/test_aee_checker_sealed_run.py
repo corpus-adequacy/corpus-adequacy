@@ -824,6 +824,11 @@ class InspectContract(unittest.TestCase):
         self.assertTrue(snap["offline_env"])
 
     def test_every_fixed_projected_field_has_a_biting_guard(self):
+        bad_tmpfs = {
+            "/tmp": "rw,size=1,nr_inodes=%d,mode=1777" % run.TMPFS_INODES,
+            "/work": "rw,size=%d,nr_inodes=%d,mode=1777" % (
+                run.TMPFS_BYTES, run.TMPFS_INODES),
+        }
         cases = (
             ("read-only root", {"ReadonlyRootfs": False}, None),
             ("cap drop", {"CapDrop": []}, None),
@@ -831,6 +836,8 @@ class InspectContract(unittest.TestCase):
             ("memory", {"Memory": MEMORY_4G - 1}, None),
             ("memory swap", {"MemorySwap": MEMORY_4G - 1}, None),
             ("pids", {"PidsLimit": 511}, None),
+            ("network", {"NetworkMode": "bridge"}, None),
+            ("tmpfs", {"Tmpfs": bad_tmpfs}, None),
             ("user", {}, {"User": "0:0"}),
             ("offline environment", {}, {"Env": ["PATH=/usr/bin"]}),
         )
