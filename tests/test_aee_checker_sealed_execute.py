@@ -90,7 +90,7 @@ class FunnelWiresCanonicalApis(unittest.TestCase):
         self.assertNotIn("report", result)
         self.assertNotIn("score", result)
 
-    def test_missing_or_real_child_is_refused(self):
+    def test_missing_child_is_refused(self):
         with self.assertRaises(exe.ExecuteError) as ctx:
             _run(child=None)
         self.assertRegex(str(ctx.exception).lower(), r"funnel|fake child")
@@ -139,6 +139,38 @@ class VoidStopsBeforeScoredRows(unittest.TestCase):
         self.assertTrue(result["closed"])
         self.assertEqual(result["close_reason"], "void-before-scored")
 
+    def test_baseline_timeout_voids_and_leaves_later_calls_empty(self):
+        calls = []
+
+        def child(step):
+            calls.append(step["id"])
+            if step["id"] != "baseline":
+                raise AssertionError("scored row after baseline timeout")
+            return {"state": "timeout", "status": "passed"}
+
+        result = _run(child)
+        self.assertEqual(calls, ["baseline"])
+        self.assertEqual(result["dispositions"], ["void"])
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["close_reason"], "void-before-scored")
+
+    def test_control_signal_voids_and_leaves_ordinary_calls_empty(self):
+        calls = []
+
+        def child(step):
+            calls.append(step["id"])
+            if step["kind"] == "mutant":
+                raise AssertionError("ordinary mutant after control signal")
+            if step["kind"] == "baseline":
+                return {"state": "ok", "status": "passed"}
+            return {"state": "signal", "status": "killed", "scored": False}
+
+        result = _run(child)
+        self.assertEqual(calls, ["baseline", "control"])
+        self.assertEqual(result["dispositions"], ["passed", "void"])
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["close_reason"], "void-before-scored")
+
 
 class ClosedVocabularyOnTheFunnel(unittest.TestCase):
     def test_unknown_state_status_killed_is_unproved_not_killed(self):
@@ -164,6 +196,17 @@ class ClosedVocabularyOnTheFunnel(unittest.TestCase):
             return tuple(steps)
 
         with mock.patch.object(exe, "required_sequence", side_effect=reordered):
+            with self.assertRaises(exe.ExecuteError) as ctx:
+                _run()
+        self.assertIn("sequence", str(ctx.exception).lower())
+
+    def test_funnel_uses_authorize_sequence_semantics_not_ids_only(self):
+        source = Path(exe.__file__).read_text(encoding="utf-8")
+        self.assertIn("require_authorized_sequence", source)
+        self.assertIn("voids_before_scored", source)
+        steps = list(auth.required_sequence(auth.load_frozen_sites(PREREG)))
+        steps[0] = dict(steps[0], kind="mutant")
+        with mock.patch.object(exe, "required_sequence", return_value=tuple(steps)):
             with self.assertRaises(exe.ExecuteError) as ctx:
                 _run()
         self.assertIn("sequence", str(ctx.exception).lower())

@@ -255,6 +255,45 @@ class SequenceAndDisposition(unittest.TestCase):
             self.assertEqual(got, "unproved", state)
             self.assertNotEqual(got, "killed")
 
+    def test_baseline_and_control_unproved_states_are_void(self):
+        steps = auth.required_sequence(_sites())
+        for state in ("wrapper-75", "timeout", "signal", "output-cap", "protocol"):
+            self.assertEqual(
+                auth.classify_observation(steps[0], {"state": state, "status": "passed"}),
+                "void",
+                state,
+            )
+            self.assertEqual(
+                auth.classify_observation(
+                    steps[1], {"state": state, "status": "killed", "scored": False}),
+                "void",
+                state,
+            )
+
+    def test_authorized_sequence_pins_kinds_operator_and_scored(self):
+        steps = auth.required_sequence(_sites())
+        pinned = auth.require_authorized_sequence(steps)
+        self.assertEqual(pinned[0], {"id": "baseline", "kind": "baseline", "scored": False})
+        self.assertEqual(pinned[1], {"id": "control", "kind": "must-die", "scored": False})
+        for step in pinned[2:]:
+            self.assertEqual(step["kind"], "mutant")
+            self.assertEqual(step["operator"], "whole-condition-to-false")
+            self.assertNotEqual(step.get("scored"), False)
+
+    def test_right_ids_with_wrong_kind_or_operator_are_refused(self):
+        steps = list(auth.required_sequence(_sites()))
+        steps[0] = dict(steps[0], kind="mutant")
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+        steps = list(auth.required_sequence(_sites()))
+        steps[2] = dict(steps[2], operator="flip-to-true")
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+        steps = list(auth.required_sequence(_sites()))
+        steps[1] = dict(steps[1], scored=True)
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+
     def test_unknown_state_with_status_killed_is_never_killed(self):
         step = {"id": "sealed-1", "kind": "mutant", "operator": "whole-condition-to-false"}
         got = auth.classify_observation(step, {"state": "mystery", "status": "killed"})

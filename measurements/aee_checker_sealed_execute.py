@@ -23,16 +23,17 @@ if str(_ROOT) not in sys.path:
 
 from aee_checker_sealed_authorize import (  # noqa: E402
     KNOWN_DISPOSITIONS,
-    SEALED_IDS,
+    AuthorizeError,
     classify_observation,
     load_frozen_sites,
+    require_authorized_sequence,
     required_sequence,
     validate_authorize,
+    voids_before_scored,
 )
 
 FUNNEL_SCHEMA = "corpus-adequacy.aee-checker-sealed.execution-funnel.v0"
 FUNNEL_PHASE = "execution-funnel"
-EXPECTED_SEQUENCE_IDS = ("baseline", "control") + SEALED_IDS
 NON_CLAIMS = (
     "MC/DC",
     "atomic-subcondition adequacy",
@@ -47,23 +48,16 @@ class ExecuteError(Exception):
     """The execution funnel refused the run."""
 
 
-def _require_sequence(steps) -> list:
-    if type(steps) is not tuple and type(steps) is not list:
-        raise ExecuteError("sequence")
-    ids = [step.get("id") for step in steps]
-    if ids != list(EXPECTED_SEQUENCE_IDS):
-        raise ExecuteError("sequence")
-    if len(set(ids)) != len(ids):
-        raise ExecuteError("sequence")
-    return list(steps)
-
-
 def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
                          pins_dir: Path, child) -> dict:
     if child is None:
         raise ExecuteError("funnel-only; fake child required")
     validate_authorize(authorize_raw, prepare_raw)
-    steps = _require_sequence(required_sequence(load_frozen_sites(Path(pins_dir))))
+    try:
+        steps = list(require_authorized_sequence(
+            required_sequence(load_frozen_sites(Path(pins_dir)))))
+    except AuthorizeError as exc:
+        raise ExecuteError(str(exc)) from exc
     observations = []
     dispositions = []
     executed = []
@@ -79,7 +73,7 @@ def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
         observations.append(observation)
         dispositions.append(disposition)
         executed.append(step["id"])
-        if step.get("kind") in ("baseline", "must-die") and disposition == "void":
+        if voids_before_scored(step, disposition):
             closed = True
             close_reason = "void-before-scored"
             break
@@ -88,7 +82,7 @@ def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
         "schema": FUNNEL_SCHEMA,
         "closed": closed,
         "close_reason": close_reason,
-        "sequence": list(EXPECTED_SEQUENCE_IDS),
+        "sequence": [step["id"] for step in steps],
         "executed": executed,
         "observations": observations,
         "dispositions": dispositions,
