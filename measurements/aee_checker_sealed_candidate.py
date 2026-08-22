@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from secrets import token_hex
 
-from aee_checker_sealed_common import PrepareError
+from aee_checker_sealed_common import PrepareError, load_strict
 from aee_checker_sealed_oci import (
     DEFAULT_MOUNT_SPEC,
     docker_bounded,
@@ -29,12 +29,17 @@ CANDIDATE_MOUNT_SPEC = DEFAULT_MOUNT_SPEC + (("subject", "/subject"),)
 CANDIDATE_ENTRYPOINT = "/bin/sh"
 CANDIDATE_SCRIPT = (
     "set -eu; "
+    "test -d /input; test -d /vendor; test -d /tool; test -d /subject; "
     "cp -a /subject/. /work/; "
     "cd /work; "
-    "cargo build --locked --offline 1>&2; "
-    "exec cargo test --locked --offline -- --quiet"
+    "CARGO_HOME=/vendor cargo build --locked --offline 1>&2; "
+    "exec /tool/checker /input --json /dev/stdout"
 )
 UNPROVED_EXIT = 75
+COMPLETE_RETURNCODES = (0, 1)
+PROJECTION_KEYS = (
+    "verdict", "result", "tiersWithPinnedKey", "tiersWithoutKey",
+)
 
 
 def _unproved() -> subprocess.CompletedProcess:
@@ -43,20 +48,19 @@ def _unproved() -> subprocess.CompletedProcess:
 
 def normalize_inner_event(*, returncode, stdout) -> subprocess.CompletedProcess:
     """Parse a complete inner JSON object once; otherwise emit rc 75."""
-    if returncode != 0 or type(stdout) is not str:
+    if returncode not in COMPLETE_RETURNCODES or type(stdout) is not str:
         return _unproved()
     if stdout == "" or stdout[0] != "{" or stdout != stdout.strip():
         return _unproved()
     try:
-        inner = json.loads(stdout)
-    except Exception:
+        inner = load_strict(stdout.encode("utf-8"))
+    except PrepareError:
         return _unproved()
     if type(inner) is not dict:
         return _unproved()
-    outer = {
-        "schema": "aee-checker-sealed-candidate-result.v0",
-        "status": "ok",
-    }
+    if any(key not in inner for key in PROJECTION_KEYS):
+        return _unproved()
+    outer = {key: inner[key] for key in PROJECTION_KEYS}
     return subprocess.CompletedProcess(
         args=[],
         returncode=0,
@@ -116,14 +120,12 @@ def run_sealed_candidate(*, image_id: str, mounts: dict,
     if getattr(transport, "skip_absent", False):
         raise PrepareError("absence proof skipped")
     name = "%s%s" % (name_prefix, token_hex(4))
-    created = False
     completed = _unproved()
     error = None
     try:
         argv = candidate_create_argv(
             image_id=image_id, name=name, mounts=mounts, sealed=sealed)
         transport.create(argv)
-        created = True
         try:
             proc = transport.start(name)
         except subprocess.TimeoutExpired:
@@ -141,16 +143,17 @@ def run_sealed_candidate(*, image_id: str, mounts: dict,
         inspect = transport.inspect(name)
         validate_inspect_contract(
             inspect, sealed=sealed, mount_spec=CANDIDATE_MOUNT_SPEC)
-    except PrepareError as exc:
+    except Exception as exc:
         error = exc
     finally:
-        if created:
-            try:
-                transport.remove(name)
-            except PrepareError:
-                transport.require_absent(name)
-                raise PrepareError("container remove failed")
-        transport.require_absent(name)
+        try:
+            transport.remove(name)
+        except Exception:
+            pass
+        try:
+            transport.require_absent(name)
+        except PrepareError:
+            raise
     if error is not None:
         raise error
     return completed
