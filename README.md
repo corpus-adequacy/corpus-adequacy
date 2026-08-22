@@ -140,16 +140,27 @@ exclusions, and what the percentage is a percentage of.
 - **Equivalence is declared with a reason, never inferred.** Deciding mutant
   equivalence is undecidable, so a tool claiming to detect it would be lying.
 - **Child termination is classified before stdout is parsed.** Default
-  `accepted_exit_codes` is `[0]`. A parseable report on an undeclared code, a
-  signal, or a missing code is not an outcome. Signals and `None` are never
-  accepted. `outcome_parse: test-names` is batch-only and must include `101`.
-  JSON `outcome_from` has no protocol ID; extra codes such as `2` are declared
-  explicitly, not inferred from a command name. An observed unexpected exit
-  or signal on an ordinary mutant may be a kill with that class named as
-  `how`. A control abnormality is `control-error` and invalidates the run
-  (no score), even if another mutant already moved. Timeout and
-  output-ceiling failures stay their own classes. This repository ships no
-  corpus manifests and does not migrate downstream adapter manifests.
+  `accepted_exit_codes` is `[0]`. Opt-in `unproved_exit_codes` is `[]` and
+  must be disjoint from the accepted set. A parseable report on an undeclared
+  code, a signal, or a missing code is not an outcome. Signals and `None` are
+  never accepted or declared unproved. `outcome_parse: test-names` is
+  batch-only and must include `101`. JSON `outcome_from` has no protocol ID;
+  extra codes such as `2` are declared explicitly, not inferred from a
+  command name. A child that exits with a declared-unproved code is reporting
+  that its *inner* measurement did not complete; that exit is classified
+  before stdout is read, so valid JSON on it is not an outcome. An ordinary
+  mutant with any such exit is `unproved` (`moved` stays 0), even if another
+  vector moved. Host-child timeout, signal, output-cap and unexpected-exit
+  are unchanged. Process/batch direct-child parse-error and incomplete keep
+  their existing disposition; this opt-in field does not reclassify them. The
+  field is process/batch only; a module manifest that declares it is refused.
+  An observed
+  unexpected exit or signal on an ordinary mutant
+  may be a kill with that class named as `how`. A control abnormality is
+  `control-error` and invalidates the run (no score), even if another mutant
+  already moved. Timeout and output-ceiling failures stay their own classes.
+  This repository ships no corpus manifests and does not migrate downstream
+  adapter manifests.
 - **A mutant that never ran is `unproved`, never a kill.** It was never shown to
   the corpus, so the corpus said nothing about that rule. Counting it killed lets
   a typo in the substitution print as a covered rule.
@@ -380,4 +391,4 @@ measured print identically, and only a control separates them.
 
 A manifest is executable trusted input: an author declaration, not independent evidence. 100% is 100% of what that author declared. Do not run a manifest you do not trust. A third-party manifest is not independent evidence merely because it was written elsewhere.
 
-That the tool itself uses no network does not mean a child or a manifest cannot. Every runner starts a child: `runner: module` loads the corpus in a disposable child process of this tool, while `process` and `batch` run the commands the manifest names. The module child is bounded by one deadline, one output ceiling and a POSIX process-group kill, which is trusted-local process isolation. Direct-child failure is classified by role: observed abnormal termination (timeout, output-cap, unexpected-exit, signal) of an ordinary mutant's child is a named kill; an unusable protocol result (empty output, parse error, incomplete) is unproved and never a kill; baseline or control child failure invalidates the score (no adequacy result). Same-user parent signalling (e.g. `kill(getppid())`), session escape and host resource exhaustion remain outside the process-isolation claim. The child inherits this process's filesystem, network, environment and credentials, nothing bounds its memory or its descriptors, and its protocol channel is not authenticated against a corpus written to forge a verdict. Isolation and least privilege are the caller's job; this is not a sandbox.
+That the tool itself uses no network does not mean a child or a manifest cannot. Every runner starts a child: `runner: module` loads the corpus in a disposable child process of this tool, while `process` and `batch` run the commands the manifest names. The module child is bounded by one deadline, one output ceiling and a POSIX process-group kill, which is trusted-local process isolation. Direct-child failure is classified by role: observed abnormal termination (timeout, output-cap, unexpected-exit, signal) of an ordinary mutant's child is a named kill. On the module runner, an unusable protocol result (empty output, parse error, incomplete) is `unproved` and never a kill. On process and batch, a declared `unproved_exit_codes` exit from a living adapter is inner incompleteness and is `unproved`; a direct-child parse-error or incomplete keeps its existing raised/killed disposition. Baseline or control child failure invalidates the score (no adequacy result). Same-user parent signalling (e.g. `kill(getppid())`), session escape and host resource exhaustion remain outside the process-isolation claim. The child inherits this process's filesystem, network, environment and credentials, nothing bounds its memory or its descriptors, and its protocol channel is not authenticated against a corpus written to forge a verdict. Isolation and least privilege are the caller's job; this is not a sandbox.

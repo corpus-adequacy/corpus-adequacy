@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+Opt-in `unproved_exit_codes` beside `accepted_exit_codes` (default `[]`,
+disjoint). A declared-unproved child exit is classified before stdout is
+parsed and never becomes a projected outcome. An ordinary mutant with any
+such exit is `unproved` (`killed == 0`, `moved == 0`), including when
+another process vector moved. Baseline voids; control is `control-error`.
+Host-child timeout, signal, output-cap and unexpected-exit are unchanged.
+Module unusable protocol remains `unproved`. Process/batch parse-error and
+incomplete keep their existing disposition; only a declared
+`unproved_exit_codes` exit on a living adapter is the new `unproved` class.
+A module manifest that declares the field is refused.
+This names adapter-declared inner incompleteness; it does not infer why
+the inner checker failed and does not turn a host-child crash into
+`unproved`. No new report verdict.
+
 ## 0.1.1 — 2026-08-22
 
 One shared JSON decoder (`load_json_document`) serves manifest, vectors,
