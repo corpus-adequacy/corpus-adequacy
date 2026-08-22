@@ -245,11 +245,20 @@ def record_toolchain(toolchain: dict) -> dict:
     return require_vendor_toolchain(toolchain)
 
 
-def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = None) -> bytes:
+def resolve_prepare_image(image_id, *, root: Path) -> str:
+    """Reuse a local sha256 image, or build the inert image once."""
+    if image_id is None:
+        return build_inert_image(Path(root) / "execution" / "aee-checker-sealed")
+    require_local_image(image_id)
+    return require_image_id(image_id)
+
+
+def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = None,
+            image_id=None) -> bytes:
     dest = Path(dest)
     pins_doc = verify_phase_a_frozen(Path(pins_dir), adapter=adapter)
     require_docker_ready()
-    image_id = build_inert_image(Path(root) / "execution" / "aee-checker-sealed")
+    image_id = resolve_prepare_image(image_id, root=root)
     template = Path(root) / "execution" / "aee-checker-sealed" / "cargo-config.toml"
     with tempfile.TemporaryDirectory() as scratch:
         pre_mounts = {name: Path(scratch) / name for name in ("input", "vendor", "tool")}
@@ -390,12 +399,14 @@ def main(argv: list[str]) -> int:
         pins = Path(argv[2]) if len(argv) > 2 else pins_default
         verify_phase_a_frozen(pins, adapter=adapter)
         return 0
-    if len(argv) >= 4 and argv[1] == "prepare":
-        prepare(Path(argv[2]), Path(argv[3]), root=_ROOT, adapter=adapter)
+    if len(argv) in (4, 5) and argv[1] == "prepare":
+        image_id = argv[4] if len(argv) == 5 else None
+        prepare(Path(argv[2]), Path(argv[3]), root=_ROOT, adapter=adapter,
+                image_id=image_id)
         return 0
     sys.stderr.write(
         "usage: aee_checker_sealed_run.py verify-phase-a [pins-dir]\n"
-        "       aee_checker_sealed_run.py prepare <pins-dir> <out-dir>\n")
+        "       aee_checker_sealed_run.py prepare <pins-dir> <out-dir> [image-id]\n")
     return 2
 
 

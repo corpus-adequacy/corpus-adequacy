@@ -685,7 +685,8 @@ class PrepareEvidence(unittest.TestCase):
                 run.emit_prepare_v0(parts, dest)
             self.assertIn("binary", str(ctx.exception).lower())
 
-    def test_regeneration_is_byte_identical(self):
+    def test_emit_prepare_v0_parts_only_is_byte_identical(self):
+        """Parts-only emit. Not a production-path prepare() proof."""
         with tempfile.TemporaryDirectory() as d:
             left = Path(d) / "a.json"
             right = Path(d) / "b.json"
@@ -1428,7 +1429,7 @@ class MaterializeBytes(unittest.TestCase):
 
     def test_prepare_uses_staging_rename_and_fail_closed_daemon(self):
         src = inspect.getsource(run.prepare)
-        self.assertLess(src.index("require_docker_ready"), src.index("build_inert_image"))
+        self.assertLess(src.index("require_docker_ready"), src.index("resolve_prepare_image"))
         self.assertLess(src.index("begin_atomic_dest"), src.index("materialize_pinned"))
         self.assertLess(src.index("emit_prepare_v0"), src.index("commit_atomic_dest"))
         self.assertIn("abort_atomic_dest", src)
@@ -1915,6 +1916,186 @@ class MaterializeVerify(unittest.TestCase):
             with self.assertRaises(run.PrepareError) as ctx:
                 run.verify_file_digest(path, "bb" * 32)
             self.assertIn("digest", str(ctx.exception).lower())
+
+
+
+
+class ExplicitPrepareImage(unittest.TestCase):
+    IMAGE = "sha256:" + ("11" * 32)
+    OTHER = "sha256:" + ("22" * 32)
+
+    def _pins_doc(self):
+        return {
+            "corpus": {
+                "commit": "59faf842098183ae7b5387ad13e6351c44687279",
+                "corpusDigest": (
+                    "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579"),
+            },
+            "instrument": {"commit": run.PHASE_A_INSTRUMENT_COMMIT},
+            "subject": {"commit": "25b9dfa797986624f2d680530a7228232aa3ddda"},
+        }
+
+    def _probe(self, *, image_id, mode, sealed=True, **_kwargs):
+        self.probed.append(image_id)
+        contract = _fixture_contract(
+            network_mode="none" if sealed else "bridge", offline=bool(sealed))
+        if mode in ("deadline-ok", "tmpfs-bytes-ok", "tmpfs-inodes-ok", "output-ok", "ok"):
+            return {"state": "completed", "contract": contract}
+        if mode == "network" and not sealed:
+            return {"state": "completed", "contract": contract}
+        if mode == "deadline":
+            return {"state": "deadline", "contract": contract}
+        if mode == "output":
+            return {"state": "output_cap", "contract": contract}
+        return {"state": "abnormal", "contract": contract}
+
+    def _materialize(self, _pins, staging, **_kwargs):
+        staging = Path(staging)
+        staging.mkdir(parents=True, exist_ok=True)
+        mats = {
+            "corpus": staging / "corpus",
+            "vendor": staging / "vendor",
+            "tool": staging / "tool",
+            "toolchain": {
+                "cargo_V": "cargo 1.92.0 (test)",
+                "image_id": "sha256:" + ("cd" * 32),
+                "index": run.RUST_IMAGE,
+                "observation": "vendor-image; checker was not run",
+                "platform": "linux/arm64",
+                "rustc_Vv": "rustc 1.92.0 (test)",
+            },
+            "corpus_digest": "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579",
+            "corpus_id_count": 250,
+            "corpus_id_set_sha256": "dd" * 32,
+            "corpus_manifest_sha256": run.FROZEN_CORPUS_MANIFEST_SHA256,
+            "corpus_tree_sha256": run.FROZEN_CORPUS_TREE_SHA256,
+            "subject_tree_sha256": run.FROZEN_SUBJECT_TREE_SHA256,
+            "subject_check_rs_sha256": (
+                "1623780ae759c070a85b74e2de6df6dac28f13f068cecbc1ea4b10e070e7a86f"),
+            "tool_config_sha256": "ee" * 32,
+            "vendor_sha256": "aa" * 32,
+            "vendor_outside_subject": True,
+            "subject_binary": False,
+        }
+        for key in ("corpus", "vendor", "tool"):
+            mats[key].mkdir(exist_ok=True)
+        return mats
+
+    def _patches(self, *, local_ok=True):
+        self.probed = []
+        self.built = []
+        self.platforms = []
+
+        def build(_context):
+            self.built.append(self.OTHER)
+            return self.OTHER
+
+        def local(image_id):
+            if not local_ok:
+                raise run.PrepareError("image is not local")
+            run.require_image_id(image_id)
+
+        def platform(image_id):
+            self.platforms.append(image_id)
+            return "linux/arm64"
+
+        return (
+            mock.patch.object(run, "verify_phase_a_frozen", return_value=self._pins_doc()),
+            mock.patch.object(run, "require_docker_ready", return_value="test"),
+            mock.patch.object(run, "build_inert_image", side_effect=build),
+            mock.patch.object(run, "require_local_image", side_effect=local),
+            mock.patch.object(run, "run_inert_probe", side_effect=self._probe),
+            mock.patch.object(run, "materialize_pinned", side_effect=self._materialize),
+            mock.patch.object(run, "execution_identity", return_value={
+                "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "content_sha256": "cc" * 32,
+                "paths": list(run.EXECUTION_PATHS),
+            }),
+            mock.patch.object(run, "image_platform", side_effect=platform),
+            mock.patch.object(run, "docker_bounded", return_value=b"29.7.2"),
+            mock.patch.object(run, "record_toolchain", return_value={
+                "cargo_V": "cargo 1.92.0 (test)",
+                "image_id": "sha256:" + ("cd" * 32),
+                "index": run.RUST_IMAGE,
+                "observation": "vendor-image; checker was not run",
+                "platform": "linux/arm64",
+                "rustc_Vv": "rustc 1.92.0 (test)",
+            }),
+        )
+
+    def _run_prepare(self, dest, image_id=None, root=None):
+        root = root or dest.parent / "root"
+        pins = dest.parent / "pins"
+        patches = self._patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6], patches[7], patches[8], patches[9]:
+            return run.prepare(pins, dest, root=root, image_id=image_id)
+
+    def test_omitted_image_still_builds_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            raw = self._run_prepare(Path(d) / "out-a")
+        self.assertEqual(self.built, [self.OTHER])
+        self.assertTrue(self.probed)
+        self.assertTrue(all(image == self.OTHER for image in self.probed))
+        self.assertEqual(json.loads(raw)["image"]["id"], self.OTHER)
+
+    def test_supplied_image_skips_build_and_is_used_everywhere(self):
+        with tempfile.TemporaryDirectory() as d:
+            raw = self._run_prepare(Path(d) / "out-a", image_id=self.IMAGE)
+        self.assertEqual(self.built, [])
+        self.assertTrue(self.probed)
+        self.assertTrue(all(image == self.IMAGE for image in self.probed))
+        self.assertTrue(all(image == self.IMAGE for image in self.platforms))
+        self.assertEqual(json.loads(raw)["image"]["id"], self.IMAGE)
+
+    def test_two_production_prepares_with_same_image_are_byte_identical(self):
+        with tempfile.TemporaryDirectory() as d:
+            left = self._run_prepare(Path(d) / "out-a", image_id=self.IMAGE)
+            right = self._run_prepare(Path(d) / "out-b", image_id=self.IMAGE)
+        self.assertEqual(left, right)
+        self.assertIn(self.IMAGE.encode("ascii"), left)
+
+    def test_malformed_or_absent_local_image_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "out"
+            with self.assertRaises(run.PrepareError):
+                self._run_prepare(dest, image_id="busybox:latest")
+            self.assertEqual(self.built, [])
+            def missing(image_id):
+                run.require_image_id(image_id)
+                raise run.PrepareError("image is not local")
+            self.probed = []
+            self.built = []
+            with mock.patch.object(run, "verify_phase_a_frozen", return_value=self._pins_doc()), \
+                    mock.patch.object(run, "require_docker_ready", return_value="test"), \
+                    mock.patch.object(run, "build_inert_image", side_effect=lambda *_: self.built.append(1)), \
+                    mock.patch.object(run, "require_local_image", side_effect=missing):
+                with self.assertRaises(run.PrepareError):
+                    run.prepare(Path(d) / "pins", dest, root=Path(d) / "root",
+                                image_id=self.IMAGE)
+            self.assertEqual(self.built, [])
+
+    def test_main_without_command_writes_usage_and_returns_2(self):
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            rc = run.main(["aee_checker_sealed_run.py"])
+        self.assertEqual(rc, 2)
+        self.assertIn("usage:", err.getvalue())
+
+    def test_cli_forwards_optional_image_id_without_validating(self):
+        captured = {}
+
+        def fake_prepare(pins, dest, *, root, adapter, image_id=None):
+            captured["image_id"] = image_id
+            return b"{}\n"
+
+        with mock.patch.object(run, "prepare", side_effect=fake_prepare):
+            rc = run.main(["aee_checker_sealed_run.py", "prepare", "pins", "out", self.IMAGE])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["image_id"], self.IMAGE)
+        with mock.patch.object(run, "prepare", side_effect=fake_prepare):
+            rc = run.main(["aee_checker_sealed_run.py", "prepare", "pins", "out"])
+        self.assertEqual(captured["image_id"], None)
 
 
 if __name__ == "__main__":
