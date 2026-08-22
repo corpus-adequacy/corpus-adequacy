@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Deeply nested measurement JSON below the byte cap is a controlled refusal
+(rc 2, `corpus-adequacy.error.v0`, no traceback). `--json` on `--survivors`
+uses the same envelope with `could not project`. A within-cap anchor that
+is empty after control stripping stays an intentional omission. No
+`report.v0` byte or scoring change.
+
 ## 0.1.0 — 2026-08-22
 
 Publication listing is an opt-in `publications/index.v0.json`. Generation

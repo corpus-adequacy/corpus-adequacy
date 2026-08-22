@@ -3565,6 +3565,86 @@ class SurvivorFindings(unittest.TestCase):
                 self.assertEqual(linked.returncode, 2)
                 self.assertIn("could not project", linked.stderr.decode())
 
+    def test_deep_measurement_input_exits_2_without_traceback(self):
+        raw = "[" * 16000 + "]" * 16000
+        self.assertLess(len(raw.encode("utf-8")), ca.OUTPUT_CAP_BYTES)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "deep.json"
+            path.write_text(raw, encoding="utf-8")
+            for extra in ([], ["--json"]):
+                with self.subTest(extra=extra):
+                    proc = subprocess.run(
+                        [sys.executable, str(ca.__file__), str(path), *extra],
+                        capture_output=True, timeout=30)
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertNotIn(b"Traceback", proc.stderr)
+                    self.assertNotIn(b"Traceback", proc.stdout)
+                    self.assertIn(b"could not measure", proc.stderr)
+                    if extra:
+                        env = json.loads(proc.stdout)
+                        self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+                        self.assertIs(env["ok"], False)
+                        self.assertEqual(env["exit"], 2)
+                        self.assertIn("could not measure", env["error"])
+                        self.assertNotEqual(env.get("schema"), ca.REPORT_SCHEMA)
+
+    def test_load_manifest_classifies_recursionerror(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "m.json"
+            path.write_text("{\"schema\":\"%s\"}" % ca.SCHEMA, encoding="utf-8")
+            with mock.patch.object(ca.json, "loads", side_effect=RecursionError("too deep")):
+                with self.assertRaises(ca.ManifestError) as ctx:
+                    ca.load_manifest(path)
+        self.assertNotIn("Traceback", str(ctx.exception))
+
+    def test_survivors_json_malformed_envelope_uses_project_verb(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "nope.json"
+            path.write_text('{"schema":"nope"}\n', encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), "--survivors", str(path), "--json"],
+                capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("could not project", proc.stderr)
+        self.assertNotIn("could not measure", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        env = json.loads(proc.stdout)
+        self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+        self.assertIn("could not project", env["error"])
+        self.assertNotIn("could not measure", env["error"])
+
+    def test_empty_after_control_strip_is_intentional_omission(self):
+        raw_anchor = "\x01" * 10
+        manifest_obj = {
+            "schema": ca.SCHEMA,
+            "mutants": {
+                "g": [{"label": "only", "anchor": raw_anchor, "replacement": "a"}],
+            },
+        }
+        raw = json.dumps(manifest_obj).encode("utf-8")
+        report = self._report(
+            [self._row("survived", "only")],
+            manifest_sha256="sha256:" + hashlib.sha256(raw).hexdigest(),
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "m.json"
+            path.write_bytes(raw)
+            projected = ca.survivor_findings(report, manifest=path)
+        finding = projected["findings"][0]
+        self.assertNotIn("anchor_excerpt", finding)
+        self.assertNotIn("anchor_omitted", finding)
+        readme = Path(__file__).resolve().parent.parent.joinpath("README.md").read_text(
+            encoding="utf-8")
+        self.assertIn("intentional omission", readme)
+        self.assertIn("empty after control stripping", readme)
+
+    def test_error_envelope_requires_an_explicit_operation(self):
+        with self.assertRaises(TypeError):
+            ca.error_envelope(ValueError("x"))
+        env = ca.error_envelope(ValueError("x"), operation="project")
+        self.assertEqual(env["error"], "could not project: x")
+        env = ca.error_envelope(ValueError("x"), operation="measure")
+        self.assertEqual(env["error"], "could not measure: x")
 
 
 if __name__ == "__main__":

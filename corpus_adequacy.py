@@ -144,12 +144,18 @@ def require_shape(obj, expected, where: str) -> None:
     raise TypeError("require_shape expected dict or list")
 
 
-def error_envelope(exc: BaseException) -> dict:
-    """Parseable --json body for a run that never produced a report."""
+def error_envelope(exc: BaseException, *, operation: str) -> dict:
+    """Parseable --json body for a run that never produced a report.
+
+    `operation` is the verb (`measure` or `project`). One envelope, no
+    second parser rule. The field and stderr share that verb.
+    """
+    if operation not in ("measure", "project"):
+        raise ValueError("error_envelope operation must be measure or project")
     return {
         "schema": ERROR_SCHEMA,
         "ok": False,
-        "error": "could not measure: %s" % exc,
+        "error": "could not %s: %s" % (operation, exc),
         "exit": 2,
     }
 
@@ -490,6 +496,9 @@ def _apply_anchor(finding: dict, manifest_obj: dict) -> None:
     excerpt = _control_stripped_one_line(raw_anchor)
     if excerpt:
         finding["anchor_excerpt"] = excerpt
+    # Intentional omission: a within-cap anchor that is empty after control
+    # stripping gets neither excerpt nor omitted reason. That is not a
+    # missing field and not a new survivors key.
 
 
 def _require_report_rows(report) -> list:
@@ -796,7 +805,12 @@ def _require_unique_labels(m: dict) -> None:
 
 def load_manifest(path: Path) -> dict:
     manifest_bytes = path.read_bytes()
-    m = json.loads(manifest_bytes)
+    try:
+        m = json.loads(manifest_bytes)
+    except RecursionError as exc:
+        raise ManifestError(str(exc)) from None
+    if not isinstance(m, dict):
+        raise ManifestError("manifest must be an object, got %s" % type(m).__name__)
     if m.get("schema") != SCHEMA:
         raise ManifestError("schema must be %r, got %r" % (SCHEMA, m.get("schema")))
     base = path.parent
@@ -2045,7 +2059,7 @@ def _survivors_cli(args, ap) -> int:
     except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError, ValueError) as exc:
         print("could not project: %s" % exc, file=sys.stderr)
         if args.json:
-            print(json.dumps(error_envelope(exc), indent=2, sort_keys=True))
+            print(json.dumps(error_envelope(exc, operation="project"), indent=2, sort_keys=True))
         return 2
     if args.json:
         assert encoded is not None
@@ -2081,7 +2095,7 @@ def main() -> int:
         exc = ManifestError("--manifest requires --survivors")
         print("could not measure: %s" % exc, file=sys.stderr)
         if args.json:
-            print(json.dumps(error_envelope(exc), indent=2, sort_keys=True))
+            print(json.dumps(error_envelope(exc, operation="measure"), indent=2, sort_keys=True))
         return 2
     if args.survivors:
         return _survivors_cli(args, ap)
@@ -2093,7 +2107,7 @@ def main() -> int:
     except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError) as exc:
         print("could not measure: %s" % exc, file=sys.stderr)
         if args.json:
-            print(json.dumps(error_envelope(exc), indent=2, sort_keys=True))
+            print(json.dumps(error_envelope(exc, operation="measure"), indent=2, sort_keys=True))
         return 2
 
     if args.json:
