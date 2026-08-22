@@ -1,0 +1,479 @@
+{
+  "ceilings": {
+    "deadline_seconds": 8,
+    "disk_bytes": 1048576,
+    "file_count": 128,
+    "output_bytes": 4194304
+  },
+  "execution": {
+    "commit": "de8007a5129589b9d82cd45b1683b97c703925e0",
+    "content_sha256": "b88ce50391c0ab2a0b2f748f10d45c44bded3c687cba57f5dd635ef36542a106",
+    "paths": [
+      "measurements/aee_checker_sealed_run.py",
+      "measurements/aee_checker_sealed_common.py",
+      "measurements/aee_checker_sealed_oci.py",
+      "measurements/aee_checker_sealed_materialize.py",
+      "execution/aee-checker-sealed/Containerfile",
+      "execution/aee-checker-sealed/probe.sh",
+      "execution/aee-checker-sealed/cargo-config.toml"
+    ]
+  },
+  "image": {
+    "id": "sha256:4a5b9b64cd5422ade9117b1f7cdca5a8fd9787a91c32a700626298bc424e8657",
+    "id_scope": "host-local",
+    "kind": "inert-probe",
+    "platform": "linux/arm64"
+  },
+  "materialize_ceilings": {
+    "deadline_seconds": 300,
+    "disk_bytes": 67108864,
+    "entry_count": 10000,
+    "output_bytes": 4194304
+  },
+  "materialized": {
+    "corpus_digest": "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579",
+    "corpus_id_count": 250,
+    "corpus_id_set_sha256": "6e91736814c026b943248c648559f7e0c4933ca77c0c641aa59fde854ad4fa4d",
+    "corpus_manifest_sha256": "aaee0241d5f92a65ecfa603113f5c313b3f0593aa97ce8a54732287f0dc26c67",
+    "corpus_tree_sha256": "4bd2f2bf1208beb613fef0e6cc4728483cecae1097b74b54baaf54ce22569c42",
+    "subject_binary": false,
+    "subject_check_rs_sha256": "1623780ae759c070a85b74e2de6df6dac28f13f068cecbc1ea4b10e070e7a86f",
+    "subject_tree_sha256": "393d742154918f640593fe9962cf87a273a28c93b24c0569ee4bef3a039fdc3d",
+    "tool_config_sha256": "8dc330c974e99a362fd8d27f5d76f485da9559f80d576e0fd9ffb1779e4dd881",
+    "vendor_outside_subject": true,
+    "vendor_sha256": "37e752611a10c04157f5393f8544a62b42093f597686123bc8141d26b344005e"
+  },
+  "network": {
+    "cutoff": "after_materialization",
+    "materialization": "online",
+    "sealed_oci": "none"
+  },
+  "non_claims": [
+    "not a scientific measurement",
+    "checker was not run",
+    "subject binary is not produced here",
+    "not a scored outcome",
+    "not a publication row",
+    "memory/swap/pids are inspect-verified; not efficacy-tested"
+  ],
+  "oci": {
+    "cap_drop": [
+      "ALL"
+    ],
+    "memory": "4g",
+    "memory_swap": "4g",
+    "memory_swap_pids_claim": "inspect-verified; not efficacy-tested",
+    "network": "none",
+    "no_new_privileges": true,
+    "pids": 512,
+    "read_only": true,
+    "user": "65532:65532"
+  },
+  "phase": "prepare",
+  "pins": {
+    "corpus_commit": "59faf842098183ae7b5387ad13e6351c44687279",
+    "corpus_digest": "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579",
+    "instrument_commit": "1347651c2087cbd5c2e958a758b380a9a6cfc67d",
+    "phase_a": {
+      "adapters/aee_checker_sealed.py": "130b36d50df8a286954649771c9d65f35541ecd2f7007918ce5b261ace3aa769",
+      "measurements/aee-checker-25b9dfa/control.json": "5a85c46054240a4470da7c6a82e3f13b5f1c30ea301809a2500a47a6e2f91f71",
+      "measurements/aee-checker-25b9dfa/manifest.json": "2f16654dd57a0b1719ec2ec5be7a833192ccae529d08c4c7695c7df4782c32c8",
+      "measurements/aee-checker-25b9dfa/pins.json": "e2456cbfcbbda17800318703e296e72fcaf138037178bad1fe237bc2c460c7e4",
+      "measurements/aee-checker-25b9dfa/sites.json": "6223a15c5db5a7c19c4633474875615ec61f3d710e092939f46b80ee986e0c4c"
+    },
+    "subject_commit": "25b9dfa797986624f2d680530a7228232aa3ddda"
+  },
+  "probe_evidence": [
+    {
+      "control": "completed",
+      "inspect": {
+        "control": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        },
+        "refusal": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        }
+      },
+      "mechanism": "deadline",
+      "refusal": "deadline"
+    },
+    {
+      "control": "completed",
+      "inspect": {
+        "control": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        },
+        "refusal": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        }
+      },
+      "mechanism": "disk",
+      "refusal": "abnormal"
+    },
+    {
+      "control": "completed",
+      "inspect": {
+        "control": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        },
+        "refusal": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        }
+      },
+      "mechanism": "file-count",
+      "refusal": "abnormal"
+    },
+    {
+      "control": "completed",
+      "inspect": {
+        "control": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "bridge",
+          "no_new_privileges": true,
+          "offline_env": false,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        },
+        "refusal": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        }
+      },
+      "mechanism": "network-off",
+      "refusal": "abnormal"
+    },
+    {
+      "control": "completed",
+      "inspect": {
+        "control": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        },
+        "refusal": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        }
+      },
+      "mechanism": "output",
+      "refusal": "output_cap"
+    },
+    {
+      "control": "completed",
+      "inspect": {
+        "control": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        },
+        "refusal": {
+          "cap_drop": [
+            "ALL"
+          ],
+          "memory": 4294967296,
+          "memory_swap": 4294967296,
+          "network_mode": "none",
+          "no_new_privileges": true,
+          "offline_env": true,
+          "pids": 512,
+          "read_only_root": true,
+          "readonly_mounts": [
+            "/input",
+            "/tool",
+            "/vendor"
+          ],
+          "tmpfs": {
+            "/tmp": {
+              "nr_inodes": 128,
+              "size": 1048576
+            },
+            "/work": {
+              "nr_inodes": 128,
+              "size": 1048576
+            }
+          },
+          "user": "65532:65532"
+        }
+      },
+      "mechanism": "protocol-exit",
+      "refusal": "abnormal"
+    }
+  ],
+  "runtime": {
+    "docker": "29.7.2",
+    "observation": "host-local; not a portable bound"
+  },
+  "schema": "corpus-adequacy.aee-checker-sealed.prepare.v0",
+  "toolchain": {
+    "cargo_V": "cargo 1.92.0 (344c4567c 2025-10-21)",
+    "image_id": "sha256:e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2",
+    "index": "docker.io/library/rust@sha256:e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2",
+    "observation": "vendor-image; checker was not run",
+    "platform": "linux/arm64",
+    "rustc_Vv": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-unknown-linux-gnu\nrelease: 1.92.0\nLLVM version: 21.1.3\n"
+  }
+}
