@@ -175,8 +175,33 @@ class CandidateArgv(unittest.TestCase):
         self.assertNotIn("CARGO_HOME=/vendor", script)
         self.assertNotIn("aee-checker /input --json", script)
         self.assertNotIn("cargo test", script)
+        self.assertIn("--json /work/report.json 1>&2", script)
+
+    def test_human_stdout_on_protocol_channel_turns_valid_report_unproved(self):
+        self.assertIn("--json /work/report.json 1>&2", cand.CANDIDATE_SCRIPT)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            report = root / "report.json"
+            report.write_text(json.dumps(RICH_REPORT), encoding="utf-8")
+            mixed = subprocess.run(
+                ["sh", "-lc", "printf 'wrote %s\\n'; cat report.json"],
+                cwd=root, capture_output=True, text=True, check=True)
+            (root / "host").mkdir()
+            vectors = cand.host_vectors_path(_mounts(root / "host"))
+            bitten = cand.normalize_inner_event(
+                returncode=0, stdout=mixed.stdout, vectors=vectors)
+            self.assertEqual(bitten.returncode, 75)
+            redirected = subprocess.run(
+                ["sh", "-lc",
+                 "printf 'wrote %s\\n' 1>&2; cat report.json"],
+                cwd=root, capture_output=True, text=True, check=True)
+            clean = cand.normalize_inner_event(
+                returncode=0, stdout=redirected.stdout, vectors=vectors)
+            self.assertEqual(clean.returncode, 0)
+            self.assertIn("rows", json.loads(clean.stdout))
 
     def test_candidate_selects_bin_sh_lc_and_subject_readonly(self):
+
         with tempfile.TemporaryDirectory() as d:
             mounts = _mounts(Path(d))
             argv = cand.candidate_create_argv(

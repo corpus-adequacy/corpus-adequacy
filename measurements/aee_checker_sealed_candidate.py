@@ -41,7 +41,7 @@ CANDIDATE_SCRIPT = (
     "cd /work; "
     "CARGO_HOME=/tool cargo build --release --locked --offline 1>&2; "
     "set +e; "
-    "/work/target/release/aee-checker /input/vectors --json /work/report.json; "
+    "/work/target/release/aee-checker /input/vectors --json /work/report.json 1>&2; "
     "status=$?; "
     "set -e; "
     "cat /work/report.json; "
