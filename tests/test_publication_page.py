@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import html
 import json
@@ -162,7 +163,7 @@ class PublicationPage(unittest.TestCase):
             dest.mkdir(parents=True)
             doc = json.loads((VALID / "report.v0.json").read_text(encoding="utf-8"))
             src = json.loads((VALID / "source.json").read_text(encoding="utf-8"))
-            src["repository"] = payload
+            src["repository"] = "owner/name"
             src["commit"] = "d" * 40
             src["non_claims"] = [payload, onerror, mixed]
             dest.joinpath("source.json").write_text(json.dumps(src, indent=2) + "\n")
@@ -182,7 +183,8 @@ class PublicationPage(unittest.TestCase):
             dest.mkdir(parents=True)
             doc = json.loads((VALID / "report.v0.json").read_text(encoding="utf-8"))
             src = json.loads((VALID / "source.json").read_text(encoding="utf-8"))
-            src["repository"] = JS_HREF
+            src["repository"] = "owner/name"
+            src["commit"] = "a" * 40
             src["non_claims"] = [XSS_PAYLOAD]
             dest.joinpath("source.json").write_text(json.dumps(src) + "\n")
             dest.joinpath("report.v0.json").write_text(json.dumps(doc) + "\n")
@@ -408,6 +410,56 @@ class PublicationPage(unittest.TestCase):
         self.assertIn("projection-digest", page)
         command = "python3 corpus_adequacy.py measurements/tersign-1cc5ea32/manifest.json --json"
         self.assertLess(page.find(command), page.find('class="counts"'))
+
+
+    def test_invalid_source_shape_fails(self):
+        cases = (
+            ("repository-number", 123, "not-a-commit"),
+            ("repository-no-slash", "not-a-repo", "a" * 40),
+            ("commit-uppercase", "owner/name", "DEADBEEF" * 5),
+            ("commit-non-hex", "owner/name", "not-a-commit"),
+        )
+        for name, repository, commit in cases:
+            with self.subTest(name):
+                with tempfile.TemporaryDirectory() as d:
+                    root = _write_tree(Path(d), [VALID / "report.v0.json"])
+                    source = root / "measurements" / "valid-tersign" / "source.json"
+                    src = json.loads(source.read_text(encoding="utf-8"))
+                    src["repository"] = repository
+                    src["commit"] = commit
+                    source.write_text(json.dumps(src, indent=2) + "\n", encoding="utf-8")
+                    _write_index(root)
+                    with self.assertRaises(rpp.PublicationError):
+                        _render(root)
+
+
+    def test_rendered_card_links_immutable_source_commit(self):
+        with tempfile.TemporaryDirectory() as d:
+            page = _render(_write_tree(Path(d), [VALID / "report.v0.json"]))
+        src = json.loads((VALID / "source.json").read_text(encoding="utf-8"))
+        commit = src["commit"]
+        repo = src["repository"]
+        self.assertEqual(len(commit), 40)
+        self.assertIn("/commit/" + commit, page)
+        self.assertIn(
+            'href="https://github.com/%s/commit/%s"' % (repo, commit),
+            page,
+        )
+        self.assertNotIn("<span>source commit", page)
+
+
+
+    def test_load_record_calls_require_source_shape(self):
+        tree = ast.parse(Path(rpp.__file__).read_text(encoding="utf-8"))
+        load = next(
+            n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "load_record"
+        )
+        calls = [
+            n.func.id
+            for n in ast.walk(load)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        ]
+        self.assertIn("_require_source_shape", calls)
 
 
 class MutationProbes(unittest.TestCase):

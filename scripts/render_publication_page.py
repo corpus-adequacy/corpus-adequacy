@@ -63,6 +63,16 @@ def _looks_like_commit(value: str) -> bool:
     return isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in value)
 
 
+def _require_source_shape(source) -> tuple[str, str]:
+    repository = source.get("repository") if isinstance(source, dict) else None
+    commit = source.get("commit") if isinstance(source, dict) else None
+    if not _looks_like_repo(repository):
+        raise PublicationError("source repository is not owner/name")
+    if not _looks_like_commit(commit):
+        raise PublicationError("source commit is not a 40-hex digest")
+    return repository, commit
+
+
 def _require_hex64(value, *, field: str) -> str:
     if not isinstance(value, str) or len(value) != 64 or set(value) - HEX64:
         raise PublicationError("%s is not a 64-hex digest" % field)
@@ -165,8 +175,7 @@ def load_record(
     if expected_source_sha256 is not None and source_digest != expected_source_sha256:
         raise PublicationError("source digest mismatch for %s" % source_path)
     directory = record_id if record_id is not None else report_path.parent.name
-    repository = source.get("repository") if isinstance(source.get("repository"), str) else ""
-    source_commit = source.get("commit") if isinstance(source.get("commit"), str) else ""
+    repository, source_commit = _require_source_shape(source)
     non_claims = []
     extra = source.get("non_claims")
     if isinstance(extra, list):
@@ -303,10 +312,10 @@ def _card_html(record: dict, build_commit: str) -> str:
     raw_href = "%s/%s/%s" % (RAW_PREFIX, build_commit, record["report_rel"]) if _looks_like_commit(build_commit) else record["report_rel"]
     review_href = "%s/%s/%s" % (BLOB_PREFIX, build_commit, record["review_rel"]) if _looks_like_commit(build_commit) else record["review_rel"]
     source_href = _source_commit_url(record)
+    if not source_href:
+        raise PublicationError("source commit URL is missing")
     source_link = (
         '<a href="%s">source commit %s</a>' % (_esc(source_href), _esc(record["source_commit"]))
-        if source_href
-        else "<span>source commit %s</span>" % _esc(record["source_commit"])
     )
     silent_value = record["silent_label"]
     counts = (
