@@ -642,6 +642,41 @@ def _declared_control_count(m: dict) -> int:
                for group in m["mutants"].values() for mut in group)
 
 
+def partition_declared_mutants(mutants: dict) -> tuple:
+    """Stable split: every control, then every ordinary mutant.
+
+    Walks sorted group names, then declaration order. Relative order is
+    preserved within each partition. No controls leaves the current
+    sorted-group walk unchanged.
+    """
+    if type(mutants) is not dict:
+        raise ManifestError("mutants must be an object")
+    items = [(group, mut) for group in sorted(mutants) for mut in mutants[group]]
+    controls = [(group, mut) for group, mut in items if mut.get("control")]
+    ordinary = [(group, mut) for group, mut in items if not mut.get("control")]
+    return controls, ordinary
+
+
+def _append_group_equivalents(results: list, m: dict, group: str,
+                              baselines: dict, emitted: set) -> int:
+    """Emit one group's declared equivalents once.
+
+    Equivalents are declarations, not ordinary executions. The ordinary wave
+    calls this after each group so no-control row order stays group then
+    that group's equivalents. A later pass over remaining baseline groups
+    keeps declarations on a control abort that never entered wave 1.
+    """
+    if group not in baselines or group in emitted:
+        return 0
+    emitted.add(group)
+    added = 0
+    for eq in m["equivalent"].get(group, []):
+        results.append({"group": group, "label": eq["label"], "verdict": "equivalent",
+                        "how": eq["reason"], "moved": 0})
+        added += 1
+    return added
+
+
 def _control_status(statuses: list[str], declared_count: int) -> str:
     """Summarise all declared controls without asking a consumer to scan rows.
 
@@ -1644,11 +1679,23 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                     "would have caught. Read the corpus's own declaration of its comparison "
                     "surface and match it." % (_selector, never_seen))
 
-        for group in sorted(m["mutants"]):
-            if group not in baselines:
-                continue
-            vectors, baseline, baseline_diag = baselines[group]
-            for mut in m["mutants"][group]:
+        controls, ordinary = partition_declared_mutants(m["mutants"])
+        prev_ordinary = None
+        emitted_equivalents: set = set()
+        for wave_index, wave in enumerate((controls, ordinary)):
+            if wave_index == 1 and declared_controls and _control_status(
+                    control_statuses, declared_controls) != "killed":
+                break
+            for group, mut in wave:
+                if (wave_index == 1 and prev_ordinary is not None
+                        and group != prev_ordinary):
+                    equivalent += _append_group_equivalents(
+                        results, m, prev_ordinary, baselines, emitted_equivalents)
+                if wave_index == 1:
+                    prev_ordinary = group
+                if group not in baselines:
+                    continue
+                vectors, baseline, baseline_diag = baselines[group]
                 scope = mut.get("scope", "declared")
                 sources = [_resolved_contained_source(sp, m["_repo_root"])
                            for sp in m["_source_paths"]]
@@ -1656,14 +1703,34 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                         for sp in sources]
                 total = sum(n for _, n in hits)
                 if total == 0:
-                    failures.append("%s / %s: anchor not found in any declared source"
-                                    % (group, mut["label"]))
+                    detail = "%s / %s: anchor not found in any declared source" % (
+                        group, mut["label"])
+                    if mut.get("control"):
+                        _record_control(
+                            results, control_statuses,
+                            group, mut["label"], scope, detected=False,
+                            moved=0, error=detail)
+                        failures.append(
+                            "control %r ended abnormally (%s); that is not a kill and "
+                            "this run has no adequacy score" % (mut["label"], detail))
+                    else:
+                        failures.append(detail)
                     continue
                 if total > 1:
-                    failures.append(
+                    detail = (
                         "%s / %s: the anchor occurs %d times across the declared sources, so "
                         "the substitution would pick one arbitrarily. Make it unique"
                         % (group, mut["label"], total))
+                    if mut.get("control"):
+                        _record_control(
+                            results, control_statuses,
+                            group, mut["label"], scope, detected=False,
+                            moved=0, error=detail)
+                        failures.append(
+                            "control %r ended abnormally (%s); that is not a kill and "
+                            "this run has no adequacy score" % (mut["label"], detail))
+                    else:
+                        failures.append(detail)
                     continue
 
                 target = next(sp for sp, n in hits if n == 1)
@@ -1680,6 +1747,15 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                         # typo in the substitution print as "rule covered". Measure a
                         # load-bearing arm with a variant that COMPILES, or declare it
                         # equivalent.
+                        if mut.get("control"):
+                            _record_control(
+                                results, control_statuses,
+                                group, mut["label"], scope, detected=False,
+                                moved=0, error=detail)
+                            failures.append(
+                                "control %r ended abnormally (%s); that is not a kill and "
+                                "this run has no adequacy score" % (mut["label"], detail))
+                            continue
                         results.append({"group": group, "label": mut["label"],
                                         "verdict": "unproved", "scope": scope, "moved": 0,
                                         "how": "the mutant does not build, so the corpus was "
@@ -1785,11 +1861,12 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                                     "how": "no vector distinguishes it. An implementation can "
                                            "delete this rule and still reproduce the digest"})
                     survived += 1
-
-            for eq in m["equivalent"].get(group, []):
-                results.append({"group": group, "label": eq["label"], "verdict": "equivalent",
-                                "how": eq["reason"], "moved": 0})
-                equivalent += 1
+        if prev_ordinary is not None:
+            equivalent += _append_group_equivalents(
+                results, m, prev_ordinary, baselines, emitted_equivalents)
+        for group in sorted(m["mutants"]):
+            equivalent += _append_group_equivalents(
+                results, m, group, baselines, emitted_equivalents)
     finally:
         try:
             if guard is not None:
@@ -1815,6 +1892,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     # implementer can delete while reproducing every pinned outcome, whatever the
     # diagnostics did; counting it killed would inflate the score by exactly the
     # rules the corpus fails to force.
+    control_status = _control_status(control_statuses, declared_controls)
     denom = killed + survived + silent
     # No denominator means no measurement. Printing 100% over zero is the same
     # defect as excluding everything and printing 100%. An unmutated or control
@@ -1832,7 +1910,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                         "diagnostic. The rule is not forced by the outcomes this corpus pins, so "
                         "it counts against the score; either write a vector that moves an outcome "
                         "or declare the diagnostic channel part of the pinned surface" % silent)
-    if denom == 0:
+    if denom == 0 and (declared_controls == 0 or control_status == "killed"):
         failures.append(null_result_reading(known_holes, equivalent, out_of_scope))
 
     return _report_v0(
@@ -1840,7 +1918,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         killed=killed, survived=survived, silent=silent, equivalent=equivalent,
         out_of_scope=out_of_scope, unproved=unproved, known_holes=known_holes,
         score=score, results=results, failures=failures,
-        control_status=_control_status(control_statuses, declared_controls),
+        control_status=control_status,
         originals_unverified_against_head=guard.unverified)
 
 
