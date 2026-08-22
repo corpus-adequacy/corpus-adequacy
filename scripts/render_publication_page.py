@@ -55,8 +55,17 @@ def _looks_like_repo(value: str) -> bool:
     if not isinstance(value, str) or value.count("/") != 1:
         return False
     owner, name = value.split("/", 1)
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_")
-    return bool(owner) and bool(name) and set(owner) <= allowed and set(name) <= allowed
+    if not owner or len(owner) > 39 or owner[0] == "-" or owner[-1] == "-":
+        return False
+    owner_ok = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+    if set(owner) - owner_ok:
+        return False
+    if not name or len(name) > 100 or name in (".", ".."):
+        return False
+    name_ok = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    if set(name) - name_ok:
+        return False
+    return True
 
 
 def _looks_like_commit(value: str) -> bool:
@@ -402,8 +411,8 @@ h1, h2, h3 { line-height: 1.2; }
 .count { border: 1px solid #333; padding: 0.35rem 0.5rem; min-width: 5rem; }
 .count-label { display: block; font-size: 0.8rem; }
 .mono, pre { overflow-wrap: anywhere; word-break: break-word; }
-pre { background: #eee; padding: 0.5rem; user-select: text; }
-.links a { margin-right: 0.75rem; }
+pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wrap; }
+.links a { margin-right: 0.75rem; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -500,6 +509,32 @@ def _atomic_write(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
+
+def _git_run(root: Path, args: list[str]) -> int:
+    return subprocess.run(
+        args,
+        cwd=str(root),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode
+
+
+def _require_recorded_link_commit(root: Path, recorded: str, records: list[dict]) -> None:
+    """Refuse an implicit --check commit that is not a real ancestor with matching bytes."""
+    if not _looks_like_commit(recorded):
+        raise PublicationError("recorded source-commit is not a 40-hex digest")
+    if _git_run(root, ["git", "cat-file", "-e", recorded + "^{commit}"]) != 0:
+        raise PublicationError("recorded source-commit is not a git commit")
+    if _git_run(root, ["git", "merge-base", "--is-ancestor", recorded, "HEAD"]) != 0:
+        raise PublicationError("recorded source-commit is not an ancestor of HEAD")
+    for record in records:
+        source_rel = "measurements/%s/source.json" % record["directory"]
+        for rel in (record["report_rel"], source_rel, record["review_rel"]):
+            if _git_run(root, ["git", "cat-file", "-e", "%s:%s" % (recorded, rel)]) != 0:
+                raise PublicationError("recorded source-commit is missing %s" % rel)
+            if _git_run(root, ["git", "diff", "--quiet", recorded, "--", rel]) != 0:
+                raise PublicationError("recorded source-commit bytes differ for %s" % rel)
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Render the publication page")
     parser.add_argument("--root", default=".", type=Path)
@@ -515,7 +550,12 @@ def main(argv=None) -> int:
     out = args.out if args.out.is_absolute() else root / args.out
     if args.check:
         existing = read_bounded_regular_file(out)
-        recorded = args.source_commit or source_commit_from_html(existing.decode("utf-8"))
+        if args.source_commit:
+            recorded = args.source_commit
+        else:
+            recorded = source_commit_from_html(existing.decode("utf-8"))
+            _index_bytes, records = load_listed_records(root)
+            _require_recorded_link_commit(root, recorded, records)
         rendered = render_html(root, recorded).encode("utf-8")
         if existing != rendered:
             raise PublicationError("checked-in %s does not match a fresh render" % out)

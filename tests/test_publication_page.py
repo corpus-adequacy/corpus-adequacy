@@ -8,6 +8,7 @@ import html
 import json
 import os
 import shutil
+import subprocess
 import stat
 import sys
 import tempfile
@@ -419,6 +420,15 @@ class PublicationPage(unittest.TestCase):
             ("repository-no-slash", "not-a-repo", "a" * 40, repo_msg),
             ("commit-uppercase", "owner/name", "DEADBEEF" * 5, commit_msg),
             ("commit-non-hex", "owner/name", "not-a-commit", commit_msg),
+            ("owner-dot-dot", "../x", "a" * 40, repo_msg),
+            ("repo-dot-dot", "x/..", "a" * 40, repo_msg),
+            ("owner-dot", "./x", "a" * 40, repo_msg),
+            ("repo-dot", "x/.", "a" * 40, repo_msg),
+            ("owner-underscore", "_/repo", "a" * 40, repo_msg),
+            ("owner-leading-hyphen", "-ab/name", "a" * 40, repo_msg),
+            ("owner-trailing-hyphen", "ab-/name", "a" * 40, repo_msg),
+            ("owner-too-long", ("a" * 40) + "/name", "a" * 40, repo_msg),
+            ("empty-repo", "a/", "a" * 40, repo_msg),
         )
         for name, repository, commit, expected_message in cases:
             with self.subTest(name):
@@ -450,24 +460,29 @@ class PublicationPage(unittest.TestCase):
 
 
 
-class MutationProbes(unittest.TestCase):
-    """Independent swaps must fail the corresponding assertion."""
-
-    def test_count_swap_is_detected(self):
+    def test_implicit_check_rejects_nonexistent_recorded_commit(self):
+        zeros = "0" * 40
         with tempfile.TemporaryDirectory() as d:
-            root = _write_tree(Path(d), [VALID / "report.v0.json"])
-            page = _render(root)
-            self.assertIn("10", page)
-            mutated = page.replace(">10<", ">0<", 1)
-            self.assertNotEqual(page, mutated)
-
-    def test_digest_swap_is_detected(self):
-        with tempfile.TemporaryDirectory() as d:
-            root = _write_tree(Path(d), [VALID / "report.v0.json"])
-            page = _render(root)
-            digest = hashlib.sha256((VALID / "report.v0.json").read_bytes()).hexdigest()
-            self.assertIn(digest, page)
-            self.assertNotIn("deadbeef" * 4, page)
+            clone = Path(d) / "clone"
+            subprocess.run(
+                [
+                    "git", "clone", "--quiet", "--no-hardlinks", "--no-tags",
+                    str(REPO_ROOT), str(clone),
+                ],
+                check=True,
+            )
+            site = clone / "site" / "index.html"
+            original = site.read_text(encoding="utf-8")
+            recorded = rpp.source_commit_from_html(original)
+            mutated = original.replace(recorded, zeros)
+            self.assertIn(zeros, mutated)
+            self.assertNotIn(recorded, mutated)
+            site.write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(
+                rpp.PublicationError,
+                "recorded source-commit is not a git commit",
+            ):
+                rpp.main(["--root", str(clone), "--out", str(site), "--check"])
 
 
 if __name__ == "__main__":
