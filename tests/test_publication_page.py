@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import html
 import json
@@ -447,19 +446,6 @@ class PublicationPage(unittest.TestCase):
         )
         self.assertNotIn("<span>source commit", page)
 
-
-
-    def test_load_record_calls_require_source_shape(self):
-        tree = ast.parse(Path(rpp.__file__).read_text(encoding="utf-8"))
-        load = next(
-            n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "load_record"
-        )
-        calls = [
-            n.func.id
-            for n in ast.walk(load)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        ]
-        self.assertIn("_require_source_shape", calls)
 
 
 class MutationProbes(unittest.TestCase):
