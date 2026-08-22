@@ -1316,7 +1316,9 @@ class MaterializeBytes(unittest.TestCase):
         live_setup = inspect.getsource(LiveInertProbes.setUpClass)
         self.assertLess(
             live_setup.index("require_live_oci_capability"), live_setup.index("TemporaryDirectory"))
-        self.assertIn("SkipTest", live_setup)
+        self.assertIn("GITHUB_ACTIONS", live_setup)
+        self.assertIn("Linux", live_setup)
+        self.assertLess(live_setup.index("Linux"), live_setup.index("SkipTest"))
         self.assertFalse(getattr(LiveInertProbes, "__unittest_skip__", False))
 
     def test_missing_docker_executable_is_unavailable_not_an_import_crash(self):
@@ -1336,12 +1338,49 @@ class MaterializeBytes(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "docker daemon is not ready")
 
     def test_live_class_skips_with_exact_reason_when_daemon_not_ready(self):
-        with mock.patch.object(
-                run, "require_live_oci_capability",
-                side_effect=run.PrepareError("docker daemon is not ready")):
-            with self.assertRaises(unittest.SkipTest) as ctx:
-                LiveInertProbes.setUpClass()
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "macOS"}):
+            with mock.patch.object(
+                    run, "require_live_oci_capability",
+                    side_effect=run.PrepareError("docker daemon is not ready")):
+                with self.assertRaises(unittest.SkipTest) as ctx:
+                    LiveInertProbes.setUpClass()
         self.assertEqual(str(ctx.exception), "docker daemon is not ready")
+
+    def test_hosted_windows_skips_unavailable_with_exact_reason(self):
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Windows"}):
+            with mock.patch.object(
+                    run, "require_live_oci_capability",
+                    side_effect=run.DockerUnavailable("docker executable is not available")):
+                with self.assertRaises(unittest.SkipTest) as ctx:
+                    LiveInertProbes.setUpClass()
+        self.assertEqual(str(ctx.exception), "docker executable is not available")
+
+    def test_hosted_linux_capability_failure_is_not_a_skip(self):
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}):
+            with mock.patch.object(
+                    run, "require_live_oci_capability",
+                    side_effect=run.PrepareError("docker daemon is not ready")):
+                try:
+                    LiveInertProbes.setUpClass()
+                except unittest.SkipTest as skip:
+                    self.fail("hosted Linux skipped: %s" % skip)
+                except run.PrepareError as exc:
+                    daemon = exc
+                else:
+                    self.fail("hosted Linux capability failure must raise")
+            with mock.patch.object(
+                    run, "require_live_oci_capability",
+                    side_effect=run.DockerUnavailable("docker executable is not available")):
+                try:
+                    LiveInertProbes.setUpClass()
+                except unittest.SkipTest as skip:
+                    self.fail("hosted Linux skipped: %s" % skip)
+                except run.DockerUnavailable as exc:
+                    unavailable = exc
+                else:
+                    self.fail("hosted Linux unavailable must raise")
+        self.assertEqual(str(daemon), "docker daemon is not ready")
+        self.assertEqual(str(unavailable), "docker executable is not available")
 
     def test_prepare_injected_materialize_failure_leaves_no_final(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1417,6 +1456,8 @@ class LiveInertProbes(unittest.TestCase):
         try:
             cls.image_id = run.require_live_oci_capability(CONTAINERFILE.parent)
         except run.PrepareError as exc:
+            if os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_OS") == "Linux":
+                raise
             raise unittest.SkipTest(str(exc)) from exc
         run.require_image_id(cls.image_id)
         cls._tmp = tempfile.TemporaryDirectory()
