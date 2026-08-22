@@ -412,6 +412,74 @@ def _plain_sentence(record: dict) -> str:
     )
 
 
+def _inspect_command(record: dict) -> str:
+    return "python3 corpus_adequacy.py --survivors %s --json" % record["report_rel"]
+
+
+def _release_href() -> str:
+    return (
+        "https://github.com/corpus-adequacy/corpus-adequacy/releases/tag/v%s"
+        % ca.VERSION
+    )
+
+
+def _clone_command() -> str:
+    return (
+        "git clone --depth 1 --branch v%s "
+        "https://github.com/corpus-adequacy/corpus-adequacy.git"
+        % ca.VERSION
+    )
+
+
+def _first_run_html(records: list[dict], source_commit: str) -> str:
+    inspect_blocks = []
+    tool_rows = []
+    for record in records:
+        inspect_blocks.append(
+            "<p>Safe first inspect. This command reads existing report bytes "
+            "and does not measure.</p>\n"
+            "<pre><code>%s</code></pre>" % _esc(_inspect_command(record))
+        )
+        tool_rows.append(
+            "<p>report tool_commit <span class=\"mono\">%s</span></p>\n"
+            "<p>report tool_content_sha256 <span class=\"mono\">%s</span></p>\n"
+            "<p>report tool_version <span class=\"mono\">%s</span></p>"
+            % (
+                _esc(record["tool_commit"]),
+                _esc(record["tool_content_sha256"]),
+                _esc(record["tool_version"]),
+            )
+        )
+    tag = "v%s" % ca.VERSION
+    return (
+        '<section id="first-run" class="non-claims" aria-labelledby="first-run-heading">\n'
+        '<h2 id="first-run-heading">What this measures</h2>\n'
+        "<p>This page identifies which author-declared rule-removal mutants "
+        "the corpus distinguished.</p>\n"
+        "%s\n"
+        "<p>The card below keeps the measurement command. exit 1 with --json "
+        "is a completed inadequate measurement with declared survivors, not a "
+        "crash; exit 2 is refusal.</p>\n"
+        "%s\n"
+        "<p>Pages projection source-commit <span class=\"mono\">%s</span></p>\n"
+        "<p>tagged tool <span class=\"mono\">%s</span></p>\n"
+        '<p><a href="%s">Release %s</a></p>\n'
+        "<p>Clone</p>\n"
+        "<pre><code>%s</code></pre>\n"
+        "<p>Equal counts do not imply identical report bytes.</p>\n"
+        "</section>"
+        % (
+            "\n".join(inspect_blocks),
+            "\n".join(tool_rows),
+            _esc(source_commit),
+            _esc(tag),
+            _esc(_release_href()),
+            _esc(tag),
+            _esc(_clone_command()),
+        )
+    )
+
+
 def _non_claims_html(records: list[dict] | None = None) -> str:
     seen = []
     for rec in records or []:
@@ -514,6 +582,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 <p>Committed <code>report.v0</code> records listed in <code>publications/index.v0.json</code>.</p>
 </header>
 %s
+%s
 <nav class="ctas" aria-label="intake and publication forms">
 <a href="%s">Request source intake</a>
 <a href="%s">Hand off a completed measurement</a>
@@ -530,6 +599,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
         _esc(projection_digest),
         _esc(source_commit),
         SHARED_STYLE,
+        _first_run_html(records, source_commit),
         _non_claims_html(records),
         _esc(ISSUES_INTAKE),
         _esc(ISSUES_PUBLISH),

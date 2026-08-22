@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="projection-digest" content="1434da50a2acdeeec63e5cc82d78e36e0df7bf84aab5237816b961e6bce3d8b5">
+<meta name="projection-digest" content="ff821dadaa2136f9153bace7cce1e5357e756b532b9fdc523fd2f23bca551fe0">
 <meta name="source-commit" content="a4a39bb38f6ba4512872fec4798b640086863619">
 <title>Published corpus-adequacy measurements</title>
 <style>
@@ -36,6 +36,22 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 <h1>Published measurements</h1>
 <p>Committed <code>report.v0</code> records listed in <code>publications/index.v0.json</code>.</p>
 </header>
+<section id="first-run" class="non-claims" aria-labelledby="first-run-heading">
+<h2 id="first-run-heading">What this measures</h2>
+<p>This page identifies which author-declared rule-removal mutants the corpus distinguished.</p>
+<p>Safe first inspect. This command reads existing report bytes and does not measure.</p>
+<pre><code>python3 corpus_adequacy.py --survivors measurements/tersign-1cc5ea32/report.v0.json --json</code></pre>
+<p>The card below keeps the measurement command. exit 1 with --json is a completed inadequate measurement with declared survivors, not a crash; exit 2 is refusal.</p>
+<p>report tool_commit <span class="mono">a2f723fe5ae5036e97090b9691316e483c3f1acc</span></p>
+<p>report tool_content_sha256 <span class="mono">sha256:2580d5ee6353ba00dce4b8c6e355393b5457d92153b8da1f4ea9f4516e181bac</span></p>
+<p>report tool_version <span class="mono">0.1.0</span></p>
+<p>Pages projection source-commit <span class="mono">a4a39bb38f6ba4512872fec4798b640086863619</span></p>
+<p>tagged tool <span class="mono">v0.1.0</span></p>
+<p><a href="https://github.com/corpus-adequacy/corpus-adequacy/releases/tag/v0.1.0">Release v0.1.0</a></p>
+<p>Clone</p>
+<pre><code>git clone --depth 1 --branch v0.1.0 https://github.com/corpus-adequacy/corpus-adequacy.git</code></pre>
+<p>Equal counts do not imply identical report bytes.</p>
+</section>
 <section class="non-claims" aria-labelledby="non-claims-heading">
 <h2 id="non-claims-heading">Non-claims</h2>
 <ul>

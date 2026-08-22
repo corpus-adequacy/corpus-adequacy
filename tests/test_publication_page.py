@@ -7,6 +7,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import shutil
 import subprocess
 import stat
@@ -559,6 +560,181 @@ class PublicationPage(unittest.TestCase):
                 r"recorded source-commit bytes differ for .*PROVENANCE.md",
             ):
                 rpp.main(["--root", str(clone), "--out", str(site), "--check"])
+
+
+WHAT_THIS_MEASURES = (
+    "This page identifies which author-declared rule-removal mutants "
+    "the corpus distinguished."
+)
+SAFE_INSPECT_LABEL = "reads existing report bytes and does not measure"
+EXIT_1_VISIBLE = (
+    "exit 1 with --json is a completed inadequate measurement with "
+    "declared survivors, not a crash"
+)
+EXIT_2_VISIBLE = "exit 2 is refusal"
+EQUAL_COUNTS = "Equal counts do not imply identical report bytes."
+REPORT_TOOL_COMMIT_LABEL = "report tool_commit"
+PROJECTION_COMMIT_LABEL = "Pages projection source-commit"
+
+
+def _visible_body(page: str) -> str:
+    text = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", "", text, flags=re.S)
+    text = re.sub(r"<title\b[^>]*>.*?</title>", "", text, flags=re.S)
+    return text
+
+
+def _inspect_command(directory: str) -> str:
+    return (
+        "python3 corpus_adequacy.py --survivors measurements/%s/report.v0.json --json"
+        % directory
+    )
+
+
+def _measure_command(directory: str) -> str:
+    return "python3 corpus_adequacy.py measurements/%s/manifest.json --json" % directory
+
+
+def _release_href() -> str:
+    return (
+        "https://github.com/corpus-adequacy/corpus-adequacy/releases/tag/v%s"
+        % ca.VERSION
+    )
+
+
+class FirstRunOrientation(unittest.TestCase):
+    def _assert_orientation(self, page: str, directory: str, source_commit: str,
+                            tool_commit: str, tool_content: str, tool_version: str):
+        fold = page[: page.find('id="results"')]
+        visible = _visible_body(page)
+        inspect = _inspect_command(directory)
+        measure = _measure_command(directory)
+        self.assertIn(WHAT_THIS_MEASURES, fold)
+        self.assertLess(page.find(WHAT_THIS_MEASURES), page.find('class="card"'))
+        self.assertIn(SAFE_INSPECT_LABEL, fold)
+        self.assertIn(inspect, fold)
+        self.assertNotIn(measure, fold)
+        self.assertIn("<pre><code>%s</code></pre>" % inspect, page)
+        self.assertIn(measure, page[page.find('id="results"') :])
+        self.assertIn(EXIT_1_VISIBLE, visible)
+        self.assertIn(EXIT_2_VISIBLE, visible)
+        self.assertIn(EQUAL_COUNTS, visible)
+        self.assertIn(REPORT_TOOL_COMMIT_LABEL, fold)
+        self.assertIn(PROJECTION_COMMIT_LABEL, fold)
+        self.assertIn(tool_commit, fold)
+        self.assertIn(source_commit, fold)
+        self.assertIn(tool_content, fold)
+        self.assertIn(tool_version, fold)
+        self.assertNotEqual(tool_commit, source_commit)
+        commit_block = fold[fold.find(REPORT_TOOL_COMMIT_LABEL):]
+        self.assertLess(
+            commit_block.find(tool_commit),
+            commit_block.find(PROJECTION_COMMIT_LABEL),
+        )
+        self.assertIn(_release_href(), page)
+        for href in re.findall(r'releases/tag/([^"\s]+)', page):
+            self.assertEqual(href, "v%s" % ca.VERSION)
+            self.assertIsNone(re.fullmatch(r"[0-9a-f]{40}", href))
+        self.assertIn("--branch v%s" % ca.VERSION, page)
+        self.assertIn('class="skip"', page)
+        self.assertIn("<h1>", page)
+        self.assertIn("<h2 id=\"first-run-heading\">", page)
+        self.assertIn("overflow-x: hidden", page)
+        self.assertIn("width: min(100%, 390px)", page)
+        self.assertIn("a:focus", page)
+
+    def test_live_overview_has_first_run_orientation(self):
+        source_commit = "f" * 40
+        page = rpp.render_html(REPO_ROOT, source_commit=source_commit)
+        doc = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
+        self._assert_orientation(
+            page,
+            "tersign-1cc5ea32",
+            source_commit,
+            doc["tool_commit"],
+            doc["tool_content_sha256"],
+            doc["tool_version"],
+        )
+
+    def test_fixture_overview_binds_listed_report_inspect_path(self):
+        source_commit = "a" * 40
+        with tempfile.TemporaryDirectory() as d:
+            page = _render(_write_tree(Path(d), [VALID / "report.v0.json"]),
+                           source_commit=source_commit)
+        doc = json.loads((VALID / "report.v0.json").read_text(encoding="utf-8"))
+        self._assert_orientation(
+            page,
+            "valid-tersign",
+            source_commit,
+            doc["tool_commit"],
+            doc["tool_content_sha256"],
+            doc["tool_version"],
+        )
+
+    def _fixture_page(self):
+        source_commit = "a" * 40
+        with tempfile.TemporaryDirectory() as d:
+            page = _render(_write_tree(Path(d), [VALID / "report.v0.json"]),
+                           source_commit=source_commit)
+        doc = json.loads((VALID / "report.v0.json").read_text(encoding="utf-8"))
+        return page, source_commit, doc
+
+    def _assert_mutant_is_red(self, page: str, source_commit: str, doc: dict):
+        with self.assertRaises(AssertionError):
+            self._assert_orientation(
+                page,
+                "valid-tersign",
+                source_commit,
+                doc["tool_commit"],
+                doc["tool_content_sha256"],
+                doc["tool_version"],
+            )
+
+    def test_mutation_inspect_pre_replaced_by_measure_is_red(self):
+        page, source_commit, doc = self._fixture_page()
+        inspect = _inspect_command("valid-tersign")
+        measure = _measure_command("valid-tersign")
+        mutated = page.replace(
+            "<pre><code>%s</code></pre>" % inspect,
+            "<pre><code>%s</code></pre>" % measure,
+            1,
+        )
+        self._assert_mutant_is_red(mutated, source_commit, doc)
+
+    def test_mutation_survivors_points_at_manifest_is_red(self):
+        page, source_commit, doc = self._fixture_page()
+        mutated = page.replace(
+            "--survivors measurements/valid-tersign/report.v0.json",
+            "--survivors measurements/valid-tersign/manifest.json",
+            1,
+        )
+        self._assert_mutant_is_red(mutated, source_commit, doc)
+
+    def test_mutation_collapsed_commit_fields_is_red(self):
+        page, source_commit, doc = self._fixture_page()
+        mutated = page.replace(REPORT_TOOL_COMMIT_LABEL, "commit", 1)
+        mutated = mutated.replace(PROJECTION_COMMIT_LABEL, "commit", 1)
+        self._assert_mutant_is_red(mutated, source_commit, doc)
+
+    def test_mutation_exit_1_only_in_comment_title_or_css_is_red(self):
+        page, source_commit, doc = self._fixture_page()
+        hidden = (
+            page.replace(EXIT_1_VISIBLE, "<!-- %s -->" % EXIT_1_VISIBLE, 1)
+            .replace("<title>", "<title>%s " % EXIT_1_VISIBLE, 1)
+        )
+        hidden = hidden.replace(
+            "overflow-x: hidden",
+            "overflow-x: hidden; /* %s */" % EXIT_1_VISIBLE,
+            1,
+        )
+        self.assertIn(EXIT_1_VISIBLE, hidden)
+        self.assertNotIn(EXIT_1_VISIBLE, _visible_body(hidden))
+        self._assert_mutant_is_red(hidden, source_commit, doc)
+
+    def test_mutation_release_href_hardcodes_sha_is_red(self):
+        page, source_commit, doc = self._fixture_page()
+        mutated = page.replace(_release_href(), _release_href().rsplit("/v", 1)[0] + "/" + "b" * 40, 1)
+        self._assert_mutant_is_red(mutated, source_commit, doc)
 
 
 if __name__ == "__main__":
