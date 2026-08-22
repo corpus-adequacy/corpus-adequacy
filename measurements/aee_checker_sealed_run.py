@@ -310,6 +310,7 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
             ("file-count", "tmpfs-inodes-ok", True, "tmpfs-inodes", True),
             ("network-off", "network", False, "network", True),
             ("output", "output-ok", True, "output", True),
+            ("protocol-exit", "ok", True, "exit2-json", True),
         )
         evidence = []
         for mechanism, control_mode, control_sealed, refusal_mode, refusal_sealed in pairs:

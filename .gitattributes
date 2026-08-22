@@ -24,3 +24,10 @@ site/index.html text eol=lf
 site/runs/** text eol=lf
 
 publications/index.v0.json text eol=lf
+adapters/aee_checker_sealed.py text eol=lf
+measurements/aee-checker-25b9dfa/** text eol=lf
+measurements/aee_checker_sealed_common.py text eol=lf
+measurements/aee_checker_sealed_oci.py text eol=lf
+measurements/aee_checker_sealed_run.py text eol=lf
+tests/test_aee_checker_sealed_run.py text eol=lf
+execution/aee-checker-sealed/** text eol=lf

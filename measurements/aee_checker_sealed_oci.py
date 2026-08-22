@@ -25,7 +25,9 @@ INSPECT_SNAPSHOT_KEYS = (
     "no_new_privileges", "offline_env", "pids", "read_only_root",
     "readonly_mounts", "tmpfs", "user",
 )
-PROBE_MECHANISMS = ("deadline", "disk", "file-count", "network-off", "output")
+PROBE_MECHANISMS = (
+    "deadline", "disk", "file-count", "network-off", "output", "protocol-exit",
+)
 PROBE_ROW_KEYS = ("control", "inspect", "mechanism", "refusal")
 
 
@@ -227,6 +229,8 @@ def require_probe_evidence(rows) -> None:
             raise PrepareError("probe pair missing control")
         if row["refusal"] in (None, "completed"):
             raise PrepareError("probe pair missing refusal")
+        if expected == "protocol-exit" and row["refusal"] != "abnormal":
+            raise PrepareError("protocol-exit must be abnormal")
         exact_object(row["inspect"], ("control", "refusal"), "probe inspect")
         for side in row["inspect"].values():
             exact_object(side, INSPECT_SNAPSHOT_KEYS, "inspect snapshot")

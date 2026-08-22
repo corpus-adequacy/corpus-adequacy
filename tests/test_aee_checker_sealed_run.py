@@ -55,6 +55,31 @@ FORBIDDEN_PUBLIC = (
 )
 EMPTY_VENDOR = hashlib.sha256(b"").hexdigest()
 MEMORY_4G = 4 * 1024 * 1024 * 1024
+WINDOWS_CRLF_ADAPTER = (
+    "53d1e5449792b261174f92ba70d49a01d1bc8dc037b5812a7cbe26448bc58c1d"
+)
+AEE_LF_ATTRS = (
+    "adapters/aee_checker_sealed.py text eol=lf",
+    "measurements/aee-checker-25b9dfa/** text eol=lf",
+    "measurements/aee_checker_sealed_common.py text eol=lf",
+    "measurements/aee_checker_sealed_oci.py text eol=lf",
+    "measurements/aee_checker_sealed_run.py text eol=lf",
+    "tests/test_aee_checker_sealed_run.py text eol=lf",
+    "execution/aee-checker-sealed/** text eol=lf",
+)
+AEE_LF_PATHS = (
+    "adapters/aee_checker_sealed.py",
+    "measurements/aee-checker-25b9dfa/control.json",
+    "measurements/aee-checker-25b9dfa/manifest.json",
+    "measurements/aee-checker-25b9dfa/pins.json",
+    "measurements/aee-checker-25b9dfa/sites.json",
+    "measurements/aee_checker_sealed_common.py",
+    "measurements/aee_checker_sealed_oci.py",
+    "measurements/aee_checker_sealed_run.py",
+    "tests/test_aee_checker_sealed_run.py",
+    "execution/aee-checker-sealed/Containerfile",
+    "execution/aee-checker-sealed/probe.sh",
+)
 
 
 def _fixture_contract(*, network_mode: str, offline: bool) -> dict:
@@ -106,6 +131,16 @@ def _committed_execution_root(tmp: Path) -> Path:
         cwd=root, check=True, capture_output=True,
     )
     return root
+
+
+def _git_eol(root: Path, rel: str) -> str:
+    out = subprocess.check_output(
+        ["git", "check-attr", "eol", "--", rel], cwd=root, text=True)
+    line = out.strip().splitlines()[-1]
+    name, attr, value = line.split(": ")
+    if attr != "eol" or name != rel:
+        raise AssertionError("check-attr %r" % line)
+    return value
 
 
 def _local_git_repo(tmp: Path, name: str, files: dict[str, bytes]):
@@ -255,6 +290,24 @@ class ClassifyAbnormal(unittest.TestCase):
         self.assertNotEqual(result["state"], "completed")
         self.assertNotIn("rows", result)
         self.assertIsNone(result.get("parsed"))
+        self.assertNotIn("ok", result)
+
+    def test_accepting_parseable_exit_2_as_completed_is_a_false_green(self):
+        raw = b'{"ok":true,"schema":"not-a-success"}\n'
+        result = run.classify_container_result(2, raw)
+        self.assertEqual(result["state"], "abnormal")
+        self.assertIsNone(result.get("parsed"))
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = PrepareEvidence()._parts()
+            parts["probe_evidence"] = [
+                row if row["mechanism"] != "protocol-exit"
+                else {**row, "refusal": "completed"}
+                for row in parts["probe_evidence"]
+            ]
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"abnormal|protocol|pair|refusal")
 
     def test_exit_0_small_output_is_completed_without_scoring(self):
         result = run.classify_container_result(0, b'{"probe":"ok"}\n')
@@ -385,6 +438,7 @@ class PrepareEvidence(unittest.TestCase):
                 _probe_row("file-count", "abnormal"),
                 _probe_row("network-off", "abnormal", control_net="bridge"),
                 _probe_row("output", "output_cap"),
+                _probe_row("protocol-exit", "abnormal"),
             ],
             "network": dict(run.NETWORK_CUTOFF),
             "oci": run.OCI_CONTRACT,
@@ -455,6 +509,33 @@ class PrepareEvidence(unittest.TestCase):
             with self.assertRaises(run.PrepareError) as ctx:
                 run.emit_prepare_v0(parts, dest)
             self.assertRegex(str(ctx.exception).lower(), r"declared|ceiling")
+
+    def test_probe_mechanisms_include_protocol_exit(self):
+        self.assertIn("protocol-exit", run.PROBE_MECHANISMS)
+        self.assertEqual(run.PROBE_MECHANISMS[-1], "protocol-exit")
+
+    def test_omitting_protocol_exit_row_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = self._parts()
+            parts["probe_evidence"] = [
+                row for row in parts["probe_evidence"] if row["mechanism"] != "protocol-exit"
+            ]
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"protocol|pair|evidence")
+
+    def test_protocol_exit_refusal_must_be_exactly_abnormal(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = self._parts()
+            parts["probe_evidence"] = [
+                {**row, "refusal": "output_cap"} if row["mechanism"] == "protocol-exit" else row
+                for row in parts["probe_evidence"]
+            ]
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"abnormal|protocol-exit")
 
     def test_probe_evidence_refuses_a_refusal_without_its_control(self):
         with tempfile.TemporaryDirectory() as d:
@@ -782,7 +863,7 @@ class LiveInertProbes(unittest.TestCase):
     def test_exit_2_json_is_abnormal_and_exit_0_json_is_completed(self):
         good = self._run("ok")
         bad = self._run("exit2-json")
-        row = run.record_probe_pair("exit-class", good, bad)
+        row = run.record_probe_pair("protocol-exit", good, bad)
         self.assertEqual(row["control"], "completed")
         self.assertEqual(row["refusal"], "abnormal")
         self.assertIsNone(good.get("parsed"))
@@ -840,6 +921,9 @@ class LiveInertProbes(unittest.TestCase):
             self.assertEqual(row["inspect"]["refusal"]["network_mode"], "none", row)
         network = next(row for row in doc["probe_evidence"] if row["mechanism"] == "network-off")
         self.assertNotEqual(network["inspect"]["control"]["network_mode"], "none")
+        protocol = next(row for row in doc["probe_evidence"] if row["mechanism"] == "protocol-exit")
+        self.assertEqual(protocol["control"], "completed")
+        self.assertEqual(protocol["refusal"], "abnormal")
 
     def test_memory_swap_pids_are_inspect_verified_not_efficacy_probed(self):
         good = self._run("ok")
@@ -848,6 +932,63 @@ class LiveInertProbes(unittest.TestCase):
         self.assertEqual(host["memory_swap"], 4 * 1024 * 1024 * 1024)
         self.assertEqual(host["pids"], 512)
         self.assertEqual(host["claim"], "inspect-verified; not efficacy-tested")
+
+
+class FrozenAeeEol(unittest.TestCase):
+    def test_gitattributes_and_check_attr_pin_aee_paths_to_lf(self):
+        lines = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+        for rule in AEE_LF_ATTRS:
+            self.assertIn(rule, lines)
+        for rel in AEE_LF_PATHS:
+            self.assertEqual(_git_eol(REPO_ROOT, rel), "lf", rel)
+
+    def test_prepare_consumes_worktree_adapter_bytes_without_eol_rewrite(self):
+        raw = ADAPTER.read_bytes()
+        self.assertNotIn(b"\r\n", raw)
+        self.assertEqual(_sha256(raw), run.ADAPTER_DIGEST)
+        src = (REPO_ROOT / "measurements" / "aee_checker_sealed_run.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("replace(b\"\\r\\n\"", src)
+        self.assertNotIn("replace('\\r\\n'", src)
+        self.assertNotIn("replace(\"\\r\\n\"", src)
+
+    def test_removing_aee_eol_rule_reproduces_windows_crlf_drift(self):
+        lf = ADAPTER.read_bytes()
+        self.assertEqual(_sha256(lf), run.ADAPTER_DIGEST)
+        drifted = _sha256(lf.replace(b"\n", b"\r\n"))
+        self.assertEqual(drifted, WINDOWS_CRLF_ADAPTER)
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "src"
+            (src / "adapters").mkdir(parents=True)
+            (src / "adapters" / "aee_checker_sealed.py").write_bytes(lf)
+            (src / ".gitattributes").write_text(
+                "adapters/aee_checker_sealed.py text eol=lf\n", encoding="utf-8")
+            subprocess.run(["git", "init"], cwd=src, check=True, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=src, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                 "commit", "-m", "lf"],
+                cwd=src, check=True, capture_output=True)
+            pinned = Path(d) / "pinned"
+            subprocess.run(
+                ["git", "-c", "core.autocrlf=true", "clone", str(src), str(pinned)],
+                check=True, capture_output=True)
+            worktree = pinned / "adapters" / "aee_checker_sealed.py"
+            self.assertEqual(_sha256(worktree.read_bytes()), run.ADAPTER_DIGEST)
+            self.assertEqual(_git_eol(pinned, "adapters/aee_checker_sealed.py"), "lf")
+            (src / ".gitattributes").write_text("", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=src, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                 "commit", "-m", "drop aee eol"],
+                cwd=src, check=True, capture_output=True)
+            drifted_co = Path(d) / "drifted"
+            subprocess.run(
+                ["git", "-c", "core.autocrlf=true", "clone", str(src), str(drifted_co)],
+                check=True, capture_output=True)
+            got = (drifted_co / "adapters" / "aee_checker_sealed.py").read_bytes()
+            self.assertEqual(_sha256(got), WINDOWS_CRLF_ADAPTER)
+            self.assertNotEqual(_git_eol(drifted_co, "adapters/aee_checker_sealed.py"), "lf")
 
 
 class MaterializeVerify(unittest.TestCase):
