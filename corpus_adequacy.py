@@ -144,13 +144,14 @@ def require_shape(obj, expected, where: str) -> None:
     raise TypeError("require_shape expected dict or list")
 
 
-def load_json_document(raw, *, root, where: str):
-    """One decoder: RecursionError is a refusal; root shape is require_shape once."""
+def load_json_document(raw, *, root=None, where: str):
+    """One decoder: RecursionError is a refusal; optional root is require_shape once."""
     try:
         doc = json.loads(raw)
     except RecursionError as exc:
         raise ManifestError(str(exc)) from None
-    require_shape(doc, root, where)
+    if root is not None:
+        require_shape(doc, root, where)
     return doc
 
 
@@ -853,7 +854,12 @@ def load_manifest(path: Path) -> dict:
         key = m["corpus_digest_key"]
         if key not in digest_doc:
             raise ManifestError("corpus_digest_key %r is missing" % key)
-        m["_corpus_digest"] = digest_doc[key]
+        digest_value = digest_doc[key]
+        if not isinstance(digest_value, str):
+            raise ManifestError(
+                "corpus_digest_key %r must be a string, got %s"
+                % (key, type(digest_value).__name__))
+        m["_corpus_digest"] = digest_value
         for digest, entries in m["known_holes"].items():
             require_shape(entries, list, "known_holes[%s]" % digest)
             for i, e in enumerate(entries):
@@ -1481,30 +1487,34 @@ def _process_outcomes(m: dict, vectors: list[dict]) -> tuple[dict, dict, dict]:
 
 
 
+def _require_declared_vector_keys(row: dict, m: dict, where: str) -> None:
+    if m["id_key"] not in row:
+        raise ManifestError("%s missing %r" % (where, m["id_key"]))
+    if m["group_key"] is not None and m["group_key"] not in row:
+        raise ManifestError("%s missing %r" % (where, m["group_key"]))
+
+
 def load_vector_document(m: dict) -> list:
-    """Shared vectors JSON for process and module. Decoder refusal, not a score."""
+    """Shared vectors JSON for process and module. One decode, then list/object."""
     raw = m["_vectors_path"].read_bytes()
-    try:
-        doc = load_json_document(raw, root=dict, where="vectors")
-        as_object = True
-    except ManifestError as first:
-        try:
-            doc = load_json_document(raw, root=list, where="vectors")
-        except ManifestError:
-            raise first
-        as_object = False
+    doc = load_json_document(raw, where="vectors")
     if m["runner"] == "batch":
         return [{m["id_key"]: "<batch>",
                  (m["group_key"] or "_g"): m["default_group"]}]
-    if as_object:
+    if isinstance(doc, dict):
         if m["vectors_key"] not in doc:
             raise ManifestError("vectors key %r is missing" % m["vectors_key"])
         selected = doc[m["vectors_key"]]
-        require_shape(selected, list, "vectors")
-    else:
+    elif isinstance(doc, list):
         selected = doc
+    else:
+        raise ManifestError(
+            "vectors must be an object or array, got %s" % type(doc).__name__)
+    require_shape(selected, list, "vectors")
     for i, row in enumerate(selected):
-        require_shape(row, dict, "vectors[%d]" % i)
+        where = "vectors[%d]" % i
+        require_shape(row, dict, where)
+        _require_declared_vector_keys(row, m, where)
     return selected
 
 
