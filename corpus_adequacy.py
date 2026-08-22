@@ -643,19 +643,18 @@ def _declared_control_count(m: dict) -> int:
 
 
 def partition_declared_mutants(mutants: dict) -> tuple:
-    """Stable plan: every control, then every ordinary, plus the ordinary boundary.
+    """Stable split: every control, then every ordinary mutant.
 
-    Walks sorted group names, then declaration order. Returns
-    ``(plan, first_ordinary)``. ``first_ordinary`` is the index of the first
-    ordinary mutant, or ``len(plan)`` when the plan is all controls.
-    No controls leaves the current sorted-group walk unchanged.
+    Walks sorted group names, then declaration order. Relative order is
+    preserved within each partition. No controls leaves the current
+    sorted-group walk unchanged.
     """
     if type(mutants) is not dict:
         raise ManifestError("mutants must be an object")
     items = [(group, mut) for group in sorted(mutants) for mut in mutants[group]]
     controls = [(group, mut) for group, mut in items if mut.get("control")]
     ordinary = [(group, mut) for group, mut in items if not mut.get("control")]
-    return controls + ordinary, len(controls)
+    return controls, ordinary
 
 
 def _control_status(statuses: list[str], declared_count: int) -> str:
@@ -1660,15 +1659,15 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                     "would have caught. Read the corpus's own declaration of its comparison "
                     "surface and match it." % (_selector, never_seen))
 
-        plan, first_ordinary = partition_declared_mutants(m["mutants"])
-        for step, (group, mut) in enumerate(plan):
-            if step == first_ordinary and declared_controls and _control_status(
+        controls, ordinary = partition_declared_mutants(m["mutants"])
+        for wave_index, wave in enumerate((controls, ordinary)):
+            if wave_index == 1 and declared_controls and _control_status(
                     control_statuses, declared_controls) != "killed":
                 break
-            if group not in baselines:
-                continue
-            vectors, baseline, baseline_diag = baselines[group]
-            for mut in (mut,):
+            for group, mut in wave:
+                if group not in baselines:
+                    continue
+                vectors, baseline, baseline_diag = baselines[group]
                 scope = mut.get("scope", "declared")
                 sources = [_resolved_contained_source(sp, m["_repo_root"])
                            for sp in m["_source_paths"]]

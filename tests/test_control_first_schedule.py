@@ -55,24 +55,22 @@ def _identify(src: str) -> str:
 
 class PartitionHelper(unittest.TestCase):
     def test_frozen_aee_plan_is_control_then_seven(self):
-        plan, first = ca.partition_declared_mutants({"g": _aee_spec()})
-        self.assertEqual(first, 1)
-        self.assertEqual(_labels(plan), ["CONTROL", *SEALED_IDS])
-        self.assertEqual(_labels(plan[first:]), list(SEALED_IDS))
+        controls, ordinary = ca.partition_declared_mutants({"g": _aee_spec()})
+        self.assertEqual(_labels(controls), ["CONTROL"])
+        self.assertEqual(_labels(ordinary), list(SEALED_IDS))
 
     def test_multi_group_barrier_is_global_not_per_group(self):
         mutants = {
             "z": [{"label": "ord-z"}, {"label": "ctrl-z", "control": True}],
             "a": [{"label": "ord-a"}, {"label": "ctrl-a", "control": True}],
         }
-        plan, first = ca.partition_declared_mutants(mutants)
-        self.assertEqual(first, 2)
+        controls, ordinary = ca.partition_declared_mutants(mutants)
         self.assertEqual(
-            [(group, mut["label"]) for group, mut in plan[:first]],
+            [(group, mut["label"]) for group, mut in controls],
             [("a", "ctrl-a"), ("z", "ctrl-z")],
         )
         self.assertEqual(
-            [(group, mut["label"]) for group, mut in plan[first:]],
+            [(group, mut["label"]) for group, mut in ordinary],
             [("a", "ord-a"), ("z", "ord-z")],
         )
 
@@ -81,10 +79,10 @@ class PartitionHelper(unittest.TestCase):
             "z": [{"label": "z1"}, {"label": "z2"}],
             "a": [{"label": "a1"}],
         }
-        plan, first = ca.partition_declared_mutants(mutants)
-        self.assertEqual(first, 0)
+        controls, ordinary = ca.partition_declared_mutants(mutants)
+        self.assertEqual(controls, [])
         self.assertEqual(
-            [(group, mut["label"]) for group, mut in plan],
+            [(group, mut["label"]) for group, mut in ordinary],
             [("a", "a1"), ("z", "z1"), ("z", "z2")],
         )
 
