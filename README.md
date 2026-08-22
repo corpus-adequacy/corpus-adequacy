@@ -38,6 +38,9 @@ not measure, does not call the runner, and does not change `report.v0` bytes.
 without `--survivors` is still `report.v0`. Optional `--manifest` is used only
 when its exact file bytes match `report.manifest_sha256`; the projection never
 invents compared or unmoved vector IDs.
+A digest-matched anchor that is empty after control stripping is an
+intentional omission: no `anchor_excerpt` and no `anchor_omitted`. That is
+not a missing field and not a new survivors key.
 
 ```
 python3 adapters/tersign_evidence_record.py <tersign-checkout> <empty-dest>

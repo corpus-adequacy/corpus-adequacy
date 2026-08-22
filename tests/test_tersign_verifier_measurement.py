@@ -481,6 +481,7 @@ class ProcessMeasurement(unittest.TestCase):
 
 
 MEASURED_ON = "a2f723fe5ae5036e97090b9691316e483c3f1acc"
+RELEASED_TOOL_COMMIT = "fbcdcb7a496f98420232260411d1afad6777ec11"
 DURABLE = REPO_ROOT / "measurements" / "tersign-1cc5ea32"
 REPORT_PATH = DURABLE / "report.v0.json"
 PROVENANCE_PATH = DURABLE / "PROVENANCE.md"
@@ -493,7 +494,11 @@ TOOL_CONTENT = "sha256:2580d5ee6353ba00dce4b8c6e355393b5457d92153b8da1f4ea9f4516
 
 
 class ClaimedReport(unittest.TestCase):
-    """Frozen report.v0 from the source commit; this head only records it."""
+    """Frozen report.v0 from the source commit; this head only records it.
+
+    MEASURED_ON is report provenance. It is not a Git object a fresh clone
+    must contain.
+    """
 
     def test_report_bytes_are_the_measured_file(self):
         self.assertTrue(REPORT_PATH.is_file())
@@ -515,10 +520,28 @@ class ClaimedReport(unittest.TestCase):
         self.assertFalse(doc["adequate"])
         self.assertEqual(doc["control_status"], "killed")
 
-    def test_current_tool_source_matches_the_measured_report(self):
-        ident = ca.tool_identity()
-        self.assertEqual(ident["tool_content_sha256"], TOOL_CONTENT)
-        self.assertEqual(ident["tool_content_sha256"], json.loads(REPORT_PATH.read_text())["tool_content_sha256"])
+    def test_released_tool_commit_is_a_reachable_ancestor(self):
+        # No local tag object required. The released commit must be in history.
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor",
+             RELEASED_TOOL_COMMIT, "HEAD"],
+            capture_output=True, timeout=10)
+        self.assertEqual(proc.returncode, 0)
+
+    def test_released_tool_content_matches_the_measured_report(self):
+        sources = []
+        for rel in ca.TOOL_SOURCE_PATHS:
+            shown = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "show",
+                 "%s:%s" % (RELEASED_TOOL_COMMIT, rel)],
+                capture_output=True, check=True, timeout=10)
+            sources.append((rel, shown.stdout))
+        digest = ca._tool_content_digest(sources)
+        self.assertEqual(digest, TOOL_CONTENT)
+        self.assertEqual(
+            digest,
+            json.loads(REPORT_PATH.read_text(encoding="utf-8"))["tool_content_sha256"],
+        )
 
     def test_implementation_identities_are_named(self):
         self.assertEqual(_sha(WRAPPER), WRAPPER_SHA256)

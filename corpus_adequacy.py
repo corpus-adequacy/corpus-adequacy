@@ -144,12 +144,29 @@ def require_shape(obj, expected, where: str) -> None:
     raise TypeError("require_shape expected dict or list")
 
 
-def error_envelope(exc: BaseException) -> dict:
-    """Parseable --json body for a run that never produced a report."""
+def load_json_document(raw, *, root=None, where: str):
+    """One decoder: RecursionError is a refusal; optional root is require_shape once."""
+    try:
+        doc = json.loads(raw)
+    except RecursionError as exc:
+        raise ManifestError(str(exc)) from None
+    if root is not None:
+        require_shape(doc, root, where)
+    return doc
+
+
+def error_envelope(exc: BaseException, *, operation: str) -> dict:
+    """Parseable --json body for a run that never produced a report.
+
+    `operation` is the verb (`measure` or `project`). One envelope, no
+    second parser rule. The field and stderr share that verb.
+    """
+    if operation not in ("measure", "project"):
+        raise ValueError("error_envelope operation must be measure or project")
     return {
         "schema": ERROR_SCHEMA,
         "ok": False,
-        "error": "could not measure: %s" % exc,
+        "error": "could not %s: %s" % (operation, exc),
         "exit": 2,
     }
 
@@ -490,6 +507,9 @@ def _apply_anchor(finding: dict, manifest_obj: dict) -> None:
     excerpt = _control_stripped_one_line(raw_anchor)
     if excerpt:
         finding["anchor_excerpt"] = excerpt
+    # Intentional omission: a within-cap anchor that is empty after control
+    # stripping gets neither excerpt nor omitted reason. That is not a
+    # missing field and not a new survivors key.
 
 
 def _require_report_rows(report) -> list:
@@ -796,7 +816,7 @@ def _require_unique_labels(m: dict) -> None:
 
 def load_manifest(path: Path) -> dict:
     manifest_bytes = path.read_bytes()
-    m = json.loads(manifest_bytes)
+    m = load_json_document(manifest_bytes, root=dict, where="manifest")
     if m.get("schema") != SCHEMA:
         raise ManifestError("schema must be %r, got %r" % (SCHEMA, m.get("schema")))
     base = path.parent
@@ -829,7 +849,17 @@ def load_manifest(path: Path) -> dict:
         dp = (base / m["corpus_digest_file"]).resolve()
         if not dp.is_file():
             raise ManifestError("corpus_digest_file not found: %s" % dp)
-        m["_corpus_digest"] = json.loads(dp.read_text(encoding="utf-8"))[m["corpus_digest_key"]]
+        digest_doc = load_json_document(
+            dp.read_bytes(), root=dict, where="corpus_digest_file")
+        key = m["corpus_digest_key"]
+        if key not in digest_doc:
+            raise ManifestError("corpus_digest_key %r is missing" % key)
+        digest_value = digest_doc[key]
+        if not isinstance(digest_value, str):
+            raise ManifestError(
+                "corpus_digest_key %r must be a string, got %s"
+                % (key, type(digest_value).__name__))
+        m["_corpus_digest"] = digest_value
         for digest, entries in m["known_holes"].items():
             require_shape(entries, list, "known_holes[%s]" % digest)
             for i, e in enumerate(entries):
@@ -1457,18 +1487,42 @@ def _process_outcomes(m: dict, vectors: list[dict]) -> tuple[dict, dict, dict]:
 
 
 
+def _require_declared_vector_keys(row: dict, m: dict, where: str) -> None:
+    if m["id_key"] not in row:
+        raise ManifestError("%s missing %r" % (where, m["id_key"]))
+    if m["group_key"] is not None and m["group_key"] not in row:
+        raise ManifestError("%s missing %r" % (where, m["group_key"]))
+
+
+def load_vector_document(m: dict) -> list:
+    """Shared vectors JSON for process and module. One decode, then list/object."""
+    raw = m["_vectors_path"].read_bytes()
+    doc = load_json_document(raw, where="vectors")
+    if m["runner"] == "batch":
+        return [{m["id_key"]: "<batch>",
+                 (m["group_key"] or "_g"): m["default_group"]}]
+    if isinstance(doc, dict):
+        if m["vectors_key"] not in doc:
+            raise ManifestError("vectors key %r is missing" % m["vectors_key"])
+        selected = doc[m["vectors_key"]]
+    elif isinstance(doc, list):
+        selected = doc
+    else:
+        raise ManifestError(
+            "vectors must be an object or array, got %s" % type(doc).__name__)
+    require_shape(selected, list, "vectors")
+    for i, row in enumerate(selected):
+        where = "vectors[%d]" % i
+        require_shape(row, dict, where)
+        _require_declared_vector_keys(row, m, where)
+    return selected
+
+
 def _run_process(m: dict, manifest_path: Path) -> dict:
     """Mutate declared sources, rebuild, and run the corpus against the binary."""
-    doc = json.loads(m["_vectors_path"].read_text(encoding="utf-8"))
-    if m["runner"] == "batch":
-        # One synthetic unit. The corpus's real cases live inside the file the
-        # command reads; the group exists so the self-coverage guard still applies.
-        all_vectors = [{m["id_key"]: "<batch>",
-                        (m["group_key"] or "_g"): m["default_group"]}]
-        if m["group_key"] is None:
-            m["group_key"] = "_g"
-    else:
-        all_vectors = doc[m["vectors_key"]] if isinstance(doc, dict) else doc
+    all_vectors = load_vector_document(m)
+    if m["runner"] == "batch" and m["group_key"] is None:
+        m["group_key"] = "_g"
     failures: list[str] = []
 
     # Manifest loading and execution can be separated by arbitrary caller work.
@@ -1755,8 +1809,7 @@ def run(manifest_path: Path) -> dict:
     if m["runner"] in ("process", "batch"):
         return _run_process(m, manifest_path)
     source = m["_impl_path"].read_text(encoding="utf-8")
-    doc = json.loads(m["_vectors_path"].read_text(encoding="utf-8"))
-    all_vectors = doc[m["vectors_key"]] if isinstance(doc, dict) else doc
+    all_vectors = load_vector_document(m)
 
     failures: list[str] = []
     groups_in_corpus = {_group_of(v, m) for v in all_vectors}
@@ -2045,7 +2098,7 @@ def _survivors_cli(args, ap) -> int:
     except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError, ValueError) as exc:
         print("could not project: %s" % exc, file=sys.stderr)
         if args.json:
-            print(json.dumps(error_envelope(exc), indent=2, sort_keys=True))
+            print(json.dumps(error_envelope(exc, operation="project"), indent=2, sort_keys=True))
         return 2
     if args.json:
         assert encoded is not None
@@ -2081,7 +2134,7 @@ def main() -> int:
         exc = ManifestError("--manifest requires --survivors")
         print("could not measure: %s" % exc, file=sys.stderr)
         if args.json:
-            print(json.dumps(error_envelope(exc), indent=2, sort_keys=True))
+            print(json.dumps(error_envelope(exc, operation="measure"), indent=2, sort_keys=True))
         return 2
     if args.survivors:
         return _survivors_cli(args, ap)
@@ -2093,7 +2146,7 @@ def main() -> int:
     except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError) as exc:
         print("could not measure: %s" % exc, file=sys.stderr)
         if args.json:
-            print(json.dumps(error_envelope(exc), indent=2, sort_keys=True))
+            print(json.dumps(error_envelope(exc, operation="measure"), indent=2, sort_keys=True))
         return 2
 
     if args.json:
