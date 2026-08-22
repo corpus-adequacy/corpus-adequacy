@@ -412,13 +412,15 @@ class PublicationPage(unittest.TestCase):
 
 
     def test_invalid_source_shape_fails(self):
+        repo_msg = "source repository is not owner/name"
+        commit_msg = "source commit is not a 40-hex digest"
         cases = (
-            ("repository-number", 123, "not-a-commit"),
-            ("repository-no-slash", "not-a-repo", "a" * 40),
-            ("commit-uppercase", "owner/name", "DEADBEEF" * 5),
-            ("commit-non-hex", "owner/name", "not-a-commit"),
+            ("repository-number", 123, "not-a-commit", repo_msg),
+            ("repository-no-slash", "not-a-repo", "a" * 40, repo_msg),
+            ("commit-uppercase", "owner/name", "DEADBEEF" * 5, commit_msg),
+            ("commit-non-hex", "owner/name", "not-a-commit", commit_msg),
         )
-        for name, repository, commit in cases:
+        for name, repository, commit, expected_message in cases:
             with self.subTest(name):
                 with tempfile.TemporaryDirectory() as d:
                     root = _write_tree(Path(d), [VALID / "report.v0.json"])
@@ -426,9 +428,9 @@ class PublicationPage(unittest.TestCase):
                     src = json.loads(source.read_text(encoding="utf-8"))
                     src["repository"] = repository
                     src["commit"] = commit
-                    source.write_text(json.dumps(src, indent=2) + "\n", encoding="utf-8")
+                    source.write_text(json.dumps(src, indent=2) + chr(10), encoding="utf-8")
                     _write_index(root)
-                    with self.assertRaises(rpp.PublicationError):
+                    with self.assertRaisesRegex(rpp.PublicationError, expected_message):
                         _render(root)
 
 
