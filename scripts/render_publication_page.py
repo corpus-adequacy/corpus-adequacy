@@ -160,10 +160,16 @@ def _control_status_from_rows(mutants: list) -> str:
 def _require_displayed_parity(doc: dict, mutants: list) -> None:
     derived = _counts_from_mutants(mutants)
     for name in DISPLAY_VERDICTS:
-        if doc.get(name) != derived[name]:
+        value = doc.get(name)
+        if type(value) is not int:
+            raise PublicationError(
+                "displayed %s must be an int, got %s"
+                % (name, type(value).__name__)
+            )
+        if value != derived[name]:
             raise PublicationError(
                 "displayed %s %r does not match mutants[] count %r"
-                % (name, doc.get(name), derived[name])
+                % (name, value, derived[name])
             )
     derived_control = _control_status_from_rows(mutants)
     if doc.get("control_status") != derived_control:
@@ -171,6 +177,18 @@ def _require_displayed_parity(doc: dict, mutants: list) -> None:
             "control_status %r does not match control rows %r"
             % (doc.get("control_status"), derived_control)
         )
+
+
+def _diagnostic_channel_declared(doc: dict) -> bool:
+    if "diagnostic_channel_declared" not in doc:
+        return False
+    value = doc["diagnostic_channel_declared"]
+    if type(value) is not bool:
+        raise PublicationError(
+            "diagnostic_channel_declared must be a bool, got %s"
+            % type(value).__name__
+        )
+    return value
 
 
 def _load_json_object(path: Path, *, label: str) -> tuple[bytes, dict]:
@@ -213,7 +231,7 @@ def load_record(
     if isinstance(extra, list):
         non_claims.extend(str(item) for item in extra)
     runner = doc.get("runner") if doc.get("runner") is not None else ""
-    diagnostic = bool(doc.get("diagnostic_channel_declared"))
+    diagnostic = _diagnostic_channel_declared(doc)
     silent = doc.get("silent")
     silent_label = "not measured" if (silent == 0 and not diagnostic) else str(silent)
     control = doc.get("control_status")

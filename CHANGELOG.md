@@ -14,7 +14,8 @@ renderer so a shared deep link still carries the four ceiling lines.
 Card and run page reuse one counts renderer, including `silent_label`
 and `diagnostic_channel_declared`. Membership is that projection only:
 leftover unconsumed findings fail closed, and `how` is the validated
-report field.
+report field. Displayed counts must be exact `int` values; a present
+`diagnostic_channel_declared` must be an exact `bool` (absent is false).
 `--check` inventories regular files under `site/`. Only an exact `CNAME`
 is left unmanaged; any other regular file outside `index.html` and
 `runs/**` (including a regular file named `runs`) fails closed as surplus.

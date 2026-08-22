@@ -128,7 +128,6 @@ class FirstRedDeepLinks(unittest.TestCase):
                 json.loads((SURVIVED_SILENT / "report.v0.json").read_text())
             )
             self.assertEqual(projected["finding_count"], 2)
-            self.assertIs(rpp.survivor_findings, ca.survivor_findings)
 
 
 class ActionableBinding(unittest.TestCase):

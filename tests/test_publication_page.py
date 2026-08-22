@@ -115,6 +115,60 @@ class PublicationPage(unittest.TestCase):
             with self.assertRaises(rpp.PublicationError):
                 _render(root)
 
+    def test_bool_and_integral_float_counts_refuse_render(self):
+        fixture = FIXTURES / "survived-silent" / "report.v0.json"
+        base = json.loads(fixture.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [fixture])
+            report = root / "measurements" / "survived-silent" / "report.v0.json"
+            for name in rpp.DISPLAY_VERDICTS:
+                for value in (True, float(base[name])):
+                    with self.subTest(name=name, value=value):
+                        mutated = dict(base)
+                        mutated[name] = value
+                        report.write_text(
+                            json.dumps(mutated, indent=2, sort_keys=True) + "\n"
+                        )
+                        _write_index(root)
+                        with self.assertRaises(rpp.PublicationError):
+                            _render(root)
+
+    def test_diagnostic_channel_is_exact_bool_or_absent(self):
+        fixture = FIXTURES / "survived-silent" / "report.v0.json"
+        base = json.loads(fixture.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [fixture])
+            report = root / "measurements" / "survived-silent" / "report.v0.json"
+            for value in (True, False):
+                with self.subTest(accepted=value):
+                    mutated = dict(base)
+                    mutated["diagnostic_channel_declared"] = value
+                    report.write_text(
+                        json.dumps(mutated, indent=2, sort_keys=True) + "\n"
+                    )
+                    _write_index(root)
+                    page = _render(root)
+                    label = "declared" if value else "not declared"
+                    self.assertIn(
+                        'aria-label="diagnostic_channel_declared %s"' % label, page
+                    )
+            mutated = dict(base)
+            del mutated["diagnostic_channel_declared"]
+            report.write_text(json.dumps(mutated, indent=2, sort_keys=True) + "\n")
+            _write_index(root)
+            page = _render(root)
+            self.assertIn('aria-label="diagnostic_channel_declared not declared"', page)
+            for value in ("false", 1, None):
+                with self.subTest(refused=value):
+                    mutated = dict(base)
+                    mutated["diagnostic_channel_declared"] = value
+                    report.write_text(
+                        json.dumps(mutated, indent=2, sort_keys=True) + "\n"
+                    )
+                    _write_index(root)
+                    with self.assertRaises(rpp.PublicationError):
+                        _render(root)
+
     def test_hostile_query_is_not_read_as_truth(self):
         with tempfile.TemporaryDirectory() as d:
             root = _write_tree(Path(d), [VALID / "report.v0.json"])
