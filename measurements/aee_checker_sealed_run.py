@@ -118,6 +118,8 @@ EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_common.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_materialize.py",
+    "measurements/aee_checker_sealed_authorize.py",
+    "measurements/aee_checker_sealed_execute.py",
     "execution/aee-checker-sealed/Containerfile",
     "execution/aee-checker-sealed/probe.sh",
     "execution/aee-checker-sealed/cargo-config.toml",

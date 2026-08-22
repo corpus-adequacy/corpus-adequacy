@@ -45,6 +45,13 @@ SEALED_IDS = tuple("sealed-%d" % i for i in range(1, 8))
 UNPROVED_STATES = frozenset({
     "wrapper-75", "timeout", "signal", "output-cap", "protocol",
 })
+KNOWN_STATES = UNPROVED_STATES | frozenset({"ok"})
+KNOWN_MUTANT_STATUSES = frozenset({
+    "killed", "survived", "silent", "equivalent", "unproved",
+})
+KNOWN_DISPOSITIONS = frozenset({
+    "passed", "void", "unproved", "killed", "survived", "silent", "equivalent",
+})
 NON_CLAIMS = (
     "MC/DC",
     "atomic-subcondition adequacy",
@@ -159,22 +166,35 @@ def required_sequence(sites_doc: dict) -> tuple:
 
 
 def classify_observation(step: dict, observation: dict) -> str:
+    """Map one observation onto the closed disposition vocabulary.
+
+    Unknown state or status is unproved (mutant) or void (baseline/control).
+    Those unknown cases are never killed.
+    """
     state = observation.get("state")
+    status = observation.get("status")
+    unknown_state = state is not None and state not in KNOWN_STATES
     if state in UNPROVED_STATES:
         return "unproved"
     kind = step.get("kind")
     if kind == "baseline":
-        return "passed" if observation.get("status") == "passed" else "void"
+        if unknown_state:
+            return "void"
+        return "passed" if status == "passed" else "void"
     if kind == "must-die":
+        if unknown_state:
+            return "void"
         if observation.get("scored") is not False:
             return "void"
-        if observation.get("status") != "killed":
+        if status != "killed":
             return "void"
         return "passed"
     if kind == "mutant":
         if step.get("operator") != GO_RUN_OPERATOR:
             return "void"
-        return observation.get("status") or "unproved"
+        if unknown_state or status not in KNOWN_MUTANT_STATUSES:
+            return "unproved"
+        return status
     raise AuthorizeError("unknown step")
 
 

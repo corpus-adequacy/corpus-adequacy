@@ -255,6 +255,30 @@ class SequenceAndDisposition(unittest.TestCase):
             self.assertEqual(got, "unproved", state)
             self.assertNotEqual(got, "killed")
 
+    def test_unknown_state_with_status_killed_is_never_killed(self):
+        step = {"id": "sealed-1", "kind": "mutant", "operator": "whole-condition-to-false"}
+        got = auth.classify_observation(step, {"state": "mystery", "status": "killed"})
+        self.assertIn(got, ("unproved", "void"))
+        self.assertNotEqual(got, "killed")
+
+    def test_unknown_mutant_status_is_never_returned_as_killed(self):
+        step = {"id": "sealed-1", "kind": "mutant", "operator": "whole-condition-to-false"}
+        got = auth.classify_observation(step, {"status": "banana"})
+        self.assertIn(got, ("unproved", "void"))
+        self.assertNotEqual(got, "banana")
+        self.assertNotEqual(got, "killed")
+
+    def test_unknown_baseline_or_control_status_voids_never_killed(self):
+        steps = auth.required_sequence(_sites())
+        self.assertEqual(
+            auth.classify_observation(steps[0], {"status": "killed"}),
+            "void",
+        )
+        self.assertEqual(
+            auth.classify_observation(steps[1], {"state": "mystery", "status": "killed", "scored": False}),
+            "void",
+        )
+
 
 class PublicNonClaims(unittest.TestCase):
     def test_removing_any_non_claim_from_code_tests_or_docs_fails(self):
