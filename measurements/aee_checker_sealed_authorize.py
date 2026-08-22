@@ -163,8 +163,9 @@ def require_authorized_sequence(steps) -> tuple:
         if type(got) is not dict:
             raise AuthorizeError("sequence")
         _exact(got, tuple(want.keys()), "sequence")
-        if got != want:
-            raise AuthorizeError("sequence")
+        for key, value in want.items():
+            if type(got[key]) is not type(value) or got[key] != value:
+                raise AuthorizeError("sequence")
     return tuple(steps)
 
 

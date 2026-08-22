@@ -299,6 +299,16 @@ class SequenceAndDisposition(unittest.TestCase):
             "unproved",
         )
 
+    def test_baseline_or_control_scored_zero_is_refused(self):
+        steps = list(auth.required_sequence(_sites()))
+        steps[0] = dict(steps[0], scored=0)
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+        steps = list(auth.required_sequence(_sites()))
+        steps[1] = dict(steps[1], scored=0)
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
+
     def test_extra_key_or_explicit_mutant_scored_is_refused(self):
         steps = list(auth.required_sequence(_sites()))
         steps[0] = dict(steps[0], operator=auth.GO_RUN_OPERATOR)
