@@ -357,6 +357,79 @@ class ControlFirstCallLog(unittest.TestCase):
             ],
         )
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_no_control_zero_denominator_still_emits_null_result_reading(self):
+        mutants = {"g": [{
+            "label": "oos",
+            "anchor": "{a1}",
+            "replacement": "{oos}",
+            "scope": "out_of_scope",
+            "reason": "not claimed",
+        }]}
+        with tempfile.TemporaryDirectory() as d:
+            _calls, report = self._run_logged(Path(d), mutants)
+        self.assertEqual(report["control_status"], "absent-or-invalid")
+        self.assertEqual(
+            report["killed"] + report["survived"] + report["silent"], 0)
+        self.assertEqual(report["unexercised_out_of_scope"], 1)
+        reading = ca.null_result_reading(
+            report["known_holes"], report["equivalent"],
+            report["unexercised_out_of_scope"])
+        self.assertIn(reading, report["failures"])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_ordinary_equivalents_precede_fallback_control_group_equivalents(self):
+        source = "A = {ca}\nZ = {az}\n"
+        mutants = {
+            "a": [{"label": "CTRL-a", "control": True, "anchor": "{ca}",
+                   "replacement": "{ca_x}"}],
+            "z": [{"label": "ord-z", "anchor": "{az}", "replacement": "{rz}"}],
+        }
+
+        def fake_build(_m):
+            return True, "built"
+
+        def fake_outcomes(m, vectors):
+            name = _identify(Path(m["_repo_root"], "check.py").read_text(encoding="utf-8"))
+            keys = [v[m["id_key"]] for v in vectors]
+            if name == "baseline":
+                return {key: "base" for key in keys}, {}, {}
+            return {key: name for key in keys}, {}, {}
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "check.py").write_text(source, encoding="utf-8")
+            (tmp / "va.json").write_text("{}\n")
+            (tmp / "vz.json").write_text("{}\n")
+            (tmp / "vectors.json").write_text(json.dumps({
+                "vectors": [
+                    {"vector_id": "va", "path": "va.json", "g": "a"},
+                    {"vector_id": "vz", "path": "vz.json", "g": "z"},
+                ]}))
+            raw = {
+                "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+                "implementation_sources": ["check.py"], "build": [],
+                "entrypoint_command": [sys.executable, "check.py", "{vector}"],
+                "outcome_from": ["ok"], "vectors": "vectors.json",
+                "id_key": "vector_id", "vector_path_key": "path",
+                "group_key": "g", "default_group": "a",
+                "mutants": mutants,
+                "equivalent": {
+                    "a": [{"label": "eq-a", "reason": "same a"}],
+                    "z": [{"label": "eq-z", "reason": "same z"}],
+                },
+            }
+            path = tmp / "m.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            loaded = ca.load_manifest(path)
+            with mock.patch.object(ca, "_build", side_effect=fake_build), \
+                    mock.patch.object(ca, "_process_outcomes", side_effect=fake_outcomes):
+                report = ca._run_process(loaded, path)
+        self.assertEqual(
+            [row["label"] for row in report["mutants"]],
+            ["CTRL-a", "ord-z", "eq-z", "eq-a"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
