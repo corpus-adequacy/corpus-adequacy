@@ -1,8 +1,20 @@
 # Tersign CHECKS measurement provenance
 
-Measured on `7ec3caeab415064b88a7fd288f7ec8da096a77f4` (the source commit).
+Measured on `a2f723fe5ae5036e97090b9691316e483c3f1acc` (the source commit).
 This later artifact-commit records the report; it is not the SHA the report
 ran on. TOOL_SOURCE bytes on this head equal that source commit.
+
+Re-measured after the `O_NONBLOCK` and finite-walk changes moved declared
+runtime-source bytes. Producer command, run on a clean tree at the source
+commit above:
+
+    python3 corpus_adequacy.py measurements/tersign-1cc5ea32/manifest.json --json
+
+Only `tool_commit` and `tool_content_sha256` moved. Every mutant row and every
+outcome field is byte-identical to the previous measurement: killed=10,
+survived=2, control_status `killed`, score 83.3, adequate false. The exit code
+is 1 because the corpus is not adequate, which is the same disposition the
+previous run recorded.
 
 Pin: `tersignhq/evidence-record-conformance@1cc5ea32b3da4f195b55782c8a3573d8564673a7`
 tree `8003d51692a1e77d7bca8ec07015ca3c03c00242`
@@ -23,13 +35,13 @@ vectors_tree `d84527932ee96004b9cf6329d554eb7e039e5221`
   entrypoint `["python3","tersign_checks.py","{vector}"]`, `accepted_exit_codes` `[0]`
 - `vectors.json` `678315a30887a5b899e8cc0cc36c4c8e8361cc4a587c7ed839b4f51ef717475d`
 - `source.json` `bf7094942d119fc5b57c917423c5fb7b6de110c26589690a800fa448db441cf2`
-- `report.v0.json` `b1a10e8cafabb33969e3fcaa9f4bc65de005fbc3673ef297158cbb581746c043` (4539 B)
+- `report.v0.json` `c65f8a6c6dcc4a56dea31e7fc0de241a8cbbdcf36cd4cf98c220d23a894fe5ae` (4539 B)
 
 ## Report fields on the measured SHA
 
 - schema `corpus-adequacy.report.v0`, runner `process`, tool_version `0.1.0`
-- tool_commit `7ec3caeab415064b88a7fd288f7ec8da096a77f4`, tool_source_state `exact`
-- tool_content_sha256 `sha256:8c367574fc7be11d3eb0329bee861e58681c1b4ae0c5531a410e046654fb5b5b`
+- tool_commit `a2f723fe5ae5036e97090b9691316e483c3f1acc`, tool_source_state `exact`
+- tool_content_sha256 `sha256:2580d5ee6353ba00dce4b8c6e355393b5457d92153b8da1f4ea9f4516e181bac`
 - manifest_sha256 `sha256:9c4c9583ed7166cec9a26b24bc42ad5db32a4c744bce3d6b41128ff428a07487`
 - corpus_digest `null`
 - killed=10, survived=2, silent=0, declared_total=12, score=83.3, adequate=false
