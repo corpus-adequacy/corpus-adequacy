@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import signal
@@ -356,6 +357,48 @@ class NonActionableAndDiagnostics(unittest.TestCase):
             self.assertNotIn("moved_diagnostic", run_page)
             survived = _text(files, "runs/%s/rules/0000.html" % rec_id)
             self.assertNotIn("moved_diagnostic", survived)
+
+
+def _escaped_ceilings() -> tuple[str, ...]:
+    return tuple(html.escape(line, quote=True) for line in rpp.CEILING_LINES)
+
+
+class PublicClaimsOnDeepPages(unittest.TestCase):
+    def test_run_and_rule_pages_carry_all_four_ceilings(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [SURVIVED_SILENT / "report.v0.json"])
+            files = _site(root)
+            for rel in (RUN, SURVIVED, SILENT):
+                page = _text(files, rel)
+                for line in _escaped_ceilings():
+                    self.assertIn(line, page)
+                self.assertIn('class="non-claims"', page)
+            src = Path(rpp.__file__).read_text(encoding="utf-8")
+            self.assertEqual(src.count("def _non_claims_html"), 1)
+            self.assertIn("_non_claims_html", rpp._run_page.__code__.co_names)
+            self.assertIn("_non_claims_html", rpp._rule_page.__code__.co_names)
+            self.assertIn("_non_claims_html", rpp._page_body.__code__.co_names)
+
+    def test_run_page_keeps_typed_counts_and_silent_label(self):
+        live = _site(REPO_ROOT)
+        tersign = _text(live, "runs/tersign-1cc5ea32/index.html")
+        self.assertIn('aria-label="silent not measured"', tersign)
+        self.assertIn("survived 2", tersign)
+        self.assertIn('aria-label="diagnostic_channel_declared not declared"', tersign)
+        self.assertIn('class="counts"', tersign)
+        self.assertIn("_counts_html", rpp._run_page.__code__.co_names)
+        self.assertIn("_counts_html", rpp._card_html.__code__.co_names)
+        self.assertEqual(Path(rpp.__file__).read_text(encoding="utf-8").count("def _counts_html"), 1)
+
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [SURVIVED_SILENT / "report.v0.json"])
+            run_page = _text(_site(root), RUN)
+            self.assertIn('aria-label="silent 1"', run_page)
+            self.assertNotIn('aria-label="silent not measured"', run_page)
+            self.assertIn('aria-label="diagnostic_channel_declared declared"', run_page)
+            self.assertIn("survived 1", run_page)
+            self.assertIn("killed 1", run_page)
+            self.assertIn("control_status killed", run_page)
 
 
 class KeyboardAndMobile(unittest.TestCase):

@@ -9,8 +9,12 @@ writing. The form no longer claims a workflow recomputes machine fields.
 
 The same projector now writes a run page and one rule page per
 `survivor_findings` row, addressed by the report `mutants[]` index. Overview
-cards link to `runs/{id}/`. Membership is that projection only: leftover
-unconsumed findings fail closed, and `how` is the validated report field.
+cards link to `runs/{id}/`. Run and rule pages reuse one non-claims
+renderer so a shared deep link still carries the four ceiling lines.
+Card and run page reuse one counts renderer, including `silent_label`
+and `diagnostic_channel_declared`. Membership is that projection only:
+leftover unconsumed findings fail closed, and `how` is the validated
+report field.
 `--check` inventories regular files under `site/`. Only an exact `CNAME`
 is left unmanaged; any other regular file outside `index.html` and
 `runs/**` (including a regular file named `runs`) fails closed as surplus.

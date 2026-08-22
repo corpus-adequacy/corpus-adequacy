@@ -394,27 +394,51 @@ def _plain_sentence(record: dict) -> str:
     )
 
 
+def _non_claims_html(records: list[dict] | None = None) -> str:
+    seen = []
+    for rec in records or []:
+        for item in rec.get("non_claims") or []:
+            if item not in seen:
+                seen.append(item)
+    for item in CEILING_LINES:
+        if item not in seen:
+            seen.append(item)
+    return (
+        '<section class="non-claims" aria-labelledby="non-claims-heading">\n'
+        '<h2 id="non-claims-heading">Non-claims</h2>\n'
+        "<ul>\n%s\n</ul>\n"
+        "</section>"
+        % "\n".join("<li>%s</li>" % _esc(item) for item in seen)
+    )
+
+
+def _counts_html(record: dict) -> str:
+    silent_value = record["silent_label"]
+    channel = "declared" if record["diagnostic_channel_declared"] else "not declared"
+    rows = (
+        ("killed", record["killed"], "killed %s" % record["killed"]),
+        ("survived", record["survived"], "survived %s" % record["survived"]),
+        ("silent", silent_value, "silent %s" % silent_value),
+        ("unproved", record["unproved"], "unproved %s" % record["unproved"]),
+        ("control_status", record["control_status"], "control_status %s" % record["control_status"]),
+        ("diagnostic_channel_declared", channel, "diagnostic_channel_declared %s" % channel),
+    )
+    items = []
+    for label, value, accessible in rows:
+        items.append(
+            '<li class="count" aria-label="%s"><span class="count-label">%s</span> '
+            '<span class="count-value">%s</span></li>'
+            % (_esc(accessible), _esc(label), _esc(value))
+        )
+    return '<ul class="counts">%s</ul>' % "".join(items)
+
+
 def _card_html(record: dict, build_commit: str) -> str:
     raw_href, review_href, source_href = _evidence_hrefs(record, build_commit)
     source_link = (
         '<a href="%s">source commit %s</a>' % (_esc(source_href), _esc(record["source_commit"]))
     )
     detail_href = "runs/%s/" % record["directory"]
-    silent_value = record["silent_label"]
-    counts = (
-        ("killed", record["killed"], "killed %s" % record["killed"]),
-        ("survived", record["survived"], "survived %s" % record["survived"]),
-        ("silent", silent_value, "silent %s" % silent_value),
-        ("unproved", record["unproved"], "unproved %s" % record["unproved"]),
-        ("control_status", record["control_status"], "control_status %s" % record["control_status"]),
-    )
-    count_html = []
-    for label, value, accessible in counts:
-        count_html.append(
-            '<li class="count" aria-label="%s"><span class="count-label">%s</span> '
-            '<span class="count-value">%s</span></li>'
-            % (_esc(accessible), _esc(label), _esc(value))
-        )
     return (
         '<li class="card">\n'
         '<h3>%s</h3>\n'
@@ -424,7 +448,7 @@ def _card_html(record: dict, build_commit: str) -> str:
         '<p>report digest <span class="mono">%s</span></p>\n'
         '<p>Copyable command</p>\n'
         '<pre><code>%s</code></pre>\n'
-        '<ul class="counts">%s</ul>\n'
+        '%s\n'
         '<p class="plain">%s</p>\n'
         '<p class="links">\n'
         '<a href="%s">run detail</a>\n'
@@ -441,7 +465,7 @@ def _card_html(record: dict, build_commit: str) -> str:
             _esc(record["runner"]),
             _esc(record["digest"]),
             _esc(record["command"]),
-            "".join(count_html),
+            _counts_html(record),
             _esc(_plain_sentence(record)),
             _esc(detail_href),
             _esc(raw_href),
@@ -452,15 +476,6 @@ def _card_html(record: dict, build_commit: str) -> str:
 
 
 def _page_body(records: list[dict], source_commit: str, projection_digest: str) -> str:
-    collected = []
-    for rec in records:
-        collected.extend(rec.get("non_claims") or [])
-    collected.extend(CEILING_LINES)
-    seen = []
-    for item in collected:
-        if item not in seen:
-            seen.append(item)
-    non_claims = "\n".join("<li>%s</li>" % _esc(item) for item in seen)
     cards = "\n".join(_card_html(rec, source_commit) for rec in records)
     return """<!DOCTYPE html>
 <html lang="en">
@@ -480,12 +495,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 <h1>Published measurements</h1>
 <p>Committed <code>report.v0</code> records listed in <code>publications/index.v0.json</code>.</p>
 </header>
-<section class="non-claims" aria-labelledby="non-claims-heading">
-<h2 id="non-claims-heading">Non-claims</h2>
-<ul>
 %s
-</ul>
-</section>
 <nav class="ctas" aria-label="intake and publication forms">
 <a href="%s">Request source intake</a>
 <a href="%s">Hand off a completed measurement</a>
@@ -502,7 +512,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
         _esc(projection_digest),
         _esc(source_commit),
         SHARED_STYLE,
-        non_claims,
+        _non_claims_html(records),
         _esc(ISSUES_INTAKE),
         _esc(ISSUES_PUBLISH),
         cards,
@@ -577,6 +587,8 @@ def _run_page(record: dict, findings: list[dict], build_commit: str) -> str:
         "<h1>%s</h1>\n"
         '<p><a href="../../index.html">overview</a></p>\n'
         "</header>\n"
+        "%s\n"
+        "%s\n"
         '<main id="findings">\n'
         "<h2>Actionable findings</h2>\n"
         "<ul class=\"finding\">\n%s\n</ul>\n"
@@ -584,6 +596,8 @@ def _run_page(record: dict, findings: list[dict], build_commit: str) -> str:
         "</main>"
         % (
             _esc(record["directory"]),
+            _non_claims_html([record]),
+            _counts_html(record),
             "\n".join(items),
             _evidence_links_html(record, build_commit),
         )
@@ -615,6 +629,7 @@ def _rule_page(record: dict, finding: dict, build_commit: str) -> str:
         '<p><a href="../../../index.html">overview</a> · '
         '<a href="../">run detail</a></p>\n'
         "</header>\n"
+        "%s\n"
         '<main id="finding" class="finding">\n'
         "<p>verdict <span>%s</span></p>\n"
         "<p>group <span class=\"mono\">%s</span></p>\n"
@@ -626,6 +641,7 @@ def _rule_page(record: dict, finding: dict, build_commit: str) -> str:
         "</main>"
         % (
             _esc(finding["rule"]),
+            _non_claims_html([record]),
             _esc(finding["verdict"]),
             _esc(finding["group"]),
             _esc(finding["how"]),
