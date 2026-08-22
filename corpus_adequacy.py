@@ -657,6 +657,19 @@ def partition_declared_mutants(mutants: dict) -> tuple:
     return controls, ordinary
 
 
+def _append_group_equivalents(results: list, m: dict, group: str,
+                              baselines: dict) -> int:
+    """Emit one group's declared equivalents after that group's ordinary rows."""
+    if group not in baselines:
+        return 0
+    added = 0
+    for eq in m["equivalent"].get(group, []):
+        results.append({"group": group, "label": eq["label"], "verdict": "equivalent",
+                        "how": eq["reason"], "moved": 0})
+        added += 1
+    return added
+
+
 def _control_status(statuses: list[str], declared_count: int) -> str:
     """Summarise all declared controls without asking a consumer to scan rows.
 
@@ -1660,11 +1673,18 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                     "surface and match it." % (_selector, never_seen))
 
         controls, ordinary = partition_declared_mutants(m["mutants"])
+        prev_ordinary = None
         for wave_index, wave in enumerate((controls, ordinary)):
             if wave_index == 1 and declared_controls and _control_status(
                     control_statuses, declared_controls) != "killed":
                 break
             for group, mut in wave:
+                if (wave_index == 1 and prev_ordinary is not None
+                        and group != prev_ordinary):
+                    equivalent += _append_group_equivalents(
+                        results, m, prev_ordinary, baselines)
+                if wave_index == 1:
+                    prev_ordinary = group
                 if group not in baselines:
                     continue
                 vectors, baseline, baseline_diag = baselines[group]
@@ -1833,14 +1853,9 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                                     "how": "no vector distinguishes it. An implementation can "
                                            "delete this rule and still reproduce the digest"})
                     survived += 1
-
-        for group in sorted(m["mutants"]):
-            if group not in baselines:
-                continue
-            for eq in m["equivalent"].get(group, []):
-                results.append({"group": group, "label": eq["label"], "verdict": "equivalent",
-                                "how": eq["reason"], "moved": 0})
-                equivalent += 1
+        if prev_ordinary is not None:
+            equivalent += _append_group_equivalents(
+                results, m, prev_ordinary, baselines)
     finally:
         try:
             if guard is not None:
@@ -1866,6 +1881,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     # implementer can delete while reproducing every pinned outcome, whatever the
     # diagnostics did; counting it killed would inflate the score by exactly the
     # rules the corpus fails to force.
+    control_status = _control_status(control_statuses, declared_controls)
     denom = killed + survived + silent
     # No denominator means no measurement. Printing 100% over zero is the same
     # defect as excluding everything and printing 100%. An unmutated or control
@@ -1883,7 +1899,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                         "diagnostic. The rule is not forced by the outcomes this corpus pins, so "
                         "it counts against the score; either write a vector that moves an outcome "
                         "or declare the diagnostic channel part of the pinned surface" % silent)
-    if denom == 0:
+    if denom == 0 and (declared_controls == 0 or control_status == "killed"):
         failures.append(null_result_reading(known_holes, equivalent, out_of_scope))
 
     return _report_v0(
@@ -1891,7 +1907,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         killed=killed, survived=survived, silent=silent, equivalent=equivalent,
         out_of_scope=out_of_scope, unproved=unproved, known_holes=known_holes,
         score=score, results=results, failures=failures,
-        control_status=_control_status(control_statuses, declared_controls),
+        control_status=control_status,
         originals_unverified_against_head=guard.unverified)
 
 

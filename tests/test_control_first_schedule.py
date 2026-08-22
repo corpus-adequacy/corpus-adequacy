@@ -170,11 +170,25 @@ class ControlFirstCallLog(unittest.TestCase):
                 self.assertFalse(
                     any(row["label"] in SEALED_IDS for row in report["mutants"]), mode)
                 self.assertIsNone(report["score_percent"], mode)
+                self._assert_invalid_control_failures(report)
 
     def _control_anchor_spec(self, *, anchor, replacement="{ctrl_x}"):
         spec = _aee_spec()
         spec[-1] = dict(spec[-1], anchor=anchor, replacement=replacement)
         return spec
+
+    def _assert_invalid_control_failures(self, report):
+        """An invalid control is not a null declaration / all-excluded result."""
+        self.assertTrue(
+            any("control" in item and (
+                "survived" in item or "ended abnormally" in item)
+                for item in report["failures"]),
+            report["failures"])
+        reading = ca.null_result_reading(
+            report["known_holes"], report["equivalent"],
+            report["unexercised_out_of_scope"])
+        self.assertNotIn(reading, report["failures"])
+        self.assertNotIn(ca.null_result_reading(0, 0, 0), report["failures"])
 
     def _assert_control_error_skips_ordinary(self, report, calls):
         self.assertEqual(calls, ["baseline"])
@@ -184,6 +198,7 @@ class ControlFirstCallLog(unittest.TestCase):
         self.assertEqual(row["verdict"], "control-error")
         self.assertFalse(any(item["label"] in SEALED_IDS for item in report["mutants"]))
         self.assertIsNone(report["score_percent"])
+        self._assert_invalid_control_failures(report)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_missing_control_anchor_is_control_error_and_skips_ordinary(self):
@@ -258,6 +273,68 @@ class ControlFirstCallLog(unittest.TestCase):
                 report = ca._run_process(loaded, path)
         self.assertEqual(calls, ["ctrl-a", "ctrl-z", "ord-a", "ord-z"])
         self.assertEqual(report["control_status"], "killed")
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_no_control_rows_keep_group_then_that_groups_equivalents(self):
+        source = "A = {aa}\nZ = {az}\n"
+        mutants = {
+            "z": [{"label": "ord-z", "anchor": "{az}", "replacement": "{rz}"}],
+            "a": [{"label": "ord-a", "anchor": "{aa}", "replacement": "{ra}"}],
+        }
+        calls = []
+
+        def fake_build(m):
+            name = _identify(Path(m["_repo_root"], "check.py").read_text(encoding="utf-8"))
+            if name != "baseline":
+                calls.append(name)
+            return True, "built"
+
+        def fake_outcomes(m, vectors):
+            name = _identify(Path(m["_repo_root"], "check.py").read_text(encoding="utf-8"))
+            keys = [v[m["id_key"]] for v in vectors]
+            if name == "baseline":
+                return {key: "base" for key in keys}, {}, {}
+            return {key: name for key in keys}, {}, {}
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "check.py").write_text(source, encoding="utf-8")
+            (tmp / "va.json").write_text("{}\n")
+            (tmp / "vz.json").write_text("{}\n")
+            (tmp / "vectors.json").write_text(json.dumps({
+                "vectors": [
+                    {"vector_id": "va", "path": "va.json", "g": "a"},
+                    {"vector_id": "vz", "path": "vz.json", "g": "z"},
+                ]}))
+            raw = {
+                "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+                "implementation_sources": ["check.py"], "build": [],
+                "entrypoint_command": [sys.executable, "check.py", "{vector}"],
+                "outcome_from": ["ok"], "vectors": "vectors.json",
+                "id_key": "vector_id", "vector_path_key": "path",
+                "group_key": "g", "default_group": "a",
+                "mutants": mutants,
+                "equivalent": {
+                    "z": [{"label": "eq-z", "reason": "same z"}],
+                    "a": [{"label": "eq-a", "reason": "same a"}],
+                },
+            }
+            path = tmp / "m.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            loaded = ca.load_manifest(path)
+            with mock.patch.object(ca, "_build", side_effect=fake_build), \
+                    mock.patch.object(ca, "_process_outcomes", side_effect=fake_outcomes):
+                report = ca._run_process(loaded, path)
+        self.assertEqual(calls, ["ord-a", "ord-z"])
+        self.assertEqual(
+            [(row["group"], row["label"], row["verdict"]) for row in report["mutants"]],
+            [
+                ("a", "ord-a", "killed"),
+                ("a", "eq-a", "equivalent"),
+                ("z", "ord-z", "killed"),
+                ("z", "eq-z", "equivalent"),
+            ],
+        )
 
 
 if __name__ == "__main__":
