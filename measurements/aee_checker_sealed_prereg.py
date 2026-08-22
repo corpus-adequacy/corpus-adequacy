@@ -16,10 +16,16 @@ from pathlib import Path
 
 UNPROVED_EXIT_CODES = [75]
 ACCEPTED_EXIT_CODES = [0]
-OUTCOME_FROM = ["verdict", "result", "tiersWithPinnedKey", "tiersWithoutKey"]
-DIAGNOSTIC_FROM = ["reason"]
+OUTCOME_FROM = ["rows"]
+DIAGNOSTIC_FROM = ["diagnostics"]
 PINNED_BUILD = ["cargo", "build", "--locked", "--release"]
+PINNED_IMPLEMENTATION_SOURCES = ["src/check.rs", "aee_checker_sealed.py"]
 SELECTED_COUNT = 7
+PINNED_COMPLEMENT_COUNT = 125
+# Live #211: every explicit if. if-let is in the complement, not the denominator.
+# check_sealed has no if-let, so selected stays 7. Do not amend the issue.
+# syn ExprIf outside=124 plus the format! token-if at check.rs:647 = 125.
+IF_LET_IN_COMPLEMENT = True
 GROUP = "sealed"
 CONTROL_ANCHOR = (
     "fn check_sealed(payload: &Value, ctx: &Ctx) -> R<(Vec<&'static str>, String)> {"
@@ -51,6 +57,7 @@ def code_mask(src: str) -> str:
     i, n = 0, len(src)
     state = "code"
     raw_hash = 0
+    block_depth = 0
     while i < n:
         c, nxt = src[i], src[i + 1] if i + 1 < n else ""
         if state == "code":
@@ -61,6 +68,7 @@ def code_mask(src: str) -> str:
                 continue
             if c == "/" and nxt == "*":
                 state = "block"
+                block_depth = 1
                 out.append("  ")
                 i += 2
                 continue
@@ -86,6 +94,13 @@ def code_mask(src: str) -> str:
                 i += 1
                 continue
             if c == "'":
+                # `'e'` is a char literal. `'static` / `'a` are lifetimes.
+                closed_char = bool(nxt) and i + 2 < n and src[i + 2] == "'" and nxt != "\\"
+                if nxt == "\\" or closed_char:
+                    state = "char"
+                    out.append(" ")
+                    i += 1
+                    continue
                 if nxt == "_" or nxt.isalpha():
                     out.append(c)
                     i += 1
@@ -106,13 +121,20 @@ def code_mask(src: str) -> str:
             i += 1
             continue
         if state == "block":
+            if c == "/" and nxt == "*":
+                out.append("  ")
+                i += 2
+                block_depth += 1
+                continue
             if c == "*" and nxt == "/":
                 out.append("  ")
                 i += 2
-                state = "code"
-            else:
-                out.append("\n" if c == "\n" else " ")
-                i += 1
+                block_depth -= 1
+                if block_depth == 0:
+                    state = "code"
+                continue
+            out.append("\n" if c == "\n" else " ")
+            i += 1
             continue
         if state in ("string", "char"):
             end = '"' if state == "string" else "'"
@@ -161,9 +183,6 @@ def _explicit_ifs(text: str, masked: str, lo: int, hi: int) -> list[dict]:
             break
         pos = i + m.start()
         i = pos + 2
-        rest = masked[pos + 2:hi].lstrip()
-        if rest.startswith("let"):
-            continue
         k = pos + 2
         while k < hi and masked[k] in " \t":
             k += 1
@@ -285,12 +304,11 @@ def _manifest(found: dict) -> dict:
         "runner": "batch",
         "repo_root": ".",
         "implementation": "src/check.rs",
-        "implementation_sources": ["src/check.rs"],
+        "implementation_sources": list(PINNED_IMPLEMENTATION_SOURCES),
         "build": list(PINNED_BUILD),
         "entrypoint_command": [
             "python3", "aee_checker_sealed.py",
             "--checker", "./target/release/aee-checker",
-            "--expected-count", "250",
             "corpus/vectors",
         ],
         "outcome_from": list(OUTCOME_FROM),
@@ -310,8 +328,8 @@ def _sites_doc(found: dict) -> dict:
         "selected_count": len(found["sites"]),
         "complement_count": len(found["complement"]),
         "complement_note": (
-            "Explicit ifs outside check_sealed are descriptive only "
-            "and are not in the denominator."
+            "Every explicit if outside check_sealed, including if-let, "
+            "is descriptive only and is not in the denominator."
         ),
         "function": found["function"],
         "source_sha256": found["source_sha256"],
@@ -378,10 +396,20 @@ def validate_prereg(dest: Path) -> None:
         raise PreregError("accepted_exit_codes must be %s" % ACCEPTED_EXIT_CODES)
     if manifest.get("build") != PINNED_BUILD:
         raise PreregError("build must be exactly cargo build --locked --release")
+    if manifest.get("outcome_from") != OUTCOME_FROM:
+        raise PreregError("outcome_from must be the ID-keyed rows map")
     if manifest.get("diagnostic_from") != DIAGNOSTIC_FROM:
-        raise PreregError("diagnostic_from must be the normalized prose reason")
+        raise PreregError("diagnostic_from must be the ID-keyed diagnostics map")
+    if manifest.get("implementation_sources") != PINNED_IMPLEMENTATION_SOURCES:
+        raise PreregError("implementation_sources must be check.rs and the adapter")
     if "code" in manifest.get("outcome_from", []) or "code" in (manifest.get("diagnostic_from") or []):
         raise PreregError("code must stay out of outcome_from and diagnostic_from")
+    complement = sites.get("complement") or []
+    if sites.get("complement_count") != len(complement):
+        raise PreregError("completeness: complement_count does not match complement rows")
+    pinned_outside = (pins.get("enumeration") or {}).get("complement_count")
+    if pinned_outside is not None and sites.get("complement_count") != pinned_outside:
+        raise PreregError("completeness: complement_count does not match the pinned inventory")
     selected_spans = [s["span"] for s in selected]
     for item in sites.get("complement") or []:
         if item["span"] in selected_spans:

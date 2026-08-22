@@ -21,6 +21,16 @@
       }
     },
     {
+      "condition": "let Some(p) = &prev",
+      "line": 179,
+      "span": {
+        "column": 12,
+        "end": 6141,
+        "line": 179,
+        "start": 6122
+      }
+    },
+    {
       "condition": "*p >= units",
       "line": 180,
       "span": {
@@ -28,6 +38,106 @@
         "end": 6170,
         "line": 180,
         "start": 6159
+      }
+    },
+    {
+      "condition": "integral && json::parse_safe_integer(raw).is_none()",
+      "line": 211,
+      "span": {
+        "column": 16,
+        "end": 7194,
+        "line": 211,
+        "start": 7143
+      }
+    },
+    {
+      "condition": "!json::is_bmp_only(k)",
+      "line": 226,
+      "span": {
+        "column": 20,
+        "end": 7697,
+        "line": 226,
+        "start": 7676
+      }
+    },
+    {
+      "condition": "rec.as_object().is_none()",
+      "line": 241,
+      "span": {
+        "column": 8,
+        "end": 8119,
+        "line": 241,
+        "start": 8094
+      }
+    },
+    {
+      "condition": "sigs.is_empty()",
+      "line": 247,
+      "span": {
+        "column": 8,
+        "end": 8382,
+        "line": 247,
+        "start": 8367
+      }
+    },
+    {
+      "condition": "s.as_object().is_none()",
+      "line": 252,
+      "span": {
+        "column": 12,
+        "end": 8610,
+        "line": 252,
+        "start": 8587
+      }
+    },
+    {
+      "condition": "let Some(kid) = s.get(\"keyid\")",
+      "line": 256,
+      "span": {
+        "column": 12,
+        "end": 8824,
+        "line": 256,
+        "start": 8794
+      }
+    },
+    {
+      "condition": "kid.as_str().is_none()",
+      "line": 257,
+      "span": {
+        "column": 16,
+        "end": 8864,
+        "line": 257,
+        "start": 8842
+      }
+    },
+    {
+      "condition": "B64.encode(&payload_bytes) != payload_b64",
+      "line": 274,
+      "span": {
+        "column": 8,
+        "end": 9652,
+        "line": 274,
+        "start": 9611
+      }
+    },
+    {
+      "condition": "v.as_object().is_none()",
+      "line": 285,
+      "span": {
+        "column": 16,
+        "end": 10068,
+        "line": 285,
+        "start": 10045
+      }
+    },
+    {
+      "condition": "let Err(e) = payload_profile_ok(&v)",
+      "line": 287,
+      "span": {
+        "column": 23,
+        "end": 10201,
+        "line": 287,
+        "start": 10166
       }
     },
     {
@@ -98,6 +208,16 @@
         "end": 16908,
         "line": 436,
         "start": 16873
+      }
+    },
+    {
+      "condition": "let Err(e) = check_arming(payload, ctx)",
+      "line": 439,
+      "span": {
+        "column": 27,
+        "end": 17101,
+        "line": 439,
+        "start": 17062
       }
     },
     {
@@ -191,6 +311,16 @@
       }
     },
     {
+      "condition": "let Some(p) = &prev_token",
+      "line": 574,
+      "span": {
+        "column": 28,
+        "end": 23467,
+        "line": 574,
+        "start": 23442
+      }
+    },
+    {
       "condition": "*p >= units",
       "line": 575,
       "span": {
@@ -238,6 +368,26 @@
         "end": 33956,
         "line": 803,
         "start": 33936
+      }
+    },
+    {
+      "condition": "let Some(r) = row.get(\"observationRefs\")",
+      "line": 809,
+      "span": {
+        "column": 8,
+        "end": 34192,
+        "line": 809,
+        "start": 34152
+      }
+    },
+    {
+      "condition": "let Some(sel) = row.get(\"observationSelectors\")",
+      "line": 822,
+      "span": {
+        "column": 8,
+        "end": 34712,
+        "line": 822,
+        "start": 34665
       }
     },
     {
@@ -301,6 +451,16 @@
       }
     },
     {
+      "condition": "let Some(dna) = pred.get(\"doesNotAssert\")",
+      "line": 882,
+      "span": {
+        "column": 8,
+        "end": 36933,
+        "line": 882,
+        "start": 36892
+      }
+    },
+    {
       "condition": "v.as_str().is_none()",
       "line": 887,
       "span": {
@@ -341,6 +501,16 @@
       }
     },
     {
+      "condition": "let Some(p) = &prev",
+      "line": 953,
+      "span": {
+        "column": 16,
+        "end": 40747,
+        "line": 953,
+        "start": 40728
+      }
+    },
+    {
       "condition": "*p >= units",
       "line": 954,
       "span": {
@@ -378,6 +548,16 @@
         "end": 42858,
         "line": 1005,
         "start": 42813
+      }
+    },
+    {
+      "condition": "let Some(ep) = manifest.get(\"expectedPayloads\")",
+      "line": 1019,
+      "span": {
+        "column": 8,
+        "end": 43584,
+        "line": 1019,
+        "start": 43537
       }
     },
     {
@@ -461,6 +641,16 @@
       }
     },
     {
+      "condition": "let Some(&j) = first_seen.get(row.attack_id)",
+      "line": 1159,
+      "span": {
+        "column": 12,
+        "end": 49900,
+        "line": 1159,
+        "start": 49856
+      }
+    },
+    {
       "condition": "!manifest_attacks.iter().any(|(_, a)| a == row.attack_id)",
       "line": 1169,
       "span": {
@@ -491,6 +681,16 @@
       }
     },
     {
+      "condition": "let Some(label) = row.label",
+      "line": 1203,
+      "span": {
+        "column": 12,
+        "end": 51623,
+        "line": 1203,
+        "start": 51596
+      }
+    },
+    {
       "condition": "clean",
       "line": 1205,
       "span": {
@@ -518,6 +718,16 @@
         "end": 52479,
         "line": 1221,
         "start": 52460
+      }
+    },
+    {
+      "condition": "let Some(rv) = records_val",
+      "line": 1233,
+      "span": {
+        "column": 8,
+        "end": 52988,
+        "line": 1233,
+        "start": 52962
       }
     },
     {
@@ -681,6 +891,16 @@
       }
     },
     {
+      "condition": "let Some(why) = ce.non_covering.as_ref()",
+      "line": 1467,
+      "span": {
+        "column": 20,
+        "end": 64180,
+        "line": 1467,
+        "start": 64140
+      }
+    },
+    {
       "condition": "non_covering_why.is_empty()",
       "line": 1482,
       "span": {
@@ -761,6 +981,16 @@
       }
     },
     {
+      "condition": "let Some(slot) = resolved_by_caught.get_mut(r as usize)",
+      "line": 1585,
+      "span": {
+        "column": 20,
+        "end": 70614,
+        "line": 1585,
+        "start": 70559
+      }
+    },
+    {
       "condition": "*k == RecordKind::Interception && !resolved_by_caught[idx]",
       "line": 1591,
       "span": {
@@ -788,6 +1018,16 @@
         "end": 71902,
         "line": 1614,
         "start": 71878
+      }
+    },
+    {
+      "condition": "let Some(pl) = records[idx].payload.as_ref()",
+      "line": 1624,
+      "span": {
+        "column": 20,
+        "end": 72567,
+        "line": 1624,
+        "start": 72523
       }
     },
     {
@@ -831,6 +1071,16 @@
       }
     },
     {
+      "condition": "let Some(why) = ce.non_covering",
+      "line": 1733,
+      "span": {
+        "column": 20,
+        "end": 79206,
+        "line": 1733,
+        "start": 79175
+      }
+    },
+    {
       "condition": "ce.kind == RecordKind::Sealed && !(ce.sealed_covers_clean && sweep_arming_ok)",
       "line": 1788,
       "span": {
@@ -848,6 +1098,16 @@
         "end": 84398,
         "line": 1812,
         "start": 84374
+      }
+    },
+    {
+      "condition": "let Some(arr) = payload.get(\"aeeObservedAttacks\").and_then(|v| v.as_array())",
+      "line": 1819,
+      "span": {
+        "column": 20,
+        "end": 84703,
+        "line": 1819,
+        "start": 84627
       }
     },
     {
@@ -991,8 +1251,8 @@
       }
     }
   ],
-  "complement_count": 99,
-  "complement_note": "Explicit ifs outside check_sealed are descriptive only and are not in the denominator.",
+  "complement_count": 125,
+  "complement_note": "Every explicit if outside check_sealed, including if-let, is descriptive only and is not in the denominator.",
   "function": {
     "end": 31597,
     "name": "check_sealed",

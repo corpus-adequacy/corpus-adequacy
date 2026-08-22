@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,9 @@ PINNED_CONDITIONS = (
 SYNTHETIC = """\
 fn other() {
     if leftover_outside {
+        return;
+    }
+    if let Some(x) = y {
         return;
     }
 }
@@ -100,6 +104,7 @@ class EnumeratorSelectsSeven(unittest.TestCase):
         outside = [s["condition"] for s in found["complement"]]
         self.assertIn("leftover_outside", outside)
         self.assertIn("extra_outside", outside)
+        self.assertTrue(any(c.startswith("let ") for c in outside), outside)
         self.assertEqual(len(found["sites"]), 7)
 
     def test_outside_complement_is_not_in_the_denominator(self):
@@ -182,6 +187,16 @@ class BitingPreregMutations(unittest.TestCase):
             with self.assertRaises(prereg.PreregError):
                 prereg.assert_byte_identical_prereg(a, b)
 
+    def test_understated_complement_count_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = self._emit(Path(d))
+            sites = json.loads((dest / "sites.json").read_text(encoding="utf-8"))
+            sites["complement_count"] = sites["complement_count"] - 1
+            _dump(dest / "sites.json", sites)
+            with self.assertRaises(prereg.PreregError) as ctx:
+                prereg.validate_prereg(dest)
+            self.assertIn("complement", str(ctx.exception).lower())
+
     def test_unproved_exit_not_exclusively_from_issue_45_policy_fails(self):
         with tempfile.TemporaryDirectory() as d:
             dest = self._emit(Path(d))
@@ -193,8 +208,78 @@ class BitingPreregMutations(unittest.TestCase):
             self.assertIn("unproved", str(ctx.exception).lower())
 
 
+class LexerKeepsExplicitIfs(unittest.TestCase):
+    """#211 is every explicit if, including if-let. Complement is descriptive."""
+
+    def _masked_has_if(self, src: str, cond: str) -> bool:
+        return bool(re.search(r"\bif\s+" + re.escape(cond) + r"\b", prereg.code_mask(src)))
+
+    def test_alphabetic_char_literal_does_not_hide_a_later_if(self):
+        src = "let integral = !raw.contains(['.', 'e', 'E']);\nif later_guard {\n}\n"
+        self.assertTrue(self._masked_has_if(src, "later_guard"), prereg.code_mask(src))
+        found = prereg.enumerate_source(
+            (src + SYNTHETIC[SYNTHETIC.index("fn check_sealed"):]).encode("utf-8"))
+        self.assertIn("later_guard", [c["condition"] for c in found["complement"]])
+
+    def test_lifetime_is_not_treated_as_a_char_literal(self):
+        src = "fn f<'a>(x: &'a str) {\n    if lifetime_guard {\n    }\n}\n"
+        self.assertTrue(self._masked_has_if(src, "lifetime_guard"), prereg.code_mask(src))
+
+    def test_raw_string_does_not_contribute_an_if(self):
+        src = 'const S: &str = r#" if hidden_raw { } "#;\nif raw_after {\n}\n'
+        masked = prereg.code_mask(src)
+        self.assertIsNone(re.search(r"\bif\s+hidden_raw\b", masked), masked)
+        self.assertTrue(self._masked_has_if(src, "raw_after"), masked)
+
+    def test_nested_block_comment_does_not_leak_or_hide_an_if(self):
+        src = "/* outer /* inner */ if still_comment { } */\nif after_comment {\n}\n"
+        masked = prereg.code_mask(src)
+        self.assertIsNone(re.search(r"\bif\s+still_comment\b", masked), masked)
+        self.assertTrue(self._masked_has_if(src, "after_comment"), masked)
+
+    def test_if_let_belongs_to_the_explicit_if_complement(self):
+        found = prereg.enumerate_source(SYNTHETIC.encode("utf-8"))
+        lets = [c["condition"] for c in found["complement"] if c["condition"].startswith("let ")]
+        self.assertEqual(lets, ["let Some(x) = y"])
+        self.assertEqual(len(found["sites"]), 7)
+
+    def test_format_macro_if_belongs_to_the_explicit_if_complement(self):
+        src = (
+            'fn other() {\n'
+            '    failed.push(format!("arming record{} the rows resolve",\n'
+            '        if n == 1 { "" } else { "s" }\n'
+            '    ));\n'
+            '}\n'
+        )
+        found = prereg.enumerate_source(
+            (src + SYNTHETIC[SYNTHETIC.index("fn check_sealed"):]).encode("utf-8"))
+        self.assertIn("n == 1", [c["condition"] for c in found["complement"]])
+        self.assertEqual(len(found["sites"]), 7)
+
+
 class FrozenPin(unittest.TestCase):
     """Frozen artifacts for aee-checker@25b9dfa. Structural, not mutation proof."""
+
+    def test_every_explicit_if_including_if_let_is_the_outside_rule(self):
+        pins = _load("pins.json")
+        sites = _load("sites.json")
+        rule = pins["enumeration"]
+        self.assertEqual(rule["explicit_if_rule"], "every explicit if, including if-let")
+        self.assertEqual(rule["if_let"], "included in complement; check_sealed has none")
+        self.assertEqual(rule["complement_count"], 125)
+        self.assertEqual(rule["selected_count"], 7)
+        self.assertEqual(sites["complement_count"], 125)
+        self.assertEqual(rule["syn_expr_if_outside"], 124)
+        self.assertEqual(rule["macro_tokenstream_if"], 1)
+        self.assertTrue(
+            any(c["condition"].startswith("let ") for c in sites["complement"]),
+            "outside inventory must include if-let",
+        )
+        self.assertTrue(
+            any(c["condition"] == "n == 1" and c["line"] == 647
+                for c in sites["complement"]),
+            "format! token-if at check.rs:647 belongs in the complement",
+        )
 
     def test_frozen_dir_has_only_prereg_files(self):
         names = sorted(p.name for p in PREREG.iterdir())
@@ -209,7 +294,8 @@ class FrozenPin(unittest.TestCase):
         sites = _load("sites.json")
         self.assertEqual([s["condition"] for s in sites["sites"]], list(PINNED_CONDITIONS))
         self.assertEqual(sites["selected_count"], 7)
-        self.assertGreater(sites["complement_count"], 0)
+        self.assertEqual(sites["complement_count"], 125)
+        self.assertEqual(len(sites["complement"]), 125)
         den = {s["condition"] for s in sites["sites"]}
         for item in sites["complement"]:
             self.assertNotIn(item.get("span"), [s["span"] for s in sites["sites"]])
@@ -224,11 +310,13 @@ class FrozenPin(unittest.TestCase):
         self.assertEqual(manifest["accepted_exit_codes"], [0])
         self.assertEqual(manifest["unproved_exit_codes"], [75])
         self.assertEqual(manifest["build"], ["cargo", "build", "--locked", "--release"])
-        self.assertEqual(
-            manifest["outcome_from"],
-            ["verdict", "result", "tiersWithPinnedKey", "tiersWithoutKey"],
-        )
-        self.assertEqual(manifest["diagnostic_from"], ["reason"])
+        pins = _load("pins.json")
+        self.assertEqual(len(pins["corpus"]["vector_ids"]), 250)
+        self.assertEqual(len(set(pins["corpus"]["vector_ids"])), 250)
+        self.assertEqual(manifest["implementation_sources"],
+                         ["src/check.rs", "aee_checker_sealed.py"])
+        self.assertEqual(manifest["outcome_from"], ["rows"])
+        self.assertEqual(manifest["diagnostic_from"], ["diagnostics"])
         self.assertNotIn("code", manifest["outcome_from"])
         self.assertNotIn("code", manifest["diagnostic_from"])
         mutants = manifest["mutants"]["sealed"]
@@ -267,8 +355,11 @@ class WrapperContract(unittest.TestCase):
         return path
 
     def _run(self, checker: Path, extra=None):
-        cmd = [sys.executable, str(ADAPTER), "--checker", str(checker),
-               "--expected-count", "1", str(checker.parent)]
+        dest = checker.parent
+        if not (dest / "MANIFEST.json").exists():
+            (dest / "MANIFEST.json").write_text(
+                json.dumps({"vectors": [{"id": "v1"}]}), encoding="utf-8")
+        cmd = [sys.executable, str(ADAPTER), "--checker", str(checker), str(dest)]
         if extra:
             cmd.extend(extra)
         return subprocess.run(cmd, capture_output=True, text=True)
@@ -291,11 +382,11 @@ sys.exit(1)
             proc = self._run(checker)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         doc = json.loads(proc.stdout)
-        self.assertEqual(doc["verdict"], ["valid"])
-        self.assertEqual(doc["result"], ["ok"])
-        self.assertEqual(doc["reason"], ["prose"])
-        self.assertNotEqual(doc["verdict"], ["FROM-STDOUT"])
-        self.assertNotIn("code", doc)
+        self.assertEqual(doc["rows"]["v1"]["verdict"], "valid")
+        self.assertEqual(doc["rows"]["v1"]["result"], "ok")
+        self.assertEqual(doc["diagnostics"]["v1"]["reason"], "prose")
+        self.assertNotIn("FROM-STDOUT", proc.stdout)
+        self.assertNotIn("code", json.dumps(doc))
         self.assertNotIn("secret", proc.stdout)
 
     def test_inner_protocol_failure_exits_the_issue_45_unproved_code(self):
@@ -314,6 +405,32 @@ sys.exit(0)
         self.assertEqual(wrapper.UNPROVED_EXIT, 75)
         self.assertEqual(wrapper.ACCEPTED_EXIT, 0)
         self.assertEqual(prereg.UNPROVED_EXIT_CODES, [75])
+
+    def test_relative_checker_starts_from_wrapper_cwd_not_vectors_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "bin").mkdir()
+            vectors = root / "corpus" / "vectors"
+            vectors.mkdir(parents=True)
+            (vectors / "MANIFEST.json").write_text(
+                json.dumps({"vectors": [{"id": "v1"}]}), encoding="utf-8")
+            (root / "bin" / "fake_checker.py").write_text(
+                "import json, sys\n"
+                "from pathlib import Path\n"
+                "Path(sys.argv[sys.argv.index('--json') + 1]).write_text(json.dumps({\n"
+                '  "vectors": [{"id": "v1", "verdict": "valid", "result": "ok",\n'
+                '    "reason": "prose", "tiersWithPinnedKey": [], "tiersWithoutKey": []}]\n'
+                "}) + '\\n')\n"
+                "sys.exit(0)\n",
+                encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(ADAPTER),
+                 "--checker", "./bin/fake_checker.py", "corpus/vectors"],
+                cwd=root, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        doc = json.loads(proc.stdout)
+        self.assertEqual(doc["rows"]["v1"]["verdict"], "valid")
+        self.assertEqual(doc["diagnostics"]["v1"]["reason"], "prose")
 
 
 class ReviewFixes(unittest.TestCase):
@@ -340,11 +457,14 @@ Path(sys.argv[sys.argv.index("--json") + 1]).write_text({payload!r} + "\\n")
 sys.exit({rc})
 """)
 
-    def _run(self, checker: Path, extra=None):
+    def _run(self, checker: Path, extra=None, ids=("v1",)):
         # In-process so cap patches reach the same bounded_run / corpus_adequacy
         # names the wrapper uses. Child-exec coverage stays in WrapperContract.
-        argv = ["--checker", str(checker), "--expected-count", "1",
-                str(checker.parent)]
+        dest = checker.parent
+        if not (dest / "MANIFEST.json").exists():
+            (dest / "MANIFEST.json").write_text(
+                json.dumps({"vectors": [{"id": i} for i in ids]}), encoding="utf-8")
+        argv = ["--checker", str(checker), str(dest)]
         if extra:
             argv.extend(extra)
         buf = io.StringIO()
@@ -419,18 +539,44 @@ sys.exit(0)
                 self.assertEqual(proc.returncode, 75, proc.stdout)
                 self.assertFalse(proc.stdout.strip())
 
+    def test_adapter_must_be_in_implementation_sources(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prereg"
+            dest.mkdir()
+            prereg.emit_prereg(SYNTHETIC.encode("utf-8"), dest)
+            manifest = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
+            manifest["implementation_sources"] = ["src/check.rs"]
+            _dump(dest / "manifest.json", manifest)
+            with self.assertRaises(prereg.PreregError) as ctx:
+                prereg.validate_prereg(dest)
+            self.assertIn("implementation_sources", str(ctx.exception).lower())
+
+    def test_reordered_rows_still_match_manifest_ids(self):
+        rows = [
+            dict(self.GOOD_ROW, id="v2", reason="b"),
+            dict(self.GOOD_ROW, id="v1", reason="a"),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            checker = self._writer(tmp, {"vectors": rows})
+            proc = self._run(checker, ids=("v1", "v2"))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        doc = json.loads(proc.stdout)
+        self.assertEqual(set(doc["rows"]), {"v1", "v2"})
+        self.assertEqual(doc["diagnostics"]["v1"]["reason"], "a")
+
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
-    def test_diagnostic_only_reason_move_is_silent(self):
+    def test_id_keyed_batch_matching_sees_silent_reason_move(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             (tmp / "check.py").write_text(
                 "import json\n"
                 'reason = "prose A"\n'
                 "print(json.dumps({\n"
-                '  "verdict": ["valid"], "result": ["ok"],\n'
-                '  "tiersWithPinnedKey": [[]], "tiersWithoutKey": [[]],\n'
-                '  "reason": [reason],\n'
-                "}))\n",
+                '  "rows": {"v1": {"verdict": "valid", "result": "ok",\n'
+                '    "tiersWithPinnedKey": [], "tiersWithoutKey": []}},\n'
+                '  "diagnostics": {"v1": {"reason": reason}},\n'
+                "}, sort_keys=True))\n",
                 encoding="utf-8")
             (tmp / "vectors.json").write_text("{}", encoding="utf-8")
             raw = {
@@ -439,10 +585,8 @@ sys.exit(0)
                 "implementation_sources": ["check.py"],
                 "build": [],
                 "entrypoint_command": [sys.executable, "check.py"],
-                "outcome_from": [
-                    "verdict", "result", "tiersWithPinnedKey", "tiersWithoutKey",
-                ],
-                "diagnostic_from": ["reason"],
+                "outcome_from": ["rows"],
+                "diagnostic_from": ["diagnostics"],
                 "accepted_exit_codes": [0],
                 "unproved_exit_codes": [75],
                 "vectors": "vectors.json",
@@ -458,6 +602,22 @@ sys.exit(0)
             }
             manifest = tmp / "m.json"
             manifest.write_text(json.dumps(raw), encoding="utf-8")
+            loaded = json.loads(manifest.read_text(encoding="utf-8"))
+            loaded["accepted_exit_codes"] = [0]
+            loaded["unproved_exit_codes"] = [75]
+            loaded["runner"] = "batch"
+            loaded["outcome_from"] = ["rows"]
+            loaded["diagnostic_from"] = ["diagnostics"]
+            value, diag, kind = ca.child_outcome(
+                loaded,
+                type("P", (), {"returncode": 0, "stdout": json.dumps({
+                    "rows": {"v1": {"verdict": "valid", "result": "ok",
+                                    "tiersWithPinnedKey": [], "tiersWithoutKey": []}},
+                    "diagnostics": {"v1": {"reason": "prose A"}},
+                }), "stderr": ""})())
+            self.assertIsNone(kind)
+            self.assertIsInstance(value[0], dict)
+            self.assertEqual(value[0]["v1"]["verdict"], "valid")
             rep = ca.run(manifest)
         row = next(r for r in rep["mutants"] if r["label"] == "reason-only")
         self.assertEqual(row["verdict"], "silent")

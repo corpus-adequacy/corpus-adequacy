@@ -10,21 +10,20 @@
   ],
   "default_group": "sealed",
   "diagnostic_from": [
-    "reason"
+    "diagnostics"
   ],
   "entrypoint_command": [
     "python3",
     "aee_checker_sealed.py",
     "--checker",
     "./target/release/aee-checker",
-    "--expected-count",
-    "250",
     "corpus/vectors"
   ],
   "id_key": "vector_id",
   "implementation": "src/check.rs",
   "implementation_sources": [
-    "src/check.rs"
+    "src/check.rs",
+    "aee_checker_sealed.py"
   ],
   "mutants": {
     "sealed": [
@@ -80,10 +79,7 @@
     ]
   },
   "outcome_from": [
-    "verdict",
-    "result",
-    "tiersWithPinnedKey",
-    "tiersWithoutKey"
+    "rows"
   ],
   "repo_root": ".",
   "runner": "batch",
