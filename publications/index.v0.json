@@ -1,0 +1,10 @@
+{
+  "schema": "corpus-adequacy.publication-index.v0",
+  "records": [
+    {
+      "id": "tersign-1cc5ea32",
+      "report_sha256": "c65f8a6c6dcc4a56dea31e7fc0de241a8cbbdcf36cd4cf98c220d23a894fe5ae",
+      "source_sha256": "bf7094942d119fc5b57c917423c5fb7b6de110c26589690a800fa448db441cf2"
+    }
+  ]
+}

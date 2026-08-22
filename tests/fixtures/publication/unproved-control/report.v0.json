@@ -10,7 +10,7 @@
     "2 mutant(s) survived; the required score is 100% of non-equivalent mutants"
   ],
   "hole_ratio": 0.0,
-  "killed": 10,
+  "killed": 7,
   "known_holes": 0,
   "manifest": "measurements/tersign-1cc5ea32/manifest.json",
   "manifest_sha256": "sha256:9c4c9583ed7166cec9a26b24bc42ad5db32a4c744bce3d6b41128ff428a07487",
@@ -29,7 +29,7 @@
       "label": "remove the greater-than 2^53-1 refusal",
       "moved": 1,
       "scope": "declared",
-      "verdict": "killed"
+      "verdict": "unproved"
     },
     {
       "group": "tersign",
@@ -37,7 +37,7 @@
       "label": "CONTROL tighten the safe-integer bound to greater-than-or-equal",
       "moved": 1,
       "scope": "declared",
-      "verdict": "control-killed"
+      "verdict": "control-SURVIVED"
     },
     {
       "group": "tersign",
@@ -53,7 +53,7 @@
       "label": "digest_recompute accepts a mismatched expected digest",
       "moved": 1,
       "scope": "declared",
-      "verdict": "killed"
+      "verdict": "unproved"
     },
     {
       "group": "tersign",
@@ -61,7 +61,7 @@
       "label": "canonical_bytes accepts non-canonical claimed bytes",
       "moved": 2,
       "scope": "declared",
-      "verdict": "killed"
+      "verdict": "unproved"
     },
     {
       "group": "tersign",

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - measurements/**
+      - publications/**
       - scripts/render_publication_page.py
       - scripts/publication_handoff.py
       - .github/ISSUE_TEMPLATE/**
@@ -13,6 +14,7 @@ on:
   pull_request:
     paths:
       - measurements/**
+      - publications/**
       - scripts/render_publication_page.py
       - scripts/publication_handoff.py
       - .github/ISSUE_TEMPLATE/**
@@ -32,9 +34,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Render publication page
+      - name: Check publication page
         shell: bash
-        run: python3 scripts/render_publication_page.py --root . --out site/index.html
+        run: python3 scripts/render_publication_page.py --root . --out site/index.html --check
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:

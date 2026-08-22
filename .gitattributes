@@ -20,3 +20,5 @@ tests/fixtures/publication/** text eol=lf
 .github/ISSUE_TEMPLATE/publish-measurement.yml text eol=lf
 .github/workflows/pages.yml text eol=lf
 site/index.html text eol=lf
+
+publications/index.v0.json text eol=lf

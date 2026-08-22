@@ -8,6 +8,7 @@ import html
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -16,8 +17,10 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 
+import corpus_adequacy as ca  # noqa: E402
 import render_publication_page as rpp  # noqa: E402
 from test_tersign_verifier_measurement import (  # noqa: E402
     ClaimedReport,
@@ -40,19 +43,36 @@ FORBIDDEN = (
     "row number",
     "conformance seal",
 )
-CEILINGS = (
-    "not a leaderboard",
-    "not a badge",
-    "not a certification",
-    "not a trust score",
-    "not automatic admission",
-    "not completeness of declared inventory",
-    "not authenticity",
-    "not endorsement",
-    "not implementation safety",
-    "silent:0 without diagnostic_channel_declared is not \"no silent rules\"",
-    "score_percent is percent of author-declared in-scope rules, not of the implementation",
-)
+INDEX_SCHEMA = "corpus-adequacy.publication-index.v0"
+
+
+def _hex(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_index(root: Path, ids: list[str] | None = None) -> Path:
+    meas = root / "measurements"
+    if ids is None:
+        ids = sorted(p.name for p in meas.iterdir() if p.is_dir()) if meas.is_dir() else []
+    records = []
+    for rec_id in ids:
+        report = meas / rec_id / "report.v0.json"
+        source = meas / rec_id / "source.json"
+        records.append(
+            {
+                "id": rec_id,
+                "report_sha256": _hex(report),
+                "source_sha256": _hex(source),
+            }
+        )
+    pub = root / "publications"
+    pub.mkdir(parents=True, exist_ok=True)
+    dest = pub / "index.v0.json"
+    dest.write_text(
+        json.dumps({"schema": INDEX_SCHEMA, "records": records}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return dest
 
 
 def _write_tree(tmpdir: Path, reports: list[Path]) -> Path:
@@ -64,6 +84,7 @@ def _write_tree(tmpdir: Path, reports: list[Path]) -> Path:
         src = report.parent / "source.json"
         if src.is_file():
             shutil.copy2(src, dest_dir / "source.json")
+    _write_index(root)
     return root
 
 
@@ -78,27 +99,20 @@ class PublicationPage(unittest.TestCase):
         ClaimedReport().test_report_bytes_are_the_measured_file()
         doc = json.loads((VALID / "report.v0.json").read_text(encoding="utf-8"))
         rpp._require_report_rows(doc)
+        self.assertIs(rpp._require_report_rows, ca._require_report_rows)
+        self.assertIs(rpp.read_bounded_regular_file, ca.read_bounded_regular_file)
+        self.assertIs(rpp._parse_projection_json, ca._parse_projection_json)
 
-    def test_fixture_digest_swap_changes_page(self):
+    def test_inconsistent_top_level_killed_fails_generation(self):
         with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            root = _write_tree(tmp, [VALID / "report.v0.json"])
-            page = _render(root)
-            digest = hashlib.sha256((VALID / "report.v0.json").read_bytes()).hexdigest()
-            self.assertIn(digest, page)
-            self.assertIn("1cc5ea32b3da4f195b55782c8a3573d8564673a7", page)
-            self.assertIn("10", page)
-            self.assertIn("killed", page)
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
             report = root / "measurements" / "valid-tersign" / "report.v0.json"
             mutated = json.loads(report.read_text(encoding="utf-8"))
             mutated["killed"] = 99
             report.write_text(json.dumps(mutated, indent=2, sort_keys=True) + "\n")
-            new_digest = hashlib.sha256(report.read_bytes()).hexdigest()
-            swapped = _render(root)
-            self.assertNotEqual(page, swapped)
-            self.assertIn(new_digest, swapped)
-            self.assertNotIn(digest, swapped)
-            self.assertIn(">99<", swapped)
+            _write_index(root)
+            with self.assertRaises(rpp.PublicationError):
+                _render(root)
 
     def test_hostile_query_is_not_read_as_truth(self):
         with tempfile.TemporaryDirectory() as d:
@@ -118,26 +132,26 @@ class PublicationPage(unittest.TestCase):
             self.assertIn("10", page)
             self.assertNotIn("os.environ", Path(rpp.__file__).read_text(encoding="utf-8"))
 
-    def test_stale_generation_meta_and_byte_identity(self):
+    def test_projection_meta_and_byte_identity(self):
         with tempfile.TemporaryDirectory() as d:
             root = _write_tree(Path(d), [VALID / "report.v0.json"])
             first = _render(root, source_commit="c" * 40)
             second = _render(root, source_commit="c" * 40)
             self.assertEqual(first, second)
-            self.assertIn('name="generation-digest"', first)
+            self.assertIn('name="projection-digest"', first)
             self.assertIn('name="source-commit"', first)
             self.assertIn("c" * 40, first)
-            digest = rpp.generation_digest_from_html(first)
+            digest = rpp.projection_digest_from_html(first)
             self.assertEqual(len(digest), 64)
             self.assertIn(digest, first)
-            without_gen = first.replace("generation-digest", "generation-x", 1)
+            without_proj = first.replace("projection-digest", "projection-x", 1)
             without_src = first.replace("source-commit", "source-x", 1)
-            self.assertNotEqual(first, without_gen)
+            self.assertNotEqual(first, without_proj)
             self.assertNotEqual(first, without_src)
             report = root / "measurements" / "valid-tersign" / "report.v0.json"
             report.write_bytes(report.read_bytes() + b"\n")
-            changed = _render(root, source_commit="c" * 40)
-            self.assertNotEqual(first, changed)
+            with self.assertRaises(rpp.PublicationError):
+                _render(root, source_commit="c" * 40)
 
     def test_html_escape_every_interpolated_field(self):
         payload = XSS_PAYLOAD
@@ -153,6 +167,7 @@ class PublicationPage(unittest.TestCase):
             src["non_claims"] = [payload, onerror, mixed]
             dest.joinpath("source.json").write_text(json.dumps(src, indent=2) + "\n")
             dest.joinpath("report.v0.json").write_text(json.dumps(doc, indent=2) + "\n")
+            _write_index(Path(d))
             page = _render(Path(d), source_commit="e" * 40)
             self.assertNotIn(XSS_PAYLOAD, page)
             self.assertIn(html.escape(payload, quote=True), page)
@@ -171,10 +186,10 @@ class PublicationPage(unittest.TestCase):
             src["non_claims"] = [XSS_PAYLOAD]
             dest.joinpath("source.json").write_text(json.dumps(src) + "\n")
             dest.joinpath("report.v0.json").write_text(json.dumps(doc) + "\n")
+            _write_index(Path(d))
             page = _render(Path(d))
             self.assertNotIn("href=\"" + JS_HREF.split(":")[0] + ":", page.lower())
             self.assertNotIn(XSS_PAYLOAD, page)
-            # optional enhance-only script must not contain record text
             if "<script" in page.lower():
                 start = page.lower().find("<script")
                 chunk = page[start:page.lower().find("</script>", start) + 9]
@@ -192,6 +207,7 @@ class PublicationPage(unittest.TestCase):
             fx = root / "fixtures" / "algovoi-jcs-edge-aa53149c"
             fx.mkdir(parents=True)
             (fx / "README.md").write_text("algovoi fixture, not a published measurement\n")
+            _write_index(root)
             page = _render(root)
             self.assertEqual(page.count('class="card"'), 1)
             self.assertEqual(page.lower().count("algovoi"), 0)
@@ -199,12 +215,148 @@ class PublicationPage(unittest.TestCase):
             digest = hashlib.sha256((VALID / "report.v0.json").read_bytes()).hexdigest()
             self.assertIn(digest, page)
 
+    def test_unlisted_measurement_is_not_a_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            bad = root / "measurements" / "bad"
+            bad.mkdir()
+            (bad / "report.v0.json").write_text("{", encoding="utf-8")
+            page = _render(root)
+            self.assertEqual(page.count('class="card"'), 1)
+            self.assertNotIn("measurements/bad", page)
+
+    def test_missing_index_fails_generation(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            (root / "publications" / "index.v0.json").unlink()
+            with self.assertRaises((rpp.PublicationError, ca.ManifestError, OSError)):
+                _render(root)
+
+    def test_omitted_index_entry_is_not_auto_published(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            _write_index(root, ids=[])
+            page = _render(root)
+            self.assertEqual(page.count('class="card"'), 0)
+            self.assertNotIn("valid-tersign", page[page.find('id="results"'):])
+
+    def test_listed_invalid_or_missing_report_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            report = root / "measurements" / "valid-tersign" / "report.v0.json"
+            report.write_text("{", encoding="utf-8")
+            _write_index(root)
+            with self.assertRaises(rpp.PublicationError):
+                _render(root)
+            report.unlink()
+            index = {
+                "schema": INDEX_SCHEMA,
+                "records": [
+                    {
+                        "id": "valid-tersign",
+                        "report_sha256": "0" * 64,
+                        "source_sha256": "1" * 64,
+                    }
+                ],
+            }
+            (root / "publications" / "index.v0.json").write_text(
+                json.dumps(index, indent=2) + "\n", encoding="utf-8"
+            )
+            with self.assertRaises(rpp.PublicationError):
+                _render(root)
+
+    def test_symlink_report_or_source_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            report = root / "measurements" / "valid-tersign" / "report.v0.json"
+            real = report.with_name("report.real.json")
+            report.rename(real)
+            report.symlink_to(real.name)
+            with self.assertRaises((rpp.PublicationError, ca.ManifestError)):
+                _render(root)
+            report.unlink()
+            shutil.copy2(real, report)
+            source = root / "measurements" / "valid-tersign" / "source.json"
+            sreal = source.with_name("source.real.json")
+            source.rename(sreal)
+            source.symlink_to(sreal.name)
+            with self.assertRaises((rpp.PublicationError, ca.ManifestError)):
+                _render(root)
+
+    def test_duplicate_top_level_killed_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            report = root / "measurements" / "valid-tersign" / "report.v0.json"
+            text = report.read_text(encoding="utf-8")
+            text = text.replace('"killed": 10', '"killed": 10,\n  "killed": 999', 1)
+            report.write_text(text, encoding="utf-8")
+            _write_index(root)
+            with self.assertRaises(rpp.PublicationError):
+                _render(root)
+
+    def test_unbound_source_swap_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            source = root / "measurements" / "valid-tersign" / "source.json"
+            src = json.loads(source.read_text(encoding="utf-8"))
+            src["repository"] = "evil/swap"
+            src["commit"] = "f" * 40
+            source.write_text(json.dumps(src, indent=2) + "\n", encoding="utf-8")
+            with self.assertRaises(rpp.PublicationError):
+                _render(root)
+
+    def test_flipped_control_status_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            report = root / "measurements" / "valid-tersign" / "report.v0.json"
+            mutated = json.loads(report.read_text(encoding="utf-8"))
+            mutated["control_status"] = "survived"
+            report.write_text(json.dumps(mutated, indent=2, sort_keys=True) + "\n")
+            _write_index(root)
+            with self.assertRaises(rpp.PublicationError):
+                _render(root)
+
+    def test_check_does_not_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            out = root / "site" / "index.html"
+            rc = rpp.main(["--root", str(root), "--out", str(out), "--source-commit", "a" * 40])
+            self.assertEqual(rc, 0)
+            before = out.stat()
+            out.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            rc = rpp.main(["--root", str(root), "--out", str(out), "--source-commit", "a" * 40, "--check"])
+            self.assertEqual(rc, 0)
+            after = out.stat()
+            self.assertEqual(before.st_mtime_ns, after.st_mtime_ns)
+            self.assertEqual(before.st_ino, after.st_ino)
+            self.assertEqual(before.st_size, after.st_size)
+
+    def test_stale_renderer_fails_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            out = root / "site" / "index.html"
+            self.assertEqual(
+                rpp.main(["--root", str(root), "--out", str(out), "--source-commit", "a" * 40]),
+                0,
+            )
+            orig = rpp._page_body
+
+            def stale(*args, **kwargs):
+                return orig(*args, **kwargs).replace(
+                    "<h1>Published measurements</h1>",
+                    "<h1>Stale renderer title</h1>",
+                    1,
+                )
+
+            with mock.patch.object(rpp, "_page_body", stale):
+                with self.assertRaises(rpp.PublicationError):
+                    rpp.main(["--root", str(root), "--out", str(out), "--source-commit", "a" * 40, "--check"])
+
     def test_non_claims_above_rows_and_forbidden_ui_words(self):
         with tempfile.TemporaryDirectory() as d:
             root = _write_tree(Path(d), [VALID / "report.v0.json"])
             page = _render(root)
             non_claims_pos = page.find("This adapter preserves one pinned upstream corpus.")
-            results_pos = page.find('id="results"')
             card_pos = page.find('class="card"')
             self.assertNotEqual(non_claims_pos, -1)
             self.assertLess(non_claims_pos, card_pos)
@@ -226,7 +378,12 @@ class PublicationPage(unittest.TestCase):
             self.assertIn("skip to results", page.lower())
             self.assertIn("PROVENANCE.md", page)
             self.assertIn("python3 corpus_adequacy.py measurements/", page)
+            command_pos = page.find("python3 corpus_adequacy.py measurements/")
+            counts_pos = page.find('class="counts"')
+            self.assertLess(command_pos, counts_pos)
             self.assertIn("tersignhq/evidence-record-conformance", page)
+            self.assertNotIn("stay representable", page)
+            self.assertNotIn("Publication recomputes every machine field", page)
 
     def test_counts_have_text_label_and_accessible_name(self):
         with tempfile.TemporaryDirectory() as d:
@@ -248,6 +405,9 @@ class PublicationPage(unittest.TestCase):
         self.assertNotIn("b1a10e8c", page)
         results = page[page.find('id="results"'):]
         self.assertNotIn("score_percent", results)
+        self.assertIn("projection-digest", page)
+        command = "python3 corpus_adequacy.py measurements/tersign-1cc5ea32/manifest.json --json"
+        self.assertLess(page.find(command), page.find('class="counts"'))
 
 
 class MutationProbes(unittest.TestCase):

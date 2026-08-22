@@ -1,14 +1,14 @@
 name: Publish a measurement
-description: Hand off a completed measurement. Machine fields are recomputed from report bytes.
+description: Hand off a completed measurement. Local prefills come from report+source bytes.
 title: "[publish] "
 labels: ["publication"]
 body:
   - type: markdown
     attributes:
       value: |
-        Query parameters are untrusted convenience. Publication recomputes
-        every machine field from the report file bytes and source.json.
-        Submitted code is not executed.
+        Local handoff recomputes prefills from report+source bytes.
+        Review must recompute those machine fields before publication.
+        Submitted query/form values stay untrusted. Submitted code is not executed.
   - type: input
     id: source-url
     attributes:

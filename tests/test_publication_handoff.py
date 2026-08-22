@@ -14,8 +14,10 @@ from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import corpus_adequacy as ca  # noqa: E402
 import publication_handoff as handoff  # noqa: E402
 import render_publication_page as rpp  # noqa: E402
 
@@ -108,10 +110,8 @@ class PublicationHandoff(unittest.TestCase):
             doc["killed"] = 1
             clone.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
             src.write_text((VALID / "source.json").read_text(encoding="utf-8"))
-            swapped = handoff.handoff_url(clone)
-            self.assertNotEqual(url, swapped)
-            self.assertNotEqual(parse_qs(urlparse(swapped).query)["report-digest"], [digest])
-            self.assertEqual(parse_qs(urlparse(swapped).query)["killed"], ["1"])
+            with self.assertRaises(rpp.PublicationError):
+                handoff.handoff_url(clone)
 
     def test_hostile_query_does_not_prefab_machine_fields(self):
         hostile = {
@@ -161,7 +161,7 @@ class PublicationHandoff(unittest.TestCase):
     def test_row_validator_rejects_empty_mutant_fields(self):
         bad = json.loads((VALID / "report.v0.json").read_text(encoding="utf-8"))
         bad["mutants"][0]["label"] = ""
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ca.ManifestError):
             rpp._require_report_rows(bad)
 
 

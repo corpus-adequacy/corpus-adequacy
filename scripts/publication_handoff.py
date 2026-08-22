@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Print a prefilled publication Issue Form URL from a validated report."""
+"""Print a prefilled publication Issue Form URL from report+source bytes.
+
+Local handoff recomputes prefills. Review must recompute those machine
+fields before publication. Submitted query/form values stay untrusted.
+"""
 
 from __future__ import annotations
 
