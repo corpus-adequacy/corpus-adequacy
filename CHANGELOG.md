@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.1 — 2026-08-22
+
 One shared JSON decoder (`load_json_document`) serves manifest, vectors,
 and `corpus_digest_file`: RecursionError and declared root shape are
 refusals (rc 2, `error.v0`, no traceback), including known_holes digest
