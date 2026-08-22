@@ -1624,6 +1624,7 @@ class LiveInertProbes(unittest.TestCase):
         self.assertEqual(row["control"], "completed")
         self.assertNotEqual(row["refusal"], "completed")
         self.assertNotEqual(row["inspect"]["control"]["network_mode"], "none")
+        self.assertFalse(row["inspect"]["control"]["offline_env"])
         self.assertEqual(row["inspect"]["refusal"]["network_mode"], "none")
 
     def test_tmpfs_bytes_refuse_over_limit_and_allow_under_limit(self):
