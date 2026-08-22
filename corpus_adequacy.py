@@ -41,8 +41,10 @@ declares its own mutants in a manifest:
     mutant equivalence is undecidable in general, so a tool that claimed to
     detect it would be lying.
     - child termination is classified before stdout is parsed. Default
-    accepted_exit_codes is [0]. A parseable report on an undeclared code,
-    a signal, or a missing code is not an outcome. An observed unexpected
+    accepted_exit_codes is [0]. Opt-in unproved_exit_codes is [] and must
+    be disjoint. A parseable report on an undeclared code, a signal, or a
+    missing code is not an outcome. A declared-unproved exit is not an
+    outcome either, even when stdout is valid JSON. An observed unexpected
     exit or signal on an ordinary mutant may be a kill with that class
     named; a control abnormality is control-error and is not a score.
 
@@ -883,6 +885,10 @@ def load_manifest(path: Path) -> dict:
         raise ManifestError(
             "diagnostic_from is not implemented for runner=module; the module runner "
             "reads one callable result, so there is no second channel to compare")
+    if m["runner"] == "module" and "unproved_exit_codes" in m:
+        raise ManifestError(
+            "unproved_exit_codes is not implemented for runner=module; "
+            "the module runner has no process/batch exit-code policy")
     if m["runner"] in ("process", "batch"):
         _req(m, "entrypoint_command", "manifest (runner=%s)" % m["runner"])
         if m.get("outcome_parse") != "test-names":
@@ -929,6 +935,11 @@ def load_manifest(path: Path) -> dict:
         m.setdefault("build_timeout", 1800)
         m.setdefault("vector_timeout", 120)
         m["accepted_exit_codes"] = accepted_exit_codes(m)
+        m["unproved_exit_codes"] = unproved_exit_codes(m)
+        overlap = sorted(set(m["accepted_exit_codes"]) & set(m["unproved_exit_codes"]))
+        if overlap:
+            raise ManifestError(
+                "unproved_exit_codes overlaps accepted_exit_codes: %s" % overlap)
     # One deadline per child, on every runner. The module runner has a child too.
     m.setdefault("vector_timeout", 120)
     m.setdefault("mutants", {})
@@ -1153,10 +1164,10 @@ def _module_outcomes(m: dict, source: str, tag: str, vectors: list, tmp: Path) -
         abnormal=None)
 
 
-def classify(returncode, accepted) -> str:
-    """ok | unexpected-exit | signal | incomplete. Never reads stdout.
+def classify(returncode, accepted, unproved=()) -> str:
+    """ok | unproved | unexpected-exit | signal | incomplete. Never reads stdout.
 
-    Signals and None never become ok, even if *accepted* is malformed.
+    Signals and None never become ok or unproved, even if a policy is malformed.
     """
     if returncode is None or type(returncode) is not int:
         return "incomplete"
@@ -1165,7 +1176,36 @@ def classify(returncode, accepted) -> str:
     allowed = {code for code in (accepted or []) if type(code) is int and code >= 0}
     if returncode in allowed:
         return "ok"
+    declared_unproved = {
+        code for code in (unproved or []) if type(code) is int and code >= 0}
+    if returncode in declared_unproved:
+        return "unproved"
     return "unexpected-exit"
+
+
+def _unique_nonneg_exit_codes(raw, key: str) -> list[int]:
+    """Unique nonnegative ints. Bools and signals are refused."""
+    if not isinstance(raw, list):
+        raise ManifestError(
+            "%s must be an array of unique nonnegative integers" % key)
+    seen: set[int] = set()
+    codes: list[int] = []
+    for i, value in enumerate(raw):
+        if type(value) is bool:
+            raise ManifestError(
+                "%s[%d] must be a nonnegative integer, got bool" % (key, i))
+        if type(value) is not int:
+            raise ManifestError(
+                "%s[%d] must be a nonnegative integer, got %s"
+                % (key, i, type(value).__name__))
+        if value < 0:
+            raise ManifestError(
+                "%s[%d] is %s; signals are never accepted" % (key, i, value))
+        if value in seen:
+            raise ManifestError("%s repeats %d" % (key, value))
+        seen.add(value)
+        codes.append(value)
+    return codes
 
 
 def accepted_exit_codes(m: dict) -> list[int]:
@@ -1177,40 +1217,32 @@ def accepted_exit_codes(m: dict) -> list[int]:
     explicitly. This repository ships no manifests and does not infer codes
     from a command name.
     """
-    raw = m.get("accepted_exit_codes", [0])
-    if not isinstance(raw, list):
-        raise ManifestError(
-            "accepted_exit_codes must be an array of unique nonnegative integers")
-    seen: set[int] = set()
-    codes: list[int] = []
-    for i, value in enumerate(raw):
-        if type(value) is bool:
-            raise ManifestError(
-                "accepted_exit_codes[%d] must be a nonnegative integer, got bool" % i)
-        if type(value) is not int:
-            raise ManifestError(
-                "accepted_exit_codes[%d] must be a nonnegative integer, got %s"
-                % (i, type(value).__name__))
-        if value < 0:
-            raise ManifestError(
-                "accepted_exit_codes[%d] is %s; signals are never accepted" % (i, value))
-        if value in seen:
-            raise ManifestError("accepted_exit_codes repeats %d" % value)
-        seen.add(value)
-        codes.append(value)
+    codes = _unique_nonneg_exit_codes(
+        m.get("accepted_exit_codes", [0]), "accepted_exit_codes")
     if m.get("outcome_parse") == "test-names":
-        if 101 not in seen:
+        if 101 not in codes:
             raise ManifestError(
                 "outcome_parse test-names requires accepted_exit_codes to include 101")
     return codes
+
+
+def unproved_exit_codes(m: dict) -> list[int]:
+    """Opt-in incomplete-inner class. Default []. Same integer rule as accepted."""
+    return _unique_nonneg_exit_codes(
+        m.get("unproved_exit_codes", []), "unproved_exit_codes")
 
 
 def child_outcome(m: dict, completed: subprocess.CompletedProcess):
     """Classify returncode against the accepted policy, then parse stdout.
 
     An accepted code with empty or malformed output is still a parse-error.
+    A declared-unproved exit never reaches the parse, even with valid JSON.
     """
-    kind = classify(completed.returncode, m["accepted_exit_codes"])
+    kind = classify(
+        completed.returncode,
+        m["accepted_exit_codes"],
+        m.get("unproved_exit_codes") or [],
+    )
     if kind != "ok":
         return None, None, kind
     if m.get("outcome_parse") == "test-names":
@@ -1694,6 +1726,14 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                             "control %r survived: the harness cannot detect a change on this "
                             "path, so every other verdict in this run is meaningless"
                             % mut["label"])
+                    continue
+                if any(kind == "unproved" for kind in raised.values()):
+                    results.append({
+                        "group": group, "label": mut["label"],
+                        "verdict": "unproved", "scope": scope, "moved": 0,
+                        "how": "the measurement did not complete (unproved), so the corpus "
+                               "was never shown this mutant and said nothing about this rule"})
+                    unproved += 1
                     continue
                 if raised or moved:
                     how = (", ".join(sorted(set(raised.values()))) if raised
