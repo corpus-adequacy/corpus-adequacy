@@ -1,0 +1,3 @@
+FROM docker.io/library/busybox:1.37.0
+COPY probe.sh /probe
+RUN chmod 0755 /probe
