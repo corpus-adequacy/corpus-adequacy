@@ -247,7 +247,8 @@ def require_container_absent(name: str) -> None:
 
 def docker_create_argv(
         *, image_id: str, name: str, mounts: dict, command: list[str],
-        sealed: bool = True, mount_spec=DEFAULT_MOUNT_SPEC) -> list[str]:
+        sealed: bool = True, mount_spec=DEFAULT_MOUNT_SPEC,
+        entrypoint: str = "/probe") -> list[str]:
     image_id = require_image_id(image_id)
     tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (TMPFS_BYTES, TMPFS_INODES)
     argv = [
@@ -274,7 +275,9 @@ def docker_create_argv(
             "type=bind,source=%s,destination=%s,readonly" % (
                 Path(mounts[key]).resolve(), destination),
         ])
-    argv.extend([image_id, "/probe", *command])
+    if type(entrypoint) is not str or not entrypoint.startswith("/"):
+        raise PrepareError("entrypoint")
+    argv.extend([image_id, entrypoint, *command])
     return argv
 
 

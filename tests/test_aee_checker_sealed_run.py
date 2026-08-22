@@ -92,6 +92,7 @@ REQUIRED_EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
     "measurements/aee_checker_sealed_oci.py",
+    "measurements/aee_checker_sealed_candidate.py",
     "measurements/aee_checker_sealed_materialize.py",
     "measurements/aee_checker_sealed_authorize.py",
     "measurements/aee_checker_sealed_execute.py",
