@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+Publication listing is an opt-in `publications/index.v0.json`. Generation
+binds report and source file digests, refuses symlink and count/control
+parity mismatches, and `--check` compares the checked-in page without
+writing. The form no longer claims a workflow recomputes machine fields.
+
 The AlgoVoi adapter's mechanism boundary is pinned against a whole-document
 re-serialize, not only the per-preimage form. The previous probe used the
 pinned fixture, whose round trip is byte-identical, so a scanner that

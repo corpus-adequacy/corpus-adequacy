@@ -1,0 +1,132 @@
+name: Publish a measurement
+description: Hand off a completed measurement. Local prefills come from report+source bytes.
+title: "[publish] "
+labels: ["publication"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Local handoff recomputes prefills from report+source bytes.
+        Review must recompute those machine fields before publication.
+        Submitted query/form values stay untrusted. Submitted code is not executed.
+  - type: input
+    id: source-url
+    attributes:
+      label: Source URL
+    validations:
+      required: true
+  - type: input
+    id: source-commit
+    attributes:
+      label: Source commit
+    validations:
+      required: true
+  - type: input
+    id: adapter
+    attributes:
+      label: Adapter
+    validations:
+      required: true
+  - type: input
+    id: runner
+    attributes:
+      label: Runner
+    validations:
+      required: true
+  - type: input
+    id: report-path
+    attributes:
+      label: Report path
+    validations:
+      required: true
+  - type: input
+    id: report-digest
+    attributes:
+      label: Report digest
+    validations:
+      required: true
+  - type: input
+    id: manifest-sha256
+    attributes:
+      label: Manifest SHA-256
+    validations:
+      required: true
+  - type: input
+    id: tool-commit
+    attributes:
+      label: Tool commit
+    validations:
+      required: true
+  - type: input
+    id: tool-content-sha256
+    attributes:
+      label: Tool content SHA-256
+    validations:
+      required: true
+  - type: input
+    id: tool-version
+    attributes:
+      label: Tool version
+    validations:
+      required: true
+  - type: input
+    id: killed
+    attributes:
+      label: Killed
+    validations:
+      required: true
+  - type: input
+    id: survived
+    attributes:
+      label: Survived
+    validations:
+      required: true
+  - type: input
+    id: silent
+    attributes:
+      label: Silent
+    validations:
+      required: true
+  - type: input
+    id: unproved
+    attributes:
+      label: Unproved
+    validations:
+      required: true
+  - type: input
+    id: control-status
+    attributes:
+      label: Control status
+    validations:
+      required: true
+  - type: input
+    id: display-name
+    attributes:
+      label: Display name
+    validations:
+      required: true
+  - type: input
+    id: relationship
+    attributes:
+      label: Relationship
+    validations:
+      required: true
+  - type: textarea
+    id: public-context
+    attributes:
+      label: Public context
+    validations:
+      required: true
+  - type: textarea
+    id: scoping
+    attributes:
+      label: Scoping
+    validations:
+      required: true
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: Consent
+      options:
+        - label: I understand query parameters are untrusted and this is not a badge, certificate, or automatic admission.
+          required: true
