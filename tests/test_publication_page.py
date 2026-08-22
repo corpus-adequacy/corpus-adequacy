@@ -602,6 +602,45 @@ def _release_href() -> str:
     )
 
 
+def _first_run_script(page: str) -> str:
+    start = page.find('id="first-run"')
+    end = page.find('id="results"')
+    self_section = page[start:end]
+    for raw in re.findall(r"<pre><code>(.*?)</code></pre>", self_section, flags=re.S):
+        text = html.unescape(raw)
+        if "git clone" in text and "--survivors" in text and "\ncd " in text:
+            return text
+    raise AssertionError("first-run HTML has no obtain-then-inspect copy-paste block")
+
+
+def _run_extracted_script(script: str) -> subprocess.CompletedProcess:
+    with tempfile.TemporaryDirectory() as d:
+        return subprocess.run(
+            ["bash", "-c", script],
+            cwd=d,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+
+
+def _assert_survivors_v0(proc: subprocess.CompletedProcess) -> None:
+    if proc.returncode != 0:
+        raise AssertionError(
+            "first-run route rc=%s stderr=%r stdout=%r"
+            % (proc.returncode, proc.stderr, proc.stdout[:500])
+        )
+    try:
+        doc = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            "first-run route stdout is not JSON: %r" % proc.stdout[:500]
+        ) from exc
+    if not isinstance(doc, dict) or doc.get("schema") != "corpus-adequacy.survivors.v0":
+        raise AssertionError("first-run route did not emit survivors.v0: %r" % proc.stdout[:500])
+
+
 class FirstRunOrientation(unittest.TestCase):
     def _assert_orientation(self, page: str, directory: str, source_commit: str,
                             tool_commit: str, tool_content: str, tool_version: str):
@@ -614,7 +653,11 @@ class FirstRunOrientation(unittest.TestCase):
         self.assertIn(SAFE_INSPECT_LABEL, fold)
         self.assertIn(inspect, fold)
         self.assertNotIn(measure, fold)
-        self.assertIn("<pre><code>%s</code></pre>" % inspect, page)
+        route = _first_run_script(page)
+        self.assertIn(inspect, route)
+        self.assertLess(route.find("git clone"), route.find("\ncd "))
+        self.assertLess(route.find("\ncd "), route.find(inspect))
+        self.assertIn("cd corpus-adequacy", route)
         self.assertIn(measure, page[page.find('id="results"') :])
         self.assertIn(EXIT_1_VISIBLE, visible)
         self.assertIn(EXIT_2_VISIBLE, visible)
@@ -656,6 +699,10 @@ class FirstRunOrientation(unittest.TestCase):
             doc["tool_version"],
         )
 
+    def test_extracted_first_run_route_runs_from_empty_tempdir(self):
+        page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
+        _assert_survivors_v0(_run_extracted_script(_first_run_script(page)))
+
     def test_fixture_overview_binds_listed_report_inspect_path(self):
         source_commit = "a" * 40
         with tempfile.TemporaryDirectory() as d:
@@ -694,12 +741,23 @@ class FirstRunOrientation(unittest.TestCase):
         page, source_commit, doc = self._fixture_page()
         inspect = _inspect_command("valid-tersign")
         measure = _measure_command("valid-tersign")
-        mutated = page.replace(
-            "<pre><code>%s</code></pre>" % inspect,
-            "<pre><code>%s</code></pre>" % measure,
-            1,
-        )
+        mutated = page.replace(inspect, measure, 1)
         self._assert_mutant_is_red(mutated, source_commit, doc)
+
+    def test_mutation_drop_cd_or_inspect_before_clone_runtime_is_red(self):
+        page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
+        script = _first_run_script(page)
+        dropped = "\n".join(
+            line for line in script.splitlines() if not line.startswith("cd ")
+        )
+        reordered = "\n".join(
+            [line for line in script.splitlines() if "--survivors" in line]
+            + [line for line in script.splitlines() if "--survivors" not in line]
+        )
+        for mutant in (dropped, reordered):
+            with self.subTest(mutant=mutant.splitlines()[0][:40]):
+                with self.assertRaises(AssertionError):
+                    _assert_survivors_v0(_run_extracted_script(mutant))
 
     def test_mutation_survivors_points_at_manifest_is_red(self):
         page, source_commit, doc = self._fixture_page()

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="projection-digest" content="ff821dadaa2136f9153bace7cce1e5357e756b532b9fdc523fd2f23bca551fe0">
+<meta name="projection-digest" content="b382cab74f1bf55bf3cf5c65eafd9a9112650400975c02b07c761bde015bfaf5">
 <meta name="source-commit" content="a4a39bb38f6ba4512872fec4798b640086863619">
 <title>Published corpus-adequacy measurements</title>
 <style>
@@ -39,8 +39,10 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 <section id="first-run" class="non-claims" aria-labelledby="first-run-heading">
 <h2 id="first-run-heading">What this measures</h2>
 <p>This page identifies which author-declared rule-removal mutants the corpus distinguished.</p>
-<p>Safe first inspect. This command reads existing report bytes and does not measure.</p>
-<pre><code>python3 corpus_adequacy.py --survivors measurements/tersign-1cc5ea32/report.v0.json --json</code></pre>
+<p>Obtain the tagged tool, then inspect. The inspect line reads existing report bytes and does not measure.</p>
+<pre><code>git clone --depth 1 --branch v0.1.0 https://github.com/corpus-adequacy/corpus-adequacy.git
+cd corpus-adequacy
+python3 corpus_adequacy.py --survivors measurements/tersign-1cc5ea32/report.v0.json --json</code></pre>
 <p>The card below keeps the measurement command. exit 1 with --json is a completed inadequate measurement with declared survivors, not a crash; exit 2 is refusal.</p>
 <p>report tool_commit <span class="mono">a2f723fe5ae5036e97090b9691316e483c3f1acc</span></p>
 <p>report tool_content_sha256 <span class="mono">sha256:2580d5ee6353ba00dce4b8c6e355393b5457d92153b8da1f4ea9f4516e181bac</span></p>
@@ -48,8 +50,6 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 <p>Pages projection source-commit <span class="mono">a4a39bb38f6ba4512872fec4798b640086863619</span></p>
 <p>tagged tool <span class="mono">v0.1.0</span></p>
 <p><a href="https://github.com/corpus-adequacy/corpus-adequacy/releases/tag/v0.1.0">Release v0.1.0</a></p>
-<p>Clone</p>
-<pre><code>git clone --depth 1 --branch v0.1.0 https://github.com/corpus-adequacy/corpus-adequacy.git</code></pre>
 <p>Equal counts do not imply identical report bytes.</p>
 </section>
 <section class="non-claims" aria-labelledby="non-claims-heading">

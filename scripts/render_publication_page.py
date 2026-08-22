@@ -431,15 +431,15 @@ def _clone_command() -> str:
     )
 
 
+def _first_run_route(records: list[dict]) -> str:
+    lines = [_clone_command(), "cd corpus-adequacy"]
+    lines.extend(_inspect_command(record) for record in records)
+    return "\n".join(lines)
+
+
 def _first_run_html(records: list[dict], source_commit: str) -> str:
-    inspect_blocks = []
     tool_rows = []
     for record in records:
-        inspect_blocks.append(
-            "<p>Safe first inspect. This command reads existing report bytes "
-            "and does not measure.</p>\n"
-            "<pre><code>%s</code></pre>" % _esc(_inspect_command(record))
-        )
         tool_rows.append(
             "<p>report tool_commit <span class=\"mono\">%s</span></p>\n"
             "<p>report tool_content_sha256 <span class=\"mono\">%s</span></p>\n"
@@ -456,7 +456,9 @@ def _first_run_html(records: list[dict], source_commit: str) -> str:
         '<h2 id="first-run-heading">What this measures</h2>\n'
         "<p>This page identifies which author-declared rule-removal mutants "
         "the corpus distinguished.</p>\n"
-        "%s\n"
+        "<p>Obtain the tagged tool, then inspect. The inspect line reads "
+        "existing report bytes and does not measure.</p>\n"
+        "<pre><code>%s</code></pre>\n"
         "<p>The card below keeps the measurement command. exit 1 with --json "
         "is a completed inadequate measurement with declared survivors, not a "
         "crash; exit 2 is refusal.</p>\n"
@@ -464,18 +466,15 @@ def _first_run_html(records: list[dict], source_commit: str) -> str:
         "<p>Pages projection source-commit <span class=\"mono\">%s</span></p>\n"
         "<p>tagged tool <span class=\"mono\">%s</span></p>\n"
         '<p><a href="%s">Release %s</a></p>\n'
-        "<p>Clone</p>\n"
-        "<pre><code>%s</code></pre>\n"
         "<p>Equal counts do not imply identical report bytes.</p>\n"
         "</section>"
         % (
-            "\n".join(inspect_blocks),
+            _esc(_first_run_route(records)),
             "\n".join(tool_rows),
             _esc(source_commit),
             _esc(tag),
             _esc(_release_href()),
             _esc(tag),
-            _esc(_clone_command()),
         )
     )
 
