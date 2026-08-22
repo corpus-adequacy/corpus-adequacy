@@ -111,11 +111,14 @@ def _tmpfs_spec(value) -> dict:
     if not isinstance(value, str):
         raise PrepareError("tmpfs")
     size = inodes = None
-    for part in value.split(","):
-        if part.startswith("size="):
-            size = int(part[5:])
-        elif part.startswith("nr_inodes="):
-            inodes = int(part[10:])
+    try:
+        for part in value.split(","):
+            if part.startswith("size="):
+                size = int(part[5:])
+            elif part.startswith("nr_inodes="):
+                inodes = int(part[10:])
+    except ValueError as exc:
+        raise PrepareError("tmpfs") from exc
     if size != TMPFS_BYTES or inodes != TMPFS_INODES:
         raise PrepareError("tmpfs")
     return {"nr_inodes": inodes, "size": size}
@@ -139,9 +142,11 @@ def validate_inspect_contract(
         raise PrepareError("no-new-privileges")
     if cfg.get("User") != "65532:65532":
         raise PrepareError("user")
-    if host.get("Memory") != MEMORY_4G or host.get("MemorySwap") != MEMORY_4G:
+    if (type(host.get("Memory")) is not int or host.get("Memory") != MEMORY_4G or
+            type(host.get("MemorySwap")) is not int or
+            host.get("MemorySwap") != MEMORY_4G):
         raise PrepareError("defense-in-depth inspect mismatch")
-    if host.get("PidsLimit") != 512:
+    if type(host.get("PidsLimit")) is not int or host.get("PidsLimit") != 512:
         raise PrepareError("defense-in-depth inspect mismatch")
     network = host.get("NetworkMode")
     if sealed and network != "none":

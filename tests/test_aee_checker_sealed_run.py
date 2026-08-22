@@ -834,8 +834,11 @@ class InspectContract(unittest.TestCase):
             ("cap drop", {"CapDrop": []}, None),
             ("security option", {"SecurityOpt": []}, None),
             ("memory", {"Memory": MEMORY_4G - 1}, None),
+            ("memory type", {"Memory": float(MEMORY_4G)}, None),
             ("memory swap", {"MemorySwap": MEMORY_4G - 1}, None),
+            ("memory swap type", {"MemorySwap": float(MEMORY_4G)}, None),
             ("pids", {"PidsLimit": 511}, None),
+            ("pids type", {"PidsLimit": 512.0}, None),
             ("network", {"NetworkMode": "bridge"}, None),
             ("tmpfs", {"Tmpfs": bad_tmpfs}, None),
             ("user", {}, {"User": "0:0"}),
@@ -846,6 +849,13 @@ class InspectContract(unittest.TestCase):
                 with self.assertRaises(run.PrepareError):
                     run.validate_inspect_contract(
                         self._ok(config_over=config_over, **host_over), sealed=True)
+
+    def test_malformed_tmpfs_is_a_contract_error(self):
+        bad = self._ok()
+        bad["HostConfig"]["Tmpfs"]["/tmp"] = (
+            "rw,size=not-a-number,nr_inodes=128,mode=1777")
+        with self.assertRaises(run.PrepareError):
+            run.validate_inspect_contract(bad, sealed=True)
 
     def test_mount_contract_drives_argv_validation_and_projection(self):
         custom = run.DEFAULT_MOUNT_SPEC + (("subject", "/subject"),)
