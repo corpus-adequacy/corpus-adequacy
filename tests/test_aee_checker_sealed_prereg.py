@@ -179,8 +179,10 @@ class BitingPreregMutations(unittest.TestCase):
             src = SYNTHETIC.encode("utf-8")
             prereg.emit_prereg(src, a)
             prereg.emit_prereg(src, b)
-            for name in ("sites.json", "manifest.json", "control.json", "ceilings.json"):
+            for name in ("sites.json", "manifest.json", "control.json"):
                 self.assertEqual((a / name).read_bytes(), (b / name).read_bytes(), name)
+            self.assertFalse((a / "ceilings.json").exists())
+            self.assertFalse((b / "ceilings.json").exists())
             drifted = json.loads((b / "sites.json").read_text(encoding="utf-8"))
             drifted["sites"][0]["label"] = "drift"
             _dump(b / "sites.json", drifted)
@@ -285,9 +287,15 @@ class FrozenPin(unittest.TestCase):
         names = sorted(p.name for p in PREREG.iterdir())
         self.assertEqual(
             names,
-            ["ceilings.json", "control.json", "manifest.json", "pins.json", "sites.json"],
+            ["control.json", "manifest.json", "pins.json", "sites.json"],
         )
-        for forbidden in ("report.v0.json", "result.json", "provenance.json"):
+        for forbidden in (
+            "ceilings.json",
+            "report.v0.json",
+            "report.json",
+            "result.json",
+            "provenance.json",
+        ):
             self.assertFalse((PREREG / forbidden).exists(), forbidden)
 
     def test_frozen_sites_are_the_seven_conditions(self):
@@ -393,6 +401,11 @@ sys.exit(1)
         self.assertEqual(doc["rows"]["v1"]["verdict"], "valid")
         self.assertEqual(doc["rows"]["v1"]["result"], "ok")
         self.assertEqual(doc["diagnostics"]["v1"]["reason"], "prose")
+        self.assertEqual(
+            set(doc["rows"]["v1"]),
+            {"verdict", "result", "tiersWithPinnedKey", "tiersWithoutKey"},
+        )
+        self.assertEqual(set(doc["diagnostics"]["v1"]), {"reason"})
         self.assertNotIn("FROM-STDOUT", proc.stdout)
         self.assertNotIn("code", json.dumps(doc))
         self.assertNotIn("secret", proc.stdout)
@@ -479,6 +492,27 @@ sys.exit({rc})
         with mock.patch.object(sys, "stdout", buf):
             rc = wrapper.main(argv)
         return SimpleNamespace(returncode=rc, stdout=buf.getvalue(), stderr="")
+
+    def test_emitted_maps_keep_reason_out_of_outcome(self):
+        projected = wrapper.project({"vectors": [self.GOOD_ROW]}, ["v1"])
+        self.assertEqual(set(projected), {"rows", "diagnostics"})
+        self.assertEqual(
+            set(projected["rows"]["v1"]),
+            {"verdict", "result", "tiersWithPinnedKey", "tiersWithoutKey"},
+        )
+        self.assertEqual(set(projected["diagnostics"]["v1"]), {"reason"})
+        self.assertEqual(projected["diagnostics"]["v1"]["reason"], "prose A")
+        self.assertNotIn("reason", projected["rows"]["v1"])
+        self.assertNotIn("code", projected["rows"]["v1"])
+        self.assertNotIn("code", projected["diagnostics"]["v1"])
+        self.assertNotIn(wrapper.DIAGNOSTIC_KEY, wrapper.OUTCOME_KEYS)
+        with tempfile.TemporaryDirectory() as d:
+            checker = self._writer(Path(d), {"vectors": [self.GOOD_ROW]})
+            proc = self._run(checker)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        emitted = json.loads(proc.stdout)
+        self.assertEqual(set(emitted["rows"]["v1"]), set(projected["rows"]["v1"]))
+        self.assertEqual(set(emitted["diagnostics"]["v1"]), {"reason"})
 
     def test_inner_rc2_with_valid_json_is_unproved_before_parse(self):
         with tempfile.TemporaryDirectory() as d:
@@ -681,4 +715,3 @@ sys.exit({rc})
 
 if __name__ == "__main__":
     unittest.main()
-

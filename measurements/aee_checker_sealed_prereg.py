@@ -337,17 +337,6 @@ def _sites_doc(found: dict) -> dict:
     }
 
 
-def _ceilings() -> dict:
-    return {
-        "vector_timeout_seconds": 600,
-        "build_timeout_seconds": 1800,
-        "output_cap_bytes": 4 * 1024 * 1024,
-        "max_output_files": 8,
-        "disk_ceiling_bytes": 256 * 1024 * 1024,
-        "network_after_materialize": False,
-    }
-
-
 def emit_prereg(source: bytes, dest: Path, pins: dict | None = None) -> None:
     found = enumerate_source(source)
     dest.mkdir(parents=True, exist_ok=True)
@@ -358,7 +347,6 @@ def emit_prereg(source: bytes, dest: Path, pins: dict | None = None) -> None:
     (dest / "sites.json").write_bytes(encode_json(_sites_doc(found)))
     (dest / "manifest.json").write_bytes(encode_json(_manifest(found)))
     (dest / "control.json").write_bytes(encode_json(_control()))
-    (dest / "ceilings.json").write_bytes(encode_json(_ceilings()))
     (dest / "pins.json").write_bytes(encode_json(pins))
 
 
@@ -430,7 +418,7 @@ def validate_prereg(dest: Path) -> None:
 
 
 def assert_byte_identical_prereg(left: Path, right: Path) -> None:
-    for name in ("sites.json", "manifest.json", "control.json", "ceilings.json"):
+    for name in ("sites.json", "manifest.json", "control.json"):
         if (left / name).read_bytes() != (right / name).read_bytes():
             raise PreregError("regeneration is not byte-identical: %s" % name)
 

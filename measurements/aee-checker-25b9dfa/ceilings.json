@@ -1,8 +1,0 @@
-{
-  "build_timeout_seconds": 1800,
-  "disk_ceiling_bytes": 268435456,
-  "max_output_files": 8,
-  "network_after_materialize": false,
-  "output_cap_bytes": 4194304,
-  "vector_timeout_seconds": 600
-}
