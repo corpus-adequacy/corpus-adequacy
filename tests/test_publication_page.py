@@ -8,6 +8,7 @@ import html
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import stat
@@ -613,15 +614,104 @@ def _first_run_script(page: str) -> str:
     raise AssertionError("first-run HTML has no obtain-then-inspect copy-paste block")
 
 
+CLONE_URL = "https://github.com/corpus-adequacy/corpus-adequacy.git"
+
+
+def _displayed_clone_argv() -> list[str]:
+    return shlex.split(rpp._clone_command(), posix=True)
+
+
+def _displayed_inspect_argv(line: str) -> list[str]:
+    argv = shlex.split(line, posix=True)
+    if argv[:3] != ["python3", "corpus_adequacy.py", "--survivors"]:
+        raise AssertionError(
+            "first-run inspect argv is not the displayed python3 command: %r" % argv
+        )
+    if len(argv) != 5 or argv[4] != "--json":
+        raise AssertionError(
+            "first-run inspect argv is not the displayed python3 command: %r" % argv
+        )
+    if not argv[3].endswith("/report.v0.json"):
+        raise AssertionError(
+            "first-run inspect argv is not the displayed python3 command: %r" % argv
+        )
+    return argv
+
+
+def _hermetic_git_env(mirror: Path, gitconfig: Path) -> dict[str, str]:
+    gitconfig.write_text(
+        '[url "%s"]\n\tinsteadOf = %s\n' % (mirror.resolve().as_uri(), CLONE_URL),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
+
+
+def _tagged_local_mirror(mirror: Path) -> None:
+    subprocess.run(
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            "--no-tags",
+            str(REPO_ROOT),
+            str(mirror),
+        ],
+        check=True,
+        timeout=180,
+    )
+    subprocess.run(
+        ["git", "tag", "-f", "v%s" % ca.VERSION],
+        cwd=mirror,
+        check=True,
+        timeout=30,
+    )
+
+
 def _run_extracted_script(script: str) -> subprocess.CompletedProcess:
+    lines = [line for line in script.splitlines() if line]
+    if len(lines) != 3:
+        raise AssertionError(
+            "first-run route is not exactly clone, cd, inspect: %r" % lines
+        )
+    clone_argv = shlex.split(lines[0], posix=True)
+    if clone_argv != _displayed_clone_argv():
+        raise AssertionError(
+            "first-run clone argv is not the displayed command: %r" % clone_argv
+        )
+    if lines[1] != "cd corpus-adequacy":
+        raise AssertionError(
+            "first-run cd is not the displayed directory: %r" % lines[1]
+        )
+    inspect_argv = _displayed_inspect_argv(lines[2])
     with tempfile.TemporaryDirectory() as d:
-        return subprocess.run(
-            ["bash", "-c", script],
-            cwd=d,
+        root = Path(d)
+        mirror = root / "mirror"
+        empty = root / "empty"
+        empty.mkdir()
+        _tagged_local_mirror(mirror)
+        env = _hermetic_git_env(mirror, root / "gitconfig")
+        clone_proc = subprocess.run(
+            clone_argv,
+            cwd=empty,
             capture_output=True,
             text=True,
             timeout=180,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env=env,
+        )
+        if clone_proc.returncode != 0:
+            return clone_proc
+        return subprocess.run(
+            inspect_argv,
+            cwd=empty / "corpus-adequacy",
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env,
         )
 
 
