@@ -1,0 +1,48 @@
+{
+  "adequate": false,
+  "control_status": "killed",
+  "declared_total": 3,
+  "diagnostic_channel_declared": true,
+  "killed": 1,
+  "manifest_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "mutants": [
+    {
+      "group": "axis-a",
+      "how": "no vector distinguishes the survived rule",
+      "label": "survived-rule",
+      "moved": 0,
+      "scope": "declared",
+      "verdict": "survived"
+    },
+    {
+      "group": "axis-b",
+      "how": "diagnostic moved, declared outcome did not",
+      "label": "silent-rule",
+      "moved": 0,
+      "moved_diagnostic": 2,
+      "scope": "declared",
+      "verdict": "silent"
+    },
+    {
+      "group": "axis-a",
+      "how": "1 vector(s) moved",
+      "label": "killed-rule",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "axis-a",
+      "how": "harness detects a change on this path",
+      "label": "CONTROL keep path",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "control-killed"
+    }
+  ],
+  "runner": "process",
+  "schema": "corpus-adequacy.report.v0",
+  "silent": 1,
+  "survived": 1,
+  "unproved": 0
+}

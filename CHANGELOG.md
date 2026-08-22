@@ -7,6 +7,23 @@ binds report and source file digests, refuses symlink and count/control
 parity mismatches, and `--check` compares the checked-in page without
 writing. The form no longer claims a workflow recomputes machine fields.
 
+The same projector now writes a run page and one rule page per
+`survivor_findings` row, addressed by the report `mutants[]` index. Overview
+cards link to `runs/{id}/`. Run and rule pages reuse one non-claims
+renderer so a shared deep link still carries the four ceiling lines.
+Card and run page reuse one counts renderer, including `silent_label`
+and `diagnostic_channel_declared`. Membership is that projection only:
+leftover unconsumed findings fail closed, and `how` is the validated
+report field. Displayed counts must be exact `int` values; a present
+`diagnostic_channel_declared` must be an exact `bool` (absent is false).
+`--check` inventories regular files under `site/`. Only an exact `CNAME`
+is left unmanaged; any other regular file outside `index.html` and
+`runs/**` (including a regular file named `runs`) fails closed as surplus.
+A FIFO, symlink, or device anywhere under `site/` is refused without
+opening it. Generation writes expected
+owned files and refuses pre-existing owned surplus instead of deleting.
+No ranking, latest, or identity widening. No release.
+
 The AlgoVoi adapter's mechanism boundary is pinned against a whole-document
 re-serialize, not only the per-preimage form. The previous probe used the
 pinned fixture, whose round trip is byte-identical, so a scanner that

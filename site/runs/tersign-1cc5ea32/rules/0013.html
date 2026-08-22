@@ -3,9 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="projection-digest" content="1434da50a2acdeeec63e5cc82d78e36e0df7bf84aab5237816b961e6bce3d8b5">
-<meta name="source-commit" content="a4a39bb38f6ba4512872fec4798b640086863619">
-<title>Published corpus-adequacy measurements</title>
+<title>boundary_binding skips empty-attested coverage refusal — tersign-1cc5ea32</title>
 <style>
 
 :root { color-scheme: light; }
@@ -31,10 +29,10 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 </style>
 </head>
 <body>
-<a class="skip" href="#results">Skip to results</a>
+<a class="skip" href="#finding">Skip to finding</a>
 <header>
-<h1>Published measurements</h1>
-<p>Committed <code>report.v0</code> records listed in <code>publications/index.v0.json</code>.</p>
+<h1>boundary_binding skips empty-attested coverage refusal</h1>
+<p><a href="../../../index.html">overview</a> · <a href="../">run detail</a></p>
 </header>
 <section class="non-claims" aria-labelledby="non-claims-heading">
 <h2 id="non-claims-heading">Non-claims</h2>
@@ -49,31 +47,17 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 <li>score_percent is percent of author-declared in-scope rules, not of the implementation</li>
 </ul>
 </section>
-<nav class="ctas" aria-label="intake and publication forms">
-<a href="https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=add-corpus.yml">Request source intake</a>
-<a href="https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=publish-measurement.yml">Hand off a completed measurement</a>
-</nav>
-<main id="results">
-<h2>Committed records</h2>
-<ul class="cards">
-<li class="card">
-<h3>tersign-1cc5ea32</h3>
-<p>corpus id <span class="mono">tersign-1cc5ea32</span></p>
-<p>source commit <span class="mono">1cc5ea32b3da4f195b55782c8a3573d8564673a7</span></p>
-<p>adapter <span class="mono">tersign_evidence_record</span> · runner <span class="mono">process</span></p>
-<p>report digest <span class="mono">c65f8a6c6dcc4a56dea31e7fc0de241a8cbbdcf36cd4cf98c220d23a894fe5ae</span></p>
-<p>Copyable command</p>
-<pre><code>python3 corpus_adequacy.py measurements/tersign-1cc5ea32/manifest.json --json</code></pre>
-<ul class="counts"><li class="count" aria-label="killed 10"><span class="count-label">killed</span> <span class="count-value">10</span></li><li class="count" aria-label="survived 2"><span class="count-label">survived</span> <span class="count-value">2</span></li><li class="count" aria-label="silent not measured"><span class="count-label">silent</span> <span class="count-value">not measured</span></li><li class="count" aria-label="unproved 0"><span class="count-label">unproved</span> <span class="count-value">0</span></li><li class="count" aria-label="control_status killed"><span class="count-label">control_status</span> <span class="count-value">killed</span></li><li class="count" aria-label="diagnostic_channel_declared not declared"><span class="count-label">diagnostic_channel_declared</span> <span class="count-value">not declared</span></li></ul>
-<p class="plain">Of the author-declared in-scope mutants in this record, 10 were killed, 2 survived, silent was not measured, and 0 were unproved. The control path status is killed.</p>
+<main id="finding" class="finding">
+<p>verdict <span>survived</span></p>
+<p>group <span class="mono">tersign</span></p>
+<p>how no vector distinguishes it. An implementation can delete this rule and still reproduce the digest</p>
+<p>obligation A future vector must distinguish this rule on a declared outcome. This projection does not name such a vector.</p>
+<p>moved <span class="mono">0</span></p>
 <p class="links">
-<a href="runs/tersign-1cc5ea32/">run detail</a>
 <a href="https://github.com/corpus-adequacy/corpus-adequacy/raw/a4a39bb38f6ba4512872fec4798b640086863619/measurements/tersign-1cc5ea32/report.v0.json">raw report.v0.json</a>
 <a href="https://github.com/tersignhq/evidence-record-conformance/commit/1cc5ea32b3da4f195b55782c8a3573d8564673a7">source commit 1cc5ea32b3da4f195b55782c8a3573d8564673a7</a>
 <a href="https://github.com/corpus-adequacy/corpus-adequacy/blob/a4a39bb38f6ba4512872fec4798b640086863619/measurements/tersign-1cc5ea32/PROVENANCE.md">review</a>
 </p>
-</li>
-</ul>
 </main>
 </body>
 </html>

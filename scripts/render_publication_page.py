@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a no-JS static overview of index-listed report.v0 records."""
+"""Render a no-JS static overview and detail pages from one publication load."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import hashlib
 import html
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from corpus_adequacy import (  # noqa: E402
     _parse_projection_json,
     _require_report_rows,
     read_bounded_regular_file,
+    survivor_findings,
 )
 
 INDEX_REL = "publications/index.v0.json"
@@ -37,6 +39,27 @@ CEILING_LINES = (
     'silent:0 without diagnostic_channel_declared is not "no silent rules"',
     "score_percent is percent of author-declared in-scope rules, not of the implementation",
 )
+SHARED_STYLE = """
+:root { color-scheme: light; }
+html, body { max-width: 100%; overflow-x: hidden; margin: 0; }
+body { font-family: system-ui, sans-serif; line-height: 1.45; color: #1a1a1a; background: #f7f5f0; padding: 1rem; }
+a:focus, button:focus, .skip:focus { outline: 3px solid #0033aa; outline-offset: 2px; }
+.skip { position: absolute; left: -999px; top: 0; background: #fff; padding: 0.5rem; }
+.skip:focus { left: 1rem; z-index: 2; }
+h1, h2, h3 { line-height: 1.2; }
+.non-claims { max-width: 46rem; }
+.ctas { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1rem 0 1.5rem; }
+.ctas a { display: inline-block; padding: 0.5rem 0.75rem; background: #0033aa; color: #fff; text-decoration: underline; }
+.cards { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 1rem; }
+.card { box-sizing: border-box; width: min(100%, 390px); max-width: 100%; background: #fff; border: 2px solid #1a1a1a; padding: 1rem; }
+.counts { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.count { border: 1px solid #333; padding: 0.35rem 0.5rem; min-width: 5rem; }
+.count-label { display: block; font-size: 0.8rem; }
+.mono, pre { overflow-wrap: anywhere; word-break: break-word; }
+pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wrap; }
+.links a { margin-right: 0.75rem; overflow-wrap: anywhere; }
+.finding { box-sizing: border-box; width: min(100%, 390px); max-width: 100%; background: #fff; border: 2px solid #1a1a1a; padding: 1rem; }
+"""
 
 
 class PublicationError(ValueError):
@@ -137,10 +160,16 @@ def _control_status_from_rows(mutants: list) -> str:
 def _require_displayed_parity(doc: dict, mutants: list) -> None:
     derived = _counts_from_mutants(mutants)
     for name in DISPLAY_VERDICTS:
-        if doc.get(name) != derived[name]:
+        value = doc.get(name)
+        if type(value) is not int:
+            raise PublicationError(
+                "displayed %s must be an int, got %s"
+                % (name, type(value).__name__)
+            )
+        if value != derived[name]:
             raise PublicationError(
                 "displayed %s %r does not match mutants[] count %r"
-                % (name, doc.get(name), derived[name])
+                % (name, value, derived[name])
             )
     derived_control = _control_status_from_rows(mutants)
     if doc.get("control_status") != derived_control:
@@ -148,6 +177,18 @@ def _require_displayed_parity(doc: dict, mutants: list) -> None:
             "control_status %r does not match control rows %r"
             % (doc.get("control_status"), derived_control)
         )
+
+
+def _diagnostic_channel_declared(doc: dict) -> bool:
+    if "diagnostic_channel_declared" not in doc:
+        return False
+    value = doc["diagnostic_channel_declared"]
+    if type(value) is not bool:
+        raise PublicationError(
+            "diagnostic_channel_declared must be a bool, got %s"
+            % type(value).__name__
+        )
+    return value
 
 
 def _load_json_object(path: Path, *, label: str) -> tuple[bytes, dict]:
@@ -190,7 +231,7 @@ def load_record(
     if isinstance(extra, list):
         non_claims.extend(str(item) for item in extra)
     runner = doc.get("runner") if doc.get("runner") is not None else ""
-    diagnostic = bool(doc.get("diagnostic_channel_declared"))
+    diagnostic = _diagnostic_channel_declared(doc)
     silent = doc.get("silent")
     silent_label = "not measured" if (silent == 0 and not diagnostic) else str(silent)
     control = doc.get("control_status")
@@ -282,6 +323,60 @@ def discover_records(root: Path) -> list[dict]:
     return records
 
 
+def actionable_findings(record: dict) -> list[dict]:
+    """Actionable rows from survivor_findings, addressed by report mutants[] index."""
+    projected = survivor_findings(record["doc"])
+    buckets: dict[tuple[str, str, str], list[dict]] = {}
+    for finding in projected["findings"]:
+        key = (finding["group"], finding["rule"], finding["verdict"])
+        buckets.setdefault(key, []).append(finding)
+    rows = []
+    for i, row in enumerate(record["doc"]["mutants"]):
+        key = (row["group"], row["label"], row["verdict"])
+        bucket = buckets.get(key)
+        if not bucket:
+            continue
+        finding = bucket.pop(0)
+        how = row.get("how")
+        if not isinstance(how, str) or not how:
+            raise PublicationError("report.mutants[%d].how must be a non-empty string" % i)
+        item = {
+            "index": i,
+            "path_id": "%04d" % i,
+            "rule": finding["rule"],
+            "group": finding["group"],
+            "verdict": finding["verdict"],
+            "how": row["how"],
+            "obligation": finding["obligation"],
+            "moved": finding["moved"],
+            "moved_diagnostic": finding["moved_diagnostic"],
+        }
+        if "anchor_excerpt" in finding:
+            item["anchor_excerpt"] = finding["anchor_excerpt"]
+        rows.append(item)
+    leftover = [key for key, bucket in buckets.items() if bucket]
+    if leftover:
+        raise PublicationError("leftover survivor_findings: %s" % leftover)
+    return rows
+
+
+def _evidence_hrefs(record: dict, build_commit: str) -> tuple[str, str, str]:
+    raw_href = (
+        "%s/%s/%s" % (RAW_PREFIX, build_commit, record["report_rel"])
+        if _looks_like_commit(build_commit)
+        else record["report_rel"]
+    )
+    review_href = (
+        "%s/%s/%s" % (BLOB_PREFIX, build_commit, record["review_rel"])
+        if _looks_like_commit(build_commit)
+        else record["review_rel"]
+    )
+    source_href = _source_commit_url(record)
+    if not source_href:
+        raise PublicationError("source commit URL is missing")
+    return raw_href, review_href, source_href
+
+
 def _source_url(record: dict) -> str:
     repo = record["repository"]
     if _looks_like_repo(repo):
@@ -317,30 +412,51 @@ def _plain_sentence(record: dict) -> str:
     )
 
 
-def _card_html(record: dict, build_commit: str) -> str:
-    raw_href = "%s/%s/%s" % (RAW_PREFIX, build_commit, record["report_rel"]) if _looks_like_commit(build_commit) else record["report_rel"]
-    review_href = "%s/%s/%s" % (BLOB_PREFIX, build_commit, record["review_rel"]) if _looks_like_commit(build_commit) else record["review_rel"]
-    source_href = _source_commit_url(record)
-    if not source_href:
-        raise PublicationError("source commit URL is missing")
-    source_link = (
-        '<a href="%s">source commit %s</a>' % (_esc(source_href), _esc(record["source_commit"]))
+def _non_claims_html(records: list[dict] | None = None) -> str:
+    seen = []
+    for rec in records or []:
+        for item in rec.get("non_claims") or []:
+            if item not in seen:
+                seen.append(item)
+    for item in CEILING_LINES:
+        if item not in seen:
+            seen.append(item)
+    return (
+        '<section class="non-claims" aria-labelledby="non-claims-heading">\n'
+        '<h2 id="non-claims-heading">Non-claims</h2>\n'
+        "<ul>\n%s\n</ul>\n"
+        "</section>"
+        % "\n".join("<li>%s</li>" % _esc(item) for item in seen)
     )
+
+
+def _counts_html(record: dict) -> str:
     silent_value = record["silent_label"]
-    counts = (
+    channel = "declared" if record["diagnostic_channel_declared"] else "not declared"
+    rows = (
         ("killed", record["killed"], "killed %s" % record["killed"]),
         ("survived", record["survived"], "survived %s" % record["survived"]),
         ("silent", silent_value, "silent %s" % silent_value),
         ("unproved", record["unproved"], "unproved %s" % record["unproved"]),
         ("control_status", record["control_status"], "control_status %s" % record["control_status"]),
+        ("diagnostic_channel_declared", channel, "diagnostic_channel_declared %s" % channel),
     )
-    count_html = []
-    for label, value, accessible in counts:
-        count_html.append(
+    items = []
+    for label, value, accessible in rows:
+        items.append(
             '<li class="count" aria-label="%s"><span class="count-label">%s</span> '
             '<span class="count-value">%s</span></li>'
             % (_esc(accessible), _esc(label), _esc(value))
         )
+    return '<ul class="counts">%s</ul>' % "".join(items)
+
+
+def _card_html(record: dict, build_commit: str) -> str:
+    raw_href, review_href, source_href = _evidence_hrefs(record, build_commit)
+    source_link = (
+        '<a href="%s">source commit %s</a>' % (_esc(source_href), _esc(record["source_commit"]))
+    )
+    detail_href = "runs/%s/" % record["directory"]
     return (
         '<li class="card">\n'
         '<h3>%s</h3>\n'
@@ -350,9 +466,10 @@ def _card_html(record: dict, build_commit: str) -> str:
         '<p>report digest <span class="mono">%s</span></p>\n'
         '<p>Copyable command</p>\n'
         '<pre><code>%s</code></pre>\n'
-        '<ul class="counts">%s</ul>\n'
+        '%s\n'
         '<p class="plain">%s</p>\n'
         '<p class="links">\n'
+        '<a href="%s">run detail</a>\n'
         '<a href="%s">raw report.v0.json</a>\n'
         '%s\n'
         '<a href="%s">review</a>\n'
@@ -366,8 +483,9 @@ def _card_html(record: dict, build_commit: str) -> str:
             _esc(record["runner"]),
             _esc(record["digest"]),
             _esc(record["command"]),
-            "".join(count_html),
+            _counts_html(record),
             _esc(_plain_sentence(record)),
+            _esc(detail_href),
             _esc(raw_href),
             source_link,
             _esc(review_href),
@@ -376,15 +494,6 @@ def _card_html(record: dict, build_commit: str) -> str:
 
 
 def _page_body(records: list[dict], source_commit: str, projection_digest: str) -> str:
-    collected = []
-    for rec in records:
-        collected.extend(rec.get("non_claims") or [])
-    collected.extend(CEILING_LINES)
-    seen = []
-    for item in collected:
-        if item not in seen:
-            seen.append(item)
-    non_claims = "\n".join("<li>%s</li>" % _esc(item) for item in seen)
     cards = "\n".join(_card_html(rec, source_commit) for rec in records)
     return """<!DOCTYPE html>
 <html lang="en">
@@ -395,24 +504,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 <meta name="source-commit" content="%s">
 <title>Published corpus-adequacy measurements</title>
 <style>
-:root { color-scheme: light; }
-html, body { max-width: 100%%; overflow-x: hidden; margin: 0; }
-body { font-family: system-ui, sans-serif; line-height: 1.45; color: #1a1a1a; background: #f7f5f0; padding: 1rem; }
-a:focus, button:focus, .skip:focus { outline: 3px solid #0033aa; outline-offset: 2px; }
-.skip { position: absolute; left: -999px; top: 0; background: #fff; padding: 0.5rem; }
-.skip:focus { left: 1rem; z-index: 2; }
-h1, h2, h3 { line-height: 1.2; }
-.non-claims { max-width: 46rem; }
-.ctas { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1rem 0 1.5rem; }
-.ctas a { display: inline-block; padding: 0.5rem 0.75rem; background: #0033aa; color: #fff; text-decoration: underline; }
-.cards { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 1rem; }
-.card { box-sizing: border-box; width: min(100%%, 390px); max-width: 100%%; background: #fff; border: 2px solid #1a1a1a; padding: 1rem; }
-.counts { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
-.count { border: 1px solid #333; padding: 0.35rem 0.5rem; min-width: 5rem; }
-.count-label { display: block; font-size: 0.8rem; }
-.mono, pre { overflow-wrap: anywhere; word-break: break-word; }
-pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wrap; }
-.links a { margin-right: 0.75rem; overflow-wrap: anywhere; }
+%s
 </style>
 </head>
 <body>
@@ -421,12 +513,7 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 <h1>Published measurements</h1>
 <p>Committed <code>report.v0</code> records listed in <code>publications/index.v0.json</code>.</p>
 </header>
-<section class="non-claims" aria-labelledby="non-claims-heading">
-<h2 id="non-claims-heading">Non-claims</h2>
-<ul>
 %s
-</ul>
-</section>
 <nav class="ctas" aria-label="intake and publication forms">
 <a href="%s">Request source intake</a>
 <a href="%s">Hand off a completed measurement</a>
@@ -442,7 +529,8 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 """ % (
         _esc(projection_digest),
         _esc(source_commit),
-        non_claims,
+        SHARED_STYLE,
+        _non_claims_html(records),
         _esc(ISSUES_INTAKE),
         _esc(ISSUES_PUBLISH),
         cards,
@@ -469,11 +557,148 @@ def compute_projection_digest(
     return hasher.hexdigest()
 
 
-def render_html(root: Path, source_commit: str) -> str:
+def _shell_page(title: str, skip_href: str, skip_label: str, body: str) -> str:
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%s</title>
+<style>
+%s
+</style>
+</head>
+<body>
+<a class="skip" href="%s">%s</a>
+%s
+</body>
+</html>
+""" % (_esc(title), SHARED_STYLE, _esc(skip_href), _esc(skip_label), body)
+
+
+def _evidence_links_html(record: dict, build_commit: str) -> str:
+    raw_href, review_href, source_href = _evidence_hrefs(record, build_commit)
+    return (
+        '<p class="links">\n'
+        '<a href="%s">raw report.v0.json</a>\n'
+        '<a href="%s">source commit %s</a>\n'
+        '<a href="%s">review</a>\n'
+        "</p>"
+        % (
+            _esc(raw_href),
+            _esc(source_href),
+            _esc(record["source_commit"]),
+            _esc(review_href),
+        )
+    )
+
+
+def _run_page(record: dict, findings: list[dict], build_commit: str) -> str:
+    items = []
+    for finding in findings:
+        items.append(
+            '<li><a href="rules/%s.html">%s</a> <span>%s</span></li>'
+            % (_esc(finding["path_id"]), _esc(finding["rule"]), _esc(finding["verdict"]))
+        )
+    body = (
+        "<header>\n"
+        "<h1>%s</h1>\n"
+        '<p><a href="../../index.html">overview</a></p>\n'
+        "</header>\n"
+        "%s\n"
+        "%s\n"
+        '<main id="findings">\n'
+        "<h2>Actionable findings</h2>\n"
+        "<ul class=\"finding\">\n%s\n</ul>\n"
+        "%s\n"
+        "</main>"
+        % (
+            _esc(record["directory"]),
+            _non_claims_html([record]),
+            _counts_html(record),
+            "\n".join(items),
+            _evidence_links_html(record, build_commit),
+        )
+    )
+    return _shell_page(
+        record["directory"],
+        "#findings",
+        "Skip to findings",
+        body,
+    )
+
+
+def _rule_page(record: dict, finding: dict, build_commit: str) -> str:
+    diagnostic = ""
+    if record["diagnostic_channel_declared"]:
+        diagnostic = (
+            '<p>moved_diagnostic <span class="mono">%s</span></p>\n'
+            % _esc(finding["moved_diagnostic"])
+        )
+    excerpt = ""
+    if finding.get("anchor_excerpt"):
+        excerpt = (
+            '<p>anchor <span class="mono">%s</span></p>\n'
+            % _esc(finding["anchor_excerpt"])
+        )
+    body = (
+        "<header>\n"
+        "<h1>%s</h1>\n"
+        '<p><a href="../../../index.html">overview</a> · '
+        '<a href="../">run detail</a></p>\n'
+        "</header>\n"
+        "%s\n"
+        '<main id="finding" class="finding">\n'
+        "<p>verdict <span>%s</span></p>\n"
+        "<p>group <span class=\"mono\">%s</span></p>\n"
+        "<p>how %s</p>\n"
+        "<p>obligation %s</p>\n"
+        "<p>moved <span class=\"mono\">%s</span></p>\n"
+        "%s%s"
+        "%s\n"
+        "</main>"
+        % (
+            _esc(finding["rule"]),
+            _non_claims_html([record]),
+            _esc(finding["verdict"]),
+            _esc(finding["group"]),
+            _esc(finding["how"]),
+            _esc(finding["obligation"]),
+            _esc(finding["moved"]),
+            diagnostic,
+            excerpt,
+            _evidence_links_html(record, build_commit),
+        )
+    )
+    return _shell_page(
+        "%s — %s" % (finding["rule"], record["directory"]),
+        "#finding",
+        "Skip to finding",
+        body,
+    )
+
+
+def render_site(root: Path, source_commit: str) -> dict[str, bytes]:
     index_bytes, records = load_listed_records(Path(root))
     renderer_bytes = read_bounded_regular_file(Path(__file__))
     digest = compute_projection_digest(index_bytes, records, renderer_bytes)
-    return _page_body(records, source_commit, digest)
+    files = {
+        "index.html": _page_body(records, source_commit, digest).encode("utf-8"),
+    }
+    for record in records:
+        rec_id = record["directory"]
+        findings = actionable_findings(record)
+        files["runs/%s/index.html" % rec_id] = _run_page(
+            record, findings, source_commit
+        ).encode("utf-8")
+        for finding in findings:
+            rel = "runs/%s/rules/%s.html" % (rec_id, finding["path_id"])
+            files[rel] = _rule_page(record, finding, source_commit).encode("utf-8")
+    return files
+
+
+def render_html(root: Path, source_commit: str) -> str:
+    return render_site(root, source_commit)["index.html"].decode("utf-8")
 
 
 def _meta_content(page: str, name: str) -> str:
@@ -507,6 +732,58 @@ def _atomic_write(path: Path, data: bytes) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
+
+
+def _is_preserved_rel(rel: str) -> bool:
+    return rel == "CNAME"
+
+
+def _list_site_files(site_root: Path) -> dict[str, Path]:
+    found = {}
+    if not site_root.exists():
+        return found
+    root_st = os.lstat(site_root)
+    if stat.S_ISLNK(root_st.st_mode) or not stat.S_ISDIR(root_st.st_mode):
+        raise PublicationError("site path is not a regular file: %s" % site_root)
+    for dirpath, dirnames, filenames in os.walk(site_root, followlinks=False):
+        base = Path(dirpath)
+        for name in list(dirnames) + list(filenames):
+            path = base / name
+            mode = os.lstat(path).st_mode
+            if stat.S_ISLNK(mode):
+                raise PublicationError("site path is not a regular file: %s" % path)
+            if stat.S_ISDIR(mode):
+                continue
+            if not stat.S_ISREG(mode):
+                raise PublicationError("site path is not a regular file: %s" % path)
+            rel = path.relative_to(site_root).as_posix()
+            if _is_preserved_rel(rel):
+                continue
+            found[rel] = path
+    return dict(sorted(found.items()))
+
+
+def _write_site(site_root: Path, files: dict[str, bytes]) -> None:
+    found = _list_site_files(site_root)
+    surplus = [rel for rel in found if rel not in files]
+    if surplus:
+        raise PublicationError("surplus generated site files: %s" % ", ".join(surplus))
+    for rel, data in files.items():
+        _atomic_write(site_root / rel, data)
+
+
+def _check_site(site_root: Path, expected: dict[str, bytes]) -> None:
+    found = _list_site_files(site_root)
+    missing = [rel for rel in expected if rel not in found]
+    surplus = [rel for rel in found if rel not in expected]
+    if missing:
+        raise PublicationError("missing generated site files: %s" % ", ".join(missing))
+    if surplus:
+        raise PublicationError("surplus generated site files: %s" % ", ".join(surplus))
+    for rel, data in expected.items():
+        current = read_bounded_regular_file(found[rel])
+        if current != data:
+            raise PublicationError("stale generated site file: %s" % rel)
 
 
 
@@ -575,11 +852,12 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="compare checked-in --out to a freshly rendered page and do not write",
+        help="compare every generated site file and do not write",
     )
     args = parser.parse_args(argv)
     root = args.root.resolve()
     out = args.out if args.out.is_absolute() else root / args.out
+    site_root = out.parent
     if args.check:
         existing = read_bounded_regular_file(out)
         if args.source_commit:
@@ -588,13 +866,11 @@ def main(argv=None) -> int:
             recorded = source_commit_from_html(existing.decode("utf-8"))
             _index_bytes, records = load_listed_records(root)
             _require_recorded_link_commit(root, recorded, records)
-        rendered = render_html(root, recorded).encode("utf-8")
-        if existing != rendered:
-            raise PublicationError("checked-in %s does not match a fresh render" % out)
+        expected = render_site(root, recorded)
+        _check_site(site_root, expected)
         return 0
     source_commit = args.source_commit or _git_head(root)
-    rendered = render_html(root, source_commit).encode("utf-8")
-    _atomic_write(out, rendered)
+    _write_site(site_root, render_site(root, source_commit))
     return 0
 
 
