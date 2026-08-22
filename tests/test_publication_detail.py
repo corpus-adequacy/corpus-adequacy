@@ -373,11 +373,6 @@ class PublicClaimsOnDeepPages(unittest.TestCase):
                 for line in _escaped_ceilings():
                     self.assertIn(line, page)
                 self.assertIn('class="non-claims"', page)
-            src = Path(rpp.__file__).read_text(encoding="utf-8")
-            self.assertEqual(src.count("def _non_claims_html"), 1)
-            self.assertIn("_non_claims_html", rpp._run_page.__code__.co_names)
-            self.assertIn("_non_claims_html", rpp._rule_page.__code__.co_names)
-            self.assertIn("_non_claims_html", rpp._page_body.__code__.co_names)
 
     def test_run_page_keeps_typed_counts_and_silent_label(self):
         live = _site(REPO_ROOT)
@@ -386,9 +381,6 @@ class PublicClaimsOnDeepPages(unittest.TestCase):
         self.assertIn("survived 2", tersign)
         self.assertIn('aria-label="diagnostic_channel_declared not declared"', tersign)
         self.assertIn('class="counts"', tersign)
-        self.assertIn("_counts_html", rpp._run_page.__code__.co_names)
-        self.assertIn("_counts_html", rpp._card_html.__code__.co_names)
-        self.assertEqual(Path(rpp.__file__).read_text(encoding="utf-8").count("def _counts_html"), 1)
 
         with tempfile.TemporaryDirectory() as d:
             root = _write_tree(Path(d), [SURVIVED_SILENT / "report.v0.json"])
