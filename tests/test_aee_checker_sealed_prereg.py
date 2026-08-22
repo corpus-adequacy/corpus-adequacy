@@ -311,8 +311,16 @@ class FrozenPin(unittest.TestCase):
         self.assertEqual(manifest["unproved_exit_codes"], [75])
         self.assertEqual(manifest["build"], ["cargo", "build", "--locked", "--release"])
         pins = _load("pins.json")
-        self.assertEqual(len(pins["corpus"]["vector_ids"]), 250)
-        self.assertEqual(len(set(pins["corpus"]["vector_ids"])), 250)
+        self.assertNotIn("vector_ids", pins["corpus"])
+        self.assertNotIn("vector_count", pins["corpus"])
+        self.assertEqual(
+            pins["corpus"]["commit"],
+            "59faf842098183ae7b5387ad13e6351c44687279")
+        self.assertEqual(
+            pins["corpus"]["corpusDigest"],
+            "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579")
+        self.assertEqual(pins["corpus"]["vectors"], "corpus/vectors/MANIFEST.json")
+        self.assertEqual(manifest["vectors"], "corpus/vectors/MANIFEST.json")
         self.assertEqual(manifest["implementation_sources"],
                          ["src/check.rs", "aee_checker_sealed.py"])
         self.assertEqual(manifest["outcome_from"], ["rows"])
@@ -551,6 +559,14 @@ sys.exit(0)
                 prereg.validate_prereg(dest)
             self.assertIn("implementation_sources", str(ctx.exception).lower())
 
+    def _writer_raw(self, tmp: Path, payload: str, rc=0) -> Path:
+        return self._fake(tmp, f"""
+import sys
+from pathlib import Path
+Path(sys.argv[sys.argv.index("--json") + 1]).write_text({payload!r} + "\\n")
+sys.exit({rc})
+""")
+
     def test_reordered_rows_still_match_manifest_ids(self):
         rows = [
             dict(self.GOOD_ROW, id="v2", reason="b"),
@@ -565,15 +581,45 @@ sys.exit(0)
         self.assertEqual(set(doc["rows"]), {"v1", "v2"})
         self.assertEqual(doc["diagnostics"]["v1"]["reason"], "a")
 
+    def test_unexpected_unique_id_is_unproved(self):
+        with tempfile.TemporaryDirectory() as d:
+            checker = self._writer(Path(d), {"vectors": [dict(self.GOOD_ROW, id="v2")]})
+            proc = self._run(checker, ids=("v1",))
+        self.assertEqual(proc.returncode, 75, proc.stdout)
+        self.assertFalse(proc.stdout.strip())
+
+    def test_duplicate_json_key_is_unproved(self):
+        payload = (
+            '{"vectors":[{"id":"v1","id":"v1","verdict":"valid","result":"ok",'
+            '"reason":"r","tiersWithPinnedKey":[],"tiersWithoutKey":[]}]}'
+        )
+        with tempfile.TemporaryDirectory() as d:
+            checker = self._writer_raw(Path(d), payload)
+            proc = self._run(checker)
+        self.assertEqual(proc.returncode, 75, proc.stdout)
+        self.assertFalse(proc.stdout.strip())
+
+    def test_nonfinite_json_number_is_unproved(self):
+        payload = (
+            '{"vectors":[{"id":"v1","verdict":"valid","result":1e999,'
+            '"reason":"r","tiersWithPinnedKey":[],"tiersWithoutKey":[]}]}'
+        )
+        with tempfile.TemporaryDirectory() as d:
+            checker = self._writer_raw(Path(d), payload)
+            proc = self._run(checker)
+        self.assertEqual(proc.returncode, 75, proc.stdout)
+        self.assertFalse(proc.stdout.strip())
+
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_id_keyed_batch_matching_sees_silent_reason_move(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             (tmp / "check.py").write_text(
                 "import json\n"
+                'verdict = "valid"\n'
                 'reason = "prose A"\n'
                 "print(json.dumps({\n"
-                '  "rows": {"v1": {"verdict": "valid", "result": "ok",\n'
+                '  "rows": {"v1": {"verdict": verdict, "result": "ok",\n'
                 '    "tiersWithPinnedKey": [], "tiersWithoutKey": []}},\n'
                 '  "diagnostics": {"v1": {"reason": reason}},\n'
                 "}, sort_keys=True))\n",
@@ -596,9 +642,9 @@ sys.exit(0)
                     {"label": "reason-only", "anchor": 'reason = "prose A"',
                      "replacement": 'reason = "prose B"'},
                     {"label": "CONTROL", "control": True,
-                     "anchor": "print(json.dumps",
-                     "replacement": "raise SystemExit(1)\nprint(json.dumps"}],
-                },
+                     "anchor": 'verdict = "valid"',
+                     "replacement": 'verdict = "invalid"'},
+                ]},
             }
             manifest = tmp / "m.json"
             manifest.write_text(json.dumps(raw), encoding="utf-8")
@@ -608,7 +654,7 @@ sys.exit(0)
             loaded["runner"] = "batch"
             loaded["outcome_from"] = ["rows"]
             loaded["diagnostic_from"] = ["diagnostics"]
-            value, diag, kind = ca.child_outcome(
+            value, _diag, kind = ca.child_outcome(
                 loaded,
                 type("P", (), {"returncode": 0, "stdout": json.dumps({
                     "rows": {"v1": {"verdict": "valid", "result": "ok",
@@ -619,6 +665,13 @@ sys.exit(0)
             self.assertIsInstance(value[0], dict)
             self.assertEqual(value[0]["v1"]["verdict"], "valid")
             rep = ca.run(manifest)
+        self.assertIsNotNone(rep["score_percent"], rep["failures"])
+        self.assertEqual(rep["control_status"], "killed")
+        self.assertTrue(
+            all("were silent" in f for f in rep["failures"]),
+            rep["failures"])
+        control = next(r for r in rep["mutants"] if r["label"] == "CONTROL")
+        self.assertEqual(control["verdict"], "control-killed")
         row = next(r for r in rep["mutants"] if r["label"] == "reason-only")
         self.assertEqual(row["verdict"], "silent")
         self.assertEqual(row["moved"], 0)
