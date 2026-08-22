@@ -53,6 +53,79 @@ FORBIDDEN_PUBLIC = (
     "partnership",
     "sandbox",
 )
+EMPTY_VENDOR = hashlib.sha256(b"").hexdigest()
+MEMORY_4G = 4 * 1024 * 1024 * 1024
+
+
+def _fixture_contract(*, network_mode: str, offline: bool) -> dict:
+    return {
+        "cap_drop": ["ALL"],
+        "memory": MEMORY_4G,
+        "memory_swap": MEMORY_4G,
+        "network_mode": network_mode,
+        "no_new_privileges": True,
+        "offline_env": offline,
+        "pids": 512,
+        "read_only_root": True,
+        "readonly_mounts": ["/input", "/tool", "/vendor"],
+        "tmpfs": {
+            "/tmp": {"nr_inodes": 128, "size": 1048576},
+            "/work": {"nr_inodes": 128, "size": 1048576},
+        },
+        "user": "65532:65532",
+    }
+
+
+def _probe_row(mechanism: str, refusal: str, *, control_net="none") -> dict:
+    return {
+        "mechanism": mechanism,
+        "control": "completed",
+        "refusal": refusal,
+        "inspect": {
+            "control": _fixture_contract(network_mode=control_net, offline=True),
+            "refusal": _fixture_contract(network_mode="none", offline=True),
+        },
+    }
+
+
+def _committed_execution_root(tmp: Path) -> Path:
+    root = tmp / "exec-root"
+    sealed = root / "execution" / "aee-checker-sealed"
+    sealed.mkdir(parents=True)
+    (root / "measurements").mkdir()
+    shutil.copy2(
+        REPO_ROOT / "measurements" / "aee_checker_sealed_run.py",
+        root / "measurements" / "aee_checker_sealed_run.py",
+    )
+    shutil.copy2(CONTAINERFILE, sealed / "Containerfile")
+    shutil.copy2(CONTAINERFILE.parent / "probe.sh", sealed / "probe.sh")
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "exec"],
+        cwd=root, check=True, capture_output=True,
+    )
+    return root
+
+
+def _local_git_repo(tmp: Path, name: str, files: dict[str, bytes]):
+    repo = tmp / name
+    repo.mkdir()
+    for rel, data in files.items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", name],
+        cwd=repo, check=True, capture_output=True,
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return repo, commit
 
 
 def _sha256(data: bytes) -> str:
@@ -115,78 +188,25 @@ class PhaseAImmutable(unittest.TestCase):
             self.assertFalse((PREREG / forbidden).exists(), forbidden)
 
 
-class HostileInputBeforeMaterialize(unittest.TestCase):
-    def test_oversized_request_is_refused_before_dest_exists(self):
+class StrictPinsBuffer(unittest.TestCase):
+    def test_verify_phase_a_returns_parsed_pins_and_ignores_later_overwrite(self):
+        pins = run.verify_phase_a_frozen(PREREG, adapter=ADAPTER)
+        self.assertEqual(pins["instrument"]["commit"], run.PHASE_A_INSTRUMENT_COMMIT)
         with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            dest = tmp / "dest"
-            req = tmp / "request.json"
-            req.write_bytes(b'{"schema":"' + b"x" * (run.REQUEST_CAP_BYTES + 1) + b'"}')
-            with self.assertRaises(run.PrepareError) as ctx:
-                run.load_prepare_request(req)
-            self.assertFalse(dest.exists())
-            self.assertRegex(str(ctx.exception).lower(), r"cap|bound|ceiling|size")
+            copy = Path(d) / "pins"
+            shutil.copytree(PREREG, copy)
+            parsed = run.verify_phase_a_frozen(copy)
+            (copy / "pins.json").write_text("{}\n", encoding="utf-8")
+            self.assertEqual(
+                parsed["instrument"]["commit"], run.PHASE_A_INSTRUMENT_COMMIT)
 
-    def test_duplicate_json_key_is_refused(self):
-        with tempfile.TemporaryDirectory() as d:
-            req = Path(d) / "request.json"
-            _write_json(req, '{"schema":"x","schema":"y","pins_dir":"p","dest":"d"}\n')
-            with self.assertRaises(run.PrepareError) as ctx:
-                run.load_prepare_request(req)
-            self.assertIn("duplicate", str(ctx.exception).lower())
-
-    def test_non_finite_number_is_refused(self):
-        with tempfile.TemporaryDirectory() as d:
-            req = Path(d) / "request.json"
-            _write_json(
-                req,
-                '{"schema":"corpus-adequacy.aee-checker-sealed.prepare-request.v0",'
-                '"pins_dir":"p","dest":"d","extra":1e999}\n',
-            )
-            with self.assertRaises(run.PrepareError) as ctx:
-                run.load_prepare_request(req)
-            self.assertRegex(str(ctx.exception).lower(), r"non-finite|finite")
-
-    def test_unknown_key_is_refused(self):
-        with tempfile.TemporaryDirectory() as d:
-            req = Path(d) / "request.json"
-            _write_json(
-                req,
-                json.dumps({
-                    "schema": run.REQUEST_SCHEMA,
-                    "pins_dir": "p",
-                    "dest": "d",
-                    "score": 1,
-                }) + "\n",
-            )
-            with self.assertRaises(run.PrepareError) as ctx:
-                run.load_prepare_request(req)
-            self.assertRegex(str(ctx.exception).lower(), r"exact|unknown|key")
-
-    def test_missing_key_is_refused(self):
-        with tempfile.TemporaryDirectory() as d:
-            req = Path(d) / "request.json"
-            _write_json(req, json.dumps({"schema": run.REQUEST_SCHEMA, "pins_dir": "p"}) + "\n")
-            with self.assertRaises(run.PrepareError) as ctx:
-                run.load_prepare_request(req)
-            self.assertRegex(str(ctx.exception).lower(), r"exact|missing|key")
-
-    def test_valid_request_does_not_create_dest(self):
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            dest = tmp / "out"
-            req = tmp / "request.json"
-            _write_json(
-                req,
-                json.dumps({
-                    "schema": run.REQUEST_SCHEMA,
-                    "pins_dir": str(PREREG),
-                    "dest": str(dest),
-                }) + "\n",
-            )
-            loaded = run.load_prepare_request(req)
-            self.assertEqual(loaded["dest"], str(dest))
-            self.assertFalse(dest.exists())
+    def test_strict_parse_refuses_duplicate_and_nonfinite(self):
+        with self.assertRaises(run.PrepareError) as ctx:
+            run.load_strict(b'{"a":1,"a":2}')
+        self.assertIn("duplicate", str(ctx.exception).lower())
+        with self.assertRaises(run.PrepareError) as ctx:
+            run.load_strict(b'{"n":1e999}')
+        self.assertRegex(str(ctx.exception).lower(), r"non-finite|finite")
 
 
 class VendorOutsideSubject(unittest.TestCase):
@@ -271,8 +291,8 @@ class DockerArgvContract(unittest.TestCase):
         self.assertEqual(argv[argv.index("--memory") + 1], "4g")
         self.assertEqual(argv[argv.index("--memory-swap") + 1], "4g")
         self.assertEqual(argv[argv.index("--pids-limit") + 1], "512")
-        self.assertEqual(argv[argv.index("--cpus") + 1], "4")
-        self.assertIn("nofile=1024:1024", text)
+        self.assertNotIn("--cpus", argv)
+        self.assertNotIn("nofile", text)
         self.assertTrue(
             any(item.startswith("/tmp:") and "nr_inodes=" in item for item in argv),
             argv,
@@ -288,6 +308,22 @@ class DockerArgvContract(unittest.TestCase):
         self.assertLess(argv.index("--network"), argv.index(image))
         for dest in ("/input", "/vendor", "/tool"):
             self.assertIn("destination=%s,readonly" % dest, text.replace(" ", ""))
+
+    def test_network_control_argv_does_not_use_network_none(self):
+        image = "sha256:" + ("cd" * 32)
+        with tempfile.TemporaryDirectory() as d:
+            mounts = {name: Path(d) / name for name in ("input", "vendor", "tool")}
+            for path in mounts.values():
+                path.mkdir()
+            argv = run.docker_create_argv(
+                image_id=image,
+                name="aee-sealed-inert-net",
+                mounts=mounts,
+                command=["network"],
+                sealed=False,
+            )
+        self.assertNotIn("none", argv[argv.index("--network") + 1] if "--network" in argv else "")
+        self.assertNotIn("CARGO_NET_OFFLINE=true", " ".join(argv))
 
     def test_create_argv_refuses_tag_even_if_caller_bypasses_require(self):
         with tempfile.TemporaryDirectory() as d:
@@ -343,7 +379,13 @@ class PrepareEvidence(unittest.TestCase):
                 "observation": "host-local; not a portable bound",
             },
             "ceilings": dict(run.DECLARED_CEILINGS),
-            "host_evidence": dict(run.EMPTY_HOST_EVIDENCE),
+            "probe_evidence": [
+                _probe_row("deadline", "deadline"),
+                _probe_row("disk", "abnormal"),
+                _probe_row("file-count", "abnormal"),
+                _probe_row("network-off", "abnormal", control_net="bridge"),
+                _probe_row("output", "output_cap"),
+            ],
             "network": dict(run.NETWORK_CUTOFF),
             "oci": run.OCI_CONTRACT,
             "non_claims": list(run.NON_CLAIMS),
@@ -388,19 +430,23 @@ class PrepareEvidence(unittest.TestCase):
         self.assertEqual(doc["network"]["cutoff"], "after_materialization")
         self.assertNotEqual(doc["network"]["materialization"], "none")
 
-    def test_declared_ceilings_are_not_host_timings(self):
+    def test_prepare_v0_stores_no_timings(self):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "prepare.v0.json"
             doc = json.loads(run.emit_prepare_v0(self._parts(), dest).decode("utf-8"))
         self.assertEqual(doc["ceilings"], run.DECLARED_CEILINGS)
-        self.assertEqual(
-            doc["host_evidence"]["portability"],
-            "host-local; not a portable bound",
-        )
-        self.assertNotIn("elapsed_seconds", doc["ceilings"])
-        self.assertNotIn("calibration", doc["ceilings"])
+        self.assertNotIn("host_evidence", doc)
+        forbidden = {"elapsed_seconds", "elapsed", "duration", "timing", "wall_ms"}
+        stack = [doc]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                self.assertTrue(forbidden.isdisjoint(item), item)
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
 
-    def test_host_evidence_cannot_overwrite_declared_ceilings(self):
+    def test_declared_ceilings_cannot_be_replaced_by_host_timing(self):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "prepare.v0.json"
             parts = self._parts()
@@ -409,6 +455,35 @@ class PrepareEvidence(unittest.TestCase):
             with self.assertRaises(run.PrepareError) as ctx:
                 run.emit_prepare_v0(parts, dest)
             self.assertRegex(str(ctx.exception).lower(), r"declared|ceiling")
+
+    def test_probe_evidence_refuses_a_refusal_without_its_control(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = self._parts()
+            parts["probe_evidence"] = [
+                {**row, "control": None} if row["mechanism"] == "network-off" else row
+                for row in parts["probe_evidence"]
+            ]
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"control|pair")
+
+    def test_empty_vendor_digest_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = self._parts()
+            parts["materialized"]["vendor_sha256"] = EMPTY_VENDOR
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"empty|vendor")
+
+    def test_oci_drops_unexercised_cpus_and_nofile(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            doc = json.loads(run.emit_prepare_v0(self._parts(), dest).decode("utf-8"))
+        self.assertNotIn("cpus", doc["oci"])
+        self.assertNotIn("nofile", doc["oci"])
+        self.assertEqual(doc["oci"]["memory_swap_pids_claim"], "inspect-verified; not efficacy-tested")
 
     def test_per_vector_outcomes_are_refused(self):
         with tempfile.TemporaryDirectory() as d:
@@ -457,20 +532,184 @@ class PublicStrings(unittest.TestCase):
         self.assertIn("checker was not run", text)
         self.assertIn("after_materialization", text)
         self.assertIn("subject binary is not produced here", text)
+        self.assertIn("not efficacy-tested", text)
         self.assertNotIn("cargo build", text)
+        self.assertIn("cargo vendor --locked", text)
         self.assertNotIn("entirely offline", text)
+        self.assertNotIn("--cpus", text)
+        self.assertNotIn("nofile", text)
+        self.assertNotIn("cleanup_named_containers", text)
+        self.assertNotIn("load_prepare_request", text)
+        self.assertNotIn("REQUEST_SCHEMA", text)
 
     def test_containerfile_is_inert_probe_not_aee_checker(self):
         text = CONTAINERFILE.read_text(encoding="utf-8")
         self.assertNotIn("aee-checker", text)
         self.assertNotIn("aee-conformance", text)
         self.assertNotIn("cargo run", text)
+        self.assertIn("@sha256:", text)
+        self.assertIn("COPY --chmod=0755", text)
+        self.assertNotIn("RUN ", text)
+
+
+class InspectContract(unittest.TestCase):
+    def _ok(self, *, network_mode="none", offline=True, **host_over):
+        host = {
+            "NetworkMode": network_mode,
+            "ReadonlyRootfs": True,
+            "CapDrop": ["ALL"],
+            "SecurityOpt": ["no-new-privileges:true"],
+            "Memory": MEMORY_4G,
+            "MemorySwap": MEMORY_4G,
+            "PidsLimit": 512,
+            "Tmpfs": {
+                "/tmp": "rw,size=1048576,nr_inodes=128,mode=1777",
+                "/work": "rw,size=1048576,nr_inodes=128,mode=1777",
+            },
+        }
+        host.update(host_over)
+        env = ["PATH=/usr/bin"]
+        if offline:
+            env.append("CARGO_NET_OFFLINE=true")
+        return {
+            "HostConfig": host,
+            "Config": {"User": "65532:65532", "Env": env},
+            "Mounts": [
+                {"Destination": "/input", "RW": False, "Type": "bind"},
+                {"Destination": "/vendor", "RW": False, "Type": "bind"},
+                {"Destination": "/tool", "RW": False, "Type": "bind"},
+            ],
+        }
+
+    def test_omitted_readonly_root_is_refused(self):
+        with self.assertRaises(run.PrepareError) as ctx:
+            run.validate_inspect_contract(
+                self._ok(ReadonlyRootfs=False), sealed=True)
+        self.assertRegex(str(ctx.exception).lower(), r"readonly|read-only")
+
+    def test_sealed_requires_network_none(self):
+        with self.assertRaises(run.PrepareError):
+            run.validate_inspect_contract(
+                self._ok(network_mode="bridge"), sealed=True)
+
+    def test_control_refuses_network_none(self):
+        with self.assertRaises(run.PrepareError) as ctx:
+            run.validate_inspect_contract(
+                self._ok(network_mode="none", offline=False), sealed=False)
+        self.assertRegex(str(ctx.exception).lower(), r"network")
+
+    def test_empty_or_wrong_shape_inspect_is_refused(self):
+        with self.assertRaises(run.PrepareError):
+            run.parse_inspect_payload(b"")
+        with self.assertRaises(run.PrepareError):
+            run.parse_inspect_payload(b"[]")
+        with self.assertRaises(run.PrepareError):
+            run.parse_inspect_payload(b"{}")
+        with self.assertRaises(run.PrepareError):
+            run.parse_inspect_payload(b"null")
+
+    def test_valid_sealed_inspect_records_the_contract(self):
+        snap = run.validate_inspect_contract(self._ok(), sealed=True)
+        self.assertEqual(snap["network_mode"], "none")
+        self.assertTrue(snap["read_only_root"])
+        self.assertEqual(snap["user"], "65532:65532")
+        self.assertTrue(snap["offline_env"])
+
+
+class ExecutionIdentityDirty(unittest.TestCase):
+    def test_dirty_execution_path_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _committed_execution_root(Path(d))
+            target = root / "execution" / "aee-checker-sealed" / "probe.sh"
+            target.write_bytes(target.read_bytes() + b"# dirty\n")
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.execution_identity(root)
+            self.assertRegex(str(ctx.exception).lower(), r"dirty|untracked|head")
+
+    def test_committed_execution_paths_bind_head_blobs(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _committed_execution_root(Path(d))
+            identity = run.execution_identity(root)
+            self.assertEqual(len(identity["commit"]), 40)
+            self.assertNotEqual(identity["commit"], run.PHASE_A_INSTRUMENT_COMMIT)
+
+
+class MaterializeBytes(unittest.TestCase):
+    def test_empty_vendor_tree_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            vendor = Path(d) / "vendor"
+            vendor.mkdir()
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.tree_sha256(vendor)
+            self.assertRegex(str(ctx.exception).lower(), r"empty|vendor")
+
+    def test_tree_digest_changes_when_a_file_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = Path(d) / "vendor"
+            tree.mkdir()
+            (tree / "a").write_bytes(b"one")
+            first = run.tree_sha256(tree)
+            (tree / "a").write_bytes(b"two")
+            self.assertNotEqual(first, run.tree_sha256(tree))
+            self.assertNotEqual(first, EMPTY_VENDOR)
+
+    def test_symlink_in_tree_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = Path(d) / "vendor"
+            tree.mkdir()
+            (tree / "a").write_bytes(b"one")
+            (tree / "link").symlink_to("a")
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.tree_sha256(tree)
+            self.assertRegex(str(ctx.exception).lower(), r"symlink")
+
+    def test_verify_materialized_uses_disk_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            subject = Path(d) / "subject"
+            corpus = Path(d) / "corpus"
+            (subject / "src").mkdir(parents=True)
+            (corpus / "vectors").mkdir(parents=True)
+            (subject / "src" / "check.rs").write_text("fn pinned() {}\n", encoding="utf-8")
+            digest = _sha256((subject / "src" / "check.rs").read_bytes())
+            manifest = {
+                "corpusDigest": "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579",
+                "vectors": [{"id": "v1"}],
+            }
+            (corpus / "vectors" / "MANIFEST.json").write_bytes(
+                (json.dumps(manifest, sort_keys=True) + "\n").encode("utf-8"))
+            pins = {
+                "subject": {"path": "src/check.rs", "check_rs_sha256": digest},
+                "corpus": {
+                    "corpusDigest": "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579",
+                    "vectors": "corpus/vectors/MANIFEST.json",
+                },
+            }
+            got = run.verify_materialized(pins, subject, corpus)
+            self.assertEqual(got["subject_check_rs_sha256"], digest)
+            self.assertEqual(
+                got["corpus_digest"],
+                "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579")
+            (subject / "src" / "check.rs").write_text("fn other() {}\n", encoding="utf-8")
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.verify_materialized(pins, subject, corpus)
+            self.assertIn("digest", str(ctx.exception).lower())
+
+    def test_fetch_commit_checks_out_exact_commit(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            source, commit = _local_git_repo(tmp, "src", {"src/check.rs": b"fn x() {}\n"})
+            dest = tmp / "checkout"
+            run.fetch_commit(str(source), commit, dest)
+            self.assertEqual((dest / "src" / "check.rs").read_bytes(), b"fn x() {}\n")
+            with self.assertRaises(run.PrepareError):
+                run.fetch_commit(str(source), "0" * 40, tmp / "bad")
 
 
 @unittest.skipUnless(DOCKER, "docker daemon is not available")
 class LiveInertProbes(unittest.TestCase):
     image_id = ""
     prefix = "aee-sealed-inert-"
+    created_names: list[str] = []
 
     @classmethod
     def setUpClass(cls):
@@ -479,74 +718,89 @@ class LiveInertProbes(unittest.TestCase):
         cls.mounts = {name: root / name for name in ("input", "vendor", "tool")}
         for path in cls.mounts.values():
             path.mkdir()
+        cls.created_names = []
         cls.image_id = run.build_inert_image(CONTAINERFILE.parent)
         run.require_image_id(cls.image_id)
 
     @classmethod
     def tearDownClass(cls):
-        run.cleanup_named_containers(cls.prefix)
+        for name in cls.created_names:
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
         cls._tmp.cleanup()
 
     def _run(self, mode: str, **kwargs):
-        return run.run_inert_probe(
+        result = run.run_inert_probe(
             image_id=self.image_id,
             mode=mode,
             mounts=self.mounts,
             name_prefix=self.prefix,
             **kwargs,
         )
+        self.created_names.append(result["name"])
+        return result
 
-    def test_network_none_refuses_outbound_and_allows_local_ok(self):
-        good = self._run("ok")
-        self.assertEqual(good["state"], "completed", good)
-        bad = self._run("network")
-        self.assertNotEqual(bad["state"], "completed", bad)
-        self.assertTrue(good["container_absent_after"] and bad["container_absent_after"])
+    def test_network_none_refuses_the_same_outbound_that_works_with_network(self):
+        good = self._run("network", sealed=False)
+        bad = self._run("network", sealed=True)
+        row = run.record_probe_pair("network-off", good, bad)
+        self.assertEqual(row["control"], "completed")
+        self.assertNotEqual(row["refusal"], "completed")
+        self.assertNotEqual(row["inspect"]["control"]["network_mode"], "none")
+        self.assertEqual(row["inspect"]["refusal"]["network_mode"], "none")
 
     def test_tmpfs_bytes_refuse_over_limit_and_allow_under_limit(self):
         good = self._run("tmpfs-bytes-ok")
-        self.assertEqual(good["state"], "completed", good)
         bad = self._run("tmpfs-bytes")
-        self.assertNotEqual(bad["state"], "completed", bad)
+        row = run.record_probe_pair("disk", good, bad)
+        self.assertEqual(row["control"], "completed")
+        self.assertNotEqual(row["refusal"], "completed")
 
     def test_tmpfs_inodes_refuse_over_limit_and_allow_under_limit(self):
         good = self._run("tmpfs-inodes-ok")
-        self.assertEqual(good["state"], "completed", good)
         bad = self._run("tmpfs-inodes")
-        self.assertNotEqual(bad["state"], "completed", bad)
+        row = run.record_probe_pair("file-count", good, bad)
+        self.assertEqual(row["control"], "completed")
+        self.assertNotEqual(row["refusal"], "completed")
 
     def test_output_cap_refuses_over_4mib_and_allows_small(self):
         good = self._run("output-ok")
-        self.assertEqual(good["state"], "completed", good)
         bad = self._run("output")
-        self.assertEqual(bad["state"], "output_cap", bad)
+        row = run.record_probe_pair("output", good, bad)
+        self.assertEqual(row["mechanism"], "output")
+        self.assertEqual(row["control"], "completed")
+        self.assertEqual(row["refusal"], "output_cap")
+        self.assertEqual(set(row["inspect"]), {"control", "refusal"})
 
     def test_deadline_kills_descendant_and_short_child_completes(self):
         good = self._run("deadline-ok")
-        self.assertEqual(good["state"], "completed", good)
         bad = self._run("deadline")
-        self.assertEqual(bad["state"], "deadline", bad)
-        self.assertNotIn("elapsed_seconds", run.DECLARED_CEILINGS)
+        row = run.record_probe_pair("deadline", good, bad)
+        self.assertEqual(row["control"], "completed")
+        self.assertEqual(row["refusal"], "deadline")
+        self.assertNotIn("elapsed_seconds", row)
 
     def test_exit_2_json_is_abnormal_and_exit_0_json_is_completed(self):
         good = self._run("ok")
-        self.assertEqual(good["state"], "completed", good)
-        self.assertIsNone(good.get("parsed"))
         bad = self._run("exit2-json")
-        self.assertEqual(bad["state"], "abnormal", bad)
+        row = run.record_probe_pair("exit-class", good, bad)
+        self.assertEqual(row["control"], "completed")
+        self.assertEqual(row["refusal"], "abnormal")
+        self.assertIsNone(good.get("parsed"))
         self.assertIsNone(bad.get("parsed"))
 
     def test_image_digest_mismatch_is_refused_and_match_runs(self):
         good = self._run("ok")
         self.assertEqual(good["state"], "completed", good)
         fake = "sha256:" + ("00" * 32)
-        with self.assertRaises(run.PrepareError):
+        with self.assertRaises(run.PrepareError) as ctx:
             run.run_inert_probe(
                 image_id=fake,
                 mode="ok",
                 mounts=self.mounts,
                 name_prefix=self.prefix,
             )
+        self.assertEqual(good["state"], "completed")
+        self.assertRegex(str(ctx.exception).lower(), r"image|digest")
 
     def test_cleanup_absence_is_verified_after_successful_remove(self):
         good = self._run("ok")
@@ -559,37 +813,44 @@ class LiveInertProbes(unittest.TestCase):
     def test_prepare_emits_artifact_without_subject_binary_or_outcomes(self):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "prepare.v0.json"
-            raw = run.prepare(PREREG, dest, root=REPO_ROOT, adapter=ADAPTER)
+            root = _committed_execution_root(Path(d) / "exec")
+            raw = run.prepare(PREREG, dest, root=root, adapter=ADAPTER)
             doc = json.loads(raw.decode("utf-8"))
         self.assertEqual(doc["schema"], run.PREPARE_SCHEMA)
         self.assertFalse(doc["materialized"]["subject_binary"])
         self.assertNotIn("vectors", doc["materialized"])
+        self.assertNotEqual(doc["materialized"]["vendor_sha256"], EMPTY_VENDOR)
         self.assertEqual(doc["pins"]["instrument_commit"], run.PHASE_A_INSTRUMENT_COMMIT)
         self.assertNotEqual(doc["execution"]["commit"], doc["pins"]["instrument_commit"])
         self.assertEqual(doc["network"]["cutoff"], "after_materialization")
         self.assertEqual(doc["ceilings"], run.DECLARED_CEILINGS)
         self.assertEqual(doc["image"]["kind"], "inert-probe")
+        self.assertEqual(doc["image"]["id_scope"], "host-local")
+        self.assertRegex(doc["image"]["platform"], r"^linux/")
+        self.assertNotIn("host_evidence", doc)
+        self.assertNotIn("cpus", doc["oci"])
+        self.assertNotIn("nofile", doc["oci"])
         run.require_image_id(doc["image"]["id"])
+        mechanisms = [row["mechanism"] for row in doc["probe_evidence"]]
+        self.assertEqual(mechanisms, list(run.PROBE_MECHANISMS))
+        for row in doc["probe_evidence"]:
+            self.assertEqual(row["control"], "completed", row)
+            self.assertNotEqual(row["refusal"], "completed", row)
+            self.assertEqual(set(row["inspect"]), {"control", "refusal"}, row)
+            self.assertEqual(row["inspect"]["refusal"]["network_mode"], "none", row)
+        network = next(row for row in doc["probe_evidence"] if row["mechanism"] == "network-off")
+        self.assertNotEqual(network["inspect"]["control"]["network_mode"], "none")
+
+    def test_memory_swap_pids_are_inspect_verified_not_efficacy_probed(self):
+        good = self._run("ok")
+        host = run.defense_in_depth_from_inspect(good["inspect"])
+        self.assertEqual(host["memory"], 4 * 1024 * 1024 * 1024)
+        self.assertEqual(host["memory_swap"], 4 * 1024 * 1024 * 1024)
+        self.assertEqual(host["pids"], 512)
+        self.assertEqual(host["claim"], "inspect-verified; not efficacy-tested")
 
 
 class MaterializeVerify(unittest.TestCase):
-    def test_subject_digest_mismatch_is_refused(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "check.rs"
-            path.write_text("fn not_the_pin() {}\n", encoding="utf-8")
-            pins = {"subject": {"path": "src/check.rs", "check_rs_sha256": "aa" * 32}}
-            with self.assertRaises(run.PrepareError) as ctx:
-                run.verify_subject_bytes(path, pins)
-            self.assertIn("digest", str(ctx.exception).lower())
-
-    def test_matching_subject_digest_is_accepted(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "check.rs"
-            path.write_text("fn pinned() {}\n", encoding="utf-8")
-            digest = _sha256(path.read_bytes())
-            run.verify_subject_bytes(
-                path, {"subject": {"path": "src/check.rs", "check_rs_sha256": digest}})
-
     def test_payload_digest_mismatch_is_refused_before_use(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "payload.json"

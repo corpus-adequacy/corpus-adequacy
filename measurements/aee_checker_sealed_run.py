@@ -1,34 +1,65 @@
 #!/usr/bin/env python3
 """Phase B PREPARE + inert OCI envelope for issue #211. Stdlib only.
 
-Online materialization (pins, image, vendor) then sealed OCI with
-network none after_materialization. subject binary is not produced here.
-Does not invoke the checker. Not a scientific measurement.
+Online materialization (pins, image, cargo vendor --locked) then sealed
+OCI with network none after_materialization. subject binary is not
+produced here. Does not invoke the checker. Not a scientific measurement.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
-import subprocess
+import os
 import sys
 import tempfile
 from pathlib import Path
-from secrets import token_hex
 
-_ROOT = Path(__file__).resolve().parent.parent
+_HERE = Path(__file__).resolve().parent
+_ROOT = _HERE.parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import bounded_run as br  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
+from aee_checker_sealed_common import (  # noqa: E402
+    DECLARED_CEILINGS,
+    HEX64,
+    MEMORY_4G,
+    TMPFS_BYTES,
+    TMPFS_INODES,
+    PrepareError,
+    encode_json,
+    exact_object,
+    load_strict,
+    verify_file_digest,
+)
+from aee_checker_sealed_oci import (  # noqa: E402
+    INSPECT_SNAPSHOT_KEYS,
+    PROBE_MECHANISMS,
+    PROBE_ROW_KEYS,
+    build_inert_image,
+    classify_container_result,
+    container_exists,
+    defense_in_depth_from_inspect,
+    docker_bounded,
+    docker_create_argv,
+    image_platform,
+    parse_inspect_payload,
+    record_probe_pair,
+    require_container_absent,
+    require_image_id,
+    require_local_image,
+    require_probe_evidence,
+    run_inert_probe,
+    validate_inspect_contract,
+)
 
-REQUEST_SCHEMA = "corpus-adequacy.aee-checker-sealed.prepare-request.v0"
 PREPARE_SCHEMA = "corpus-adequacy.aee-checker-sealed.prepare.v0"
-REQUEST_KEYS = ("dest", "pins_dir", "schema")
 PREPARE_PART_KEYS = (
-    "ceilings", "execution", "host_evidence", "image", "materialized",
-    "network", "non_claims", "oci", "pins", "runtime", "toolchain",
+    "ceilings", "execution", "image", "materialized", "network",
+    "non_claims", "oci", "pins", "probe_evidence", "runtime", "toolchain",
 )
 PREPARE_KEYS = ("phase", "schema") + PREPARE_PART_KEYS
 EXECUTION_PATHS = (
@@ -36,7 +67,6 @@ EXECUTION_PATHS = (
     "execution/aee-checker-sealed/Containerfile",
     "execution/aee-checker-sealed/probe.sh",
 )
-REQUEST_CAP_BYTES = 64 * 1024
 PHASE_A_INSTRUMENT_COMMIT = "1347651c2087cbd5c2e958a758b380a9a6cfc67d"
 PHASE_A_PIN_DIGESTS = {
     "control.json": "5a85c46054240a4470da7c6a82e3f13b5f1c30ea301809a2500a47a6e2f91f71",
@@ -45,20 +75,8 @@ PHASE_A_PIN_DIGESTS = {
     "sites.json": "6223a15c5db5a7c19c4633474875615ec61f3d710e092939f46b80ee986e0c4c",
 }
 ADAPTER_DIGEST = "130b36d50df8a286954649771c9d65f35541ecd2f7007918ce5b261ace3aa769"
-HEX64 = frozenset("0123456789abcdef")
-TMPFS_BYTES = 1048576
-TMPFS_INODES = 128
-DECLARED_CEILINGS = {
-    "deadline_seconds": 8,
-    "stdout_stderr_bytes": br.OUTPUT_CAP_BYTES,
-    "tmpfs_bytes": TMPFS_BYTES,
-    "tmpfs_inodes": TMPFS_INODES,
-}
-EMPTY_HOST_EVIDENCE = {
-    "kind": "host-local",
-    "portability": "host-local; not a portable bound",
-    "probes": {},
-}
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+_TIMING_KEYS = frozenset({"duration", "elapsed", "elapsed_seconds", "timing", "wall_ms"})
 NETWORK_CUTOFF = {
     "cutoff": "after_materialization",
     "materialization": "online",
@@ -66,12 +84,11 @@ NETWORK_CUTOFF = {
 }
 OCI_CONTRACT = {
     "cap_drop": ["ALL"],
-    "cpus": "4",
     "memory": "4g",
     "memory_swap": "4g",
+    "memory_swap_pids_claim": "inspect-verified; not efficacy-tested",
     "network": "none",
     "no_new_privileges": True,
-    "nofile": 1024,
     "pids": 512,
     "read_only": True,
     "user": "65532:65532",
@@ -82,77 +99,27 @@ NON_CLAIMS = (
     "subject binary is not produced here",
     "not a scored outcome",
     "not a publication row",
-    "host evidence is not a portable bound",
+    "memory/swap/pids are inspect-verified; not efficacy-tested",
 )
 _OUTCOME_KEYS = frozenset({"outcomes", "result", "rows", "score", "vectors", "verdict"})
 
 
-class PrepareError(Exception):
-    """PREPARE refused before a sealed measurement could start."""
-
-
-def encode_json(doc) -> bytes:
-    return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-
-
-def exact_object(doc, keys, where: str) -> None:
-    if type(doc) is not dict:
-        raise PrepareError("%s must be an object" % where)
-    want, got = set(keys), set(doc)
-    if got != want:
-        raise PrepareError(
-            "%s exact keys missing=%s unknown=%s" % (where, sorted(want - got), sorted(got - want)))
-
-
-def load_strict(raw: bytes):
-    try:
-        return ca._parse_projection_json(raw)
-    except ca.ManifestError as exc:
-        raise PrepareError(str(exc)) from exc
-
-
-def load_prepare_request(path: Path) -> dict:
-    try:
-        raw = ca.read_bounded_regular_file(Path(path), cap=REQUEST_CAP_BYTES)
-    except ca.ManifestError as exc:
-        raise PrepareError(str(exc)) from exc
-    doc = load_strict(raw)
-    exact_object(doc, REQUEST_KEYS, "request")
-    if doc["schema"] != REQUEST_SCHEMA:
-        raise PrepareError("request schema")
-    if not isinstance(doc["pins_dir"], str) or not isinstance(doc["dest"], str):
-        raise PrepareError("request paths")
-    return doc
-
-
-def verify_file_digest(path: Path, expected: str) -> bytes:
-    try:
-        raw = ca.read_bounded_regular_file(Path(path))
-    except ca.ManifestError as exc:
-        raise PrepareError(str(exc)) from exc
-    got = hashlib.sha256(raw).hexdigest()
-    if got != expected:
-        raise PrepareError("digest mismatch for %s" % path)
-    return raw
-
-
-def verify_phase_a_frozen(pins_dir: Path, *, adapter: Path | None = None) -> None:
+def verify_phase_a_frozen(pins_dir: Path, *, adapter: Path | None = None) -> dict:
     pins_dir = Path(pins_dir)
+    pins_raw = None
     for name, digest in PHASE_A_PIN_DIGESTS.items():
         try:
-            verify_file_digest(pins_dir / name, digest)
+            raw = verify_file_digest(pins_dir / name, digest)
         except PrepareError as exc:
             raise PrepareError("phase-a artifact %s" % exc) from exc
-    pins = load_strict((pins_dir / "pins.json").read_bytes())
-    commit = pins.get("instrument", {}).get("commit")
-    if commit != PHASE_A_INSTRUMENT_COMMIT:
+        if name == "pins.json":
+            pins_raw = raw
+    pins = load_strict(pins_raw)
+    if pins.get("instrument", {}).get("commit") != PHASE_A_INSTRUMENT_COMMIT:
         raise PrepareError("phase-a instrument.commit drift")
     if adapter is not None:
         verify_file_digest(adapter, ADAPTER_DIGEST)
-
-
-def verify_subject_bytes(path: Path, pins: dict) -> None:
-    verify_file_digest(path, pins["subject"]["check_rs_sha256"])
+    return pins
 
 
 def require_vendor_outside(subject: Path, vendor: Path) -> None:
@@ -164,125 +131,110 @@ def require_vendor_outside(subject: Path, vendor: Path) -> None:
     raise PrepareError("vendor must be outside the subject root")
 
 
-def require_image_id(value: str) -> str:
-    if not isinstance(value, str) or not value.startswith("sha256:"):
-        raise PrepareError("image id must be sha256:<64hex>")
-    digest = value[7:]
-    if len(digest) != 64 or any(ch not in HEX64 for ch in digest):
-        raise PrepareError("image id must be sha256:<64hex>")
-    return value
+def tree_sha256(root: Path) -> str:
+    root = Path(root)
+    files = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in list(dirnames) + filenames:
+            path = Path(dirpath) / name
+            if path.is_symlink():
+                raise PrepareError("symlink in tree")
+        for name in filenames:
+            path = Path(dirpath) / name
+            if not path.is_file():
+                raise PrepareError("non-regular in tree")
+            files.append(path.relative_to(root).as_posix())
+    if not files:
+        raise PrepareError("empty vendor tree")
+    digest = hashlib.sha256()
+    for rel in sorted(files):
+        raw = (root / rel).read_bytes()
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(len(raw)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(raw)
+    return digest.hexdigest()
 
 
-def classify_container_result(returncode, raw: bytes) -> dict:
-    if type(returncode) is not int:
-        return {"state": "harness_failure", "parsed": None}
-    if returncode == 0:
-        return {"state": "completed", "parsed": None}
-    return {"state": "abnormal", "parsed": None}
-
-
-def docker_create_argv(*, image_id: str, name: str, mounts: dict, command: list[str]) -> list[str]:
-    image_id = require_image_id(image_id)
-    tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (TMPFS_BYTES, TMPFS_INODES)
-    argv = [
-        "docker", "create",
-        "--name", name,
-        "--network", "none",
-        "--read-only",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges:true",
-        "--user", "65532:65532",
-        "--memory", "4g",
-        "--memory-swap", "4g",
-        "--pids-limit", "512",
-        "--cpus", "4",
-        "--ulimit", "nofile=1024:1024",
-        "--tmpfs", "/tmp:%s" % tmpfs,
-        "--tmpfs", "/work:%s" % tmpfs,
-        "--env", "CARGO_NET_OFFLINE=true",
-    ]
-    for dest in ("input", "vendor", "tool"):
-        argv.extend([
-            "--mount",
-            "type=bind,source=%s,destination=/%s,readonly" % (Path(mounts[dest]).resolve(), dest),
-        ])
-    argv.extend([image_id, "/probe", *command])
-    return argv
-
-
-def _docker(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", *args], capture_output=True, timeout=timeout)
-
-
-def require_local_image(image_id: str) -> None:
-    image_id = require_image_id(image_id)
-    proc = _docker("image", "inspect", image_id)
+def _git_ok(args, cwd: Path, timeout: int = 60) -> str:
+    proc = br._run_capped(["git", *args], Path(cwd), timeout)
     if proc.returncode != 0:
-        raise PrepareError("image digest mismatch")
+        raise PrepareError("git failed")
+    return (proc.stdout or "").strip()
 
 
-def container_exists(name: str) -> bool:
-    return _docker("inspect", name).returncode == 0
+def fetch_commit(url: str, commit: str, dest: Path) -> Path:
+    dest = Path(dest)
+    if dest.exists():
+        raise PrepareError("fetch dest exists")
+    dest.mkdir(parents=True)
+    _git_ok(["init", str(dest)], Path.cwd(), 60)
+    _git_ok(["-C", str(dest), "remote", "add", "origin", url], dest, 60)
+    _git_ok(["-C", str(dest), "fetch", "--depth", "1", "origin", commit], dest, 300)
+    _git_ok(["-C", str(dest), "checkout", "--detach", "FETCH_HEAD"], dest, 60)
+    head = _git_ok(["-C", str(dest), "rev-parse", "HEAD"], dest, 60)
+    if head != commit:
+        raise PrepareError("fetched commit mismatch")
+    return dest
 
 
-def require_container_absent(name: str, exists: bool | None = None) -> None:
-    present = container_exists(name) if exists is None else bool(exists)
-    if present:
-        raise PrepareError("container still present: %s" % name)
-
-
-def cleanup_named_containers(prefix: str) -> None:
-    proc = _docker("ps", "-aq", "--filter", "name=%s" % prefix)
-    for line in proc.stdout.decode("utf-8", "replace").split():
-        if line:
-            _docker("rm", "-f", line)
-
-
-def build_inert_image(context: Path) -> str:
-    proc = subprocess.run(
-        ["docker", "build", "-q", "-f", "Containerfile", "."],
-        cwd=str(context), capture_output=True, timeout=300)
-    if proc.returncode != 0:
-        raise PrepareError("inert image build failed")
-    return require_image_id(proc.stdout.decode("utf-8").strip())
-
-
-def run_inert_probe(*, image_id: str, mode: str, mounts: dict, name_prefix: str) -> dict:
-    require_local_image(image_id)
-    name = "%s%s-%s" % (name_prefix, mode.replace("-", ""), token_hex(4))
-    created = False
-    inspect = None
-    state = "abnormal"
+def verify_materialized(pins: dict, subject: Path, corpus: Path) -> dict:
+    check = Path(subject) / pins["subject"]["path"]
+    raw = verify_file_digest(check, pins["subject"]["check_rs_sha256"])
+    manifest_path = Path(corpus) / "vectors" / "MANIFEST.json"
     try:
-        created_proc = subprocess.run(
-            docker_create_argv(image_id=image_id, name=name, mounts=mounts, command=[mode]),
-            capture_output=True, timeout=60)
-        if created_proc.returncode != 0:
-            raise PrepareError("image digest mismatch")
-        created = True
-        try:
-            proc = br._run_capped(
-                ["docker", "start", "-a", name],
-                Path.cwd(),
-                DECLARED_CEILINGS["deadline_seconds"],
-            )
-            state = classify_container_result(proc.returncode, b"")["state"]
-        except br._OutputTooLarge:
-            state = "output_cap"
-        except subprocess.TimeoutExpired:
-            state = "deadline"
-        inspect = json.loads(_docker("inspect", name).stdout.decode("utf-8") or "null")
-    finally:
-        if created:
-            _docker("rm", "-f", name)
-    require_container_absent(name)
+        manifest_raw = ca.read_bounded_regular_file(manifest_path)
+    except ca.ManifestError as exc:
+        raise PrepareError(str(exc)) from exc
+    manifest = load_strict(manifest_raw)
+    if manifest.get("corpusDigest") != pins["corpus"]["corpusDigest"]:
+        raise PrepareError("corpus digest mismatch")
+    ids = []
+    for row in manifest.get("vectors") or []:
+        if type(row) is dict and isinstance(row.get("id"), str):
+            ids.append(row["id"])
     return {
-        "state": state,
-        "name": name,
-        "inspect": inspect,
-        "container_absent_after": True,
-        "parsed": None,
+        "corpus_digest": manifest["corpusDigest"],
+        "corpus_id_set_sha256": hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest(),
+        "subject_binary": False,
+        "subject_check_rs_sha256": hashlib.sha256(raw).hexdigest(),
     }
+
+
+def vendor_locked(subject: Path, vendor: Path) -> str:
+    require_vendor_outside(subject, vendor)
+    vendor = Path(vendor)
+    vendor.mkdir(parents=True, exist_ok=True)
+    proc = br._run_capped(
+        ["cargo", "vendor", "--locked", str(vendor.resolve())],
+        Path(subject),
+        300,
+    )
+    if proc.returncode != 0:
+        raise PrepareError("cargo vendor --locked failed")
+    digest = tree_sha256(vendor)
+    if digest == EMPTY_SHA256:
+        raise PrepareError("empty vendor")
+    return digest
+
+
+def materialize_pinned(pins: dict, work: Path) -> dict:
+    work = Path(work)
+    subject, corpus, vendor = work / "subject", work / "corpus", work / "vendor"
+    fetch_commit(
+        "https://github.com/%s.git" % pins["subject"]["repository"],
+        pins["subject"]["commit"], subject)
+    fetch_commit(
+        "https://github.com/%s.git" % pins["corpus"]["repository"],
+        pins["corpus"]["commit"], corpus)
+    verified = verify_materialized(pins, subject, corpus)
+    verified["vendor_outside_subject"] = True
+    verified["vendor_sha256"] = vendor_locked(subject, vendor)
+    verified["subject"] = subject
+    verified["corpus"] = corpus
+    verified["vendor"] = vendor
+    return verified
 
 
 def _distinct_identities(pins: dict, execution: dict) -> None:
@@ -296,93 +248,132 @@ def _distinct_identities(pins: dict, execution: dict) -> None:
 
 def execution_identity(root: Path) -> dict:
     root = Path(root)
+    status = _git_ok(
+        ["-C", str(root), "status", "--porcelain", "--untracked-files=normal",
+         "--", *EXECUTION_PATHS],
+        root, 10)
+    if status:
+        raise PrepareError("dirty execution path")
     digest = hashlib.sha256()
     for rel in EXECUTION_PATHS:
-        raw = (root / rel).read_bytes()
+        head_blob = _git_ok(["-C", str(root), "rev-parse", "HEAD:%s" % rel], root, 10)
+        disk_blob = _git_ok(["-C", str(root), "hash-object", rel], root, 10)
+        if head_blob != disk_blob:
+            raise PrepareError("dirty execution path")
+        raw = ca.read_bounded_regular_file(root / rel)
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(len(raw)).encode("ascii"))
         digest.update(b"\0")
         digest.update(raw)
-    proc = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        capture_output=True, text=True, timeout=10)
-    commit = (proc.stdout or "").strip()
-    if proc.returncode != 0 or len(commit) != 40:
+    commit = _git_ok(["-C", str(root), "rev-parse", "HEAD"], root, 10)
+    if len(commit) != 40:
         raise PrepareError("execution commit unresolved")
     identity = {
         "commit": commit,
         "content_sha256": digest.hexdigest(),
         "paths": list(EXECUTION_PATHS),
     }
-    _distinct_identities(
-        {"instrument_commit": PHASE_A_INSTRUMENT_COMMIT}, identity)
+    _distinct_identities({"instrument_commit": PHASE_A_INSTRUMENT_COMMIT}, identity)
     return identity
 
 
 def record_toolchain() -> dict:
-    rustc = subprocess.run(["rustc", "-Vv"], capture_output=True, text=True, timeout=30)
-    cargo = subprocess.run(["cargo", "-V"], capture_output=True, text=True, timeout=30)
+    rustc = br._run_capped(["rustc", "-Vv"], Path.cwd(), 30)
+    cargo = br._run_capped(["cargo", "-V"], Path.cwd(), 30)
     if rustc.returncode != 0 or cargo.returncode != 0:
         raise PrepareError("toolchain observation failed")
     return {
-        "cargo_V": cargo.stdout.strip(),
+        "cargo_V": (cargo.stdout or "").strip(),
         "observation": "host; checker was not run",
-        "rustc_Vv": rustc.stdout,
+        "rustc_Vv": rustc.stdout or "",
     }
 
 
 def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = None) -> bytes:
-    pins_dir = Path(pins_dir)
     dest = Path(dest)
-    verify_phase_a_frozen(pins_dir, adapter=adapter)
+    pins_doc = verify_phase_a_frozen(Path(pins_dir), adapter=adapter)
     if dest.exists():
         raise PrepareError("dest exists")
-    pins_doc = load_strict((pins_dir / "pins.json").read_bytes())
-    image_id = build_inert_image(root / "execution" / "aee-checker-sealed")
+    image_id = build_inert_image(Path(root) / "execution" / "aee-checker-sealed")
     with tempfile.TemporaryDirectory() as tmp:
-        mounts = {name: Path(tmp) / name for name in ("input", "vendor", "tool")}
-        for path in mounts.values():
-            path.mkdir()
-        require_vendor_outside(Path(tmp) / "subject", mounts["vendor"])
-        ok = run_inert_probe(
-            image_id=image_id, mode="ok", mounts=mounts,
-            name_prefix="aee-sealed-prep-")
-        if ok["state"] != "completed":
-            raise PrepareError("inert ok control failed")
-    parts = {
-        "ceilings": dict(DECLARED_CEILINGS),
-        "execution": execution_identity(root),
-        "host_evidence": dict(EMPTY_HOST_EVIDENCE),
-        "image": {"id": image_id, "kind": "inert-probe"},
-        "materialized": {
-            "corpus_digest": pins_doc["corpus"]["corpusDigest"],
-            "subject_binary": False,
-            "subject_check_rs_sha256": pins_doc["subject"]["check_rs_sha256"],
-            "vendor_outside_subject": True,
-            "vendor_sha256": hashlib.sha256(b"").hexdigest(),
-        },
-        "network": dict(NETWORK_CUTOFF),
-        "non_claims": list(NON_CLAIMS),
-        "oci": OCI_CONTRACT,
-        "pins": {
-            "corpus_commit": pins_doc["corpus"]["commit"],
-            "corpus_digest": pins_doc["corpus"]["corpusDigest"],
-            "instrument_commit": pins_doc["instrument"]["commit"],
-            "phase_a": {
-                "adapters/aee_checker_sealed.py": ADAPTER_DIGEST,
-                **{"measurements/aee-checker-25b9dfa/%s" % name: digest
-                   for name, digest in PHASE_A_PIN_DIGESTS.items()},
+        mats = materialize_pinned(pins_doc, Path(tmp) / "materialize")
+        mounts = {
+            "input": mats["corpus"],
+            "vendor": mats["vendor"],
+            "tool": Path(tmp) / "tool",
+        }
+        mounts["tool"].mkdir()
+        pairs = (
+            ("deadline", "deadline-ok", True, "deadline", True),
+            ("disk", "tmpfs-bytes-ok", True, "tmpfs-bytes", True),
+            ("file-count", "tmpfs-inodes-ok", True, "tmpfs-inodes", True),
+            ("network-off", "network", False, "network", True),
+            ("output", "output-ok", True, "output", True),
+        )
+        evidence = []
+        for mechanism, control_mode, control_sealed, refusal_mode, refusal_sealed in pairs:
+            evidence.append(record_probe_pair(
+                mechanism,
+                run_inert_probe(
+                    image_id=image_id, mode=control_mode, mounts=mounts,
+                    name_prefix="aee-sealed-prep-", sealed=control_sealed),
+                run_inert_probe(
+                    image_id=image_id, mode=refusal_mode, mounts=mounts,
+                    name_prefix="aee-sealed-prep-", sealed=refusal_sealed),
+            ))
+        parts = {
+            "ceilings": dict(DECLARED_CEILINGS),
+            "execution": execution_identity(root),
+            "image": {
+                "id": image_id,
+                "id_scope": "host-local",
+                "kind": "inert-probe",
+                "platform": image_platform(image_id),
             },
-            "subject_commit": pins_doc["subject"]["commit"],
-        },
-        "runtime": {
-            "docker": (_docker("version", "--format", "{{.Server.Version}}").stdout.decode("utf-8").strip()),
-            "observation": "host-local; not a portable bound",
-        },
-        "toolchain": record_toolchain(),
-    }
+            "materialized": {
+                "corpus_digest": mats["corpus_digest"],
+                "corpus_id_set_sha256": mats["corpus_id_set_sha256"],
+                "subject_binary": False,
+                "subject_check_rs_sha256": mats["subject_check_rs_sha256"],
+                "vendor_outside_subject": True,
+                "vendor_sha256": mats["vendor_sha256"],
+            },
+            "network": dict(NETWORK_CUTOFF),
+            "non_claims": list(NON_CLAIMS),
+            "oci": OCI_CONTRACT,
+            "pins": {
+                "corpus_commit": pins_doc["corpus"]["commit"],
+                "corpus_digest": pins_doc["corpus"]["corpusDigest"],
+                "instrument_commit": pins_doc["instrument"]["commit"],
+                "phase_a": {
+                    "adapters/aee_checker_sealed.py": ADAPTER_DIGEST,
+                    **{"measurements/aee-checker-25b9dfa/%s" % name: digest
+                       for name, digest in PHASE_A_PIN_DIGESTS.items()},
+                },
+                "subject_commit": pins_doc["subject"]["commit"],
+            },
+            "probe_evidence": evidence,
+            "runtime": {
+                "docker": docker_bounded(
+                    ["version", "--format", "{{.Server.Version}}"]).decode("utf-8").strip(),
+                "observation": "host-local; not a portable bound",
+            },
+            "toolchain": record_toolchain(),
+        }
     return emit_prepare_v0(parts, dest)
+
+
+def _refuse_timings(doc) -> None:
+    stack = [doc]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if _TIMING_KEYS.intersection(item):
+                raise PrepareError("prepare must not store timings")
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
 
 
 def emit_prepare_v0(parts: dict, dest: Path) -> bytes:
@@ -397,10 +388,15 @@ def emit_prepare_v0(parts: dict, dest: Path) -> bytes:
         raise PrepareError("prepare must not record per-vector outcomes")
     if materialized.get("subject_binary") is not False:
         raise PrepareError("subject binary is not produced here")
-    if parts["host_evidence"].get("portability") != EMPTY_HOST_EVIDENCE["portability"]:
-        raise PrepareError("host evidence is not a portable bound")
+    if materialized.get("vendor_sha256") == EMPTY_SHA256:
+        raise PrepareError("empty vendor")
+    require_probe_evidence(parts["probe_evidence"])
+    exact_object(parts["oci"], OCI_CONTRACT, "oci")
+    if parts["oci"].get("memory_swap_pids_claim") != "inspect-verified; not efficacy-tested":
+        raise PrepareError("memory/swap/pids must remain not efficacy-tested")
     doc = {"phase": "prepare", "schema": PREPARE_SCHEMA, **parts}
     exact_object(doc, PREPARE_KEYS, "prepare.v0")
+    _refuse_timings(doc)
     raw = encode_json(doc)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
