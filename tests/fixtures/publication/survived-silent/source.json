@@ -1,0 +1,9 @@
+{
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "license": "Apache-2.0",
+  "non_claims": [
+    "This fixture is a publication-detail probe, not a measurement."
+  ],
+  "repository": "example/survived-silent",
+  "schema": "corpus-adequacy.example.source.v0"
+}

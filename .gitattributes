@@ -13,6 +13,7 @@ adapters/algovoi_jcs_edge.py text eol=lf
 scripts/render_publication_page.py text eol=lf
 scripts/publication_handoff.py text eol=lf
 tests/test_publication_page.py text eol=lf
+tests/test_publication_detail.py text eol=lf
 tests/test_publication_handoff.py text eol=lf
 tests/fixtures/publication/** text eol=lf
 .github/ISSUE_TEMPLATE/config.yml text eol=lf
@@ -20,5 +21,6 @@ tests/fixtures/publication/** text eol=lf
 .github/ISSUE_TEMPLATE/publish-measurement.yml text eol=lf
 .github/workflows/pages.yml text eol=lf
 site/index.html text eol=lf
+site/runs/** text eol=lf
 
 publications/index.v0.json text eol=lf
