@@ -144,6 +144,16 @@ def require_shape(obj, expected, where: str) -> None:
     raise TypeError("require_shape expected dict or list")
 
 
+def load_json_document(raw, *, root, where: str):
+    """One decoder: RecursionError is a refusal; root shape is require_shape once."""
+    try:
+        doc = json.loads(raw)
+    except RecursionError as exc:
+        raise ManifestError(str(exc)) from None
+    require_shape(doc, root, where)
+    return doc
+
+
 def error_envelope(exc: BaseException, *, operation: str) -> dict:
     """Parseable --json body for a run that never produced a report.
 
@@ -805,12 +815,7 @@ def _require_unique_labels(m: dict) -> None:
 
 def load_manifest(path: Path) -> dict:
     manifest_bytes = path.read_bytes()
-    try:
-        m = json.loads(manifest_bytes)
-    except RecursionError as exc:
-        raise ManifestError(str(exc)) from None
-    if not isinstance(m, dict):
-        raise ManifestError("manifest must be an object, got %s" % type(m).__name__)
+    m = load_json_document(manifest_bytes, root=dict, where="manifest")
     if m.get("schema") != SCHEMA:
         raise ManifestError("schema must be %r, got %r" % (SCHEMA, m.get("schema")))
     base = path.parent
@@ -843,7 +848,12 @@ def load_manifest(path: Path) -> dict:
         dp = (base / m["corpus_digest_file"]).resolve()
         if not dp.is_file():
             raise ManifestError("corpus_digest_file not found: %s" % dp)
-        m["_corpus_digest"] = json.loads(dp.read_text(encoding="utf-8"))[m["corpus_digest_key"]]
+        digest_doc = load_json_document(
+            dp.read_bytes(), root=dict, where="corpus_digest_file")
+        key = m["corpus_digest_key"]
+        if key not in digest_doc:
+            raise ManifestError("corpus_digest_key %r is missing" % key)
+        m["_corpus_digest"] = digest_doc[key]
         for digest, entries in m["known_holes"].items():
             require_shape(entries, list, "known_holes[%s]" % digest)
             for i, e in enumerate(entries):
@@ -1473,20 +1483,26 @@ def _process_outcomes(m: dict, vectors: list[dict]) -> tuple[dict, dict, dict]:
 
 def load_vector_document(m: dict) -> list:
     """Shared vectors JSON for process and module. Decoder refusal, not a score."""
+    raw = m["_vectors_path"].read_bytes()
     try:
-        doc = json.loads(m["_vectors_path"].read_text(encoding="utf-8"))
-    except RecursionError as exc:
-        raise ManifestError(str(exc)) from None
+        doc = load_json_document(raw, root=dict, where="vectors")
+        as_object = True
+    except ManifestError as first:
+        try:
+            doc = load_json_document(raw, root=list, where="vectors")
+        except ManifestError:
+            raise first
+        as_object = False
     if m["runner"] == "batch":
         return [{m["id_key"]: "<batch>",
                  (m["group_key"] or "_g"): m["default_group"]}]
-    if isinstance(doc, dict):
+    if as_object:
         if m["vectors_key"] not in doc:
             raise ManifestError("vectors key %r is missing" % m["vectors_key"])
         selected = doc[m["vectors_key"]]
+        require_shape(selected, list, "vectors")
     else:
         selected = doc
-    require_shape(selected, list, "vectors")
     for i, row in enumerate(selected):
         require_shape(row, dict, "vectors[%d]" % i)
     return selected

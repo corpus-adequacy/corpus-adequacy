@@ -2,14 +2,15 @@
 
 ## Unreleased
 
-Deeply nested measurement JSON below the byte cap is a controlled refusal
-(rc 2, `corpus-adequacy.error.v0`, no traceback). `--json` on `--survivors`
-uses the same envelope with `could not project`. A within-cap anchor that
-is empty after control stripping stays an intentional omission. No
-`report.v0` byte or scoring change. The same refusal applies to the
-shared vectors document. Released v0.1.0 tool bytes, digested with `_tool_content_digest`, match
+One shared JSON decoder (`load_json_document`) serves manifest, vectors,
+and `corpus_digest_file`: RecursionError and declared root shape are
+refusals (rc 2, `error.v0`, no traceback), including known_holes digest
+deep/array/missing-key. `--json` on `--survivors` uses `could not project`.
+A within-cap empty-after-control-strip anchor stays an intentional
+omission. Released v0.1.0 tool bytes through `_tool_content_digest` match
 the frozen report `tool_content_sha256`. MEASURED_ON is report provenance,
-not a Git object a fresh clone must contain.
+not a required Git object or local tag. No `report.v0` byte or scoring
+change.
 
 ## 0.1.0 — 2026-08-22
 

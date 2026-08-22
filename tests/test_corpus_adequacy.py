@@ -3696,6 +3696,92 @@ class SurvivorFindings(unittest.TestCase):
         env = ca.error_envelope(ValueError("x"), operation="measure")
         self.assertEqual(env["error"], "could not measure: x")
 
+    def test_error_envelope_rejects_an_invalid_operation(self):
+        with self.assertRaises(ValueError):
+            ca.error_envelope(ValueError("x"), operation="score")
+
+    def test_load_json_document_classifies_recursionerror(self):
+        with mock.patch.object(ca.json, "loads", side_effect=RecursionError("too deep")):
+            with self.assertRaises(ca.ManifestError) as ctx:
+                ca.load_json_document(b"{}", root=dict, where="manifest")
+        self.assertNotIn("Traceback", str(ctx.exception))
+
+    def test_manifest_array_root_exits_2_without_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "m.json"
+            path.write_text("[]\n", encoding="utf-8")
+            for extra in ([], ["--json"]):
+                with self.subTest(extra=extra):
+                    proc = subprocess.run(
+                        [sys.executable, str(ca.__file__), str(path), *extra],
+                        capture_output=True, timeout=30)
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertNotIn(b"Traceback", proc.stderr)
+                    self.assertIn(b"could not measure", proc.stderr)
+                    if extra:
+                        env = json.loads(proc.stdout)
+                        self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+
+    def test_missing_vectors_key_is_a_manifest_refusal(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+            (root / "vectors.json").write_text("{\"other\": []}\n", encoding="utf-8")
+            path = root / "m.json"
+            path.write_text(json.dumps({
+                "schema": ca.SCHEMA, "runner": "module",
+                "implementation": "impl.py", "entrypoint": "check",
+                "vectors": "vectors.json", "id_key": "vector_id",
+                "default_group": "g",
+                "mutants": {"g": [{"label": "r1", "anchor": "return True",
+                                   "replacement": "return False"}]},
+            }), encoding="utf-8")
+            m = ca.load_manifest(path)
+            with self.assertRaises(ca.ManifestError) as ctx:
+                ca.load_vector_document(m)
+        self.assertIn("vectors key", str(ctx.exception))
+
+    def _holes_cli(self, digest_text):
+        root = Path(tempfile.mkdtemp())
+        (root / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+        (root / "vectors.json").write_text(
+            json.dumps({"vectors": [{"vector_id": "v1"}]}), encoding="utf-8")
+        (root / "digest.json").write_text(digest_text, encoding="utf-8")
+        path = root / "m.json"
+        path.write_text(json.dumps({
+            "schema": ca.SCHEMA, "runner": "module",
+            "implementation": "impl.py", "entrypoint": "check",
+            "vectors": "vectors.json", "id_key": "vector_id",
+            "default_group": "g",
+            "corpus_digest_file": "digest.json",
+            "corpus_digest_key": "digest",
+            "known_holes": {"sha256:deadbeef": [
+                {"label": "r1", "reason": "acknowledged", "recorded": "2026-08-22"}]},
+            "mutants": {"g": [
+                {"label": "r1", "anchor": "return True", "replacement": "return False"},
+                {"label": "CONTROL", "control": True,
+                 "anchor": "def check", "replacement": "def  check"}]},
+        }), encoding="utf-8")
+        return path
+
+    def test_corpus_digest_deep_array_and_missing_key_exit_2(self):
+        cases = (
+            "[" * 16000 + "]" * 16000,
+            "[]\n",
+            "{}\n",
+        )
+        for digest_text in cases:
+            with self.subTest(digest=digest_text[:8]):
+                path = self._holes_cli(digest_text)
+                proc = subprocess.run(
+                    [sys.executable, str(ca.__file__), str(path), "--json"],
+                    capture_output=True, timeout=30)
+                self.assertEqual(proc.returncode, 2)
+                self.assertNotIn(b"Traceback", proc.stderr)
+                env = json.loads(proc.stdout)
+                self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+                self.assertEqual(env["exit"], 2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
