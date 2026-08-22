@@ -1,0 +1,1378 @@
+{
+  "complement": [
+    {
+      "condition": "v.as_object().is_none()",
+      "line": 92,
+      "span": {
+        "column": 8,
+        "end": 3215,
+        "line": 92,
+        "start": 3192
+      }
+    },
+    {
+      "condition": "require_hex64 && !is_lower_hex64(s)",
+      "line": 175,
+      "span": {
+        "column": 12,
+        "end": 5975,
+        "line": 175,
+        "start": 5940
+      }
+    },
+    {
+      "condition": "let Some(p) = &prev",
+      "line": 179,
+      "span": {
+        "column": 12,
+        "end": 6141,
+        "line": 179,
+        "start": 6122
+      }
+    },
+    {
+      "condition": "*p >= units",
+      "line": 180,
+      "span": {
+        "column": 16,
+        "end": 6170,
+        "line": 180,
+        "start": 6159
+      }
+    },
+    {
+      "condition": "integral && json::parse_safe_integer(raw).is_none()",
+      "line": 211,
+      "span": {
+        "column": 16,
+        "end": 7194,
+        "line": 211,
+        "start": 7143
+      }
+    },
+    {
+      "condition": "!json::is_bmp_only(k)",
+      "line": 226,
+      "span": {
+        "column": 20,
+        "end": 7697,
+        "line": 226,
+        "start": 7676
+      }
+    },
+    {
+      "condition": "rec.as_object().is_none()",
+      "line": 241,
+      "span": {
+        "column": 8,
+        "end": 8119,
+        "line": 241,
+        "start": 8094
+      }
+    },
+    {
+      "condition": "sigs.is_empty()",
+      "line": 247,
+      "span": {
+        "column": 8,
+        "end": 8382,
+        "line": 247,
+        "start": 8367
+      }
+    },
+    {
+      "condition": "s.as_object().is_none()",
+      "line": 252,
+      "span": {
+        "column": 12,
+        "end": 8610,
+        "line": 252,
+        "start": 8587
+      }
+    },
+    {
+      "condition": "let Some(kid) = s.get(\"keyid\")",
+      "line": 256,
+      "span": {
+        "column": 12,
+        "end": 8824,
+        "line": 256,
+        "start": 8794
+      }
+    },
+    {
+      "condition": "kid.as_str().is_none()",
+      "line": 257,
+      "span": {
+        "column": 16,
+        "end": 8864,
+        "line": 257,
+        "start": 8842
+      }
+    },
+    {
+      "condition": "B64.encode(&payload_bytes) != payload_b64",
+      "line": 274,
+      "span": {
+        "column": 8,
+        "end": 9652,
+        "line": 274,
+        "start": 9611
+      }
+    },
+    {
+      "condition": "v.as_object().is_none()",
+      "line": 285,
+      "span": {
+        "column": 16,
+        "end": 10068,
+        "line": 285,
+        "start": 10045
+      }
+    },
+    {
+      "condition": "let Err(e) = payload_profile_ok(&v)",
+      "line": 287,
+      "span": {
+        "column": 23,
+        "end": 10201,
+        "line": 287,
+        "start": 10166
+      }
+    },
+    {
+      "condition": "!rec.json_media_type",
+      "line": 363,
+      "span": {
+        "column": 8,
+        "end": 13359,
+        "line": 363,
+        "start": 13339
+      }
+    },
+    {
+      "condition": "!unimplemented_binding_version && binding != ctx.run_binding",
+      "line": 387,
+      "span": {
+        "column": 8,
+        "end": 14704,
+        "line": 387,
+        "start": 14644
+      }
+    },
+    {
+      "condition": "unimplemented_binding_version",
+      "line": 399,
+      "span": {
+        "column": 8,
+        "end": 15215,
+        "line": 399,
+        "start": 15186
+      }
+    },
+    {
+      "condition": "kind == RecordKind::CoversNothing",
+      "line": 403,
+      "span": {
+        "column": 15,
+        "end": 15437,
+        "line": 403,
+        "start": 15404
+      }
+    },
+    {
+      "condition": "kind == RecordKind::Unknown",
+      "line": 410,
+      "span": {
+        "column": 15,
+        "end": 15811,
+        "line": 410,
+        "start": 15784
+      }
+    },
+    {
+      "condition": "method.is_none()",
+      "line": 412,
+      "span": {
+        "column": 15,
+        "end": 15928,
+        "line": 412,
+        "start": 15912
+      }
+    },
+    {
+      "condition": "method != Some(Method::Intercepted)",
+      "line": 436,
+      "span": {
+        "column": 20,
+        "end": 16908,
+        "line": 436,
+        "start": 16873
+      }
+    },
+    {
+      "condition": "let Err(e) = check_arming(payload, ctx)",
+      "line": 439,
+      "span": {
+        "column": 27,
+        "end": 17101,
+        "line": 439,
+        "start": 17062
+      }
+    },
+    {
+      "condition": "method != Some(Method::Intercepted)",
+      "line": 444,
+      "span": {
+        "column": 20,
+        "end": 17274,
+        "line": 444,
+        "start": 17239
+      }
+    },
+    {
+      "condition": "method != Some(Method::Reconstructed)",
+      "line": 459,
+      "span": {
+        "column": 20,
+        "end": 17967,
+        "line": 459,
+        "start": 17930
+      }
+    },
+    {
+      "condition": "!parsed.profile_ok",
+      "line": 488,
+      "span": {
+        "column": 8,
+        "end": 19013,
+        "line": 488,
+        "start": 18995
+      }
+    },
+    {
+      "condition": "parsed.instant > ctx.issued_at",
+      "line": 493,
+      "span": {
+        "column": 8,
+        "end": 19186,
+        "line": 493,
+        "start": 19156
+      }
+    },
+    {
+      "condition": "!ctx.manifest_attacks.iter().any(|m| m == a)",
+      "line": 500,
+      "span": {
+        "column": 12,
+        "end": 19560,
+        "line": 500,
+        "start": 19516
+      }
+    },
+    {
+      "condition": "posture != ctx.posture_digest",
+      "line": 511,
+      "span": {
+        "column": 8,
+        "end": 20008,
+        "line": 511,
+        "start": 19979
+      }
+    },
+    {
+      "condition": "prev.is_some() || scope.is_some()",
+      "line": 523,
+      "span": {
+        "column": 16,
+        "end": 20512,
+        "line": 523,
+        "start": 20479
+      }
+    },
+    {
+      "condition": "n < 1",
+      "line": 533,
+      "span": {
+        "column": 16,
+        "end": 20886,
+        "line": 533,
+        "start": 20881
+      }
+    },
+    {
+      "condition": "!matches!(tok, \"subject\" | \"corpus\" | \"networkPosture\")",
+      "line": 567,
+      "span": {
+        "column": 28,
+        "end": 23076,
+        "line": 567,
+        "start": 23021
+      }
+    },
+    {
+      "condition": "let Some(p) = &prev_token",
+      "line": 574,
+      "span": {
+        "column": 28,
+        "end": 23467,
+        "line": 574,
+        "start": 23442
+      }
+    },
+    {
+      "condition": "*p >= units",
+      "line": 575,
+      "span": {
+        "column": 32,
+        "end": 23512,
+        "line": 575,
+        "start": 23501
+      }
+    },
+    {
+      "condition": "!ok",
+      "line": 599,
+      "span": {
+        "column": 24,
+        "end": 24519,
+        "line": 599,
+        "start": 24516
+      }
+    },
+    {
+      "condition": "n == 1",
+      "line": 647,
+      "span": {
+        "column": 20,
+        "end": 26884,
+        "line": 647,
+        "start": 26878
+      }
+    },
+    {
+      "condition": "row.as_object().is_none()",
+      "line": 762,
+      "span": {
+        "column": 8,
+        "end": 32368,
+        "line": 762,
+        "start": 32343
+      }
+    },
+    {
+      "condition": "v.as_str().is_none()",
+      "line": 803,
+      "span": {
+        "column": 16,
+        "end": 33956,
+        "line": 803,
+        "start": 33936
+      }
+    },
+    {
+      "condition": "let Some(r) = row.get(\"observationRefs\")",
+      "line": 809,
+      "span": {
+        "column": 8,
+        "end": 34192,
+        "line": 809,
+        "start": 34152
+      }
+    },
+    {
+      "condition": "let Some(sel) = row.get(\"observationSelectors\")",
+      "line": 822,
+      "span": {
+        "column": 8,
+        "end": 34712,
+        "line": 822,
+        "start": 34665
+      }
+    },
+    {
+      "condition": "v.as_str().is_none()",
+      "line": 827,
+      "span": {
+        "column": 16,
+        "end": 34938,
+        "line": 827,
+        "start": 34918
+      }
+    },
+    {
+      "condition": "stmt.as_object().is_none()",
+      "line": 858,
+      "span": {
+        "column": 8,
+        "end": 35894,
+        "line": 858,
+        "start": 35868
+      }
+    },
+    {
+      "condition": "req_str(&stmt, \"_type\", \"statement\")? != STATEMENT_TYPE",
+      "line": 861,
+      "span": {
+        "column": 8,
+        "end": 36032,
+        "line": 861,
+        "start": 35977
+      }
+    },
+    {
+      "condition": "req_str(&stmt, \"predicateType\", \"statement\")? != PREDICATE_TYPE",
+      "line": 864,
+      "span": {
+        "column": 8,
+        "end": 36189,
+        "line": 864,
+        "start": 36126
+      }
+    },
+    {
+      "condition": "subjects.is_empty()",
+      "line": 868,
+      "span": {
+        "column": 8,
+        "end": 36360,
+        "line": 868,
+        "start": 36341
+      }
+    },
+    {
+      "condition": "pred.get(\"does_not_assert\").is_some()",
+      "line": 874,
+      "span": {
+        "column": 8,
+        "end": 36602,
+        "line": 874,
+        "start": 36565
+      }
+    },
+    {
+      "condition": "let Some(dna) = pred.get(\"doesNotAssert\")",
+      "line": 882,
+      "span": {
+        "column": 8,
+        "end": 36933,
+        "line": 882,
+        "start": 36892
+      }
+    },
+    {
+      "condition": "v.as_str().is_none()",
+      "line": 887,
+      "span": {
+        "column": 16,
+        "end": 37143,
+        "line": 887,
+        "start": 37123
+      }
+    },
+    {
+      "condition": "!issued_at_parsed.profile_ok",
+      "line": 899,
+      "span": {
+        "column": 8,
+        "end": 37742,
+        "line": 899,
+        "start": 37714
+      }
+    },
+    {
+      "condition": "!matches!(\n        posture_token,\n        \"allowlist\" | \"no_network\" | \"sinkhole\" | \"unsafe_bypass_egress\"\n    )",
+      "line": 926,
+      "span": {
+        "column": 8,
+        "end": 39470,
+        "line": 926,
+        "start": 39358
+      }
+    },
+    {
+      "condition": "!json::is_bmp_only(s)",
+      "line": 947,
+      "span": {
+        "column": 16,
+        "end": 40464,
+        "line": 947,
+        "start": 40443
+      }
+    },
+    {
+      "condition": "let Some(p) = &prev",
+      "line": 953,
+      "span": {
+        "column": 16,
+        "end": 40747,
+        "line": 953,
+        "start": 40728
+      }
+    },
+    {
+      "condition": "*p >= units",
+      "line": 954,
+      "span": {
+        "column": 20,
+        "end": 40780,
+        "line": 954,
+        "start": 40769
+      }
+    },
+    {
+      "condition": "!labels.contains(c)",
+      "line": 969,
+      "span": {
+        "column": 12,
+        "end": 41318,
+        "line": 969,
+        "start": 41299
+      }
+    },
+    {
+      "condition": "jcs_sha256_hex(&vocab_preimage)? != vocab_digest",
+      "line": 986,
+      "span": {
+        "column": 8,
+        "end": 41959,
+        "line": 986,
+        "start": 41911
+      }
+    },
+    {
+      "condition": "manifest_attacks.iter().any(|(_, a)| a == id)",
+      "line": 1005,
+      "span": {
+        "column": 16,
+        "end": 42858,
+        "line": 1005,
+        "start": 42813
+      }
+    },
+    {
+      "condition": "let Some(ep) = manifest.get(\"expectedPayloads\")",
+      "line": 1019,
+      "span": {
+        "column": 8,
+        "end": 43584,
+        "line": 1019,
+        "start": 43537
+      }
+    },
+    {
+      "condition": "!manifest_attacks.iter().any(|(_, a)| a == attack)",
+      "line": 1024,
+      "span": {
+        "column": 16,
+        "end": 43832,
+        "line": 1024,
+        "start": 43782
+      }
+    },
+    {
+      "condition": "entries.is_empty()",
+      "line": 1036,
+      "span": {
+        "column": 16,
+        "end": 44315,
+        "line": 1036,
+        "start": 44297
+      }
+    },
+    {
+      "condition": "manifest_attacks.is_empty()",
+      "line": 1050,
+      "span": {
+        "column": 8,
+        "end": 44978,
+        "line": 1050,
+        "start": 44951
+      }
+    },
+    {
+      "condition": "jcs_sha256_hex(manifest)? != corpus_digest",
+      "line": 1056,
+      "span": {
+        "column": 8,
+        "end": 45197,
+        "line": 1056,
+        "start": 45155
+      }
+    },
+    {
+      "condition": "reason.as_str().is_none()",
+      "line": 1076,
+      "span": {
+        "column": 16,
+        "end": 46064,
+        "line": 1076,
+        "start": 46039
+      }
+    },
+    {
+      "condition": "n == 0",
+      "line": 1115,
+      "span": {
+        "column": 12,
+        "end": 47751,
+        "line": 1115,
+        "start": 47745
+      }
+    },
+    {
+      "condition": "n > 1",
+      "line": 1120,
+      "span": {
+        "column": 12,
+        "end": 47944,
+        "line": 1120,
+        "start": 47939
+      }
+    },
+    {
+      "condition": "!manifest_classes.contains(&class)",
+      "line": 1137,
+      "span": {
+        "column": 16,
+        "end": 48801,
+        "line": 1137,
+        "start": 48767
+      }
+    },
+    {
+      "condition": "let Some(&j) = first_seen.get(row.attack_id)",
+      "line": 1159,
+      "span": {
+        "column": 12,
+        "end": 49900,
+        "line": 1159,
+        "start": 49856
+      }
+    },
+    {
+      "condition": "!manifest_attacks.iter().any(|(_, a)| a == row.attack_id)",
+      "line": 1169,
+      "span": {
+        "column": 12,
+        "end": 50271,
+        "line": 1169,
+        "start": 50214
+      }
+    },
+    {
+      "condition": "!rows.iter().any(|r| r.attack_id == a.as_str())",
+      "line": 1185,
+      "span": {
+        "column": 16,
+        "end": 50926,
+        "line": 1185,
+        "start": 50879
+      }
+    },
+    {
+      "condition": "!expected.iter().any(|a| a.as_str() == row.attack_id)",
+      "line": 1192,
+      "span": {
+        "column": 16,
+        "end": 51228,
+        "line": 1192,
+        "start": 51175
+      }
+    },
+    {
+      "condition": "let Some(label) = row.label",
+      "line": 1203,
+      "span": {
+        "column": 12,
+        "end": 51623,
+        "line": 1203,
+        "start": 51596
+      }
+    },
+    {
+      "condition": "clean",
+      "line": 1205,
+      "span": {
+        "column": 16,
+        "end": 51743,
+        "line": 1205,
+        "start": 51738
+      }
+    },
+    {
+      "condition": "layer != \"none\"",
+      "line": 1207,
+      "span": {
+        "column": 20,
+        "end": 51869,
+        "line": 1207,
+        "start": 51854
+      }
+    },
+    {
+      "condition": "subjects.len() != 1",
+      "line": 1221,
+      "span": {
+        "column": 8,
+        "end": 52479,
+        "line": 1221,
+        "start": 52460
+      }
+    },
+    {
+      "condition": "let Some(rv) = records_val",
+      "line": 1233,
+      "span": {
+        "column": 8,
+        "end": 52988,
+        "line": 1233,
+        "start": 52962
+      }
+    },
+    {
+      "condition": "r < 0 || r as usize >= records.len()",
+      "line": 1250,
+      "span": {
+        "column": 16,
+        "end": 53870,
+        "line": 1250,
+        "start": 53834
+      }
+    },
+    {
+      "condition": "records[i].leaf == records[j].leaf",
+      "line": 1261,
+      "span": {
+        "column": 16,
+        "end": 54296,
+        "line": 1261,
+        "start": 54262
+      }
+    },
+    {
+      "condition": "records.is_empty()",
+      "line": 1269,
+      "span": {
+        "column": 8,
+        "end": 54568,
+        "line": 1269,
+        "start": 54550
+      }
+    },
+    {
+      "condition": "batch_root.is_some()",
+      "line": 1270,
+      "span": {
+        "column": 12,
+        "end": 54602,
+        "line": 1270,
+        "start": 54582
+      }
+    },
+    {
+      "condition": "hex::encode(root) != carried",
+      "line": 1282,
+      "span": {
+        "column": 12,
+        "end": 55174,
+        "line": 1282,
+        "start": 55146
+      }
+    },
+    {
+      "condition": "substrate_carrying",
+      "line": 1290,
+      "span": {
+        "column": 42,
+        "end": 55500,
+        "line": 1290,
+        "start": 55482
+      }
+    },
+    {
+      "condition": "s.as_object().is_none()",
+      "line": 1294,
+      "span": {
+        "column": 16,
+        "end": 55672,
+        "line": 1294,
+        "start": 55649
+      }
+    },
+    {
+      "condition": "run_entropy.as_object().is_none()",
+      "line": 1305,
+      "span": {
+        "column": 12,
+        "end": 56223,
+        "line": 1305,
+        "start": 56190
+      }
+    },
+    {
+      "condition": "!is_lower_hex64(v)",
+      "line": 1318,
+      "span": {
+        "column": 16,
+        "end": 56796,
+        "line": 1318,
+        "start": 56778
+      }
+    },
+    {
+      "condition": "substrate_carrying",
+      "line": 1407,
+      "span": {
+        "column": 8,
+        "end": 61223,
+        "line": 1407,
+        "start": 61205
+      }
+    },
+    {
+      "condition": "row.basis != Some(\"substrate\")",
+      "line": 1416,
+      "span": {
+        "column": 16,
+        "end": 61558,
+        "line": 1416,
+        "start": 61528
+      }
+    },
+    {
+      "condition": "!labels.iter().any(|l| l == label)",
+      "line": 1426,
+      "span": {
+        "column": 16,
+        "end": 62010,
+        "line": 1426,
+        "start": 61976
+      }
+    },
+    {
+      "condition": "!matches!(row.attribution, Some(\"pinned\") | Some(\"paired\"))",
+      "line": 1442,
+      "span": {
+        "column": 16,
+        "end": 62894,
+        "line": 1442,
+        "start": 62835
+      }
+    },
+    {
+      "condition": "row.refs.is_empty()",
+      "line": 1449,
+      "span": {
+        "column": 16,
+        "end": 63221,
+        "line": 1449,
+        "start": 63202
+      }
+    },
+    {
+      "condition": "r < 0 || r as usize >= records.len()",
+      "line": 1457,
+      "span": {
+        "column": 20,
+        "end": 63630,
+        "line": 1457,
+        "start": 63594
+      }
+    },
+    {
+      "condition": "cover_cache[idx].is_none()",
+      "line": 1463,
+      "span": {
+        "column": 20,
+        "end": 63939,
+        "line": 1463,
+        "start": 63913
+      }
+    },
+    {
+      "condition": "let Some(why) = ce.non_covering.as_ref()",
+      "line": 1467,
+      "span": {
+        "column": 20,
+        "end": 64180,
+        "line": 1467,
+        "start": 64140
+      }
+    },
+    {
+      "condition": "non_covering_why.is_empty()",
+      "line": 1482,
+      "span": {
+        "column": 20,
+        "end": 65014,
+        "line": 1482,
+        "start": 64987
+      }
+    },
+    {
+      "condition": "!has(RecordKind::Interception)",
+      "line": 1490,
+      "span": {
+        "column": 24,
+        "end": 65314,
+        "line": 1490,
+        "start": 65284
+      }
+    },
+    {
+      "condition": "!has(RecordKind::Examination)",
+      "line": 1495,
+      "span": {
+        "column": 24,
+        "end": 65639,
+        "line": 1495,
+        "start": 65610
+      }
+    },
+    {
+      "condition": "!has(RecordKind::Arming)",
+      "line": 1500,
+      "span": {
+        "column": 24,
+        "end": 65954,
+        "line": 1500,
+        "start": 65930
+      }
+    },
+    {
+      "condition": "!sealed_ok",
+      "line": 1532,
+      "span": {
+        "column": 24,
+        "end": 67899,
+        "line": 1532,
+        "start": 67889
+      }
+    },
+    {
+      "condition": "method == Method::Intercepted && weakest_is_reconstructed",
+      "line": 1542,
+      "span": {
+        "column": 16,
+        "end": 68485,
+        "line": 1542,
+        "start": 68428
+      }
+    },
+    {
+      "condition": "!is_clean_row(row)",
+      "line": 1567,
+      "span": {
+        "column": 16,
+        "end": 69751,
+        "line": 1567,
+        "start": 69733
+      }
+    },
+    {
+      "condition": "kinds.get(r as usize) == Some(&RecordKind::Interception)",
+      "line": 1571,
+      "span": {
+        "column": 20,
+        "end": 69903,
+        "line": 1571,
+        "start": 69847
+      }
+    },
+    {
+      "condition": "let Some(slot) = resolved_by_caught.get_mut(r as usize)",
+      "line": 1585,
+      "span": {
+        "column": 20,
+        "end": 70614,
+        "line": 1585,
+        "start": 70559
+      }
+    },
+    {
+      "condition": "*k == RecordKind::Interception && !resolved_by_caught[idx]",
+      "line": 1591,
+      "span": {
+        "column": 16,
+        "end": 70817,
+        "line": 1591,
+        "start": 70759
+      }
+    },
+    {
+      "condition": "substrate_carrying",
+      "line": 1604,
+      "span": {
+        "column": 12,
+        "end": 71493,
+        "line": 1604,
+        "start": 71475
+      }
+    },
+    {
+      "condition": "*k != RecordKind::Sealed",
+      "line": 1614,
+      "span": {
+        "column": 20,
+        "end": 71902,
+        "line": 1614,
+        "start": 71878
+      }
+    },
+    {
+      "condition": "let Some(pl) = records[idx].payload.as_ref()",
+      "line": 1624,
+      "span": {
+        "column": 20,
+        "end": 72567,
+        "line": 1624,
+        "start": 72523
+      }
+    },
+    {
+      "condition": "ce.non_covering.is_none() && ce.sealed_covers_clean && arming_ok",
+      "line": 1671,
+      "span": {
+        "column": 20,
+        "end": 75854,
+        "line": 1671,
+        "start": 75790
+      }
+    },
+    {
+      "condition": "valid_sealed == 0",
+      "line": 1675,
+      "span": {
+        "column": 16,
+        "end": 75960,
+        "line": 1675,
+        "start": 75943
+      }
+    },
+    {
+      "condition": "!matches!(\n                    k,\n                    RecordKind::Interception\n                        | RecordKind::Arming\n                        | RecordKind::Sealed\n                        | RecordKind::Examination\n                )",
+      "line": 1714,
+      "span": {
+        "column": 20,
+        "end": 78699,
+        "line": 1714,
+        "start": 78463
+      }
+    },
+    {
+      "condition": "!binds",
+      "line": 1729,
+      "span": {
+        "column": 20,
+        "end": 79025,
+        "line": 1729,
+        "start": 79019
+      }
+    },
+    {
+      "condition": "let Some(why) = ce.non_covering",
+      "line": 1733,
+      "span": {
+        "column": 20,
+        "end": 79206,
+        "line": 1733,
+        "start": 79175
+      }
+    },
+    {
+      "condition": "ce.kind == RecordKind::Sealed && !(ce.sealed_covers_clean && sweep_arming_ok)",
+      "line": 1788,
+      "span": {
+        "column": 20,
+        "end": 83162,
+        "line": 1788,
+        "start": 83085
+      }
+    },
+    {
+      "condition": "*k != RecordKind::Sealed",
+      "line": 1812,
+      "span": {
+        "column": 20,
+        "end": 84398,
+        "line": 1812,
+        "start": 84374
+      }
+    },
+    {
+      "condition": "let Some(arr) = payload.get(\"aeeObservedAttacks\").and_then(|v| v.as_array())",
+      "line": 1819,
+      "span": {
+        "column": 20,
+        "end": 84703,
+        "line": 1819,
+        "start": 84627
+      }
+    },
+    {
+      "condition": "!obliged",
+      "line": 1826,
+      "span": {
+        "column": 28,
+        "end": 85077,
+        "line": 1826,
+        "start": 85069
+      }
+    },
+    {
+      "condition": "*k != RecordKind::Arming",
+      "line": 1840,
+      "span": {
+        "column": 20,
+        "end": 85782,
+        "line": 1840,
+        "start": 85758
+      }
+    },
+    {
+      "condition": "c == class && !declared.iter().any(|d| d == attack)",
+      "line": 1854,
+      "span": {
+        "column": 28,
+        "end": 86433,
+        "line": 1854,
+        "start": 86382
+      }
+    },
+    {
+      "condition": "row.attribution != Some(\"pinned\")",
+      "line": 1871,
+      "span": {
+        "column": 16,
+        "end": 87335,
+        "line": 1871,
+        "start": 87302
+      }
+    },
+    {
+      "condition": "kinds.get(idx) != Some(&RecordKind::Interception)",
+      "line": 1887,
+      "span": {
+        "column": 20,
+        "end": 87998,
+        "line": 1887,
+        "start": 87949
+      }
+    },
+    {
+      "condition": "!commitments.iter().any(|c| entry.iter().any(|e| e == c))",
+      "line": 1902,
+      "span": {
+        "column": 20,
+        "end": 88646,
+        "line": 1902,
+        "start": 88589
+      }
+    },
+    {
+      "condition": "!resolved_interception",
+      "line": 1908,
+      "span": {
+        "column": 16,
+        "end": 88987,
+        "line": 1908,
+        "start": 88965
+      }
+    },
+    {
+      "condition": "label_fail || basis_fail || method_fail || attribution_fail",
+      "line": 1929,
+      "span": {
+        "column": 12,
+        "end": 90095,
+        "line": 1929,
+        "start": 90036
+      }
+    },
+    {
+      "condition": "any_fail",
+      "line": 1945,
+      "span": {
+        "column": 25,
+        "end": 90905,
+        "line": 1945,
+        "start": 90897
+      }
+    },
+    {
+      "condition": "!out_of_scope.is_empty() || !routed_elsewhere.is_empty()",
+      "line": 1947,
+      "span": {
+        "column": 15,
+        "end": 90993,
+        "line": 1947,
+        "start": 90937
+      }
+    },
+    {
+      "condition": "any_indirect_clean",
+      "line": 1949,
+      "span": {
+        "column": 15,
+        "end": 91047,
+        "line": 1949,
+        "start": 91029
+      }
+    },
+    {
+      "condition": "carried_result != recomputed",
+      "line": 1954,
+      "span": {
+        "column": 8,
+        "end": 91144,
+        "line": 1954,
+        "start": 91116
+      }
+    },
+    {
+      "condition": "row.basis != Some(\"substrate\")",
+      "line": 1968,
+      "span": {
+        "column": 12,
+        "end": 91755,
+        "line": 1968,
+        "start": 91725
+      }
+    },
+    {
+      "condition": "all_verify",
+      "line": 1977,
+      "span": {
+        "column": 12,
+        "end": 92082,
+        "line": 1977,
+        "start": 92072
+      }
+    }
+  ],
+  "complement_count": 125,
+  "complement_note": "Every explicit if outside check_sealed, including if-let, is descriptive only and is not in the denominator.",
+  "function": {
+    "end": 31597,
+    "name": "check_sealed",
+    "sha256": "1c7cfc2ec2d60720ca19ad0c997336c913074c77410d9c59e218c759a471d333",
+    "start": 27125
+  },
+  "selected_count": 7,
+  "sites": [
+    {
+      "anchor": "if drop_count < 0",
+      "bytes": "drop_count < 0",
+      "condition": "drop_count < 0",
+      "id": "sealed-1",
+      "label": "remove check_sealed guard: drop_count < 0",
+      "manifest_replacement": "if false",
+      "replacement": "false",
+      "sha256": "f8b5aa8bd7a35eb18d1a50088dd140f93799a2e79ffc598f6174cd376cce89b0",
+      "span": {
+        "column": 8,
+        "end": 27745,
+        "line": 669,
+        "start": 27731
+      }
+    },
+    {
+      "anchor": "if !is_lower_hex64(observed_set)",
+      "bytes": "!is_lower_hex64(observed_set)",
+      "condition": "!is_lower_hex64(observed_set)",
+      "id": "sealed-2",
+      "label": "remove check_sealed guard: !is_lower_hex64(observed_set)",
+      "manifest_replacement": "if false",
+      "replacement": "false",
+      "sha256": "5c12d5dc5ee4d8e53a054aef24239e667b6c0186b32c10a63748b83448fb18b0",
+      "span": {
+        "column": 8,
+        "end": 28633,
+        "line": 688,
+        "start": 28604
+      }
+    },
+    {
+      "anchor": "if observed_set != ctx.observed_set",
+      "bytes": "observed_set != ctx.observed_set",
+      "condition": "observed_set != ctx.observed_set",
+      "id": "sealed-3",
+      "label": "remove check_sealed guard: observed_set != ctx.observed_set",
+      "manifest_replacement": "if false",
+      "replacement": "false",
+      "sha256": "6a1a7efa9528566260067318a824732023180ad8874c59735e327a9a0f7f6fc5",
+      "span": {
+        "column": 8,
+        "end": 28770,
+        "line": 691,
+        "start": 28738
+      }
+    },
+    {
+      "anchor": "if !ctx.manifest_attacks.iter().any(|m| m == a) {\n            return Err(Fail::new(\"",
+      "bytes": "!ctx.manifest_attacks.iter().any(|m| m == a)",
+      "condition": "!ctx.manifest_attacks.iter().any(|m| m == a)",
+      "id": "sealed-4",
+      "label": "remove check_sealed guard: !ctx.manifest_attacks.iter().any(|m| m == a)",
+      "manifest_replacement": "if false {\n            return Err(Fail::new(\"",
+      "replacement": "false",
+      "sha256": "b265fbeb58e8472138087ee1148e0aa7570064d17e04c29722f6055ab9d7355c",
+      "span": {
+        "column": 12,
+        "end": 29451,
+        "line": 704,
+        "start": 29407
+      }
+    },
+    {
+      "anchor": "if !still_armed",
+      "bytes": "!still_armed",
+      "condition": "!still_armed",
+      "id": "sealed-5",
+      "label": "remove check_sealed guard: !still_armed",
+      "manifest_replacement": "if false",
+      "replacement": "false",
+      "sha256": "880686837096e2d7576ea679cdb13a14f53110d14d530034b59ccbfcfff20732",
+      "span": {
+        "column": 8,
+        "end": 31144,
+        "line": 730,
+        "start": 31132
+      }
+    },
+    {
+      "anchor": "if !(drop_count == 0 || drop_bound.is_some_and(|b| drop_count <= b))",
+      "bytes": "!(drop_count == 0 || drop_bound.is_some_and(|b| drop_count <= b))",
+      "condition": "!(drop_count == 0 || drop_bound.is_some_and(|b| drop_count <= b))",
+      "id": "sealed-6",
+      "label": "remove check_sealed guard: !(drop_count == 0 || drop_bound.is_some_and(|b| drop_count <= b))",
+      "manifest_replacement": "if false",
+      "replacement": "false",
+      "sha256": "7a09ab4f4e8b9fcd4cd859f29f093f9b83fa2c33a4f7031f56b9bf6818abba8e",
+      "span": {
+        "column": 8,
+        "end": 31280,
+        "line": 733,
+        "start": 31215
+      }
+    },
+    {
+      "anchor": "if posture != ctx.posture_digest {\n        c",
+      "bytes": "posture != ctx.posture_digest",
+      "condition": "posture != ctx.posture_digest",
+      "id": "sealed-7",
+      "label": "remove check_sealed guard: posture != ctx.posture_digest",
+      "manifest_replacement": "if false {\n        c",
+      "replacement": "false",
+      "sha256": "80aca891820b0fb264648d9008acc33618a8b92c6f11c32e7a7f6a6f78a87033",
+      "span": {
+        "column": 8,
+        "end": 31446,
+        "line": 737,
+        "start": 31417
+      }
+    }
+  ],
+  "source_sha256": "1623780ae759c070a85b74e2de6df6dac28f13f068cecbc1ea4b10e070e7a86f"
+}

@@ -1,0 +1,7 @@
+{
+  "anchor": "fn check_sealed(payload: &Value, ctx: &Ctx) -> R<(Vec<&'static str>, String)> {",
+  "control": true,
+  "label": "CONTROL immediate check_sealed refusal",
+  "replacement": "fn check_sealed(payload: &Value, ctx: &Ctx) -> R<(Vec<&'static str>, String)> {\n    return Err(Fail(\"CONTROL: immediate refusal\".into()));",
+  "scope": "declared"
+}
