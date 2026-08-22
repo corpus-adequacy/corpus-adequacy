@@ -5,8 +5,10 @@ One function. VERSION is read via ast.parse of corpus_adequacy.py — no import,
 no exec, no runpy. A missing local tag is honest. This is not a release,
 not a tag, not protection, and does not make 0.1.0 addressable.
 
-The dated 0.1.0 heading already in CHANGELOG (em dash, 2026-08-19) was
-introduced with VERSION itself at 7491548357d65e45cf3db5a40a05ad0375c6d02b.
+The 0.1.0 heading was introduced with VERSION itself at
+7491548357d65e45cf3db5a40a05ad0375c6d02b, dated 2026-08-19 when the version
+was named, not cut. This contract checks for a real ISO date, but does not bind
+that date to the cut or tag; the release change sets it to the actual cut date.
 """
 
 from __future__ import annotations

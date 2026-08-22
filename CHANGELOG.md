@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0 — 2026-08-22
+
 Publication listing is an opt-in `publications/index.v0.json`. Generation
 binds report and source file digests, refuses symlink and count/control
 parity mismatches, and `--check` compares the checked-in page without
@@ -22,7 +24,7 @@ is left unmanaged; any other regular file outside `index.html` and
 A FIFO, symlink, or device anywhere under `site/` is refused without
 opening it. Generation writes expected
 owned files and refuses pre-existing owned surplus instead of deleting.
-No ranking, latest, or identity widening. No release.
+No ranking, latest, or identity widening.
 
 The AlgoVoi adapter's mechanism boundary is pinned against a whole-document
 re-serialize, not only the per-preimage form. The previous probe used the
@@ -324,10 +326,6 @@ skipped before the type check. Files and directories share one entry
 ceiling. Short `os.write` is looped; mode is set with `fchmod` on the open fd.
 This is not a sandbox, not a git worktree, not the output ceiling, and not
 HEAD-vs-dirty provenance.
-
-## 0.1.0 — 2026-08-19
-
-First named cut of the extracted tool.
 
 Reports now carry `tool_version` and, when the checkout is a git repository,
 `tool_commit`. `--version` prints the same pair. A measurement pinned by SHA
