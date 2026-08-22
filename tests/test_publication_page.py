@@ -485,5 +485,27 @@ class PublicationPage(unittest.TestCase):
                 rpp.main(["--root", str(clone), "--out", str(site), "--check"])
 
 
+    def test_implicit_check_rejects_crlf_provenance_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            clone = Path(d) / "clone"
+            subprocess.run(
+                [
+                    "git", "clone", "--quiet", "--no-hardlinks", "--no-tags",
+                    str(REPO_ROOT), str(clone),
+                ],
+                check=True,
+            )
+            proven = clone / "measurements" / "tersign-1cc5ea32" / "PROVENANCE.md"
+            raw = proven.read_bytes()
+            self.assertTrue(b"\n" in raw and b"\r\n" not in raw)
+            proven.write_bytes(raw.replace(b"\n", b"\r\n"))
+            site = clone / "site" / "index.html"
+            with self.assertRaisesRegex(
+                rpp.PublicationError,
+                r"recorded source-commit bytes differ for .*PROVENANCE.md",
+            ):
+                rpp.main(["--root", str(clone), "--out", str(site), "--check"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

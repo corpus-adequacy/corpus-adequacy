@@ -519,6 +519,35 @@ def _git_run(root: Path, args: list[str]) -> int:
     ).returncode
 
 
+def _git_oid(root: Path, spec: str) -> str | None:
+    proc = subprocess.run(
+        ["git", "rev-parse", "--verify", spec],
+        cwd=str(root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    oid = proc.stdout.strip()
+    return oid or None
+
+
+def _hash_object_oid(root: Path, data: bytes) -> str:
+    proc = subprocess.run(
+        ["git", "hash-object", "--stdin"],
+        cwd=str(root),
+        input=data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if proc.returncode != 0:
+        raise PublicationError("git hash-object failed")
+    oid = proc.stdout.decode("ascii", "replace").strip()
+    if not oid:
+        raise PublicationError("git hash-object returned no object id")
+    return oid
+
 def _require_recorded_link_commit(root: Path, recorded: str, records: list[dict]) -> None:
     """Refuse an implicit --check commit that is not a real ancestor with matching bytes."""
     if not _looks_like_commit(recorded):
@@ -530,9 +559,12 @@ def _require_recorded_link_commit(root: Path, recorded: str, records: list[dict]
     for record in records:
         source_rel = "measurements/%s/source.json" % record["directory"]
         for rel in (record["report_rel"], source_rel, record["review_rel"]):
-            if _git_run(root, ["git", "cat-file", "-e", "%s:%s" % (recorded, rel)]) != 0:
+            recorded_oid = _git_oid(root, "%s:%s" % (recorded, rel))
+            if recorded_oid is None:
                 raise PublicationError("recorded source-commit is missing %s" % rel)
-            if _git_run(root, ["git", "diff", "--quiet", recorded, "--", rel]) != 0:
+            current = read_bounded_regular_file(root / rel)
+            current_oid = _hash_object_oid(root, current)
+            if recorded_oid != current_oid:
                 raise PublicationError("recorded source-commit bytes differ for %s" % rel)
 
 def main(argv=None) -> int:
