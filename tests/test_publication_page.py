@@ -7,6 +7,8 @@ import hashlib
 import html
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import stat
@@ -207,6 +209,76 @@ class PublicationPage(unittest.TestCase):
             report.write_bytes(report.read_bytes() + b"\n")
             with self.assertRaises(rpp.PublicationError):
                 _render(root, source_commit="c" * 40)
+
+    def test_projection_digest_changes_when_only_source_commit_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            index_bytes, records = rpp.load_listed_records(root)
+            renderer = rpp.read_bounded_regular_file(Path(rpp.__file__))
+            digest_a = rpp.compute_projection_digest(
+                index_bytes, records, renderer, "a" * 40
+            )
+            digest_b = rpp.compute_projection_digest(
+                index_bytes, records, renderer, "b" * 40
+            )
+            self.assertNotEqual(digest_a, digest_b)
+            self.assertEqual(
+                rpp.compute_projection_digest(
+                    index_bytes, records, renderer, "a" * 40
+                ),
+                digest_a,
+            )
+            page = _render(root, source_commit="a" * 40)
+            self.assertEqual(rpp.projection_digest_from_html(page), digest_a)
+
+    def test_projection_digest_changes_when_only_version_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            index_bytes, records = rpp.load_listed_records(root)
+            renderer = rpp.read_bounded_regular_file(Path(rpp.__file__))
+            commit = "a" * 40
+            digest = rpp.compute_projection_digest(
+                index_bytes, records, renderer, commit
+            )
+            with mock.patch.object(rpp.ca, "VERSION", "9.9.9"):
+                mutated = rpp.compute_projection_digest(
+                    index_bytes, records, renderer, commit
+                )
+            self.assertNotEqual(digest, mutated)
+
+    def test_mutation_omit_source_commit_or_version_from_digest_is_red(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            index_bytes, records = rpp.load_listed_records(root)
+            renderer = rpp.read_bounded_regular_file(Path(rpp.__file__))
+            commit = "a" * 40
+            canonical = rpp.compute_projection_digest(
+                index_bytes, records, renderer, commit
+            )
+
+            def omitted(source_commit: str | None, version: str | None) -> str:
+                hasher = hashlib.sha256()
+
+                def add(label: bytes, payload: bytes) -> None:
+                    hasher.update(label)
+                    hasher.update(b"\0")
+                    hasher.update(len(payload).to_bytes(8, "big"))
+                    hasher.update(payload)
+
+                add(b"index", index_bytes)
+                for record in records:
+                    add(b"report", record["report_bytes"])
+                    add(b"source", record["source_bytes"])
+                add(b"renderer", renderer)
+                if source_commit is not None:
+                    add(b"source_commit", source_commit.encode("ascii"))
+                if version is not None:
+                    add(b"version", version.encode("ascii"))
+                return hasher.hexdigest()
+
+            self.assertNotEqual(canonical, omitted(None, ca.VERSION))
+            self.assertNotEqual(canonical, omitted(commit, None))
+            self.assertNotEqual(canonical, omitted(None, None))
 
     def test_html_escape_every_interpolated_field(self):
         payload = XSS_PAYLOAD
@@ -559,6 +631,328 @@ class PublicationPage(unittest.TestCase):
                 r"recorded source-commit bytes differ for .*PROVENANCE.md",
             ):
                 rpp.main(["--root", str(clone), "--out", str(site), "--check"])
+
+
+WHAT_THIS_MEASURES = (
+    "This page identifies which author-declared rule-removal mutants "
+    "the corpus distinguished."
+)
+SAFE_INSPECT_LABEL = "reads existing report bytes and does not measure"
+EXIT_1_VISIBLE = (
+    "exit 1 with --json is a completed inadequate measurement with "
+    "declared survivors, not a crash"
+)
+EXIT_2_VISIBLE = "exit 2 is refusal"
+EQUAL_COUNTS = "Equal counts do not imply identical report bytes."
+REPORT_TOOL_COMMIT_LABEL = "report tool_commit"
+EVIDENCE_LINK_COMMIT_LABEL = "evidence-link commit"
+
+
+def _visible_body(page: str) -> str:
+    text = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", "", text, flags=re.S)
+    text = re.sub(r"<title\b[^>]*>.*?</title>", "", text, flags=re.S)
+    return text
+
+
+def _inspect_command(directory: str) -> str:
+    return (
+        "python3 corpus_adequacy.py --survivors measurements/%s/report.v0.json --json"
+        % directory
+    )
+
+
+def _measure_command(directory: str) -> str:
+    return "python3 corpus_adequacy.py measurements/%s/manifest.json --json" % directory
+
+
+def _release_href() -> str:
+    return (
+        "https://github.com/corpus-adequacy/corpus-adequacy/releases/tag/v%s"
+        % ca.VERSION
+    )
+
+
+def _first_run_script(page: str) -> str:
+    start = page.find('id="first-run"')
+    end = page.find('id="results"')
+    self_section = page[start:end]
+    for raw in re.findall(r"<pre><code>(.*?)</code></pre>", self_section, flags=re.S):
+        text = html.unescape(raw)
+        if "git clone" in text and "--survivors" in text and "\ncd " in text:
+            return text
+    raise AssertionError("first-run HTML has no obtain-then-inspect copy-paste block")
+
+
+CLONE_URL = "https://github.com/corpus-adequacy/corpus-adequacy.git"
+
+
+def _displayed_clone_argv() -> list[str]:
+    return shlex.split(rpp._clone_command(), posix=True)
+
+
+def _displayed_inspect_argv(line: str) -> list[str]:
+    argv = shlex.split(line, posix=True)
+    if argv[:3] != ["python3", "corpus_adequacy.py", "--survivors"]:
+        raise AssertionError(
+            "first-run inspect argv is not the displayed python3 command: %r" % argv
+        )
+    if len(argv) != 5 or argv[4] != "--json":
+        raise AssertionError(
+            "first-run inspect argv is not the displayed python3 command: %r" % argv
+        )
+    if not argv[3].endswith("/report.v0.json"):
+        raise AssertionError(
+            "first-run inspect argv is not the displayed python3 command: %r" % argv
+        )
+    return argv
+
+
+def _hermetic_git_env(mirror: Path, gitconfig: Path) -> dict[str, str]:
+    gitconfig.write_text(
+        '[url "%s"]\n\tinsteadOf = %s\n' % (mirror.resolve().as_uri(), CLONE_URL),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
+
+
+def _tagged_local_mirror(mirror: Path) -> None:
+    subprocess.run(
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            "--no-tags",
+            str(REPO_ROOT),
+            str(mirror),
+        ],
+        check=True,
+        timeout=180,
+    )
+    subprocess.run(
+        ["git", "tag", "-f", "v%s" % ca.VERSION],
+        cwd=mirror,
+        check=True,
+        timeout=30,
+    )
+
+
+def _run_extracted_script(script: str) -> subprocess.CompletedProcess:
+    lines = [line for line in script.splitlines() if line]
+    if len(lines) != 3:
+        raise AssertionError(
+            "first-run route is not exactly clone, cd, inspect: %r" % lines
+        )
+    clone_argv = shlex.split(lines[0], posix=True)
+    if clone_argv != _displayed_clone_argv():
+        raise AssertionError(
+            "first-run clone argv is not the displayed command: %r" % clone_argv
+        )
+    if lines[1] != "cd corpus-adequacy":
+        raise AssertionError(
+            "first-run cd is not the displayed directory: %r" % lines[1]
+        )
+    inspect_argv = _displayed_inspect_argv(lines[2])
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        mirror = root / "mirror"
+        empty = root / "empty"
+        empty.mkdir()
+        _tagged_local_mirror(mirror)
+        env = _hermetic_git_env(mirror, root / "gitconfig")
+        clone_proc = subprocess.run(
+            clone_argv,
+            cwd=empty,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env,
+        )
+        if clone_proc.returncode != 0:
+            return clone_proc
+        return subprocess.run(
+            inspect_argv,
+            cwd=empty / "corpus-adequacy",
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env,
+        )
+
+
+def _assert_survivors_v0(proc: subprocess.CompletedProcess) -> None:
+    if proc.returncode != 0:
+        raise AssertionError(
+            "first-run route rc=%s stderr=%r stdout=%r"
+            % (proc.returncode, proc.stderr, proc.stdout[:500])
+        )
+    try:
+        doc = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            "first-run route stdout is not JSON: %r" % proc.stdout[:500]
+        ) from exc
+    if not isinstance(doc, dict) or doc.get("schema") != "corpus-adequacy.survivors.v0":
+        raise AssertionError("first-run route did not emit survivors.v0: %r" % proc.stdout[:500])
+
+
+class FirstRunOrientation(unittest.TestCase):
+    def _assert_orientation(self, page: str, directory: str, source_commit: str,
+                            tool_commit: str, tool_content: str, tool_version: str):
+        fold = page[: page.find('id="results"')]
+        visible = _visible_body(page)
+        inspect = _inspect_command(directory)
+        measure = _measure_command(directory)
+        self.assertIn(WHAT_THIS_MEASURES, fold)
+        self.assertLess(page.find(WHAT_THIS_MEASURES), page.find('class="card"'))
+        self.assertIn(SAFE_INSPECT_LABEL, fold)
+        self.assertIn(inspect, fold)
+        self.assertNotIn(measure, fold)
+        route = _first_run_script(page)
+        self.assertIn(inspect, route)
+        self.assertLess(route.find("git clone"), route.find("\ncd "))
+        self.assertLess(route.find("\ncd "), route.find(inspect))
+        self.assertIn("cd corpus-adequacy", route)
+        self.assertIn(measure, page[page.find('id="results"') :])
+        self.assertIn(EXIT_1_VISIBLE, visible)
+        self.assertIn(EXIT_2_VISIBLE, visible)
+        self.assertIn(EQUAL_COUNTS, visible)
+        self.assertIn(REPORT_TOOL_COMMIT_LABEL, fold)
+        self.assertIn(EVIDENCE_LINK_COMMIT_LABEL, fold)
+        self.assertIn(tool_commit, fold)
+        self.assertIn(source_commit, fold)
+        self.assertIn(tool_content, fold)
+        self.assertIn(tool_version, fold)
+        self.assertNotEqual(tool_commit, source_commit)
+        commit_block = fold[fold.find(REPORT_TOOL_COMMIT_LABEL):]
+        self.assertLess(
+            commit_block.find(tool_commit),
+            commit_block.find(EVIDENCE_LINK_COMMIT_LABEL),
+        )
+        self.assertIn(_release_href(), page)
+        for href in re.findall(r'releases/tag/([^"\s]+)', page):
+            self.assertEqual(href, "v%s" % ca.VERSION)
+            self.assertIsNone(re.fullmatch(r"[0-9a-f]{40}", href))
+        self.assertIn("--branch v%s" % ca.VERSION, page)
+        self.assertIn('class="skip"', page)
+        self.assertIn("<h1>", page)
+        self.assertIn("<h2 id=\"first-run-heading\">", page)
+        self.assertIn("overflow-x: hidden", page)
+        self.assertIn("width: min(100%, 390px)", page)
+        self.assertIn("a:focus", page)
+
+    def test_live_overview_has_first_run_orientation(self):
+        source_commit = "f" * 40
+        page = rpp.render_html(REPO_ROOT, source_commit=source_commit)
+        doc = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
+        self._assert_orientation(
+            page,
+            "tersign-1cc5ea32",
+            source_commit,
+            doc["tool_commit"],
+            doc["tool_content_sha256"],
+            doc["tool_version"],
+        )
+
+    def test_extracted_first_run_route_runs_from_empty_tempdir(self):
+        page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
+        _assert_survivors_v0(_run_extracted_script(_first_run_script(page)))
+
+    def test_fixture_overview_binds_listed_report_inspect_path(self):
+        source_commit = "a" * 40
+        with tempfile.TemporaryDirectory() as d:
+            page = _render(_write_tree(Path(d), [VALID / "report.v0.json"]),
+                           source_commit=source_commit)
+        doc = json.loads((VALID / "report.v0.json").read_text(encoding="utf-8"))
+        self._assert_orientation(
+            page,
+            "valid-tersign",
+            source_commit,
+            doc["tool_commit"],
+            doc["tool_content_sha256"],
+            doc["tool_version"],
+        )
+
+    def _fixture_page(self):
+        source_commit = "a" * 40
+        with tempfile.TemporaryDirectory() as d:
+            page = _render(_write_tree(Path(d), [VALID / "report.v0.json"]),
+                           source_commit=source_commit)
+        doc = json.loads((VALID / "report.v0.json").read_text(encoding="utf-8"))
+        return page, source_commit, doc
+
+    def _assert_mutant_is_red(self, page: str, source_commit: str, doc: dict):
+        with self.assertRaises(AssertionError):
+            self._assert_orientation(
+                page,
+                "valid-tersign",
+                source_commit,
+                doc["tool_commit"],
+                doc["tool_content_sha256"],
+                doc["tool_version"],
+            )
+
+    def test_mutation_inspect_pre_replaced_by_measure_is_red(self):
+        page, source_commit, doc = self._fixture_page()
+        inspect = _inspect_command("valid-tersign")
+        measure = _measure_command("valid-tersign")
+        mutated = page.replace(inspect, measure, 1)
+        self._assert_mutant_is_red(mutated, source_commit, doc)
+
+    def test_mutation_drop_cd_or_inspect_before_clone_runtime_is_red(self):
+        page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
+        script = _first_run_script(page)
+        dropped = "\n".join(
+            line for line in script.splitlines() if not line.startswith("cd ")
+        )
+        reordered = "\n".join(
+            [line for line in script.splitlines() if "--survivors" in line]
+            + [line for line in script.splitlines() if "--survivors" not in line]
+        )
+        for mutant in (dropped, reordered):
+            with self.subTest(mutant=mutant.splitlines()[0][:40]):
+                with self.assertRaises(AssertionError):
+                    _assert_survivors_v0(_run_extracted_script(mutant))
+
+    def test_mutation_survivors_points_at_manifest_is_red(self):
+        page, source_commit, doc = self._fixture_page()
+        mutated = page.replace(
+            "--survivors measurements/valid-tersign/report.v0.json",
+            "--survivors measurements/valid-tersign/manifest.json",
+            1,
+        )
+        self._assert_mutant_is_red(mutated, source_commit, doc)
+
+    def test_mutation_collapsed_commit_fields_is_red(self):
+        page, source_commit, doc = self._fixture_page()
+        mutated = page.replace(REPORT_TOOL_COMMIT_LABEL, "commit", 1)
+        mutated = mutated.replace(EVIDENCE_LINK_COMMIT_LABEL, "commit", 1)
+        self._assert_mutant_is_red(mutated, source_commit, doc)
+
+    def test_mutation_exit_1_only_in_comment_title_or_css_is_red(self):
+        page, source_commit, doc = self._fixture_page()
+        hidden = (
+            page.replace(EXIT_1_VISIBLE, "<!-- %s -->" % EXIT_1_VISIBLE, 1)
+            .replace("<title>", "<title>%s " % EXIT_1_VISIBLE, 1)
+        )
+        hidden = hidden.replace(
+            "overflow-x: hidden",
+            "overflow-x: hidden; /* %s */" % EXIT_1_VISIBLE,
+            1,
+        )
+        self.assertIn(EXIT_1_VISIBLE, hidden)
+        self.assertNotIn(EXIT_1_VISIBLE, _visible_body(hidden))
+        self._assert_mutant_is_red(hidden, source_commit, doc)
+
+    def test_mutation_release_href_hardcodes_sha_is_red(self):
+        page, source_commit, doc = self._fixture_page()
+        mutated = page.replace(_release_href(), _release_href().rsplit("/v", 1)[0] + "/" + "b" * 40, 1)
+        self._assert_mutant_is_red(mutated, source_commit, doc)
 
 
 if __name__ == "__main__":

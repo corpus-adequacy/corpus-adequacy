@@ -412,6 +412,73 @@ def _plain_sentence(record: dict) -> str:
     )
 
 
+def _inspect_command(record: dict) -> str:
+    return "python3 corpus_adequacy.py --survivors %s --json" % record["report_rel"]
+
+
+def _release_href() -> str:
+    return (
+        "https://github.com/corpus-adequacy/corpus-adequacy/releases/tag/v%s"
+        % ca.VERSION
+    )
+
+
+def _clone_command() -> str:
+    return (
+        "git clone --depth 1 --branch v%s "
+        "https://github.com/corpus-adequacy/corpus-adequacy.git"
+        % ca.VERSION
+    )
+
+
+def _first_run_route(records: list[dict]) -> str:
+    lines = [_clone_command(), "cd corpus-adequacy"]
+    lines.extend(_inspect_command(record) for record in records)
+    return "\n".join(lines)
+
+
+def _first_run_html(records: list[dict], source_commit: str) -> str:
+    tool_rows = []
+    for record in records:
+        tool_rows.append(
+            "<p>report tool_commit <span class=\"mono\">%s</span></p>\n"
+            "<p>report tool_content_sha256 <span class=\"mono\">%s</span></p>\n"
+            "<p>report tool_version <span class=\"mono\">%s</span></p>"
+            % (
+                _esc(record["tool_commit"]),
+                _esc(record["tool_content_sha256"]),
+                _esc(record["tool_version"]),
+            )
+        )
+    tag = "v%s" % ca.VERSION
+    return (
+        '<section id="first-run" class="non-claims" aria-labelledby="first-run-heading">\n'
+        '<h2 id="first-run-heading">What this measures</h2>\n'
+        "<p>This page identifies which author-declared rule-removal mutants "
+        "the corpus distinguished.</p>\n"
+        "<p>Obtain the tagged tool, then inspect. The inspect line reads "
+        "existing report bytes and does not measure.</p>\n"
+        "<pre><code>%s</code></pre>\n"
+        "<p>The card below keeps the measurement command. exit 1 with --json "
+        "is a completed inadequate measurement with declared survivors, not a "
+        "crash; exit 2 is refusal.</p>\n"
+        "%s\n"
+        "<p>evidence-link commit <span class=\"mono\">%s</span></p>\n"
+        "<p>tagged tool <span class=\"mono\">%s</span></p>\n"
+        '<p><a href="%s">Release %s</a></p>\n'
+        "<p>Equal counts do not imply identical report bytes.</p>\n"
+        "</section>"
+        % (
+            _esc(_first_run_route(records)),
+            "\n".join(tool_rows),
+            _esc(source_commit),
+            _esc(tag),
+            _esc(_release_href()),
+            _esc(tag),
+        )
+    )
+
+
 def _non_claims_html(records: list[dict] | None = None) -> str:
     seen = []
     for rec in records or []:
@@ -514,6 +581,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 <p>Committed <code>report.v0</code> records listed in <code>publications/index.v0.json</code>.</p>
 </header>
 %s
+%s
 <nav class="ctas" aria-label="intake and publication forms">
 <a href="%s">Request source intake</a>
 <a href="%s">Hand off a completed measurement</a>
@@ -530,6 +598,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
         _esc(projection_digest),
         _esc(source_commit),
         SHARED_STYLE,
+        _first_run_html(records, source_commit),
         _non_claims_html(records),
         _esc(ISSUES_INTAKE),
         _esc(ISSUES_PUBLISH),
@@ -541,19 +610,31 @@ def compute_projection_digest(
     index_bytes: bytes,
     records: list[dict],
     renderer_bytes: bytes,
+    source_commit: str,
 ) -> str:
-    # projection-digest is SHA-256 of this concatenation, in this order:
-    #   publications/index.v0.json bytes
-    #   then each listed record in index order:
-    #     measurements/<id>/report.v0.json bytes
-    #     measurements/<id>/source.json bytes
-    #   then scripts/render_publication_page.py source bytes
+    """SHA-256 of projection inputs, not of the emitted HTML.
+
+    The finished page embeds this digest, so hashing the page would be a
+    self-reference. This is not a digest of a deployed artifact. It binds
+    the inputs that determine visible projection content, including the
+    evidence-link commit and the tagged tool version, each with a label
+    and an 8-byte big-endian length prefix so concatenation is unambiguous.
+    """
     hasher = hashlib.sha256()
-    hasher.update(index_bytes)
+
+    def _add(label: bytes, payload: bytes) -> None:
+        hasher.update(label)
+        hasher.update(b"\0")
+        hasher.update(len(payload).to_bytes(8, "big"))
+        hasher.update(payload)
+
+    _add(b"index", index_bytes)
     for record in records:
-        hasher.update(record["report_bytes"])
-        hasher.update(record["source_bytes"])
-    hasher.update(renderer_bytes)
+        _add(b"report", record["report_bytes"])
+        _add(b"source", record["source_bytes"])
+    _add(b"renderer", renderer_bytes)
+    _add(b"source_commit", source_commit.encode("ascii"))
+    _add(b"version", ca.VERSION.encode("ascii"))
     return hasher.hexdigest()
 
 
@@ -681,7 +762,9 @@ def _rule_page(record: dict, finding: dict, build_commit: str) -> str:
 def render_site(root: Path, source_commit: str) -> dict[str, bytes]:
     index_bytes, records = load_listed_records(Path(root))
     renderer_bytes = read_bounded_regular_file(Path(__file__))
-    digest = compute_projection_digest(index_bytes, records, renderer_bytes)
+    digest = compute_projection_digest(
+        index_bytes, records, renderer_bytes, source_commit
+    )
     files = {
         "index.html": _page_body(records, source_commit, digest).encode("utf-8"),
     }
