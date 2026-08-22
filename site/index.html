@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="projection-digest" content="1a00f3685ad762929f0f310977c9535f198ace0afa7e9ecdac5f4cbce9911bbc">
+<meta name="projection-digest" content="4d6e02888c5fc61351646cc24a437f8c41ea7e2a473c51c629619680a62b8f21">
 <meta name="source-commit" content="a4a39bb38f6ba4512872fec4798b640086863619">
 <title>Published corpus-adequacy measurements</title>
 <style>
@@ -28,6 +28,7 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 .links a { margin-right: 0.75rem; overflow-wrap: anywhere; }
 .finding { box-sizing: border-box; width: min(100%, 390px); max-width: 100%; background: #fff; border: 2px solid #1a1a1a; padding: 1rem; }
 
+#results:focus { outline: 3px solid #0033aa; outline-offset: 2px; }
 </style>
 </head>
 <body>
@@ -67,9 +68,15 @@ python3 corpus_adequacy.py --survivors measurements/tersign-1cc5ea32/report.v0.j
 </section>
 <nav class="ctas" aria-label="intake and publication forms">
 <a href="https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=add-corpus.yml">Request source intake</a>
-<a href="https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=publish-measurement.yml">Hand off a completed measurement</a>
+<a href="#publication-handoff">Hand off a completed measurement</a>
 </nav>
-<main id="results">
+<section id="publication-handoff" class="non-claims" aria-labelledby="handoff-heading">
+<h2 id="handoff-heading">Local publication handoff</h2>
+<p>Recompute machine prefills from local report and source.json metadata bytes. Review must recompute those fields. Query values stay untrusted.</p>
+<pre><code>python3 scripts/publication_handoff.py measurements/tersign-1cc5ea32/report.v0.json</code></pre>
+<p><a href="https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=publish-measurement.yml">Manual empty publication form</a> (fallback if the local command is unavailable).</p>
+</section>
+<main id="results" tabindex="-1">
 <h2>Committed records</h2>
 <ul class="cards">
 <li class="card">
@@ -78,6 +85,7 @@ python3 corpus_adequacy.py --survivors measurements/tersign-1cc5ea32/report.v0.j
 <p>source commit <span class="mono">1cc5ea32b3da4f195b55782c8a3573d8564673a7</span></p>
 <p>adapter <span class="mono">tersign_evidence_record</span> · runner <span class="mono">process</span></p>
 <p>report digest <span class="mono">c65f8a6c6dcc4a56dea31e7fc0de241a8cbbdcf36cd4cf98c220d23a894fe5ae</span></p>
+<p>source.json metadata SHA-256 <span class="mono">bf7094942d119fc5b57c917423c5fb7b6de110c26589690a800fa448db441cf2</span></p>
 <p>Copyable command</p>
 <pre><code>python3 corpus_adequacy.py measurements/tersign-1cc5ea32/manifest.json --json</code></pre>
 <ul class="counts"><li class="count" aria-label="killed 10"><span class="count-label">killed</span> <span class="count-value">10</span></li><li class="count" aria-label="survived 2"><span class="count-label">survived</span> <span class="count-value">2</span></li><li class="count" aria-label="silent not measured"><span class="count-label">silent</span> <span class="count-value">not measured</span></li><li class="count" aria-label="unproved 0"><span class="count-label">unproved</span> <span class="count-value">0</span></li><li class="count" aria-label="control_status killed"><span class="count-label">control_status</span> <span class="count-value">killed</span></li><li class="count" aria-label="diagnostic_channel_declared not declared"><span class="count-label">diagnostic_channel_declared</span> <span class="count-value">not declared</span></li></ul>

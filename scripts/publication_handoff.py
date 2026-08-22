@@ -17,6 +17,7 @@ import render_publication_page as rpp
 MACHINE_FIELD_IDS = (
     "source-url",
     "source-commit",
+    "source-sha256",
     "adapter",
     "runner",
     "report-path",
@@ -31,6 +32,14 @@ MACHINE_FIELD_IDS = (
     "unproved",
     "control-status",
 )
+USER_FIELD_IDS = (
+    "display-name",
+    "relationship",
+    "public-evidence-url",
+    "public-context",
+    "scoping",
+    "consent",
+)
 BASE = "https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=publish-measurement.yml&"
 
 
@@ -40,6 +49,7 @@ def machine_fields(report_path: Path) -> dict:
     return {
         "source-url": source_url,
         "source-commit": record["source_commit"],
+        "source-sha256": record["source_digest"],
         "adapter": record["adapter"],
         "runner": record["runner"],
         "report-path": record["report_rel"],

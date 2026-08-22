@@ -531,6 +531,7 @@ def _card_html(record: dict, build_commit: str) -> str:
         '<p>source commit <span class="mono">%s</span></p>\n'
         '<p>adapter <span class="mono">%s</span> · runner <span class="mono">%s</span></p>\n'
         '<p>report digest <span class="mono">%s</span></p>\n'
+        '<p>source.json metadata SHA-256 <span class="mono">%s</span></p>\n'
         '<p>Copyable command</p>\n'
         '<pre><code>%s</code></pre>\n'
         '%s\n'
@@ -549,6 +550,7 @@ def _card_html(record: dict, build_commit: str) -> str:
             _esc(record["adapter"]),
             _esc(record["runner"]),
             _esc(record["digest"]),
+            _esc(record["source_digest"]),
             _esc(record["command"]),
             _counts_html(record),
             _esc(_plain_sentence(record)),
@@ -557,6 +559,27 @@ def _card_html(record: dict, build_commit: str) -> str:
             source_link,
             _esc(review_href),
         )
+    )
+
+
+def _handoff_command(record: dict) -> str:
+    return "python3 scripts/publication_handoff.py %s" % record["report_rel"]
+
+
+def _handoff_section(records: list[dict]) -> str:
+    commands = "\n".join(_handoff_command(record) for record in records)
+    return (
+        '<section id="publication-handoff" class="non-claims" '
+        'aria-labelledby="handoff-heading">\n'
+        '<h2 id="handoff-heading">Local publication handoff</h2>\n'
+        "<p>Recompute machine prefills from local report and source.json "
+        "metadata bytes. Review must recompute those fields. Query values "
+        "stay untrusted.</p>\n"
+        "<pre><code>%s</code></pre>\n"
+        '<p><a href="%s">Manual empty publication form</a> '
+        "(fallback if the local command is unavailable).</p>\n"
+        "</section>"
+        % (_esc(commands), _esc(ISSUES_PUBLISH))
     )
 
 
@@ -572,6 +595,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 <title>Published corpus-adequacy measurements</title>
 <style>
 %s
+#results:focus { outline: 3px solid #0033aa; outline-offset: 2px; }
 </style>
 </head>
 <body>
@@ -584,9 +608,10 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 %s
 <nav class="ctas" aria-label="intake and publication forms">
 <a href="%s">Request source intake</a>
-<a href="%s">Hand off a completed measurement</a>
+<a href="#publication-handoff">Hand off a completed measurement</a>
 </nav>
-<main id="results">
+%s
+<main id="results" tabindex="-1">
 <h2>Committed records</h2>
 <ul class="cards">
 %s
@@ -601,7 +626,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
         _first_run_html(records, source_commit),
         _non_claims_html(records),
         _esc(ISSUES_INTAKE),
-        _esc(ISSUES_PUBLISH),
+        _handoff_section(records),
         cards,
     )
 
