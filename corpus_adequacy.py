@@ -642,6 +642,22 @@ def _declared_control_count(m: dict) -> int:
                for group in m["mutants"].values() for mut in group)
 
 
+def partition_declared_mutants(mutants: dict) -> tuple:
+    """Stable plan: every control, then every ordinary, plus the ordinary boundary.
+
+    Walks sorted group names, then declaration order. Returns
+    ``(plan, first_ordinary)``. ``first_ordinary`` is the index of the first
+    ordinary mutant, or ``len(plan)`` when the plan is all controls.
+    No controls leaves the current sorted-group walk unchanged.
+    """
+    if type(mutants) is not dict:
+        raise ManifestError("mutants must be an object")
+    items = [(group, mut) for group in sorted(mutants) for mut in mutants[group]]
+    controls = [(group, mut) for group, mut in items if mut.get("control")]
+    ordinary = [(group, mut) for group, mut in items if not mut.get("control")]
+    return controls + ordinary, len(controls)
+
+
 def _control_status(statuses: list[str], declared_count: int) -> str:
     """Summarise all declared controls without asking a consumer to scan rows.
 
@@ -1644,11 +1660,15 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                     "would have caught. Read the corpus's own declaration of its comparison "
                     "surface and match it." % (_selector, never_seen))
 
-        for group in sorted(m["mutants"]):
+        plan, first_ordinary = partition_declared_mutants(m["mutants"])
+        for step, (group, mut) in enumerate(plan):
+            if step == first_ordinary and declared_controls and _control_status(
+                    control_statuses, declared_controls) != "killed":
+                break
             if group not in baselines:
                 continue
             vectors, baseline, baseline_diag = baselines[group]
-            for mut in m["mutants"][group]:
+            for mut in (mut,):
                 scope = mut.get("scope", "declared")
                 sources = [_resolved_contained_source(sp, m["_repo_root"])
                            for sp in m["_source_paths"]]
@@ -1656,14 +1676,34 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                         for sp in sources]
                 total = sum(n for _, n in hits)
                 if total == 0:
-                    failures.append("%s / %s: anchor not found in any declared source"
-                                    % (group, mut["label"]))
+                    detail = "%s / %s: anchor not found in any declared source" % (
+                        group, mut["label"])
+                    if mut.get("control"):
+                        _record_control(
+                            results, control_statuses,
+                            group, mut["label"], scope, detected=False,
+                            moved=0, error=detail)
+                        failures.append(
+                            "control %r ended abnormally (%s); that is not a kill and "
+                            "this run has no adequacy score" % (mut["label"], detail))
+                    else:
+                        failures.append(detail)
                     continue
                 if total > 1:
-                    failures.append(
+                    detail = (
                         "%s / %s: the anchor occurs %d times across the declared sources, so "
                         "the substitution would pick one arbitrarily. Make it unique"
                         % (group, mut["label"], total))
+                    if mut.get("control"):
+                        _record_control(
+                            results, control_statuses,
+                            group, mut["label"], scope, detected=False,
+                            moved=0, error=detail)
+                        failures.append(
+                            "control %r ended abnormally (%s); that is not a kill and "
+                            "this run has no adequacy score" % (mut["label"], detail))
+                    else:
+                        failures.append(detail)
                     continue
 
                 target = next(sp for sp, n in hits if n == 1)
@@ -1680,6 +1720,15 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                         # typo in the substitution print as "rule covered". Measure a
                         # load-bearing arm with a variant that COMPILES, or declare it
                         # equivalent.
+                        if mut.get("control"):
+                            _record_control(
+                                results, control_statuses,
+                                group, mut["label"], scope, detected=False,
+                                moved=0, error=detail)
+                            failures.append(
+                                "control %r ended abnormally (%s); that is not a kill and "
+                                "this run has no adequacy score" % (mut["label"], detail))
+                            continue
                         results.append({"group": group, "label": mut["label"],
                                         "verdict": "unproved", "scope": scope, "moved": 0,
                                         "how": "the mutant does not build, so the corpus was "
@@ -1786,6 +1835,9 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
                                            "delete this rule and still reproduce the digest"})
                     survived += 1
 
+        for group in sorted(m["mutants"]):
+            if group not in baselines:
+                continue
             for eq in m["equivalent"].get(group, []):
                 results.append({"group": group, "label": eq["label"], "verdict": "equivalent",
                                 "how": eq["reason"], "moved": 0})

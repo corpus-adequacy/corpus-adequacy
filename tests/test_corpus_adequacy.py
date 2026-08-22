@@ -1659,7 +1659,9 @@ class ChildExitRunSemantics(unittest.TestCase):
         def fake(cmd, cwd, timeout):
             src = Path(cwd, "check.py").read_text(encoding="utf-8")
             if "'ok': 'MOVED'" in src:
-                return _completed(control_rc, control_stdout or stdout)
+                return _completed(
+                    control_rc,
+                    control_stdout or json.dumps({"ok": False, "failures": ["c2"]}))
             if "c['n'] > 1" in src and "c['n'] > 10" not in src:
                 return _completed(mutant_rc, mutant_stdout or stdout)
             return _completed(baseline_rc, stdout)
@@ -1696,7 +1698,7 @@ class ChildExitRunSemantics(unittest.TestCase):
         self.assertEqual(rep["killed"], 0)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
-    def test_moved_mutant_then_abnormal_control_has_no_score(self):
+    def test_abnormal_control_emits_no_ordinary_row_and_has_no_score(self):
         moved = json.dumps({"ok": False, "failures": ["c2"]})
         with tempfile.TemporaryDirectory() as d:
             p = BatchRunner()._corpus(Path(d))
@@ -1706,11 +1708,11 @@ class ChildExitRunSemantics(unittest.TestCase):
                         control_rc=1, mutant_stdout=moved)):
                 rep = ca.run(p)
         verdicts = {r["label"]: r for r in rep["mutants"]}
-        self.assertEqual(verdicts["threshold"]["verdict"], "killed")
+        self.assertNotIn("threshold", verdicts)
         self.assertEqual(verdicts["CONTROL"]["verdict"], "control-error")
         self.assertFalse(rep["adequate"])
         self.assertIsNone(rep["score_percent"])
-        self.assertEqual(rep["killed"], 1)
+        self.assertEqual(rep["killed"], 0)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_mutant_unexpected_exit_is_a_kill_naming_the_class(self):

@@ -162,7 +162,7 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
         def fake(cmd, cwd, timeout):
             src = Path(cwd, "check.py").read_text(encoding="utf-8")
             if "'ok': 'MOVED'" in src:
-                return _completed(control_rc, control_stdout or VALID_CHILD_JSON)
+                return _completed(control_rc, control_stdout or MOVED_JSON)
             if "c['n'] > 1" in src and "c['n'] > 10" not in src:
                 return _completed(mutant_rc, mutant_stdout or VALID_CHILD_JSON)
             return _completed(baseline_rc, VALID_CHILD_JSON)
