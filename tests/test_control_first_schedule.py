@@ -171,6 +171,34 @@ class ControlFirstCallLog(unittest.TestCase):
                     any(row["label"] in SEALED_IDS for row in report["mutants"]), mode)
                 self.assertIsNone(report["score_percent"], mode)
 
+    def _control_anchor_spec(self, *, anchor, replacement="{ctrl_x}"):
+        spec = _aee_spec()
+        spec[-1] = dict(spec[-1], anchor=anchor, replacement=replacement)
+        return spec
+
+    def _assert_control_error_skips_ordinary(self, report, calls):
+        self.assertEqual(calls, ["baseline"])
+        self.assertFalse(any(item in SEALED_IDS for item in calls))
+        self.assertEqual(report["control_status"], "error")
+        row = next(item for item in report["mutants"] if item["label"] == "CONTROL")
+        self.assertEqual(row["verdict"], "control-error")
+        self.assertFalse(any(item["label"] in SEALED_IDS for item in report["mutants"]))
+        self.assertIsNone(report["score_percent"])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_missing_control_anchor_is_control_error_and_skips_ordinary(self):
+        with tempfile.TemporaryDirectory() as d:
+            calls, report = self._run_logged(
+                Path(d), {"g": self._control_anchor_spec(anchor="{missing}")})
+        self._assert_control_error_skips_ordinary(report, calls)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_duplicate_control_anchor_is_control_error_and_skips_ordinary(self):
+        with tempfile.TemporaryDirectory() as d:
+            calls, report = self._run_logged(
+                Path(d), {"g": self._control_anchor_spec(anchor="X")})
+        self._assert_control_error_skips_ordinary(report, calls)
+
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_multi_group_runner_runs_every_control_before_any_ordinary(self):
         source = "A = {aa}\nZ = {az}\nCA = {ca}\nCZ = {cz}\n"
