@@ -5,8 +5,9 @@ One function. VERSION is read via ast.parse of corpus_adequacy.py — no import,
 no exec, no runpy. A missing local tag is honest. This is not a release,
 not a tag, not protection, and does not make 0.1.0 addressable.
 
-The dated 0.1.0 heading already in CHANGELOG (em dash, 2026-08-19) was
-introduced with VERSION itself at 7491548357d65e45cf3db5a40a05ad0375c6d02b.
+The 0.1.0 heading was introduced with VERSION itself at
+7491548357d65e45cf3db5a40a05ad0375c6d02b, dated 2026-08-19 when the version
+was named, not cut. RELEASE_DATES independently pins the actual cut date.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ RELEASE_TRUTH_BLOCK = "%s %s %s" % (
     CUT_ORDER_PHRASE,
     NO_ADDRESSABILITY_PHRASE,
 )
+RELEASE_DATES = {"0.1.0": "2026-08-22"}
 
 
 def check_version_release_truth(root: Path) -> str:
@@ -50,15 +52,17 @@ def check_version_release_truth(root: Path) -> str:
        VERSION binding, and it is the direct top-level simple Assign.
        This does not exec the module or prove globals()/exec reflection.
     2. CHANGELOG has exactly one Unreleased heading and exactly one dated
-       heading for that VERSION (real ISO calendar date).
+       heading for that VERSION. The real ISO calendar date must equal the
+       independently pinned RELEASE_DATES entry.
     3. Public README must contain RELEASE_TRUTH_BLOCK as one full
        trimmed line. The literal v<VERSION> is forbidden only while
        that tag is demonstrably absent.
     4. No git metadata: treat as no tag. In a checkout, show-ref --verify
        --quiet maps rc 1 to absent and any other nonzero to error. A
-       present tag is read via git show tag:path, run through the same
-       public-markdown + heading/docs checks, and must have an empty
-       public Unreleased body (fenced leftover notes still fail).
+       present ref must be an annotated tag object, then is read via git show
+       tag:path, run through the same public-markdown + heading/docs checks,
+       and must have an empty public Unreleased body (fenced leftover notes
+       still fail).
 
     Returns the parsed VERSION. Raises ValueError on any violation.
     """
@@ -294,9 +298,10 @@ def _check_changelog_headings(changelog: str, version: str) -> None:
             raise ValueError(
                 "CHANGELOG date is not a real calendar date: %r" % match.group(1)
             ) from exc
-        dated.append(heading)
+        dated.append((heading, match.group(1)))
     version_headings = [h for h in headings if version_heading_re.match(h)]
-    undated = [h for h in version_headings if h not in dated]
+    dated_headings = {heading for heading, _ in dated}
+    undated = [h for h in version_headings if h not in dated_headings]
     if undated:
         raise ValueError(
             "CHANGELOG heading for %s is missing an ISO date: %r" % (version, undated)
@@ -305,6 +310,14 @@ def _check_changelog_headings(changelog: str, version: str) -> None:
         raise ValueError(
             "CHANGELOG must have exactly one dated heading for %s, found %d"
             % (version, len(dated))
+        )
+    expected = RELEASE_DATES.get(version)
+    if expected is None:
+        raise ValueError("no release date is pinned for %s" % version)
+    if dated[0][1] != expected:
+        raise ValueError(
+            "CHANGELOG date for %s is %s, expected %s"
+            % (version, dated[0][1], expected)
         )
 
 
@@ -351,6 +364,17 @@ def _tag_is_present(root: Path, version: str) -> bool:
     if result.returncode != 0:
         raise ValueError(
             "git show-ref --verify failed for %s (rc=%d)" % (ref, result.returncode)
+        )
+    object_type = _git(root, "cat-file", "-t", ref)
+    if object_type.returncode != 0:
+        raise ValueError(
+            "git cat-file -t failed for %s (rc=%d)"
+            % (ref, object_type.returncode)
+        )
+    if object_type.stdout.strip() != "tag":
+        raise ValueError(
+            "%s is a %s object, not an annotated tag"
+            % (ref, object_type.stdout.strip() or "missing")
         )
     return True
 
@@ -413,8 +437,9 @@ def _honest_changelog(version: str = "0.1.0") -> str:
     return (
         "# Changelog\n\n"
         "## Unreleased\n\n"
-        "## %s — 2026-08-19\n\n"
-        "First named cut of the extracted tool.\n" % version
+        "## %s — %s\n\n"
+        "First named cut of the extracted tool.\n"
+        % (version, RELEASE_DATES.get(version, RELEASE_DATES["0.1.0"]))
     )
 
 
@@ -480,7 +505,7 @@ def _init_git_repo(root: Path) -> None:
 
 
 def _tag(root: Path, name: str) -> None:
-    _git_fixture(root, "tag", name)
+    _git_fixture(root, "tag", "-a", name, "-m", name)
 
 
 def _show_ref_result(rc: int) -> subprocess.CompletedProcess:
@@ -540,19 +565,19 @@ INVALID_SOURCES = (
 INVALID_CHANGELOGS = (
     (
         "unreleased-removed",
-        "# Changelog\n\n## 0.1.0 — 2026-08-19\n\nFirst named cut.\n",
+        "# Changelog\n\n## 0.1.0 — 2026-08-22\n\nFirst named cut.\n",
     ),
     (
         "unreleased-doubled",
         "# Changelog\n\n## Unreleased\n\n## Unreleased\n\n"
-        "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n",
+        "## 0.1.0 — 2026-08-22\n\nFirst named cut.\n",
     ),
     ("dated-removed", "# Changelog\n\n## Unreleased\n\nlater work.\n"),
     (
         "dated-doubled",
         "# Changelog\n\n## Unreleased\n\n"
-        "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n\n"
-        "## 0.1.0 — 2026-08-20\n\nDuplicate.\n",
+        "## 0.1.0 — 2026-08-22\n\nFirst named cut.\n\n"
+        "## 0.1.0 — 2026-08-23\n\nDuplicate.\n",
     ),
     (
         "dated-without-date",
@@ -566,28 +591,28 @@ INVALID_CHANGELOGS = (
     (
         "headings-only-in-fence",
         "# Changelog\n\n```\n## Unreleased\n\n"
-        "## 0.1.0 — 2026-08-19\n```\n",
+        "## 0.1.0 — 2026-08-22\n```\n",
     ),
     (
         "headings-only-in-comment",
         "# Changelog\n\n<!--\n## Unreleased\n\n"
-        "## 0.1.0 — 2026-08-19\n-->\n",
+        "## 0.1.0 — 2026-08-22\n-->\n",
     ),
     (
         "headings-after-unclosed-comment",
         "# Changelog\n\n<!--\n## Unreleased\n\n"
-        "## 0.1.0 — 2026-08-19\n",
+        "## 0.1.0 — 2026-08-22\n",
     ),
     (
         "unreleased-indented-duplicate",
         "# Changelog\n\n## Unreleased\n\n ## Unreleased\n\n"
-        "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n",
+        "## 0.1.0 — 2026-08-22\n\nFirst named cut.\n",
     ),
     (
         "dated-indented-duplicate",
         "# Changelog\n\n## Unreleased\n\n"
-        "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n\n"
-        " ## 0.1.0 — 2026-08-20\n\nDuplicate.\n",
+        "## 0.1.0 — 2026-08-22\n\nFirst named cut.\n\n"
+        " ## 0.1.0 — 2026-08-23\n\nDuplicate.\n",
     ),
 )
 
@@ -595,6 +620,22 @@ INVALID_CHANGELOGS = (
 class VersionReleaseTruth(unittest.TestCase):
     def test_checkout_satisfies_version_release_truth(self):
         self.assertEqual(check_version_release_truth(REPO_ROOT), "0.1.0")
+
+    def test_release_date_is_pinned_independently(self):
+        with _temp_tree(
+            changelog=_honest_changelog().replace(
+                RELEASE_DATES["0.1.0"], "2026-08-23"
+            )
+        ) as root:
+            with self.assertRaises(ValueError):
+                check_version_release_truth(root)
+
+    def test_lightweight_tag_is_not_a_release_tag(self):
+        with _temp_tree() as root:
+            _init_git_repo(root)
+            _git_fixture(root, "tag", "v0.1.0")
+            with self.assertRaises(ValueError):
+                check_version_release_truth(root)
 
     def test_module_docstring_names_the_root_invocation(self):
         source = (REPO_ROOT / "corpus_adequacy.py").read_text(encoding="utf-8")
@@ -707,7 +748,7 @@ class VersionReleaseTruth(unittest.TestCase):
                     "changelog": (
                         "# Changelog\n\n## Unreleased\n\n"
                         "```\nLater work.\n```\n\n"
-                        "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n"
+                        "## 0.1.0 — 2026-08-22\n\nFirst named cut.\n"
                     )
                 },
             ),
@@ -721,7 +762,7 @@ class VersionReleaseTruth(unittest.TestCase):
                     "changelog": (
                         "# Changelog\n\n## Unreleased\n\n"
                         "### Added\n\nLater work.\n\n"
-                        "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n"
+                        "## 0.1.0 — 2026-08-22\n\nFirst named cut.\n"
                     )
                 },
             ),
@@ -747,7 +788,7 @@ class VersionReleaseTruth(unittest.TestCase):
                 "nonempty-unreleased",
                 True,
                 "# Changelog\n\n## Unreleased\n\nLater work.\n\n"
-                "## 0.1.0 — 2026-08-19\n\nFirst named cut.\n",
+                "## 0.1.0 — 2026-08-22\n\nFirst named cut.\n",
                 True,
             ),
         )
