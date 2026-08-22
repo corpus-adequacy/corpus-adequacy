@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase B PREPARE + inert OCI envelope for issue #211. Stdlib only.
 
-Online materialization (pins, image, cargo vendor --locked) then sealed
+Online materialization (pinned archives, cargo vendor --locked) then sealed
 OCI with network none after_materialization. subject binary is not
 produced here. Does not invoke the checker. Not a scientific measurement.
 """
@@ -9,7 +9,6 @@ produced here. Does not invoke the checker. Not a scientific measurement.
 from __future__ import annotations
 
 import hashlib
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -25,6 +24,12 @@ import bounded_run as br  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
 from aee_checker_sealed_common import (  # noqa: E402
     DECLARED_CEILINGS,
+    EMPTY_SHA256,
+    FROZEN_CORPUS_MANIFEST_SHA256,
+    FROZEN_CORPUS_TREE_SHA256,
+    FROZEN_SUBJECT_TREE_SHA256,
+    MATERIALIZE_CEILINGS,
+    MaterializeBudget,
     HEX64,
     MEMORY_4G,
     TMPFS_BYTES,
@@ -35,20 +40,53 @@ from aee_checker_sealed_common import (  # noqa: E402
     load_strict,
     verify_file_digest,
 )
+from aee_checker_sealed_materialize import (  # noqa: E402
+    CORPUS_ID_COUNT,
+    MATERIALIZE_CAP_BYTES,
+    MATERIALIZE_CAP_FILES,
+    RUST_IMAGE,
+    abort_atomic_dest,
+    archive_member_rel,
+    begin_atomic_dest,
+    bind_vendor_config,
+    charge_existing_tree,
+    commit_atomic_dest,
+    download_bounded,
+    extract_pinned_archive,
+    materialize_pinned,
+    pull_rust_image,
+    refuse_archive_link,
+    refuse_duplicate_member,
+    require_corpus_id_set,
+    require_frozen_manifest_sha,
+    require_frozen_trees,
+    require_vendor_outside,
+    require_vendor_toolchain,
+    stream_archive_member,
+    tree_sha256,
+    vendor_create_argv,
+    vendor_locked,
+    verify_materialized,
+)
 from aee_checker_sealed_oci import (  # noqa: E402
+    EXPECTED_REFUSALS,
     INSPECT_SNAPSHOT_KEYS,
     PROBE_MECHANISMS,
     PROBE_ROW_KEYS,
     build_inert_image,
     classify_container_result,
+    classify_inspect_status,
     container_exists,
     defense_in_depth_from_inspect,
     docker_bounded,
     docker_create_argv,
+    docker_ok,
     image_platform,
+    inspect_lookup,
     parse_inspect_payload,
     record_probe_pair,
     require_container_absent,
+    require_docker_ready,
     require_image_id,
     require_local_image,
     require_probe_evidence,
@@ -58,14 +96,32 @@ from aee_checker_sealed_oci import (  # noqa: E402
 
 PREPARE_SCHEMA = "corpus-adequacy.aee-checker-sealed.prepare.v0"
 PREPARE_PART_KEYS = (
-    "ceilings", "execution", "image", "materialized", "network",
-    "non_claims", "oci", "pins", "probe_evidence", "runtime", "toolchain",
+    "ceilings", "execution", "image", "materialize_ceilings", "materialized",
+    "network", "non_claims", "oci", "pins", "probe_evidence", "runtime",
+    "toolchain",
 )
+SEALED_PROBE_PAIRS = {
+    "deadline": ("deadline-ok", "deadline"),
+    "disk": ("tmpfs-bytes-ok", "tmpfs-bytes"),
+    "file-count": ("tmpfs-inodes-ok", "tmpfs-inodes"),
+    "output": ("output-ok", "output"),
+    "protocol-exit": ("ok", "exit2-json"),
+}
 PREPARE_KEYS = ("phase", "schema") + PREPARE_PART_KEYS
 EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_run.py",
+    "measurements/aee_checker_sealed_common.py",
+    "measurements/aee_checker_sealed_oci.py",
+    "measurements/aee_checker_sealed_materialize.py",
     "execution/aee-checker-sealed/Containerfile",
     "execution/aee-checker-sealed/probe.sh",
+    "execution/aee-checker-sealed/cargo-config.toml",
+)
+MATERIALIZED_KEYS = (
+    "corpus_digest", "corpus_id_count", "corpus_id_set_sha256",
+    "corpus_manifest_sha256", "corpus_tree_sha256", "subject_binary",
+    "subject_check_rs_sha256", "subject_tree_sha256", "tool_config_sha256",
+    "vendor_outside_subject", "vendor_sha256",
 )
 PHASE_A_INSTRUMENT_COMMIT = "1347651c2087cbd5c2e958a758b380a9a6cfc67d"
 PHASE_A_PIN_DIGESTS = {
@@ -75,8 +131,14 @@ PHASE_A_PIN_DIGESTS = {
     "sites.json": "6223a15c5db5a7c19c4633474875615ec61f3d710e092939f46b80ee986e0c4c",
 }
 ADAPTER_DIGEST = "130b36d50df8a286954649771c9d65f35541ecd2f7007918ce5b261ace3aa769"
-EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
-_TIMING_KEYS = frozenset({"duration", "elapsed", "elapsed_seconds", "timing", "wall_ms"})
+_TIMING_KEYS = frozenset({
+    "built_at", "created", "created_at", "ctime", "duration", "elapsed",
+    "elapsed_seconds", "host_path", "mtime", "timestamp", "timing", "wall_ms",
+})
+_HOST_MARKERS = (
+    "/Users/", "/home/", "/private/tmp/", "/private/var/", "/var/folders/",
+    "C:/", "C:\\",
+)
 NETWORK_CUTOFF = {
     "cutoff": "after_materialization",
     "materialization": "online",
@@ -122,119 +184,11 @@ def verify_phase_a_frozen(pins_dir: Path, *, adapter: Path | None = None) -> dic
     return pins
 
 
-def require_vendor_outside(subject: Path, vendor: Path) -> None:
-    subject, vendor = Path(subject).resolve(), Path(vendor).resolve()
-    try:
-        vendor.relative_to(subject)
-    except ValueError:
-        return
-    raise PrepareError("vendor must be outside the subject root")
-
-
-def tree_sha256(root: Path) -> str:
-    root = Path(root)
-    files = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        for name in list(dirnames) + filenames:
-            path = Path(dirpath) / name
-            if path.is_symlink():
-                raise PrepareError("symlink in tree")
-        for name in filenames:
-            path = Path(dirpath) / name
-            if not path.is_file():
-                raise PrepareError("non-regular in tree")
-            files.append(path.relative_to(root).as_posix())
-    if not files:
-        raise PrepareError("empty vendor tree")
-    digest = hashlib.sha256()
-    for rel in sorted(files):
-        raw = (root / rel).read_bytes()
-        digest.update(rel.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(len(raw)).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(raw)
-    return digest.hexdigest()
-
-
 def _git_ok(args, cwd: Path, timeout: int = 60) -> str:
     proc = br._run_capped(["git", *args], Path(cwd), timeout)
     if proc.returncode != 0:
         raise PrepareError("git failed")
     return (proc.stdout or "").strip()
-
-
-def fetch_commit(url: str, commit: str, dest: Path) -> Path:
-    dest = Path(dest)
-    if dest.exists():
-        raise PrepareError("fetch dest exists")
-    dest.mkdir(parents=True)
-    _git_ok(["init", str(dest)], Path.cwd(), 60)
-    _git_ok(["-C", str(dest), "remote", "add", "origin", url], dest, 60)
-    _git_ok(["-C", str(dest), "fetch", "--depth", "1", "origin", commit], dest, 300)
-    _git_ok(["-C", str(dest), "checkout", "--detach", "FETCH_HEAD"], dest, 60)
-    head = _git_ok(["-C", str(dest), "rev-parse", "HEAD"], dest, 60)
-    if head != commit:
-        raise PrepareError("fetched commit mismatch")
-    return dest
-
-
-def verify_materialized(pins: dict, subject: Path, corpus: Path) -> dict:
-    check = Path(subject) / pins["subject"]["path"]
-    raw = verify_file_digest(check, pins["subject"]["check_rs_sha256"])
-    manifest_path = Path(corpus) / "vectors" / "MANIFEST.json"
-    try:
-        manifest_raw = ca.read_bounded_regular_file(manifest_path)
-    except ca.ManifestError as exc:
-        raise PrepareError(str(exc)) from exc
-    manifest = load_strict(manifest_raw)
-    if manifest.get("corpusDigest") != pins["corpus"]["corpusDigest"]:
-        raise PrepareError("corpus digest mismatch")
-    ids = []
-    for row in manifest.get("vectors") or []:
-        if type(row) is dict and isinstance(row.get("id"), str):
-            ids.append(row["id"])
-    return {
-        "corpus_digest": manifest["corpusDigest"],
-        "corpus_id_set_sha256": hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest(),
-        "subject_binary": False,
-        "subject_check_rs_sha256": hashlib.sha256(raw).hexdigest(),
-    }
-
-
-def vendor_locked(subject: Path, vendor: Path) -> str:
-    require_vendor_outside(subject, vendor)
-    vendor = Path(vendor)
-    vendor.mkdir(parents=True, exist_ok=True)
-    proc = br._run_capped(
-        ["cargo", "vendor", "--locked", str(vendor.resolve())],
-        Path(subject),
-        300,
-    )
-    if proc.returncode != 0:
-        raise PrepareError("cargo vendor --locked failed")
-    digest = tree_sha256(vendor)
-    if digest == EMPTY_SHA256:
-        raise PrepareError("empty vendor")
-    return digest
-
-
-def materialize_pinned(pins: dict, work: Path) -> dict:
-    work = Path(work)
-    subject, corpus, vendor = work / "subject", work / "corpus", work / "vendor"
-    fetch_commit(
-        "https://github.com/%s.git" % pins["subject"]["repository"],
-        pins["subject"]["commit"], subject)
-    fetch_commit(
-        "https://github.com/%s.git" % pins["corpus"]["repository"],
-        pins["corpus"]["commit"], corpus)
-    verified = verify_materialized(pins, subject, corpus)
-    verified["vendor_outside_subject"] = True
-    verified["vendor_sha256"] = vendor_locked(subject, vendor)
-    verified["subject"] = subject
-    verified["corpus"] = corpus
-    verified["vendor"] = vendor
-    return verified
 
 
 def _distinct_identities(pins: dict, execution: dict) -> None:
@@ -278,50 +232,51 @@ def execution_identity(root: Path) -> dict:
     return identity
 
 
-def record_toolchain() -> dict:
-    rustc = br._run_capped(["rustc", "-Vv"], Path.cwd(), 30)
-    cargo = br._run_capped(["cargo", "-V"], Path.cwd(), 30)
-    if rustc.returncode != 0 or cargo.returncode != 0:
-        raise PrepareError("toolchain observation failed")
-    return {
-        "cargo_V": (cargo.stdout or "").strip(),
-        "observation": "host; checker was not run",
-        "rustc_Vv": rustc.stdout or "",
-    }
+def record_toolchain(toolchain: dict) -> dict:
+    return require_vendor_toolchain(toolchain)
 
 
 def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = None) -> bytes:
     dest = Path(dest)
     pins_doc = verify_phase_a_frozen(Path(pins_dir), adapter=adapter)
-    if dest.exists():
-        raise PrepareError("dest exists")
+    require_docker_ready()
     image_id = build_inert_image(Path(root) / "execution" / "aee-checker-sealed")
-    with tempfile.TemporaryDirectory() as tmp:
-        mats = materialize_pinned(pins_doc, Path(tmp) / "materialize")
+    template = Path(root) / "execution" / "aee-checker-sealed" / "cargo-config.toml"
+    with tempfile.TemporaryDirectory() as scratch:
+        pre_mounts = {name: Path(scratch) / name for name in ("input", "vendor", "tool")}
+        for path in pre_mounts.values():
+            path.mkdir()
+        network_control = run_inert_probe(
+            image_id=image_id, mode="network", mounts=pre_mounts,
+            name_prefix="aee-sealed-prep-", sealed=False)
+    state = begin_atomic_dest(dest)
+    try:
+        mats = materialize_pinned(pins_doc, state["staging"], template=template)
         mounts = {
             "input": mats["corpus"],
             "vendor": mats["vendor"],
-            "tool": Path(tmp) / "tool",
+            "tool": mats["tool"],
         }
-        mounts["tool"].mkdir()
-        pairs = (
-            ("deadline", "deadline-ok", True, "deadline", True),
-            ("disk", "tmpfs-bytes-ok", True, "tmpfs-bytes", True),
-            ("file-count", "tmpfs-inodes-ok", True, "tmpfs-inodes", True),
-            ("network-off", "network", False, "network", True),
-            ("output", "output-ok", True, "output", True),
-            ("protocol-exit", "ok", True, "exit2-json", True),
-        )
         evidence = []
-        for mechanism, control_mode, control_sealed, refusal_mode, refusal_sealed in pairs:
+        for mechanism in PROBE_MECHANISMS:
+            if mechanism == "network-off":
+                evidence.append(record_probe_pair(
+                    mechanism,
+                    network_control,
+                    run_inert_probe(
+                        image_id=image_id, mode="network", mounts=mounts,
+                        name_prefix="aee-sealed-prep-", sealed=True),
+                ))
+                continue
+            control_mode, refusal_mode = SEALED_PROBE_PAIRS[mechanism]
             evidence.append(record_probe_pair(
                 mechanism,
                 run_inert_probe(
                     image_id=image_id, mode=control_mode, mounts=mounts,
-                    name_prefix="aee-sealed-prep-", sealed=control_sealed),
+                    name_prefix="aee-sealed-prep-", sealed=True),
                 run_inert_probe(
                     image_id=image_id, mode=refusal_mode, mounts=mounts,
-                    name_prefix="aee-sealed-prep-", sealed=refusal_sealed),
+                    name_prefix="aee-sealed-prep-", sealed=True),
             ))
         parts = {
             "ceilings": dict(DECLARED_CEILINGS),
@@ -332,14 +287,8 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
                 "kind": "inert-probe",
                 "platform": image_platform(image_id),
             },
-            "materialized": {
-                "corpus_digest": mats["corpus_digest"],
-                "corpus_id_set_sha256": mats["corpus_id_set_sha256"],
-                "subject_binary": False,
-                "subject_check_rs_sha256": mats["subject_check_rs_sha256"],
-                "vendor_outside_subject": True,
-                "vendor_sha256": mats["vendor_sha256"],
-            },
+            "materialize_ceilings": dict(MATERIALIZE_CEILINGS),
+            "materialized": {key: mats[key] for key in MATERIALIZED_KEYS},
             "network": dict(NETWORK_CUTOFF),
             "non_claims": list(NON_CLAIMS),
             "oci": OCI_CONTRACT,
@@ -360,9 +309,14 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
                     ["version", "--format", "{{.Server.Version}}"]).decode("utf-8").strip(),
                 "observation": "host-local; not a portable bound",
             },
-            "toolchain": record_toolchain(),
+            "toolchain": record_toolchain(mats["toolchain"]),
         }
-    return emit_prepare_v0(parts, dest)
+        raw = emit_prepare_v0(parts, state["staging"] / "prepare.v0.json")
+        commit_atomic_dest(state)
+    except Exception:
+        abort_atomic_dest(state)
+        raise
+    return raw
 
 
 def _refuse_timings(doc) -> None:
@@ -375,6 +329,9 @@ def _refuse_timings(doc) -> None:
             stack.extend(item.values())
         elif isinstance(item, list):
             stack.extend(item)
+        elif isinstance(item, str):
+            if any(marker in item for marker in _HOST_MARKERS):
+                raise PrepareError("prepare must not store host paths")
 
 
 def emit_prepare_v0(parts: dict, dest: Path) -> bytes:
@@ -382,16 +339,28 @@ def emit_prepare_v0(parts: dict, dest: Path) -> bytes:
     _distinct_identities(parts["pins"], parts["execution"])
     if parts["ceilings"] != DECLARED_CEILINGS:
         raise PrepareError("ceilings must be the declared portable limits")
+    if parts["materialize_ceilings"] != MATERIALIZE_CEILINGS:
+        raise PrepareError("materialize ceilings must be the declared portable limits")
     if parts["network"] != NETWORK_CUTOFF:
         raise PrepareError("network cutoff")
     materialized = parts["materialized"]
-    if type(materialized) is not dict or _OUTCOME_KEYS.intersection(materialized):
+    exact_object(materialized, MATERIALIZED_KEYS, "materialized")
+    require_frozen_trees(
+        materialized.get("subject_tree_sha256"),
+        materialized.get("corpus_tree_sha256"),
+    )
+    if _OUTCOME_KEYS.intersection(materialized):
         raise PrepareError("prepare must not record per-vector outcomes")
     if materialized.get("subject_binary") is not False:
         raise PrepareError("subject binary is not produced here")
     if materialized.get("vendor_sha256") == EMPTY_SHA256:
         raise PrepareError("empty vendor")
+    if materialized.get("corpus_id_count") != CORPUS_ID_COUNT:
+        raise PrepareError("corpus must list exactly %d unique ids" % CORPUS_ID_COUNT)
+    if materialized.get("corpus_manifest_sha256") != FROZEN_CORPUS_MANIFEST_SHA256:
+        raise PrepareError("corpus manifest sha mismatch")
     require_probe_evidence(parts["probe_evidence"])
+    require_vendor_toolchain(parts["toolchain"])
     exact_object(parts["oci"], OCI_CONTRACT, "oci")
     if parts["oci"].get("memory_swap_pids_claim") != "inspect-verified; not efficacy-tested":
         raise PrepareError("memory/swap/pids must remain not efficacy-tested")
@@ -417,7 +386,7 @@ def main(argv: list[str]) -> int:
         return 0
     sys.stderr.write(
         "usage: aee_checker_sealed_run.py verify-phase-a [pins-dir]\n"
-        "       aee_checker_sealed_run.py prepare <pins-dir> <prepare.v0>\n")
+        "       aee_checker_sealed_run.py prepare <pins-dir> <out-dir>\n")
     return 2
 
 

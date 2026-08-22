@@ -28,14 +28,36 @@ INSPECT_SNAPSHOT_KEYS = (
 PROBE_MECHANISMS = (
     "deadline", "disk", "file-count", "network-off", "output", "protocol-exit",
 )
+EXPECTED_REFUSALS = {
+    "deadline": "deadline",
+    "disk": "abnormal",
+    "file-count": "abnormal",
+    "network-off": "abnormal",
+    "output": "output_cap",
+    "protocol-exit": "abnormal",
+}
 PROBE_ROW_KEYS = ("control", "inspect", "mechanism", "refusal")
+_INSPECT_ABSENT = ("no such object", "no such container")
 
 
-def docker_bounded(args, *, cwd: Path | None = None, timeout: int = 60) -> bytes:
+def require_docker_ready() -> str:
+    proc = br._run_capped(
+        ["docker", "info", "--format", "{{.ServerVersion}}"], Path.cwd(), 15)
+    version = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not version:
+        raise PrepareError("docker daemon is not ready")
+    return version
+
+
+def docker_ok(args, *, cwd: Path | None = None, timeout: int = 60):
     proc = br._run_capped(["docker", *args], Path(cwd) if cwd else Path.cwd(), timeout)
     if proc.returncode != 0:
         raise PrepareError("docker %s failed" % (args[0] if args else "cmd"))
-    text = proc.stdout or ""
+    return proc
+
+
+def docker_bounded(args, *, cwd: Path | None = None, timeout: int = 60) -> bytes:
+    text = docker_ok(args, cwd=cwd, timeout=timeout).stdout or ""
     if not str(text).strip():
         raise PrepareError("docker output empty")
     return text.encode("utf-8")
@@ -144,17 +166,34 @@ def image_platform(image_id: str) -> str:
     return "%s/%s" % (os_name, arch)
 
 
+def classify_inspect_status(returncode, stdout, stderr) -> str:
+    if type(returncode) is not int:
+        raise PrepareError("inspect infrastructure")
+    if returncode == 0:
+        if not str(stdout or "").strip():
+            raise PrepareError("inspect empty")
+        return "present"
+    text = "%s\n%s" % (stderr or "", stdout or "")
+    lowered = text.lower()
+    if any(token in lowered for token in _INSPECT_ABSENT):
+        return "absent"
+    raise PrepareError("inspect infrastructure")
+
+
+def inspect_lookup(name: str):
+    proc = br._run_capped(["docker", "inspect", name], Path.cwd(), 30)
+    status = classify_inspect_status(proc.returncode, proc.stdout or "", proc.stderr or "")
+    if status == "absent":
+        return None
+    return parse_inspect_payload((proc.stdout or "").encode("utf-8"))
+
+
 def container_exists(name: str) -> bool:
-    try:
-        docker_bounded(["inspect", name])
-    except PrepareError:
-        return False
-    return True
+    return inspect_lookup(name) is not None
 
 
-def require_container_absent(name: str, exists: bool | None = None) -> None:
-    present = container_exists(name) if exists is None else bool(exists)
-    if present:
+def require_container_absent(name: str) -> None:
+    if inspect_lookup(name) is not None:
         raise PrepareError("container still present: %s" % name)
 
 
@@ -206,17 +245,20 @@ def classify_container_result(returncode, raw: bytes) -> dict:
 
 
 def record_probe_pair(mechanism: str, control: dict, refusal: dict) -> dict:
+    expected = EXPECTED_REFUSALS.get(mechanism)
+    if expected is None:
+        raise PrepareError("unknown probe mechanism")
     if control.get("state") != "completed":
         raise PrepareError("probe pair missing control")
-    if refusal.get("state") in (None, "completed"):
-        raise PrepareError("probe pair missing refusal")
+    if refusal.get("state") != expected:
+        raise PrepareError("probe refusal must be %s" % expected)
     if type(control.get("contract")) is not dict or type(refusal.get("contract")) is not dict:
         raise PrepareError("probe pair missing inspect")
     return {
         "control": "completed",
         "inspect": {"control": control["contract"], "refusal": refusal["contract"]},
         "mechanism": mechanism,
-        "refusal": refusal["state"],
+        "refusal": expected,
     }
 
 
@@ -227,10 +269,9 @@ def require_probe_evidence(rows) -> None:
         exact_object(row, PROBE_ROW_KEYS, "probe evidence")
         if row["mechanism"] != expected or row["control"] != "completed":
             raise PrepareError("probe pair missing control")
-        if row["refusal"] in (None, "completed"):
-            raise PrepareError("probe pair missing refusal")
-        if expected == "protocol-exit" and row["refusal"] != "abnormal":
-            raise PrepareError("protocol-exit must be abnormal")
+        want = EXPECTED_REFUSALS[expected]
+        if row["refusal"] != want:
+            raise PrepareError("%s refusal must be %s" % (expected, want))
         exact_object(row["inspect"], ("control", "refusal"), "probe inspect")
         for side in row["inspect"].values():
             exact_object(side, INSPECT_SNAPSHOT_KEYS, "inspect snapshot")
@@ -281,8 +322,9 @@ def run_inert_probe(
         if created:
             try:
                 docker_bounded(["rm", "-f", name])
-            except PrepareError:
-                pass
+            except PrepareError as exc:
+                require_container_absent(name)
+                raise PrepareError("container remove failed") from exc
     require_container_absent(name)
     if error is not None:
         raise error

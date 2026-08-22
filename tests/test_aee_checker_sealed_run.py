@@ -9,18 +9,25 @@ input, wrong digests, abnormal exits, and live inert probes.
 from __future__ import annotations
 
 import hashlib
+import inspect
+import io
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import threading
 import unittest
+import unittest.mock as mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
+import aee_checker_sealed_materialize as mat  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
 
 PREREG = REPO_ROOT / "measurements" / "aee-checker-25b9dfa"
@@ -55,13 +62,11 @@ FORBIDDEN_PUBLIC = (
 )
 EMPTY_VENDOR = hashlib.sha256(b"").hexdigest()
 MEMORY_4G = 4 * 1024 * 1024 * 1024
-WINDOWS_CRLF_ADAPTER = (
-    "53d1e5449792b261174f92ba70d49a01d1bc8dc037b5812a7cbe26448bc58c1d"
-)
 AEE_LF_ATTRS = (
     "adapters/aee_checker_sealed.py text eol=lf",
     "measurements/aee-checker-25b9dfa/** text eol=lf",
     "measurements/aee_checker_sealed_common.py text eol=lf",
+    "measurements/aee_checker_sealed_materialize.py text eol=lf",
     "measurements/aee_checker_sealed_oci.py text eol=lf",
     "measurements/aee_checker_sealed_run.py text eol=lf",
     "tests/test_aee_checker_sealed_run.py text eol=lf",
@@ -74,11 +79,28 @@ AEE_LF_PATHS = (
     "measurements/aee-checker-25b9dfa/pins.json",
     "measurements/aee-checker-25b9dfa/sites.json",
     "measurements/aee_checker_sealed_common.py",
+    "measurements/aee_checker_sealed_materialize.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_run.py",
     "tests/test_aee_checker_sealed_run.py",
     "execution/aee-checker-sealed/Containerfile",
     "execution/aee-checker-sealed/probe.sh",
+    "execution/aee-checker-sealed/cargo-config.toml",
+)
+REQUIRED_EXECUTION_PATHS = (
+    "measurements/aee_checker_sealed_run.py",
+    "measurements/aee_checker_sealed_common.py",
+    "measurements/aee_checker_sealed_oci.py",
+    "measurements/aee_checker_sealed_materialize.py",
+    "execution/aee-checker-sealed/Containerfile",
+    "execution/aee-checker-sealed/probe.sh",
+    "execution/aee-checker-sealed/cargo-config.toml",
+)
+PHASE_B_PY = (
+    "measurements/aee_checker_sealed_run.py",
+    "measurements/aee_checker_sealed_common.py",
+    "measurements/aee_checker_sealed_oci.py",
+    "measurements/aee_checker_sealed_materialize.py",
 )
 
 
@@ -115,15 +137,10 @@ def _probe_row(mechanism: str, refusal: str, *, control_net="none") -> dict:
 
 def _committed_execution_root(tmp: Path) -> Path:
     root = tmp / "exec-root"
-    sealed = root / "execution" / "aee-checker-sealed"
-    sealed.mkdir(parents=True)
-    (root / "measurements").mkdir()
-    shutil.copy2(
-        REPO_ROOT / "measurements" / "aee_checker_sealed_run.py",
-        root / "measurements" / "aee_checker_sealed_run.py",
-    )
-    shutil.copy2(CONTAINERFILE, sealed / "Containerfile")
-    shutil.copy2(CONTAINERFILE.parent / "probe.sh", sealed / "probe.sh")
+    for rel in run.EXECUTION_PATHS:
+        dest = root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / rel, dest)
     subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
     subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
     subprocess.run(
@@ -131,6 +148,33 @@ def _committed_execution_root(tmp: Path) -> Path:
         cwd=root, check=True, capture_output=True,
     )
     return root
+
+
+def _write_corpus(corpus: Path, digest: str, count: int = 250) -> bytes:
+    vectors = []
+    for i in range(count):
+        rel = "accept/%03d.json" % i
+        path = corpus / "vectors" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{}\n")
+        vectors.append({"id": "v-%03d" % i, "file": rel})
+    manifest = {"corpusDigest": digest, "vectors": vectors}
+    raw = (json.dumps(manifest, sort_keys=True) + "\n").encode("utf-8")
+    (corpus / "vectors" / "MANIFEST.json").write_bytes(raw)
+    return raw
+
+
+def _tiny_tar(dest: Path, files: dict[str, bytes], prefix: str = "repo-abc", extras=()) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(dest, "w:gz") as tar:
+        for rel, data in files.items():
+            info = tarfile.TarInfo("%s/%s" % (prefix, rel))
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        for info, data in extras:
+            payload = io.BytesIO(data) if data is not None else None
+            tar.addfile(info, payload)
+    return dest
 
 
 def _git_eol(root: Path, rel: str) -> str:
@@ -172,18 +216,16 @@ def _write_json(path: Path, text: str) -> Path:
     return path
 
 
-def _docker_available() -> bool:
-    exe = shutil.which("docker")
-    if exe is None:
-        return False
+def _docker_ready() -> bool:
     try:
-        proc = subprocess.run([exe, "info"], capture_output=True, timeout=15)
-    except (OSError, subprocess.TimeoutExpired):
+        run.require_docker_ready()
+        return True
+    except run.PrepareError:
         return False
-    return proc.returncode == 0
 
 
-DOCKER = _docker_available()
+DOCKER = _docker_ready()
+CARGO = shutil.which("cargo") is not None
 
 
 class PhaseAImmutable(unittest.TestCase):
@@ -200,13 +242,14 @@ class PhaseAImmutable(unittest.TestCase):
             sites = json.loads((pins / "sites.json").read_text(encoding="utf-8"))
             sites["selected_count"] = 6
             (pins / "sites.json").write_text(json.dumps(sites), encoding="utf-8")
-            dest = Path(d) / "out" / "prepare.v0.json"
+            dest = Path(d) / "out"
             with self.assertRaises(run.PrepareError) as ctx:
                 run.verify_phase_a_frozen(pins)
             self.assertIn("phase-a", str(ctx.exception).lower())
             with self.assertRaises(run.PrepareError):
                 run.prepare(pins, dest, root=REPO_ROOT)
             self.assertFalse(dest.exists())
+            self.assertEqual(list(Path(d).glob(".out.partial-*")), [])
 
     def test_frozen_dir_still_has_only_prereg_files(self):
         names = sorted(p.name for p in PREREG.iterdir())
@@ -416,22 +459,31 @@ class PrepareEvidence(unittest.TestCase):
                 "corpus_digest": (
                     "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579"
                 ),
+                "corpus_id_count": 250,
                 "corpus_id_set_sha256": "dd" * 32,
+                "corpus_manifest_sha256": run.FROZEN_CORPUS_MANIFEST_SHA256,
+                "corpus_tree_sha256": run.FROZEN_CORPUS_TREE_SHA256,
+                "subject_tree_sha256": run.FROZEN_SUBJECT_TREE_SHA256,
+                "tool_config_sha256": "ee" * 32,
                 "vendor_sha256": "aa" * 32,
                 "vendor_outside_subject": True,
                 "subject_binary": False,
             },
             "image": {"id": "sha256:" + ("ab" * 32), "kind": "inert-probe"},
             "toolchain": {
-                "rustc_Vv": "rustc test",
-                "cargo_V": "cargo test",
-                "observation": "host; checker was not run",
+                "cargo_V": "cargo 1.92.0 (test)",
+                "image_id": "sha256:" + ("cd" * 32),
+                "index": run.RUST_IMAGE,
+                "observation": "vendor-image; checker was not run",
+                "platform": "linux/arm64",
+                "rustc_Vv": "rustc 1.92.0 (test)\n",
             },
             "runtime": {
                 "docker": "test",
                 "observation": "host-local; not a portable bound",
             },
             "ceilings": dict(run.DECLARED_CEILINGS),
+            "materialize_ceilings": dict(run.MATERIALIZE_CEILINGS),
             "probe_evidence": [
                 _probe_row("deadline", "deadline"),
                 _probe_row("disk", "abnormal"),
@@ -484,6 +536,16 @@ class PrepareEvidence(unittest.TestCase):
         self.assertEqual(doc["network"]["cutoff"], "after_materialization")
         self.assertNotEqual(doc["network"]["materialization"], "none")
 
+    def test_network_positive_runs_before_materialize_cutoff(self):
+        src = inspect.getsource(run.prepare)
+        cutoff = src.index("materialize_pinned")
+        self.assertLess(src.index("sealed=False"), cutoff)
+        self.assertEqual(src.count("sealed=False"), 1)
+        self.assertNotIn("sealed=False", src[cutoff:])
+        self.assertIn("sealed=True", src[cutoff:])
+        self.assertEqual(list(run.PROBE_MECHANISMS)[3], "network-off")
+        self.assertNotIn("network-off", run.SEALED_PROBE_PAIRS)
+
     def test_prepare_v0_stores_no_timings(self):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "prepare.v0.json"
@@ -509,6 +571,23 @@ class PrepareEvidence(unittest.TestCase):
             with self.assertRaises(run.PrepareError) as ctx:
                 run.emit_prepare_v0(parts, dest)
             self.assertRegex(str(ctx.exception).lower(), r"declared|ceiling")
+
+    def test_materialize_ceilings_are_separate_from_probe_tmpfs(self):
+        self.assertNotEqual(run.MATERIALIZE_CEILINGS, run.DECLARED_CEILINGS)
+        self.assertNotEqual(
+            run.MATERIALIZE_CEILINGS["disk_bytes"], run.DECLARED_CEILINGS["disk_bytes"])
+        self.assertNotEqual(
+            run.MATERIALIZE_CEILINGS["entry_count"], run.DECLARED_CEILINGS["file_count"])
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            doc = json.loads(run.emit_prepare_v0(self._parts(), dest).decode("utf-8"))
+            self.assertEqual(doc["materialize_ceilings"], run.MATERIALIZE_CEILINGS)
+            self.assertEqual(doc["ceilings"], run.DECLARED_CEILINGS)
+            parts = self._parts()
+            parts["materialize_ceilings"] = dict(run.DECLARED_CEILINGS)
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"materialize|ceiling")
 
     def test_probe_mechanisms_include_protocol_exit(self):
         self.assertIn("protocol-exit", run.PROBE_MECHANISMS)
@@ -536,6 +615,23 @@ class PrepareEvidence(unittest.TestCase):
             with self.assertRaises(run.PrepareError) as ctx:
                 run.emit_prepare_v0(parts, dest)
             self.assertRegex(str(ctx.exception).lower(), r"abnormal|protocol-exit")
+
+    def test_neighboring_refusal_cannot_satisfy_a_pinned_mechanism(self):
+        self.assertEqual(run.EXPECTED_REFUSALS["deadline"], "deadline")
+        self.assertEqual(run.EXPECTED_REFUSALS["output"], "output_cap")
+        self.assertEqual(run.EXPECTED_REFUSALS["disk"], "abnormal")
+        self.assertEqual(run.EXPECTED_REFUSALS["file-count"], "abnormal")
+        self.assertEqual(run.EXPECTED_REFUSALS["network-off"], "abnormal")
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = self._parts()
+            parts["probe_evidence"] = [
+                {**row, "refusal": "deadline"} if row["mechanism"] == "disk" else row
+                for row in parts["probe_evidence"]
+            ]
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"disk|abnormal|refusal")
 
     def test_probe_evidence_refuses_a_refusal_without_its_control(self):
         with tempfile.TemporaryDirectory() as d:
@@ -594,6 +690,20 @@ class PrepareEvidence(unittest.TestCase):
                 run.emit_prepare_v0(parts, right),
             )
 
+    def test_host_path_or_timestamp_in_artifact_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = self._parts()
+            parts["runtime"]["docker"] = "28.0.0 from /Users/x/.docker"
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"host path")
+            parts = self._parts()
+            parts["runtime"]["mtime"] = 1
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"timing")
+
     def test_extra_prepare_field_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "prepare.v0.json"
@@ -605,23 +715,31 @@ class PrepareEvidence(unittest.TestCase):
 
 class PublicStrings(unittest.TestCase):
     def test_run_module_does_not_claim_a_result(self):
-        text = (REPO_ROOT / "measurements" / "aee_checker_sealed_run.py").read_text(
-            encoding="utf-8")
-        for word in FORBIDDEN_PUBLIC:
-            self.assertNotIn(word, text, word)
-        self.assertIn("not a scientific measurement", text)
-        self.assertIn("checker was not run", text)
-        self.assertIn("after_materialization", text)
-        self.assertIn("subject binary is not produced here", text)
-        self.assertIn("not efficacy-tested", text)
-        self.assertNotIn("cargo build", text)
-        self.assertIn("cargo vendor --locked", text)
-        self.assertNotIn("entirely offline", text)
-        self.assertNotIn("--cpus", text)
-        self.assertNotIn("nofile", text)
-        self.assertNotIn("cleanup_named_containers", text)
-        self.assertNotIn("load_prepare_request", text)
-        self.assertNotIn("REQUEST_SCHEMA", text)
+        texts = {
+            rel: (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in PHASE_B_PY
+        }
+        joined = "\n".join(texts.values())
+        for rel, text in texts.items():
+            for word in FORBIDDEN_PUBLIC:
+                self.assertNotIn(word, text, "%s:%s" % (rel, word))
+        self.assertIn("not a scientific measurement", joined)
+        self.assertIn("checker was not run", joined)
+        self.assertIn("vendor-image; checker was not run", joined)
+        self.assertNotIn("host; checker was not run", joined)
+        self.assertIn("after_materialization", joined)
+        self.assertIn("subject binary is not produced here", joined)
+        self.assertIn("not efficacy-tested", joined)
+        self.assertNotIn("cargo build", joined)
+        self.assertIn("cargo vendor --locked", joined)
+        self.assertNotIn("entirely offline", joined)
+        self.assertNotIn("--cpus", joined)
+        self.assertNotIn("nofile", joined)
+        self.assertNotIn("cleanup_named_containers", joined)
+        self.assertNotIn("load_prepare_request", joined)
+        self.assertNotIn("REQUEST_SCHEMA", joined)
+        self.assertNotIn("git fetch", joined)
+        self.assertNotIn("git clone", joined)
+        self.assertFalse(hasattr(run, "fetch_commit"))
 
     def test_containerfile_is_inert_probe_not_aee_checker(self):
         text = CONTAINERFILE.read_text(encoding="utf-8")
@@ -696,6 +814,27 @@ class InspectContract(unittest.TestCase):
         self.assertEqual(snap["user"], "65532:65532")
         self.assertTrue(snap["offline_env"])
 
+    def test_missing_container_is_absent_not_an_infrastructure_failure(self):
+        self.assertEqual(
+            run.classify_inspect_status(1, "", "Error: No such object: aee-x"),
+            "absent")
+        self.assertEqual(
+            run.classify_inspect_status(1, "", "Error: No such container: aee-x"),
+            "absent")
+
+    def test_daemon_or_unparseable_inspect_is_not_treated_as_absent(self):
+        with self.assertRaises(run.PrepareError) as ctx:
+            run.classify_inspect_status(
+                1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+        self.assertRegex(str(ctx.exception).lower(), r"inspect|infrastructure")
+        with self.assertRaises(run.PrepareError):
+            run.classify_inspect_status(0, "", "")
+        with self.assertRaises(run.PrepareError):
+            run.parse_inspect_payload(b"not-json")
+        src = (REPO_ROOT / "measurements" / "aee_checker_sealed_oci.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("except PrepareError:\n        return False", src)
+
 
 class ExecutionIdentityDirty(unittest.TestCase):
     def test_dirty_execution_path_is_refused(self):
@@ -713,6 +852,22 @@ class ExecutionIdentityDirty(unittest.TestCase):
             identity = run.execution_identity(root)
             self.assertEqual(len(identity["commit"]), 40)
             self.assertNotEqual(identity["commit"], run.PHASE_A_INSTRUMENT_COMMIT)
+
+    def test_execution_inventory_is_complete_and_omission_mutation_bites(self):
+        self.assertEqual(run.EXECUTION_PATHS, REQUIRED_EXECUTION_PATHS)
+        self.assertIn("measurements/aee_checker_sealed_common.py", run.EXECUTION_PATHS)
+        self.assertIn("measurements/aee_checker_sealed_oci.py", run.EXECUTION_PATHS)
+        self.assertIn("measurements/aee_checker_sealed_materialize.py", run.EXECUTION_PATHS)
+        self.assertIn("execution/aee-checker-sealed/cargo-config.toml", run.EXECUTION_PATHS)
+        with tempfile.TemporaryDirectory() as d:
+            root = _committed_execution_root(Path(d))
+            target = root / "measurements" / "aee_checker_sealed_common.py"
+            target.write_bytes(target.read_bytes() + b"# dirty\n")
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.execution_identity(root)
+            self.assertRegex(str(ctx.exception).lower(), r"dirty|untracked|head")
+            missing = [p for p in REQUIRED_EXECUTION_PATHS if "common.py" not in p]
+            self.assertNotEqual(missing, list(REQUIRED_EXECUTION_PATHS))
 
 
 class MaterializeBytes(unittest.TestCase):
@@ -744,46 +899,470 @@ class MaterializeBytes(unittest.TestCase):
                 run.tree_sha256(tree)
             self.assertRegex(str(ctx.exception).lower(), r"symlink")
 
-    def test_verify_materialized_uses_disk_bytes(self):
+    def test_chmod_does_not_change_tree_digest(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = Path(d) / "vendor"
+            tree.mkdir()
+            path = tree / "a"
+            path.write_bytes(b"one")
+            path.chmod(0o644)
+            first = run.tree_sha256(tree)
+            path.chmod(0o600)
+            self.assertEqual(first, run.tree_sha256(tree))
+
+    def test_tree_read_uses_bounded_regular_file_not_stat_then_read(self):
+        src = inspect.getsource(run.tree_sha256)
+        self.assertIn("read_bounded_regular_file", src)
+        self.assertNotIn("read_bytes()", src)
+        self.assertNotIn(".stat()", src)
+
+    def test_tree_over_byte_cap_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = Path(d) / "vendor"
+            tree.mkdir()
+            (tree / "a").write_bytes(b"abcdef")
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.tree_sha256(tree, cap_bytes=3)
+            self.assertRegex(str(ctx.exception).lower(), r"ceiling|cap|exceed")
+
+    def test_frozen_manifest_sha_mismatch_is_refused(self):
+        with self.assertRaises(run.PrepareError) as ctx:
+            run.require_frozen_manifest_sha(b'{"corpusDigest":"b5aa5fdb"}\n')
+        self.assertRegex(str(ctx.exception).lower(), r"manifest sha")
+        src = inspect.getsource(run.verify_materialized)
+        self.assertIn("require_frozen_manifest_sha", src)
+        self.assertEqual(
+            run.FROZEN_CORPUS_MANIFEST_SHA256,
+            "aaee0241d5f92a65ecfa603113f5c313b3f0593aa97ce8a54732287f0dc26c67")
+
+    def test_omitting_frozen_manifest_compare_is_refused_by_emit(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = PrepareEvidence()._parts()
+            parts["materialized"]["corpus_manifest_sha256"] = "00" * 32
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"manifest sha")
+
+    def test_empty_directories_count_against_entry_ceiling(self):
+        with tempfile.TemporaryDirectory() as d:
+            extras = []
+            for name in ("empty-a", "empty-b", "empty-c"):
+                info = tarfile.TarInfo("repo-abc/%s" % name)
+                info.type = tarfile.DIRTYPE
+                extras.append((info, None))
+            archive = _tiny_tar(Path(d) / "dirs.tgz", {"keep": b"x"}, extras=extras)
+            dest = Path(d) / "out"
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.extract_pinned_archive(archive, dest, cap_files=2)
+            self.assertRegex(str(ctx.exception).lower(), r"entry|ceiling")
+            self.assertFalse((dest / "empty-c").exists())
+
+    def test_shared_materialize_budget_covers_extract_stages(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = _tiny_tar(Path(d) / "one.tgz", {"a": b"12345"})
+            second = _tiny_tar(Path(d) / "two.tgz", {"b": b"12345"})
+            spec = dict(run.MATERIALIZE_CEILINGS)
+            spec["disk_bytes"] = 8
+            spec["entry_count"] = 10
+            budget = run.MaterializeBudget(spec)
+            run.extract_pinned_archive(first, Path(d) / "one", budget=budget)
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.extract_pinned_archive(second, Path(d) / "two", budget=budget)
+            self.assertRegex(str(ctx.exception).lower(), r"ceiling|exceed")
+            self.assertFalse((Path(d) / "two" / "b").exists())
+
+    def test_empty_directory_changes_canonical_tree_digest(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = Path(d) / "subject"
+            tree.mkdir()
+            (tree / "Cargo.toml").write_bytes(b"[package]\n")
+            first = run.tree_sha256(tree)
+            (tree / "empty").mkdir()
+            self.assertNotEqual(first, run.tree_sha256(tree))
+            (tree / "Cargo.toml").write_bytes(b"[package]\nname=\"x\"\n")
+            self.assertNotEqual(first, run.tree_sha256(tree))
+
+    def test_unlisted_corpus_bytes_change_tree_digest(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = Path(d) / "corpus"
+            (tree / "vectors").mkdir(parents=True)
+            (tree / "vectors" / "MANIFEST.json").write_bytes(b"{}\n")
+            first = run.tree_sha256(tree)
+            (tree / "vectors" / "extra.json").write_bytes(b"sneak\n")
+            self.assertNotEqual(first, run.tree_sha256(tree))
+
+    def test_emit_refuses_unfrozen_tree_digests(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = PrepareEvidence()._parts()
+            parts["materialized"]["subject_tree_sha256"] = "00" * 32
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"subject tree")
+            parts = PrepareEvidence()._parts()
+            parts["materialized"]["corpus_tree_sha256"] = "00" * 32
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"corpus tree")
+
+    def test_matching_check_rs_does_not_skip_frozen_tree_digest(self):
+        src = inspect.getsource(run.verify_materialized)
+        self.assertIn("require_frozen_trees", src)
+        self.assertEqual(
+            run.FROZEN_SUBJECT_TREE_SHA256,
+            "393d742154918f640593fe9962cf87a273a28c93b24c0569ee4bef3a039fdc3d")
+        self.assertEqual(
+            run.FROZEN_CORPUS_TREE_SHA256,
+            "4bd2f2bf1208beb613fef0e6cc4728483cecae1097b74b54baaf54ce22569c42")
         with tempfile.TemporaryDirectory() as d:
             subject = Path(d) / "subject"
             corpus = Path(d) / "corpus"
             (subject / "src").mkdir(parents=True)
-            (corpus / "vectors").mkdir(parents=True)
             (subject / "src" / "check.rs").write_text("fn pinned() {}\n", encoding="utf-8")
+            (subject / "Cargo.toml").write_bytes(b"[package]\nname=\"mutated\"\n")
             digest = _sha256((subject / "src" / "check.rs").read_bytes())
-            manifest = {
-                "corpusDigest": "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579",
-                "vectors": [{"id": "v1"}],
-            }
-            (corpus / "vectors" / "MANIFEST.json").write_bytes(
-                (json.dumps(manifest, sort_keys=True) + "\n").encode("utf-8"))
+            _write_corpus(
+                corpus,
+                "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579")
             pins = {
                 "subject": {"path": "src/check.rs", "check_rs_sha256": digest},
                 "corpus": {
                     "corpusDigest": "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579",
-                    "vectors": "corpus/vectors/MANIFEST.json",
                 },
             }
-            got = run.verify_materialized(pins, subject, corpus)
-            self.assertEqual(got["subject_check_rs_sha256"], digest)
-            self.assertEqual(
-                got["corpus_digest"],
+            fixture = _sha256((corpus / "vectors" / "MANIFEST.json").read_bytes())
+            original = mat.FROZEN_CORPUS_MANIFEST_SHA256
+            mat.FROZEN_CORPUS_MANIFEST_SHA256 = fixture
+            try:
+                with self.assertRaises(run.PrepareError) as ctx:
+                    run.verify_materialized(pins, subject, corpus)
+                self.assertRegex(str(ctx.exception).lower(), r"tree digest")
+            finally:
+                mat.FROZEN_CORPUS_MANIFEST_SHA256 = original
+
+    def test_verify_materialized_refuses_unfrozen_manifest_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            subject = Path(d) / "subject"
+            corpus = Path(d) / "corpus"
+            (subject / "src").mkdir(parents=True)
+            (subject / "src" / "check.rs").write_text("fn pinned() {}\n", encoding="utf-8")
+            digest = _sha256((subject / "src" / "check.rs").read_bytes())
+            _write_corpus(
+                corpus,
                 "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579")
-            (subject / "src" / "check.rs").write_text("fn other() {}\n", encoding="utf-8")
+            pins = {
+                "subject": {"path": "src/check.rs", "check_rs_sha256": digest},
+                "corpus": {
+                    "corpusDigest": "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579",
+                },
+            }
             with self.assertRaises(run.PrepareError) as ctx:
                 run.verify_materialized(pins, subject, corpus)
-            self.assertIn("digest", str(ctx.exception).lower())
-
-    def test_fetch_commit_checks_out_exact_commit(self):
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            source, commit = _local_git_repo(tmp, "src", {"src/check.rs": b"fn x() {}\n"})
-            dest = tmp / "checkout"
-            run.fetch_commit(str(source), commit, dest)
-            self.assertEqual((dest / "src" / "check.rs").read_bytes(), b"fn x() {}\n")
+            self.assertRegex(str(ctx.exception).lower(), r"manifest sha")
+            (subject / "src" / "check.rs").write_text("fn other() {}\n", encoding="utf-8")
             with self.assertRaises(run.PrepareError):
-                run.fetch_commit(str(source), "0" * 40, tmp / "bad")
+                run.verify_file_digest(subject / "src" / "check.rs", digest)
+
+    def test_corpus_id_set_requires_exactly_250_unique_listed_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            corpus = Path(d) / "corpus"
+            _write_corpus(corpus, "x", count=2)
+            run.require_corpus_id_set(["v-%03d" % i for i in range(250)])
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.require_corpus_id_set(["v-001", "v-001"] + ["v-%03d" % i for i in range(2, 250)])
+            self.assertRegex(str(ctx.exception).lower(), r"250|unique")
+            with self.assertRaises(run.PrepareError):
+                run.require_corpus_id_set(["only-one"])
+
+    def test_extract_refuses_oversize_header_before_member_allocation(self):
+        with tempfile.TemporaryDirectory() as d:
+            archive = _tiny_tar(Path(d) / "a.tgz", {"big": b"x" * 64})
+            dest = Path(d) / "out"
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.extract_pinned_archive(archive, dest, cap_bytes=8)
+            self.assertRegex(str(ctx.exception).lower(), r"ceiling|size")
+            self.assertFalse((dest / "big").exists())
+        src = inspect.getsource(run.stream_archive_member)
+        self.assertIn("header_size > remaining", src)
+        self.assertNotIn("source.read()", inspect.getsource(run.extract_pinned_archive))
+
+    def test_extract_refuses_path_traversal_symlink_hardlink_and_duplicates(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "out"
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.archive_member_rel("repo-abc/../../etc/passwd")
+            self.assertRegex(str(ctx.exception).lower(), r"traversal")
+            link = tarfile.TarInfo("repo-abc/escape")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../../etc/passwd"
+            archive = _tiny_tar(
+                Path(d) / "link.tgz", {"ok": b"1"}, extras=((link, None),))
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.extract_pinned_archive(archive, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"link")
+            self.assertFalse((dest / "escape").exists())
+            hard = tarfile.TarInfo("repo-abc/hard")
+            hard.type = tarfile.LNKTYPE
+            hard.linkname = "repo-abc/ok"
+            dest2 = Path(d) / "out2"
+            archive2 = _tiny_tar(
+                Path(d) / "hard.tgz", {"ok": b"1"}, extras=((hard, None),))
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.extract_pinned_archive(archive2, dest2)
+            self.assertRegex(str(ctx.exception).lower(), r"link")
+            dest3 = Path(d) / "out3"
+            archive3 = _tiny_tar(Path(d) / "dup.tgz", {"a": b"1", "a": b"2"})
+            # dict last-write wins; add a real duplicate member
+            with tarfile.open(Path(d) / "dup2.tgz", "w:gz") as tar:
+                for data in (b"one", b"two"):
+                    info = tarfile.TarInfo("repo-abc/a")
+                    info.size = len(data)
+                    tar.addfile(info, io.BytesIO(data))
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.extract_pinned_archive(Path(d) / "dup2.tgz", dest3)
+            self.assertRegex(str(ctx.exception).lower(), r"duplicate")
+
+    def test_vendor_oci_enforces_disk_and_inode_ceilings_during_write(self):
+        argv = run.vendor_create_argv(
+            name="aee-vendor-t", subject=Path("."), vendor=Path("vendor"))
+        text = " ".join(argv)
+        self.assertIn("docker", argv[0])
+        self.assertIn("/vendor:", text)
+        self.assertIn("size=%d" % run.MATERIALIZE_CAP_BYTES, text)
+        self.assertIn("nr_inodes=%d" % run.MATERIALIZE_CAP_FILES, text)
+        self.assertIn("destination=/out", text)
+        self.assertIn("sleep", argv)
+        src = (REPO_ROOT / "measurements" / "aee_checker_sealed_materialize.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn('["cargo", "vendor", "--locked", str(vendor', src)
+        self.assertIn("vendor_create_argv", inspect.getsource(run.vendor_locked))
+
+    def test_rust_vendor_image_is_the_192_bookworm_index(self):
+        self.assertEqual(
+            run.RUST_IMAGE,
+            "docker.io/library/rust@sha256:"
+            "e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2")
+        src = (REPO_ROOT / "measurements" / "aee_checker_sealed_materialize.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn(
+            "a45bf1f5d9af0a23b26703b3500d70af1abff7f984a7abef5a104b42c02a292b", src)
+        self.assertNotIn("rust:1-bookworm", src)
+        self.assertNotIn("rust:1.92-bookworm", src)
+
+    def test_vendor_pulls_digest_before_inspect_and_does_not_cache_skip(self):
+        pull = inspect.getsource(run.pull_rust_image)
+        vendor = inspect.getsource(run.vendor_locked)
+        materialize = inspect.getsource(run.materialize_pinned)
+        self.assertIn("docker", pull)
+        self.assertIn("pull", pull)
+        self.assertLess(pull.index("pull"), pull.index("inspect"))
+        self.assertIn("@sha256:", pull)
+        self.assertIn("pull_rust_image", vendor)
+        self.assertLess(vendor.index("pull_rust_image"), vendor.index("vendor_create_argv"))
+        self.assertNotIn('docker_bounded(["image", "inspect", RUST_IMAGE])', vendor)
+        self.assertIn('["start", name]', vendor)
+        self.assertNotIn("start\", \"-a\"", vendor)
+        self.assertIn("docker\", \"exec\"", vendor)
+        self.assertIn('"/vendor/.", "/out/"', vendor)
+        self.assertLess(vendor.index("cargo\", \"vendor\""), vendor.index('"/out/"'))
+        self.assertLess(vendor.index('"/out/"'), vendor.index("rm"))
+        self.assertIn("pull_rust_image", materialize)
+        self.assertIn("require_container_absent", vendor)
+        live = inspect.getsource(
+            LiveInertProbes.test_prepare_emits_artifact_without_subject_binary_or_outcomes)
+        self.assertNotIn("skipTest", live)
+        self.assertNotIn("image inspect", live)
+
+    def test_emit_refuses_host_or_unprovenanced_toolchain(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = PrepareEvidence()._parts()
+            parts["toolchain"]["observation"] = "host; checker was not run"
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"vendor-image|toolchain")
+            parts = PrepareEvidence()._parts()
+            parts["toolchain"]["rustc_Vv"] = "rustc 1.91.0 (old)\n"
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"rustc|provenance")
+            parts = PrepareEvidence()._parts()
+            parts["toolchain"]["index"] = (
+                "docker.io/library/rust@sha256:"
+                "a45bf1f5d9af0a23b26703b3500d70af1abff7f984a7abef5a104b42c02a292b")
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.emit_prepare_v0(parts, dest)
+            self.assertRegex(str(ctx.exception).lower(), r"index|image")
+
+    def test_exclusive_lease_refuses_a_second_concurrent_claimer(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            claimed = []
+            errors = []
+
+            def claim():
+                try:
+                    claimed.append(run.begin_atomic_dest(dest))
+                except run.PrepareError:
+                    errors.append(1)
+
+            first = threading.Thread(target=claim)
+            second = threading.Thread(target=claim)
+            first.start()
+            second.start()
+            first.join()
+            second.join()
+            self.assertEqual(len(claimed), 1)
+            self.assertEqual(len(errors), 1)
+            self.assertFalse(dest.exists())
+            self.assertTrue(claimed[0]["lease"].is_file())
+            self.assertTrue(claimed[0]["staging"].is_dir())
+            run.abort_atomic_dest(claimed[0])
+            self.assertFalse(dest.exists())
+            self.assertFalse(claimed[0]["lease"].exists())
+            self.assertFalse(claimed[0]["staging"].exists())
+
+    def test_commit_does_not_rmtree_a_foreign_dest_created_after_lease(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            state = run.begin_atomic_dest(dest)
+            dest.mkdir()
+            sentinel = dest / "foreign-sentinel"
+            sentinel.write_text("keep\n", encoding="utf-8")
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.commit_atomic_dest(state)
+            self.assertRegex(str(ctx.exception).lower(), r"dest exists")
+            self.assertTrue(sentinel.is_file())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
+            self.assertFalse(state["staging"].exists())
+            self.assertFalse(state["lease"].exists())
+            run.abort_atomic_dest(state)
+            self.assertTrue(sentinel.is_file())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
+            src = inspect.getsource(run.abort_atomic_dest)
+            self.assertNotIn("rmtree(dest)", src)
+            self.assertNotIn("shutil.rmtree(dest)", src)
+            commit = inspect.getsource(run.commit_atomic_dest)
+            self.assertNotIn("os.replace(", commit)
+            self.assertIn("os.rename(", commit)
+
+    def test_mid_materialize_failure_leaves_no_consumable_final(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            state = run.begin_atomic_dest(dest)
+            (state["staging"] / "prepare.v0.json").write_text("{partial}\n", encoding="utf-8")
+            (state["staging"] / "subject").mkdir()
+            run.abort_atomic_dest(state)
+            self.assertFalse(dest.exists())
+            self.assertFalse((dest / "prepare.v0.json").exists())
+            leftovers = [p.name for p in Path(d).iterdir() if p.name.startswith("bundle")]
+            self.assertEqual(leftovers, [])
+
+    def test_concurrent_commit_produces_only_one_final_dest(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            outcomes = []
+
+            def worker():
+                try:
+                    state = run.begin_atomic_dest(dest)
+                    (state["staging"] / "ok").write_text("1", encoding="utf-8")
+                    run.commit_atomic_dest(state)
+                    outcomes.append("commit")
+                except run.PrepareError:
+                    outcomes.append("refuse")
+
+            first = threading.Thread(target=worker)
+            second = threading.Thread(target=worker)
+            first.start()
+            second.start()
+            first.join()
+            second.join()
+            self.assertEqual(outcomes.count("commit"), 1)
+            self.assertEqual(outcomes.count("refuse"), 1)
+            self.assertTrue((dest / "ok").is_file())
+            self.assertFalse((Path(d) / "bundle.lease").exists())
+            self.assertEqual(
+                [p.name for p in Path(d).iterdir() if ".tmp-" in p.name], [])
+
+    def test_prepare_uses_staging_rename_and_fail_closed_daemon(self):
+        src = inspect.getsource(run.prepare)
+        self.assertLess(src.index("require_docker_ready"), src.index("build_inert_image"))
+        self.assertLess(src.index("begin_atomic_dest"), src.index("materialize_pinned"))
+        self.assertLess(src.index("emit_prepare_v0"), src.index("commit_atomic_dest"))
+        self.assertIn("abort_atomic_dest", src)
+        self.assertNotIn("claim_exclusive_dest", src)
+        self.assertIn("state[\"staging\"]", src)
+        ready = inspect.getsource(run.require_docker_ready)
+        self.assertIn("docker", ready)
+        self.assertIn("info", ready)
+        self.assertIn("ServerVersion", ready)
+        self.assertNotIn("shutil.which", inspect.getsource(_docker_ready))
+        self.assertIn("require_docker_ready", inspect.getsource(_docker_ready))
+
+    def test_prepare_injected_materialize_failure_leaves_no_final(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            root = Path(d) / "root"
+            pins = Path(d) / "pins"
+
+            def exploding(_pins, staging, **_kwargs):
+                Path(staging).mkdir(exist_ok=True)
+                (Path(staging) / "prepare.v0.json").write_text("{partial}\n", encoding="utf-8")
+                raise run.PrepareError("injected mid-materialize")
+
+            with mock.patch.object(run, "verify_phase_a_frozen", return_value={"corpus": {}}), \
+                    mock.patch.object(run, "require_docker_ready", return_value="test"), \
+                    mock.patch.object(run, "build_inert_image", return_value="sha256:" + ("00" * 32)), \
+                    mock.patch.object(run, "run_inert_probe", return_value={"state": "completed"}), \
+                    mock.patch.object(run, "materialize_pinned", exploding):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    run.prepare(pins, dest, root=root)
+            self.assertRegex(str(ctx.exception).lower(), r"injected|mid-materialize")
+            self.assertFalse(dest.exists())
+            leftovers = [p.name for p in Path(d).iterdir() if p.name.startswith("bundle")]
+            self.assertEqual(leftovers, [])
+
+
+@unittest.skipUnless(CARGO, "cargo is not available")
+class DurableVendorConfig(unittest.TestCase):
+    def test_offline_fixture_build_uses_only_the_durable_bundle(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            bundle = root / "bundle"
+            subject = bundle / "subject"
+            vendor = root / "vendor"
+            tool = bundle / "tool"
+            (subject / "src").mkdir(parents=True)
+            (subject / "Cargo.toml").write_text(
+                "[package]\nname = \"inert-vendor-fixture\"\n"
+                "version = \"0.1.0\"\nedition = \"2021\"\n\n"
+                "[dependencies]\ncfg-if = \"1.0.0\"\n",
+                encoding="utf-8")
+            (subject / "src" / "lib.rs").write_text("pub fn n() -> u8 { 1 }\n", encoding="utf-8")
+            subprocess.run(
+                ["cargo", "generate-lockfile"], cwd=subject, check=True,
+                capture_output=True)
+            subprocess.run(
+                ["cargo", "vendor", "--locked", str(vendor)], cwd=subject,
+                check=True, capture_output=True)
+            cargo_home = subject / ".cargo"
+            if cargo_home.exists():
+                shutil.rmtree(cargo_home)
+            run.bind_vendor_config(
+                tool, REPO_ROOT / "execution" / "aee-checker-sealed" / "cargo-config.toml")
+            env = dict(os.environ)
+            env["CARGO_HOME"] = str(tool)
+            env["CARGO_NET_OFFLINE"] = "true"
+            built = subprocess.run(
+                ["cargo", "build", "--offline", "--manifest-path",
+                 str(subject / "Cargo.toml")],
+                cwd=subject, env=env, capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            self.assertNotIn("aee-checker", str(subject))
+            self.assertTrue((tool / "config.toml").is_file())
+            self.assertTrue(any(vendor.iterdir()))
 
 
 @unittest.skipUnless(DOCKER, "docker daemon is not available")
@@ -888,15 +1467,34 @@ class LiveInertProbes(unittest.TestCase):
         self.assertTrue(good["container_absent_after"])
         self.assertFalse(run.container_exists(good["name"]))
         self.assertIsNotNone(good["inspect"])
-        with self.assertRaises(run.PrepareError):
-            run.require_container_absent(good["name"], exists=True)
+        run.require_container_absent(good["name"])
+        self.assertIsNone(inspect.signature(run.require_container_absent).parameters.get("exists"))
+        src = inspect.getsource(run.require_container_absent)
+        self.assertIn("inspect_lookup", src)
+        self.assertNotIn("return", src)
 
     def test_prepare_emits_artifact_without_subject_binary_or_outcomes(self):
         with tempfile.TemporaryDirectory() as d:
-            dest = Path(d) / "prepare.v0.json"
+            dest = Path(d) / "bundle"
             root = _committed_execution_root(Path(d) / "exec")
             raw = run.prepare(PREREG, dest, root=root, adapter=ADAPTER)
             doc = json.loads(raw.decode("utf-8"))
+            self.assertTrue((dest / "prepare.v0.json").is_file())
+            self.assertTrue((dest / "subject").is_dir())
+            self.assertTrue((dest / "corpus").is_dir())
+            self.assertTrue((dest / "vendor").is_dir())
+            self.assertTrue((dest / "tool" / "config.toml").is_file())
+            self.assertFalse((dest / "archives").exists())
+            artifact = (dest / "prepare.v0.json").read_bytes()
+            self.assertEqual(artifact, raw)
+            self.assertNotIn(b"/Users/", artifact)
+            self.assertNotIn(b"/home/", artifact)
+            self.assertEqual(doc["materialized"]["corpus_id_count"], 250)
+            self.assertEqual(
+                doc["materialized"]["corpus_manifest_sha256"],
+                run.FROZEN_CORPUS_MANIFEST_SHA256)
+            for row in doc["probe_evidence"]:
+                self.assertEqual(row["refusal"], run.EXPECTED_REFUSALS[row["mechanism"]], row)
         self.assertEqual(doc["schema"], run.PREPARE_SCHEMA)
         self.assertFalse(doc["materialized"]["subject_binary"])
         self.assertNotIn("vectors", doc["materialized"])
@@ -905,6 +1503,18 @@ class LiveInertProbes(unittest.TestCase):
         self.assertNotEqual(doc["execution"]["commit"], doc["pins"]["instrument_commit"])
         self.assertEqual(doc["network"]["cutoff"], "after_materialization")
         self.assertEqual(doc["ceilings"], run.DECLARED_CEILINGS)
+        self.assertEqual(doc["materialize_ceilings"], run.MATERIALIZE_CEILINGS)
+        self.assertNotEqual(doc["materialize_ceilings"], doc["ceilings"])
+        self.assertEqual(
+            doc["materialized"]["subject_tree_sha256"], run.FROZEN_SUBJECT_TREE_SHA256)
+        self.assertEqual(
+            doc["materialized"]["corpus_tree_sha256"], run.FROZEN_CORPUS_TREE_SHA256)
+        self.assertEqual(doc["toolchain"]["index"], run.RUST_IMAGE)
+        self.assertEqual(doc["toolchain"]["observation"], "vendor-image; checker was not run")
+        self.assertIn("1.92.0", doc["toolchain"]["rustc_Vv"])
+        self.assertIn("1.92.0", doc["toolchain"]["cargo_V"])
+        run.require_image_id(doc["toolchain"]["image_id"])
+        self.assertRegex(doc["toolchain"]["platform"], r"^linux/")
         self.assertEqual(doc["image"]["kind"], "inert-probe")
         self.assertEqual(doc["image"]["id_scope"], "host-local")
         self.assertRegex(doc["image"]["platform"], r"^linux/")
@@ -933,6 +1543,74 @@ class LiveInertProbes(unittest.TestCase):
         self.assertEqual(host["pids"], 512)
         self.assertEqual(host["claim"], "inspect-verified; not efficacy-tested")
 
+    def test_tmpfs_copy_after_stop_is_empty_copy_while_running_is_not(self):
+        live_name = "aee-tmpfs-live-%s" % hashlib.sha256(os.urandom(8)).hexdigest()[:8]
+        stop_name = "aee-tmpfs-stop-%s" % hashlib.sha256(os.urandom(8)).hexdigest()[:8]
+        with tempfile.TemporaryDirectory() as d:
+            live = Path(d) / "live"
+            stopped = Path(d) / "stopped"
+            live.mkdir()
+            stopped.mkdir()
+            created = []
+            try:
+                run.docker_bounded([
+                    "create", "--name", live_name,
+                    "--tmpfs", "/vendor:rw,size=1048576,nr_inodes=128",
+                    "--mount", "type=bind,source=%s,destination=/out" % live,
+                    self.image_id, "sleep", "60",
+                ])
+                created.append(live_name)
+                run.docker_bounded(["start", live_name])
+                run.docker_ok(["exec", live_name, "sh", "-c", "echo packed > /vendor/keep"])
+                run.docker_ok(["exec", live_name, "cp", "-a", "/vendor/.", "/out/"])
+                self.assertTrue((live / "keep").is_file())
+                run.docker_bounded([
+                    "create", "--name", stop_name,
+                    "--tmpfs", "/vendor:rw,size=1048576,nr_inodes=128",
+                    self.image_id, "sleep", "60",
+                ])
+                created.append(stop_name)
+                run.docker_bounded(["start", stop_name])
+                run.docker_ok(["exec", stop_name, "sh", "-c", "echo packed > /vendor/keep"])
+                run.docker_ok(["stop", stop_name])
+                run.docker_ok(["cp", "%s:/vendor/." % stop_name, str(stopped)])
+                self.assertFalse((stopped / "keep").exists())
+            finally:
+                for name in created:
+                    run.docker_ok(["rm", "-f", name])
+                    run.require_container_absent(name)
+
+    @unittest.skipUnless(CARGO, "cargo is not available")
+    def test_vendor_locked_live_copy_is_nonempty_and_builds_offline(self):
+        with tempfile.TemporaryDirectory() as d:
+            bundle = Path(d) / "bundle"
+            subject = bundle / "subject"
+            vendor = Path(d) / "vendor"
+            tool = bundle / "tool"
+            (subject / "src").mkdir(parents=True)
+            (subject / "Cargo.toml").write_text(
+                "[package]\nname = \"inert-vendor-fixture\"\n"
+                "version = \"0.1.0\"\nedition = \"2021\"\n\n"
+                "[dependencies]\ncfg-if = \"1.0.0\"\n",
+                encoding="utf-8")
+            (subject / "src" / "lib.rs").write_text("pub fn n() -> u8 { 1 }\n", encoding="utf-8")
+            subprocess.run(
+                ["cargo", "generate-lockfile"], cwd=subject, check=True,
+                capture_output=True)
+            result = run.vendor_locked(subject, vendor)
+            self.assertNotEqual(result["vendor_sha256"], EMPTY_VENDOR)
+            self.assertTrue(any(vendor.iterdir()))
+            run.bind_vendor_config(
+                tool, REPO_ROOT / "execution" / "aee-checker-sealed" / "cargo-config.toml")
+            env = dict(os.environ)
+            env["CARGO_HOME"] = str(tool)
+            env["CARGO_NET_OFFLINE"] = "true"
+            built = subprocess.run(
+                ["cargo", "build", "--offline", "--manifest-path",
+                 str(subject / "Cargo.toml")],
+                cwd=subject, env=env, capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+
 
 class FrozenAeeEol(unittest.TestCase):
     def test_gitattributes_and_check_attr_pin_aee_paths_to_lf(self):
@@ -946,49 +1624,14 @@ class FrozenAeeEol(unittest.TestCase):
         raw = ADAPTER.read_bytes()
         self.assertNotIn(b"\r\n", raw)
         self.assertEqual(_sha256(raw), run.ADAPTER_DIGEST)
-        src = (REPO_ROOT / "measurements" / "aee_checker_sealed_run.py").read_text(
-            encoding="utf-8")
-        self.assertNotIn("replace(b\"\\r\\n\"", src)
-        self.assertNotIn("replace('\\r\\n'", src)
-        self.assertNotIn("replace(\"\\r\\n\"", src)
-
-    def test_removing_aee_eol_rule_reproduces_windows_crlf_drift(self):
-        lf = ADAPTER.read_bytes()
-        self.assertEqual(_sha256(lf), run.ADAPTER_DIGEST)
-        drifted = _sha256(lf.replace(b"\n", b"\r\n"))
-        self.assertEqual(drifted, WINDOWS_CRLF_ADAPTER)
-        with tempfile.TemporaryDirectory() as d:
-            src = Path(d) / "src"
-            (src / "adapters").mkdir(parents=True)
-            (src / "adapters" / "aee_checker_sealed.py").write_bytes(lf)
-            (src / ".gitattributes").write_text(
-                "adapters/aee_checker_sealed.py text eol=lf\n", encoding="utf-8")
-            subprocess.run(["git", "init"], cwd=src, check=True, capture_output=True)
-            subprocess.run(["git", "add", "-A"], cwd=src, check=True, capture_output=True)
-            subprocess.run(
-                ["git", "-c", "user.name=t", "-c", "user.email=t@t",
-                 "commit", "-m", "lf"],
-                cwd=src, check=True, capture_output=True)
-            pinned = Path(d) / "pinned"
-            subprocess.run(
-                ["git", "-c", "core.autocrlf=true", "clone", str(src), str(pinned)],
-                check=True, capture_output=True)
-            worktree = pinned / "adapters" / "aee_checker_sealed.py"
-            self.assertEqual(_sha256(worktree.read_bytes()), run.ADAPTER_DIGEST)
-            self.assertEqual(_git_eol(pinned, "adapters/aee_checker_sealed.py"), "lf")
-            (src / ".gitattributes").write_text("", encoding="utf-8")
-            subprocess.run(["git", "add", "-A"], cwd=src, check=True, capture_output=True)
-            subprocess.run(
-                ["git", "-c", "user.name=t", "-c", "user.email=t@t",
-                 "commit", "-m", "drop aee eol"],
-                cwd=src, check=True, capture_output=True)
-            drifted_co = Path(d) / "drifted"
-            subprocess.run(
-                ["git", "-c", "core.autocrlf=true", "clone", str(src), str(drifted_co)],
-                check=True, capture_output=True)
-            got = (drifted_co / "adapters" / "aee_checker_sealed.py").read_bytes()
-            self.assertEqual(_sha256(got), WINDOWS_CRLF_ADAPTER)
-            self.assertNotEqual(_git_eol(drifted_co, "adapters/aee_checker_sealed.py"), "lf")
+        texts = {
+            rel: (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in PHASE_B_PY
+        }
+        joined = "\n".join(texts.values())
+        self.assertNotIn("replace(b\"\\r\\n\"", joined)
+        self.assertNotIn("replace('\\r\\n'", joined)
+        self.assertNotIn("replace(\"\\r\\n\"", joined)
+        self.assertNotIn("core.autocrlf", joined)
 
 
 class MaterializeVerify(unittest.TestCase):
