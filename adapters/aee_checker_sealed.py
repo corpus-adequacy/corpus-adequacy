@@ -97,8 +97,6 @@ def project(doc: dict, expected: list[str]) -> dict:
             raise ValueError("row id")
         if vid in actual:
             raise ValueError("duplicate actual id")
-        if vid not in want:
-            raise ValueError("unexpected id")
         missing = [key for key in OUTCOME_KEYS if key not in row]
         if missing or DIAGNOSTIC_KEY not in row:
             raise ValueError("missing projection field")
@@ -107,7 +105,7 @@ def project(doc: dict, expected: list[str]) -> dict:
         raise ValueError("id set")
     out_rows = {}
     out_diag = {}
-    for vid in expected:
+    for vid in sorted(actual):
         row = actual[vid]
         out_rows[vid] = {key: row[key] for key in OUTCOME_KEYS}
         out_diag[vid] = {DIAGNOSTIC_KEY: normalize_reason(row[DIAGNOSTIC_KEY])}

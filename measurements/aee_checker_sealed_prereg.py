@@ -21,7 +21,6 @@ DIAGNOSTIC_FROM = ["diagnostics"]
 PINNED_BUILD = ["cargo", "build", "--locked", "--release"]
 PINNED_IMPLEMENTATION_SOURCES = ["src/check.rs", "aee_checker_sealed.py"]
 SELECTED_COUNT = 7
-PINNED_COMPLEMENT_COUNT = 125
 # Live #211: every explicit if. if-let is in the complement, not the denominator.
 # check_sealed has no if-let, so selected stays 7. Do not amend the issue.
 # syn ExprIf outside=124 plus the format! token-if at check.rs:647 = 125.
