@@ -584,6 +584,22 @@ class PublicationPage(unittest.TestCase):
         )
         self.assertNotIn("<span>source commit", page)
 
+    def _assert_results_focusable(self, page: str) -> None:
+        self.assertIn('<main id="results" tabindex="-1">', page)
+        self.assertIn("#results:focus", page)
+
+    def test_results_is_programmatically_focusable(self):
+        with tempfile.TemporaryDirectory() as d:
+            page = _render(_write_tree(Path(d), [VALID / "report.v0.json"]))
+        self._assert_results_focusable(page)
+
+    def test_mutation_remove_results_tabindex_is_red(self):
+        with tempfile.TemporaryDirectory() as d:
+            page = _render(_write_tree(Path(d), [VALID / "report.v0.json"]))
+        mutated = page.replace(' tabindex="-1"', "", 1)
+        with self.assertRaises(AssertionError):
+            self._assert_results_focusable(mutated)
+
 
 
     def test_implicit_check_rejects_nonexistent_recorded_commit(self):

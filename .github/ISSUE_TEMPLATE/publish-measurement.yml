@@ -22,6 +22,13 @@ body:
     validations:
       required: true
   - type: input
+    id: source-sha256
+    attributes:
+      label: source.json metadata SHA-256
+      description: SHA-256 of the validated source.json metadata bytes, not of the full upstream corpus.
+    validations:
+      required: true
+  - type: input
     id: adapter
     attributes:
       label: Adapter
@@ -109,6 +116,12 @@ body:
     id: relationship
     attributes:
       label: Relationship
+    validations:
+      required: true
+  - type: input
+    id: public-evidence-url
+    attributes:
+      label: Public evidence URL
     validations:
       required: true
   - type: textarea
