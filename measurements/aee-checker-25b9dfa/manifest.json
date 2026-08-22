@@ -1,0 +1,86 @@
+{
+  "accepted_exit_codes": [
+    0
+  ],
+  "build": [],
+  "default_group": "sealed",
+  "entrypoint_command": [
+    "python3",
+    "aee_checker_sealed.py",
+    "--checker",
+    "./target/release/aee-checker",
+    "corpus/vectors"
+  ],
+  "id_key": "vector_id",
+  "implementation": "src/check.rs",
+  "implementation_sources": [
+    "src/check.rs"
+  ],
+  "mutants": {
+    "sealed": [
+      {
+        "anchor": "if drop_count < 0",
+        "label": "remove check_sealed guard: drop_count < 0",
+        "replacement": "if false",
+        "scope": "declared"
+      },
+      {
+        "anchor": "if !is_lower_hex64(observed_set)",
+        "label": "remove check_sealed guard: !is_lower_hex64(observed_set)",
+        "replacement": "if false",
+        "scope": "declared"
+      },
+      {
+        "anchor": "if observed_set != ctx.observed_set",
+        "label": "remove check_sealed guard: observed_set != ctx.observed_set",
+        "replacement": "if false",
+        "scope": "declared"
+      },
+      {
+        "anchor": "if !ctx.manifest_attacks.iter().any(|m| m == a) {\n            return Err(Fail::new(\"",
+        "label": "remove check_sealed guard: !ctx.manifest_attacks.iter().any(|m| m == a)",
+        "replacement": "if false {\n            return Err(Fail::new(\"",
+        "scope": "declared"
+      },
+      {
+        "anchor": "if !still_armed",
+        "label": "remove check_sealed guard: !still_armed",
+        "replacement": "if false",
+        "scope": "declared"
+      },
+      {
+        "anchor": "if !(drop_count == 0 || drop_bound.is_some_and(|b| drop_count <= b))",
+        "label": "remove check_sealed guard: !(drop_count == 0 || drop_bound.is_some_and(|b| drop_count <= b))",
+        "replacement": "if false",
+        "scope": "declared"
+      },
+      {
+        "anchor": "if posture != ctx.posture_digest {\n        c",
+        "label": "remove check_sealed guard: posture != ctx.posture_digest",
+        "replacement": "if false {\n        c",
+        "scope": "declared"
+      },
+      {
+        "anchor": "fn check_sealed(payload: &Value, ctx: &Ctx) -> R<(Vec<&'static str>, String)> {",
+        "control": true,
+        "label": "CONTROL immediate check_sealed refusal",
+        "replacement": "fn check_sealed(payload: &Value, ctx: &Ctx) -> R<(Vec<&'static str>, String)> {\n    return Err(Fail(\"CONTROL: immediate refusal\".into()));",
+        "scope": "declared"
+      }
+    ]
+  },
+  "outcome_from": [
+    "verdict",
+    "result",
+    "tiersWithPinnedKey",
+    "tiersWithoutKey"
+  ],
+  "repo_root": ".",
+  "runner": "batch",
+  "schema": "corpus-adequacy.manifest.v0",
+  "unproved_exit_codes": [
+    75
+  ],
+  "vector_timeout": 600,
+  "vectors": "corpus/vectors/MANIFEST.json"
+}
