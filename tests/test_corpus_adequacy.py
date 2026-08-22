@@ -3638,6 +3638,56 @@ class SurvivorFindings(unittest.TestCase):
         self.assertIn("intentional omission", readme)
         self.assertIn("empty after control stripping", readme)
 
+    def test_deep_vectors_input_exits_2_without_traceback(self):
+        raw = "[" * 16000 + "]" * 16000
+        self.assertLess(len(raw.encode("utf-8")), ca.OUTPUT_CAP_BYTES)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+            (root / "vectors.json").write_text(raw, encoding="utf-8")
+            path = root / "m.json"
+            path.write_text(json.dumps({
+                "schema": ca.SCHEMA, "runner": "module",
+                "implementation": "impl.py", "entrypoint": "check",
+                "vectors": "vectors.json", "id_key": "vector_id",
+                "default_group": "g",
+                "mutants": {"g": [
+                    {"label": "r1", "anchor": "return True",
+                     "replacement": "return False"}]},
+            }), encoding="utf-8")
+            for extra in ([], ["--json"]):
+                with self.subTest(extra=extra):
+                    proc = subprocess.run(
+                        [sys.executable, str(ca.__file__), str(path), *extra],
+                        capture_output=True, timeout=30)
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertNotIn(b"Traceback", proc.stderr)
+                    self.assertNotIn(b"Traceback", proc.stdout)
+                    self.assertIn(b"could not measure", proc.stderr)
+                    if extra:
+                        env = json.loads(proc.stdout)
+                        self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+                        self.assertIs(env["ok"], False)
+                        self.assertEqual(env["exit"], 2)
+
+    def test_vector_row_shape_is_a_manifest_refusal(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+            (root / "vectors.json").write_text("[[]]\n", encoding="utf-8")
+            path = root / "m.json"
+            path.write_text(json.dumps({
+                "schema": ca.SCHEMA, "runner": "module",
+                "implementation": "impl.py", "entrypoint": "check",
+                "vectors": "vectors.json", "id_key": "vector_id",
+                "default_group": "g",
+                "mutants": {"g": [{"label": "r1", "anchor": "return True",
+                                   "replacement": "return False"}]},
+            }), encoding="utf-8")
+            m = ca.load_manifest(path)
+            with self.assertRaises(ca.ManifestError):
+                ca.load_vector_document(m)
+
     def test_error_envelope_requires_an_explicit_operation(self):
         with self.assertRaises(TypeError):
             ca.error_envelope(ValueError("x"))

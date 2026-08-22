@@ -515,10 +515,19 @@ class ClaimedReport(unittest.TestCase):
         self.assertFalse(doc["adequate"])
         self.assertEqual(doc["control_status"], "killed")
 
-    def test_current_tool_source_matches_the_measured_report(self):
-        ident = ca.tool_identity()
-        self.assertEqual(ident["tool_content_sha256"], TOOL_CONTENT)
-        self.assertEqual(ident["tool_content_sha256"], json.loads(REPORT_PATH.read_text())["tool_content_sha256"])
+    def test_measured_report_tool_content_binds_historical_sources(self):
+        sources = []
+        for rel in ca.TOOL_SOURCE_PATHS:
+            shown = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "show", "%s:%s" % (MEASURED_ON, rel)],
+                capture_output=True, check=True, timeout=10)
+            sources.append((rel, shown.stdout))
+        digest = ca._tool_content_digest(sources)
+        self.assertEqual(digest, TOOL_CONTENT)
+        self.assertEqual(
+            digest,
+            json.loads(REPORT_PATH.read_text(encoding="utf-8"))["tool_content_sha256"],
+        )
 
     def test_implementation_identities_are_named(self):
         self.assertEqual(_sha(WRAPPER), WRAPPER_SHA256)

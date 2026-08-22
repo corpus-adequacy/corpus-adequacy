@@ -6,7 +6,9 @@ Deeply nested measurement JSON below the byte cap is a controlled refusal
 (rc 2, `corpus-adequacy.error.v0`, no traceback). `--json` on `--survivors`
 uses the same envelope with `could not project`. A within-cap anchor that
 is empty after control stripping stays an intentional omission. No
-`report.v0` byte or scoring change.
+`report.v0` byte or scoring change. The same refusal applies to the
+shared vectors document. Historical Tersign tool-content binds
+MEASURED_ON sources through `_tool_content_digest`, not current HEAD.
 
 ## 0.1.0 — 2026-08-22
 

@@ -1471,18 +1471,32 @@ def _process_outcomes(m: dict, vectors: list[dict]) -> tuple[dict, dict, dict]:
 
 
 
+def load_vector_document(m: dict) -> list:
+    """Shared vectors JSON for process and module. Decoder refusal, not a score."""
+    try:
+        doc = json.loads(m["_vectors_path"].read_text(encoding="utf-8"))
+    except RecursionError as exc:
+        raise ManifestError(str(exc)) from None
+    if m["runner"] == "batch":
+        return [{m["id_key"]: "<batch>",
+                 (m["group_key"] or "_g"): m["default_group"]}]
+    if isinstance(doc, dict):
+        if m["vectors_key"] not in doc:
+            raise ManifestError("vectors key %r is missing" % m["vectors_key"])
+        selected = doc[m["vectors_key"]]
+    else:
+        selected = doc
+    require_shape(selected, list, "vectors")
+    for i, row in enumerate(selected):
+        require_shape(row, dict, "vectors[%d]" % i)
+    return selected
+
+
 def _run_process(m: dict, manifest_path: Path) -> dict:
     """Mutate declared sources, rebuild, and run the corpus against the binary."""
-    doc = json.loads(m["_vectors_path"].read_text(encoding="utf-8"))
-    if m["runner"] == "batch":
-        # One synthetic unit. The corpus's real cases live inside the file the
-        # command reads; the group exists so the self-coverage guard still applies.
-        all_vectors = [{m["id_key"]: "<batch>",
-                        (m["group_key"] or "_g"): m["default_group"]}]
-        if m["group_key"] is None:
-            m["group_key"] = "_g"
-    else:
-        all_vectors = doc[m["vectors_key"]] if isinstance(doc, dict) else doc
+    all_vectors = load_vector_document(m)
+    if m["runner"] == "batch" and m["group_key"] is None:
+        m["group_key"] = "_g"
     failures: list[str] = []
 
     # Manifest loading and execution can be separated by arbitrary caller work.
@@ -1769,8 +1783,7 @@ def run(manifest_path: Path) -> dict:
     if m["runner"] in ("process", "batch"):
         return _run_process(m, manifest_path)
     source = m["_impl_path"].read_text(encoding="utf-8")
-    doc = json.loads(m["_vectors_path"].read_text(encoding="utf-8"))
-    all_vectors = doc[m["vectors_key"]] if isinstance(doc, dict) else doc
+    all_vectors = load_vector_document(m)
 
     failures: list[str] = []
     groups_in_corpus = {_group_of(v, m) for v in all_vectors}
