@@ -670,6 +670,27 @@ class ManifestBinding(unittest.TestCase):
                     adapter.adapt(ANCHOR, tmp / "out")
             self.assertIn("manifest digest", str(caught.exception))
 
+    def test_the_anchor_digest_follows_the_manifest_declaration(self):
+        """One root. If the manifest declares a different anchor digest, the
+        real anchor must be refused against *that* declaration. A constant
+        emitted in place of the derived value cannot fail this, which is what
+        makes the derivation load-bearing rather than decorative."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+            entry = next(e for e in manifest["anchor_sets"] if e["name"] == "jcs_edge_v1")
+            entry["sha256"] = "sha256:" + ("b" * 64)
+            forged = tmp / "manifest.json"
+            forged.write_bytes(json.dumps(manifest).encode("utf-8"))
+            with mock.patch.object(adapter, "MANIFEST_PATH", forged), \
+                 mock.patch.object(adapter, "PIN_MANIFEST_SHA256",
+                                   hashlib.sha256(forged.read_bytes()).hexdigest()):
+                with self.assertRaises(adapter.AdapterError) as caught:
+                    adapter.adapt(ANCHOR, tmp / "out")
+            message = str(caught.exception)
+            self.assertIn("b" * 64, message)
+            self.assertIn(LITERAL_ANCHOR_SHA256, message)
+
     def test_a_manifest_declaring_another_vector_count_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
