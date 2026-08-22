@@ -15,6 +15,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -135,6 +136,29 @@ class MechanismBoundary(unittest.TestCase):
             self.assertEqual(
                 (dest / "cases" / (INT_ID + ".json")).read_bytes(),
                 INT_CASE_BYTES)
+
+    def test_the_scanner_slices_raw_source_rather_than_re_serializing(self):
+        """The mechanism, on input whose round trip is NOT byte-identical.
+
+        The pinned fixture cannot carry this: a whole-document
+        json.loads/json.dumps of it is byte-identical, so emitted-byte
+        equality there is satisfied by a re-serializing scanner too. These
+        two lexemes genuinely move under any round trip, so only a scanner
+        that slices the raw source can return them unchanged.
+        """
+        probe = b'{"vectors": [{"preimage": {"n": 1.50}}, {"preimage": 1E2}]}'
+        self.assertEqual(adapter.raw_preimage_slices(probe),
+                         [b'{"n": 1.50}', b'1E2'])
+
+    def test_a_whole_document_round_trip_really_moves_the_probe(self):
+        """Positive control for the test above: prove the probe discriminates."""
+        probe = b'{"vectors": [{"preimage": {"n": 1.50}}, {"preimage": 1E2}]}'
+        rendered = (json.dumps(json.loads(probe.decode("utf-8")),
+                               ensure_ascii=True, indent=2) + "\n").encode("utf-8")
+        self.assertNotEqual(rendered, probe)
+        self.assertIn(b"1.5\n", rendered)
+        self.assertNotIn(b"1.50", rendered)
+        self.assertNotIn(b"1E2", rendered)
 
     def test_per_preimage_parse_and_reserialize_fails_this_contract(self):
         """MUTATION 2: re-serializing each preimage must turn this suite RED."""
@@ -355,10 +379,25 @@ class HostileInput(unittest.TestCase):
         self.assertEqual(adapter.SOURCE_CAP_BYTES, 1 << 20)
 
     def test_mutation_9_an_oversized_source_is_refused_before_materialization(self):
+        """Refusal must precede any payload read, not merely happen.
+
+        The read loop caps at cap+1 on its own, so a refusal alone is
+        satisfied even with the fstat pre-check removed. Patching os.read
+        turns the ordering itself into the thing under test: zero payload
+        reads, zero bytes.
+        """
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             big = tmp / "big.json"
             big.write_bytes(b"{}" + b" " * ((1 << 20) + 1))
+            with mock.patch.object(
+                    os, "read",
+                    side_effect=AssertionError(
+                        "the oversized source was read before refusal")):
+                with self.assertRaises(ca.ManifestError) as loader_error:
+                    ca.read_bounded_regular_file(big, cap=adapter.SOURCE_CAP_BYTES)
+            self.assertIn("cap", str(loader_error.exception))
+
             with self.assertRaises(adapter.AdapterError) as caught:
                 adapter.adapt(big, tmp / "out")
             self.assertIn("cap", str(caught.exception))
@@ -552,6 +591,44 @@ class EndToEnd(unittest.TestCase):
                 self.test_numeric_round_trip_mutant_is_killed_by_the_lexeme_vector()
 
 
+class DirectExecution(unittest.TestCase):
+    """Finding 2: discovery and direct execution must run the same tests.
+
+    Thirteen top-level statements once followed the __main__ guard, so five
+    classes were undefined under `python3 tests/test_algovoi_jcs_edge.py`.
+    Checked by AST for the structural rule and by subprocess for the effect,
+    because a line number alone does not say what follows it.
+    """
+
+    def test_no_top_level_statement_follows_the_main_guard(self):
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        guards = [n for n in tree.body
+                  if isinstance(n, ast.If)
+                  and ast.dump(n.test).find("__main__") != -1]
+        self.assertEqual(len(guards), 1, "expected exactly one __main__ guard")
+        trailing = [n for n in tree.body if n.lineno > guards[0].lineno]
+        self.assertEqual(
+            [getattr(n, "name", type(n).__name__) for n in trailing], [],
+            "statements after the guard are undefined under direct execution")
+
+    @unittest.skipIf(os.environ.get("ALGOVOI_DIRECT_RUN_PROBE") == "1",
+                     "inner run of the direct-execution probe; it spawns itself")
+    def test_direct_execution_runs_the_same_count_as_discovery(self):
+        discovered = unittest.defaultTestLoader.loadTestsFromName(
+            "tests.test_algovoi_jcs_edge").countTestCases()
+        env = dict(os.environ, ALGOVOI_DIRECT_RUN_PROBE="1")
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve())],
+            capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=300, env=env)
+        match = re.search(r"^Ran (\d+) tests", result.stderr, re.M)
+        self.assertIsNotNone(match, result.stderr[-2000:])
+        # Count parity only. Asserting the inner run's exit status would make
+        # this test fail for every unrelated mutation elsewhere in the module,
+        # which would destroy ownership: the other tests own their own
+        # failures. A skipped test is still counted by "Ran N tests".
+        self.assertEqual(int(match.group(1)), discovered)
+
+
 class Portability(unittest.TestCase):
     def test_the_end_to_end_skip_is_declared_not_silent(self):
         source = Path(__file__).read_text(encoding="utf-8")
@@ -566,8 +643,6 @@ class Portability(unittest.TestCase):
                 self.assertTrue(row["vector_path"].startswith("cases/"))
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=1)
 
 
 # ---------------------------------------------------------------------------
@@ -712,16 +787,6 @@ class ManifestBinding(unittest.TestCase):
         for read in ('entry["anchors_to"]', ".get(\"anchors_to\")",
                      "['anchors_to']", ".get('anchors_to')"):
             self.assertNotIn(read, source_text)
-
-
-# HELD, not landed: the P1-2 exponent-overflow walk belongs in the shared
-# `_parse_projection_json`, but editing any declared runtime source moves
-# `tool_content_sha256` and breaks
-# `test_tersign_verifier_measurement.test_current_tool_source_matches_the_measured_report`,
-# which pins the tool bytes recorded in the committed Tersign measurement.
-# Landing it requires re-measuring that report, which belongs to #30, not #28.
-# The tests are written and pass with the one-line walk applied; they are held
-# here rather than shipped red or shipped with a silent re-measurement.
 
 
 class SingleBoundedRead(unittest.TestCase):
@@ -891,3 +956,7 @@ class ForgedSourceClosure(unittest.TestCase):
                 with self.assertRaises(adapter.AdapterError) as caught:
                     adapter.adapt(forged, tmp / "out")
             self.assertIn("vectors[0]", str(caught.exception))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)

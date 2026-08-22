@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+The AlgoVoi adapter's mechanism boundary is pinned against a whole-document
+re-serialize, not only the per-preimage form. The previous probe used the
+pinned fixture, whose round trip is byte-identical, so a scanner that
+re-serialized the whole document before slicing satisfied it. The new probe
+uses `1.50` and `1E2`, which move under any round trip, with a companion test
+proving the probe discriminates.
+
+The oversize refusal is pinned as an ordering, not merely as an outcome. The
+read loop caps at `cap + 1` on its own, so a refusal alone was satisfied with
+the `fstat` pre-check removed; `os.read` is now patched so zero payload reads
+is the property under test.
+
+`tests/test_algovoi_jcs_edge.py` runs the same tests under direct execution as
+under discovery. Thirteen top-level statements followed the `__main__` guard,
+so five classes were undefined when the module was run directly. The guard is
+now the last statement, checked by AST for the structural rule and by
+subprocess for the effect. The subprocess probe asserts count parity only:
+asserting the inner run's exit status would make it fail for every unrelated
+mutation and destroy per-guard ownership.
+
+A stale comment claiming the exponent-overflow walk was held back is removed;
+it landed in a2f723fe and the Tersign re-measurement landed in fd25f2e.
+
+Test-only. No product or tool bytes change, so no re-measurement. No release.
+
 `read_bounded_regular_file` opens non-blocking where the platform provides
 `O_NONBLOCK`. A FIFO is openable and parks `open()` until a writer arrives, so
 the `S_ISREG` check after it never ran and a special file hung the caller
