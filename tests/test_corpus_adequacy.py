@@ -634,8 +634,8 @@ class ProcessSourceContainment(unittest.TestCase):
             captured = None
             try:
                 ca._run_process(loaded, manifest)
-            except KeyError as exc:
-                captured = exc  # Keep the traceback and its locals alive during the lock probe.
+            except ca.ManifestError as exc:
+                captured = exc  # Refusal before lock; keep locals alive during the lock probe.
             self.assertIsNotNone(captured)
 
             self._assert_lock_can_be_reacquired(loaded["_repo_root"])
@@ -3565,7 +3565,328 @@ class SurvivorFindings(unittest.TestCase):
                 self.assertEqual(linked.returncode, 2)
                 self.assertIn("could not project", linked.stderr.decode())
 
+    def test_deep_measurement_input_exits_2_without_traceback(self):
+        raw = "[" * 16000 + "]" * 16000
+        self.assertLess(len(raw.encode("utf-8")), ca.OUTPUT_CAP_BYTES)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "deep.json"
+            path.write_text(raw, encoding="utf-8")
+            for extra in ([], ["--json"]):
+                with self.subTest(extra=extra):
+                    proc = subprocess.run(
+                        [sys.executable, str(ca.__file__), str(path), *extra],
+                        capture_output=True, timeout=30)
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertNotIn(b"Traceback", proc.stderr)
+                    self.assertNotIn(b"Traceback", proc.stdout)
+                    self.assertIn(b"could not measure", proc.stderr)
+                    if extra:
+                        env = json.loads(proc.stdout)
+                        self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+                        self.assertIs(env["ok"], False)
+                        self.assertEqual(env["exit"], 2)
+                        self.assertIn("could not measure", env["error"])
+                        self.assertNotEqual(env.get("schema"), ca.REPORT_SCHEMA)
 
+    def test_load_manifest_classifies_recursionerror(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "m.json"
+            path.write_text("{\"schema\":\"%s\"}" % ca.SCHEMA, encoding="utf-8")
+            with mock.patch.object(ca.json, "loads", side_effect=RecursionError("too deep")):
+                with self.assertRaises(ca.ManifestError) as ctx:
+                    ca.load_manifest(path)
+        self.assertNotIn("Traceback", str(ctx.exception))
+
+    def test_survivors_json_malformed_envelope_uses_project_verb(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "nope.json"
+            path.write_text('{"schema":"nope"}\n', encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), "--survivors", str(path), "--json"],
+                capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("could not project", proc.stderr)
+        self.assertNotIn("could not measure", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        env = json.loads(proc.stdout)
+        self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+        self.assertIn("could not project", env["error"])
+        self.assertNotIn("could not measure", env["error"])
+
+    def test_empty_after_control_strip_is_intentional_omission(self):
+        raw_anchor = "\x01" * 10
+        manifest_obj = {
+            "schema": ca.SCHEMA,
+            "mutants": {
+                "g": [{"label": "only", "anchor": raw_anchor, "replacement": "a"}],
+            },
+        }
+        raw = json.dumps(manifest_obj).encode("utf-8")
+        report = self._report(
+            [self._row("survived", "only")],
+            manifest_sha256="sha256:" + hashlib.sha256(raw).hexdigest(),
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "m.json"
+            path.write_bytes(raw)
+            projected = ca.survivor_findings(report, manifest=path)
+        finding = projected["findings"][0]
+        self.assertNotIn("anchor_excerpt", finding)
+        self.assertNotIn("anchor_omitted", finding)
+        readme = Path(__file__).resolve().parent.parent.joinpath("README.md").read_text(
+            encoding="utf-8")
+        self.assertIn("intentional omission", readme)
+        self.assertIn("empty after control stripping", readme)
+
+    def test_deep_vectors_input_exits_2_without_traceback(self):
+        raw = "[" * 16000 + "]" * 16000
+        self.assertLess(len(raw.encode("utf-8")), ca.OUTPUT_CAP_BYTES)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+            (root / "vectors.json").write_text(raw, encoding="utf-8")
+            path = root / "m.json"
+            path.write_text(json.dumps({
+                "schema": ca.SCHEMA, "runner": "module",
+                "implementation": "impl.py", "entrypoint": "check",
+                "vectors": "vectors.json", "id_key": "vector_id",
+                "default_group": "g",
+                "mutants": {"g": [
+                    {"label": "r1", "anchor": "return True",
+                     "replacement": "return False"}]},
+            }), encoding="utf-8")
+            for extra in ([], ["--json"]):
+                with self.subTest(extra=extra):
+                    proc = subprocess.run(
+                        [sys.executable, str(ca.__file__), str(path), *extra],
+                        capture_output=True, timeout=30)
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertNotIn(b"Traceback", proc.stderr)
+                    self.assertNotIn(b"Traceback", proc.stdout)
+                    self.assertIn(b"could not measure", proc.stderr)
+                    if extra:
+                        env = json.loads(proc.stdout)
+                        self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+                        self.assertIs(env["ok"], False)
+                        self.assertEqual(env["exit"], 2)
+
+    def test_vector_row_shape_is_a_manifest_refusal(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+            (root / "vectors.json").write_text("[[]]\n", encoding="utf-8")
+            path = root / "m.json"
+            path.write_text(json.dumps({
+                "schema": ca.SCHEMA, "runner": "module",
+                "implementation": "impl.py", "entrypoint": "check",
+                "vectors": "vectors.json", "id_key": "vector_id",
+                "default_group": "g",
+                "mutants": {"g": [{"label": "r1", "anchor": "return True",
+                                   "replacement": "return False"}]},
+            }), encoding="utf-8")
+            m = ca.load_manifest(path)
+            with self.assertRaises(ca.ManifestError):
+                ca.load_vector_document(m)
+
+    def test_error_envelope_requires_an_explicit_operation(self):
+        with self.assertRaises(TypeError):
+            ca.error_envelope(ValueError("x"))
+        env = ca.error_envelope(ValueError("x"), operation="project")
+        self.assertEqual(env["error"], "could not project: x")
+        env = ca.error_envelope(ValueError("x"), operation="measure")
+        self.assertEqual(env["error"], "could not measure: x")
+
+    def test_unreleased_changelog_does_not_name_a_version_tag(self):
+        text = Path(__file__).resolve().parent.parent.joinpath("CHANGELOG.md").read_text(
+            encoding="utf-8")
+        unreleased = text.split("## 0.1.0", 1)[0]
+        self.assertIn("## Unreleased", unreleased)
+        self.assertNotIn("v0.1.0", unreleased)
+        self.assertIn("0.1.0", unreleased)
+
+    def test_error_envelope_rejects_an_invalid_operation(self):
+        with self.assertRaises(ValueError):
+            ca.error_envelope(ValueError("x"), operation="score")
+
+    def test_load_json_document_classifies_recursionerror(self):
+        with mock.patch.object(ca.json, "loads", side_effect=RecursionError("too deep")):
+            with self.assertRaises(ca.ManifestError) as ctx:
+                ca.load_json_document(b"{}", root=dict, where="manifest")
+        self.assertNotIn("Traceback", str(ctx.exception))
+
+    def test_manifest_array_root_exits_2_without_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "m.json"
+            path.write_text("[]\n", encoding="utf-8")
+            for extra in ([], ["--json"]):
+                with self.subTest(extra=extra):
+                    proc = subprocess.run(
+                        [sys.executable, str(ca.__file__), str(path), *extra],
+                        capture_output=True, timeout=30)
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertNotIn(b"Traceback", proc.stderr)
+                    self.assertIn(b"could not measure", proc.stderr)
+                    if extra:
+                        env = json.loads(proc.stdout)
+                        self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+
+    def test_missing_vectors_key_is_a_manifest_refusal(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+            (root / "vectors.json").write_text("{\"other\": []}\n", encoding="utf-8")
+            path = root / "m.json"
+            path.write_text(json.dumps({
+                "schema": ca.SCHEMA, "runner": "module",
+                "implementation": "impl.py", "entrypoint": "check",
+                "vectors": "vectors.json", "id_key": "vector_id",
+                "default_group": "g",
+                "mutants": {"g": [{"label": "r1", "anchor": "return True",
+                                   "replacement": "return False"}]},
+            }), encoding="utf-8")
+            m = ca.load_manifest(path)
+            with self.assertRaises(ca.ManifestError) as ctx:
+                ca.load_vector_document(m)
+        self.assertIn("vectors key", str(ctx.exception))
+
+    def _holes_cli(self, digest_text):
+        root = Path(tempfile.mkdtemp())
+        (root / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+        (root / "vectors.json").write_text(
+            json.dumps({"vectors": [{"vector_id": "v1"}]}), encoding="utf-8")
+        (root / "digest.json").write_text(digest_text, encoding="utf-8")
+        path = root / "m.json"
+        path.write_text(json.dumps({
+            "schema": ca.SCHEMA, "runner": "module",
+            "implementation": "impl.py", "entrypoint": "check",
+            "vectors": "vectors.json", "id_key": "vector_id",
+            "default_group": "g",
+            "corpus_digest_file": "digest.json",
+            "corpus_digest_key": "digest",
+            "known_holes": {"sha256:deadbeef": [
+                {"label": "r1", "reason": "acknowledged", "recorded": "2026-08-22"}]},
+            "mutants": {"g": [
+                {"label": "r1", "anchor": "return True", "replacement": "return False"},
+                {"label": "CONTROL", "control": True,
+                 "anchor": "def check", "replacement": "def  check"}]},
+        }), encoding="utf-8")
+        return path
+
+    def test_corpus_digest_deep_array_and_missing_key_exit_2(self):
+        cases = (
+            "[" * 16000 + "]" * 16000,
+            "[]\n",
+            "{}\n",
+        )
+        for digest_text in cases:
+            with self.subTest(digest=digest_text[:8]):
+                path = self._holes_cli(digest_text)
+                proc = subprocess.run(
+                    [sys.executable, str(ca.__file__), str(path), "--json"],
+                    capture_output=True, timeout=30)
+                self.assertEqual(proc.returncode, 2)
+                self.assertNotIn(b"Traceback", proc.stderr)
+                env = json.loads(proc.stdout)
+                self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+                self.assertEqual(env["exit"], 2)
+
+
+    def test_vectors_selected_list_guard_exits_2(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+            (root / "vectors.json").write_text('{"vectors": 5}\n', encoding="utf-8")
+            path = root / "m.json"
+            path.write_text(json.dumps({
+                "schema": ca.SCHEMA, "runner": "module",
+                "implementation": "impl.py", "entrypoint": "check",
+                "vectors": "vectors.json", "id_key": "vector_id",
+                "default_group": "g",
+                "mutants": {"g": [{"label": "r1", "anchor": "return True",
+                                   "replacement": "return False"}]},
+            }), encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), str(path), "--json"],
+                capture_output=True, timeout=30)
+            self.assertEqual(proc.returncode, 2)
+            self.assertNotIn(b"Traceback", proc.stderr)
+            env = json.loads(proc.stdout)
+            self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+            self.assertIn("array", env["error"])
+
+    def test_corpus_digest_value_must_be_a_string(self):
+        for raw in ('{"digest": ["x"]}\n', '{"digest": {"a": 1}}\n'):
+            with self.subTest(raw=raw):
+                path = self._holes_cli(raw)
+                proc = subprocess.run(
+                    [sys.executable, str(ca.__file__), str(path), "--json"],
+                    capture_output=True, timeout=30)
+                self.assertEqual(proc.returncode, 2)
+                self.assertNotIn(b"Traceback", proc.stderr)
+                env = json.loads(proc.stdout)
+                self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+
+    def test_vector_row_missing_declared_key_is_rc2(self):
+        cases = (
+            ({"id_key": "vector_id", "group_key": "grp",
+              "row": {"vector_id": "v1"}}, "grp"),
+            ({"id_key": "vector_id", "group_key": None,
+              "row": {"other": "v1"}}, "vector_id"),
+        )
+        for extra, missing in cases:
+            with self.subTest(missing=missing):
+                with tempfile.TemporaryDirectory() as d:
+                    root = Path(d)
+                    (root / "impl.py").write_text(
+                        "def check(v):\n    return True\n", encoding="utf-8")
+                    (root / "vectors.json").write_text(
+                        json.dumps({"vectors": [extra["row"]]}), encoding="utf-8")
+                    manifest = {
+                        "schema": ca.SCHEMA, "runner": "module",
+                        "implementation": "impl.py", "entrypoint": "check",
+                        "vectors": "vectors.json",
+                        "id_key": extra["id_key"],
+                        "default_group": "g",
+                        "mutants": {"g": [{"label": "r1", "anchor": "return True",
+                                           "replacement": "return False"}]},
+                    }
+                    if extra["group_key"] is not None:
+                        manifest["group_key"] = extra["group_key"]
+                    path = root / "m.json"
+                    path.write_text(json.dumps(manifest), encoding="utf-8")
+                    proc = subprocess.run(
+                        [sys.executable, str(ca.__file__), str(path), "--json"],
+                        capture_output=True, timeout=30)
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertNotIn(b"Traceback", proc.stderr)
+                    env = json.loads(proc.stdout)
+                    self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+                    self.assertIn(missing, env["error"])
+
+    def test_load_vector_document_decodes_once_for_both_roots(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "impl.py").write_text("def check(v):\n    return True\n", encoding="utf-8")
+            path = root / "m.json"
+            path.write_text(json.dumps({
+                "schema": ca.SCHEMA, "runner": "module",
+                "implementation": "impl.py", "entrypoint": "check",
+                "vectors": "vectors.json", "id_key": "vector_id",
+                "default_group": "g",
+                "mutants": {"g": [{"label": "r1", "anchor": "return True",
+                                   "replacement": "return False"}]},
+            }), encoding="utf-8")
+            m = ca.load_manifest(path)
+            for raw in (
+                json.dumps({"vectors": [{"vector_id": "v1"}]}),
+                json.dumps([{"vector_id": "v1"}]),
+            ):
+                with self.subTest(raw=raw[:20]):
+                    (root / "vectors.json").write_text(raw, encoding="utf-8")
+                    with mock.patch.object(ca.json, "loads", wraps=json.loads) as loads:
+                        rows = ca.load_vector_document(m)
+                    self.assertEqual(loads.call_count, 1)
+                    self.assertEqual(rows[0]["vector_id"], "v1")
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

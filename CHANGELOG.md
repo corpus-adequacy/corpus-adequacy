@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+One shared JSON decoder (`load_json_document`) serves manifest, vectors,
+and `corpus_digest_file`: RecursionError and declared root shape are
+refusals (rc 2, `error.v0`, no traceback), including known_holes digest
+deep/array/missing-key and a non-string digest value.
+Declared vector keys are required. Vectors decode once, then dispatch on
+object or array root. `--json` on `--survivors` uses `could not project`.
+A within-cap empty-after-control-strip anchor stays an intentional
+omission. Released 0.1.0 tool bytes through `_tool_content_digest` match
+the frozen report `tool_content_sha256`. MEASURED_ON is report provenance,
+not a required Git object or local tag. No `report.v0` byte or scoring
+change.
+
 ## 0.1.0 — 2026-08-22
 
 Publication listing is an opt-in `publications/index.v0.json`. Generation
