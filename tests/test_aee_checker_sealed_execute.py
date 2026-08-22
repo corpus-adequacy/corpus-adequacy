@@ -173,6 +173,20 @@ class VoidStopsBeforeScoredRows(unittest.TestCase):
 
 
 class ClosedVocabularyOnTheFunnel(unittest.TestCase):
+    def test_missing_state_on_mutant_is_unproved_never_killed(self):
+        def child(step):
+            if step["kind"] == "baseline":
+                return {"state": "ok", "status": "passed"}
+            if step["kind"] == "must-die":
+                return {"state": "ok", "status": "killed", "scored": False}
+            return {"status": "killed"}
+
+        result = _run(child)
+        mutant = result["dispositions"][2:]
+        self.assertTrue(mutant)
+        self.assertTrue(all(item == "unproved" for item in mutant))
+        self.assertNotIn("killed", mutant)
+
     def test_unknown_state_status_killed_is_unproved_not_killed(self):
         def child(step):
             if step["kind"] == "baseline":

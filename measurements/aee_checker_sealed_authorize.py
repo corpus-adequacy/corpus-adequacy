@@ -162,10 +162,8 @@ def require_authorized_sequence(steps) -> tuple:
     for got, want in zip(steps, spec):
         if type(got) is not dict:
             raise AuthorizeError("sequence")
-        for key, value in want.items():
-            if got.get(key) != value:
-                raise AuthorizeError("sequence")
-        if want["kind"] == "mutant" and got.get("scored") is False:
+        _exact(got, tuple(want.keys()), "sequence")
+        if got != want:
             raise AuthorizeError("sequence")
     return tuple(steps)
 
@@ -194,8 +192,7 @@ def classify_observation(step: dict, observation: dict) -> str:
     """
     state = observation.get("state")
     status = observation.get("status")
-    unknown_state = state is not None and state not in KNOWN_STATES
-    incomplete = state in UNPROVED_STATES or unknown_state
+    incomplete = state != "ok"
     kind = step.get("kind")
     if kind == "baseline":
         if incomplete:
