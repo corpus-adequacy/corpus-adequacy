@@ -1,0 +1,48 @@
+{
+  "commit": "1cc5ea32b3da4f195b55782c8a3573d8564673a7",
+  "counts": {
+    "reject": 32,
+    "valid": 22,
+    "vectors": 54
+  },
+  "kinds": [
+    "anchor_relation",
+    "boundary_binding",
+    "canonical_bytes",
+    "chain_link",
+    "chain_set",
+    "decision_evidence_binding",
+    "digest_recompute",
+    "independence_claim",
+    "offer_binding",
+    "phase_claim"
+  ],
+  "license": "Apache-2.0",
+  "manifest_sha256": "5a3ed06d0335a803cce44257339661ee75fd902e829219277c68917abf897690",
+  "non_claims": [
+    "This adapter preserves one pinned upstream corpus.",
+    "It does not prove authenticity, endorsement, completeness, or correctness of upstream labels.",
+    "It does not prove the upstream verifier or any Assay canonicalizer.",
+    "Kind is source metadata, not an outcome."
+  ],
+  "reasons": [
+    "binding_reject",
+    "boundary_reject",
+    "canonicalization_reject",
+    "completeness_reject",
+    "continuity_reject",
+    "existence_reject",
+    "independence_reject",
+    "number_domain_reject",
+    "phase_reject",
+    "recompute_mismatch"
+  ],
+  "repository": "tersignhq/evidence-record-conformance",
+  "schema": "corpus-adequacy.tersign-evidence-record.source.v0",
+  "source_validation": {
+    "body_manifest_agreement": true,
+    "closures_match_pin": true,
+    "two_sided_per_kind": true
+  },
+  "vectors_tree": "d84527932ee96004b9cf6329d554eb7e039e5221"
+}

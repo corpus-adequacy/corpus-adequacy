@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generation-digest" content="b6fd8e2dc122935a52df21a401c7c95d60e6ddb146cf1dce054a23f0bca01bde">
+<meta name="source-commit" content="f7b697d0bc14fdce5c824e0e64d3f678f15ca8ad">
+<title>Published corpus-adequacy measurements</title>
+<style>
+:root { color-scheme: light; }
+html, body { max-width: 100%; overflow-x: hidden; margin: 0; }
+body { font-family: system-ui, sans-serif; line-height: 1.45; color: #1a1a1a; background: #f7f5f0; padding: 1rem; }
+a:focus, button:focus, .skip:focus { outline: 3px solid #0033aa; outline-offset: 2px; }
+.skip { position: absolute; left: -999px; top: 0; background: #fff; padding: 0.5rem; }
+.skip:focus { left: 1rem; z-index: 2; }
+h1, h2, h3 { line-height: 1.2; }
+.non-claims { max-width: 46rem; }
+.ctas { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1rem 0 1.5rem; }
+.ctas a { display: inline-block; padding: 0.5rem 0.75rem; background: #0033aa; color: #fff; text-decoration: underline; }
+.cards { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 1rem; }
+.card { box-sizing: border-box; width: min(100%, 390px); max-width: 100%; background: #fff; border: 2px solid #1a1a1a; padding: 1rem; }
+.counts { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.count { border: 1px solid #333; padding: 0.35rem 0.5rem; min-width: 5rem; }
+.count-label { display: block; font-size: 0.8rem; }
+.mono, pre { overflow-wrap: anywhere; word-break: break-word; }
+pre { background: #eee; padding: 0.5rem; user-select: text; }
+.links a { margin-right: 0.75rem; }
+</style>
+</head>
+<body>
+<a class="skip" href="#results">Skip to results</a>
+<header>
+<h1>Published measurements</h1>
+<p>Committed <code>report.v0</code> records only. Failed, partial, and unavailable outcomes stay representable.</p>
+</header>
+<section class="non-claims" aria-labelledby="non-claims-heading">
+<h2 id="non-claims-heading">Non-claims</h2>
+<ul>
+<li>This adapter preserves one pinned upstream corpus.</li>
+<li>It does not prove authenticity, endorsement, completeness, or correctness of upstream labels.</li>
+<li>It does not prove the upstream verifier or any Assay canonicalizer.</li>
+<li>Kind is source metadata, not an outcome.</li>
+<li>not a leaderboard/badge/certification/trust score/automatic admission/completeness of declared inventory</li>
+<li>not authenticity/endorsement/implementation safety</li>
+<li>silent:0 without diagnostic_channel_declared is not &quot;no silent rules&quot;</li>
+<li>score_percent is percent of author-declared in-scope rules, not of the implementation</li>
+</ul>
+</section>
+<nav class="ctas" aria-label="intake and publication forms">
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=add-corpus.yml">Request source intake</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=publish-measurement.yml">Hand off a completed measurement</a>
+</nav>
+<main id="results">
+<h2>Committed records</h2>
+<ul class="cards">
+<li class="card">
+<h3>tersign-1cc5ea32</h3>
+<p>corpus id <span class="mono">tersign-1cc5ea32</span></p>
+<p>source commit <span class="mono">1cc5ea32b3da4f195b55782c8a3573d8564673a7</span></p>
+<p>adapter <span class="mono">tersign_evidence_record</span> · runner <span class="mono">process</span></p>
+<p>report digest <span class="mono">c65f8a6c6dcc4a56dea31e7fc0de241a8cbbdcf36cd4cf98c220d23a894fe5ae</span></p>
+<ul class="counts"><li class="count" aria-label="killed 10"><span class="count-label">killed</span> <span class="count-value">10</span></li><li class="count" aria-label="survived 2"><span class="count-label">survived</span> <span class="count-value">2</span></li><li class="count" aria-label="silent not measured"><span class="count-label">silent</span> <span class="count-value">not measured</span></li><li class="count" aria-label="unproved 0"><span class="count-label">unproved</span> <span class="count-value">0</span></li><li class="count" aria-label="control_status killed"><span class="count-label">control_status</span> <span class="count-value">killed</span></li></ul>
+<p class="plain">Of the author-declared in-scope mutants in this record, 10 were killed, 2 survived, silent was not measured, and 0 were unproved. The control path status is killed.</p>
+<p class="links">
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/raw/f7b697d0bc14fdce5c824e0e64d3f678f15ca8ad/measurements/tersign-1cc5ea32/report.v0.json">raw report.v0.json</a>
+<a href="https://github.com/tersignhq/evidence-record-conformance/commit/1cc5ea32b3da4f195b55782c8a3573d8564673a7">source commit 1cc5ea32b3da4f195b55782c8a3573d8564673a7</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/blob/f7b697d0bc14fdce5c824e0e64d3f678f15ca8ad/measurements/tersign-1cc5ea32/PROVENANCE.md">review</a>
+</p>
+<p>Copyable command</p>
+<pre><code>python3 corpus_adequacy.py measurements/tersign-1cc5ea32/manifest.json --json</code></pre>
+</li>
+</ul>
+</main>
+</body>
+</html>

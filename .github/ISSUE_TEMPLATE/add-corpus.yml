@@ -1,0 +1,80 @@
+name: Add a corpus
+description: Request intake of a source tree. Do not paste executable payloads as the request.
+title: "[intake] "
+labels: ["intake"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form records a scoped intake request. Submitted code is not executed.
+        Query parameters are untrusted convenience and are not a measurement.
+  - type: input
+    id: repository-url
+    attributes:
+      label: Repository URL
+      description: HTTPS URL of the public source repository.
+    validations:
+      required: true
+  - type: input
+    id: source-commit
+    attributes:
+      label: Source commit
+      description: 40-hex commit that names the tree to consider.
+    validations:
+      required: true
+  - type: input
+    id: manifest-path
+    attributes:
+      label: Manifest path
+      description: Path of the proposed manifest inside that tree.
+    validations:
+      required: true
+  - type: input
+    id: adapter
+    attributes:
+      label: Adapter
+      description: Adapter name if one already exists, otherwise a proposed name.
+    validations:
+      required: true
+  - type: input
+    id: runner
+    attributes:
+      label: Runner
+      description: process, in-process, or other declared runner.
+    validations:
+      required: true
+  - type: textarea
+    id: license-context
+    attributes:
+      label: License context
+      description: SPDX or other license facts that apply to the source.
+    validations:
+      required: true
+  - type: input
+    id: relationship
+    attributes:
+      label: Relationship
+      description: How you relate to the source (author, third party, none).
+    validations:
+      required: true
+  - type: textarea
+    id: public-context
+    attributes:
+      label: Public context
+      description: Why this source should be considered in public.
+    validations:
+      required: true
+  - type: textarea
+    id: scoped-request
+    attributes:
+      label: Scoped request
+      description: What is in scope and what is not requested.
+    validations:
+      required: true
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: Consent
+      options:
+        - label: I understand this is not automatic admission and submitted code will not be executed from this form.
+          required: true
