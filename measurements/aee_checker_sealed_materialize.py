@@ -405,6 +405,17 @@ def vendor_create_argv(*, name: str, subject: Path, vendor: Path, budget=None) -
     ]
 
 
+def reclaim_bind_owner(name: str, dest: str = "/out") -> None:
+    proc = docker_ok(["exec", name, "stat", "-c", "%u:%g", dest])
+    owner = (proc.stdout or "").strip()
+    if owner.count(":") != 1:
+        raise PrepareError("bind-mount owner is not readable")
+    uid, gid = owner.split(":")
+    if not uid.isdigit() or not gid.isdigit():
+        raise PrepareError("bind-mount owner is not readable")
+    docker_ok(["exec", name, "chown", "-R", owner, dest])
+
+
 def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -> dict:
     require_vendor_outside(subject, vendor)
     vendor = Path(vendor)
@@ -428,6 +439,7 @@ def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -
         if proc.returncode != 0:
             raise PrepareError("cargo vendor --locked failed")
         docker_ok(["exec", name, "cp", "-a", "/vendor/.", "/out/"])
+        reclaim_bind_owner(name)
     finally:
         if created:
             try:

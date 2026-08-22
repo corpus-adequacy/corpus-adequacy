@@ -15,6 +15,7 @@ from aee_checker_sealed_common import (
     MEMORY_4G,
     TMPFS_BYTES,
     TMPFS_INODES,
+    DockerUnavailable,
     PrepareError,
     exact_object,
     load_strict,
@@ -41,12 +42,20 @@ _INSPECT_ABSENT = ("no such object", "no such container")
 
 
 def require_docker_ready() -> str:
-    proc = br._run_capped(
-        ["docker", "info", "--format", "{{.ServerVersion}}"], Path.cwd(), 15)
+    try:
+        proc = br._run_capped(
+            ["docker", "info", "--format", "{{.ServerVersion}}"], Path.cwd(), 15)
+    except FileNotFoundError as exc:
+        raise DockerUnavailable("docker executable is not available") from exc
     version = (proc.stdout or "").strip()
     if proc.returncode != 0 or not version:
         raise PrepareError("docker daemon is not ready")
     return version
+
+
+def require_live_oci_capability(context: Path) -> str:
+    require_docker_ready()
+    return build_inert_image(Path(context))
 
 
 def docker_ok(args, *, cwd: Path | None = None, timeout: int = 60):

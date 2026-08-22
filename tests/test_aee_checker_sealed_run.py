@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
 import aee_checker_sealed_materialize as mat  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
+import bounded_run as br  # noqa: E402
 
 PREREG = REPO_ROOT / "measurements" / "aee-checker-25b9dfa"
 ADAPTER = REPO_ROOT / "adapters" / "aee_checker_sealed.py"
@@ -220,11 +221,10 @@ def _docker_ready() -> bool:
     try:
         run.require_docker_ready()
         return True
-    except run.PrepareError:
+    except run.DockerUnavailable:
         return False
 
 
-DOCKER = _docker_ready()
 CARGO = shutil.which("cargo") is not None
 
 
@@ -1166,7 +1166,13 @@ class MaterializeBytes(unittest.TestCase):
         self.assertIn("docker\", \"exec\"", vendor)
         self.assertIn('"/vendor/.", "/out/"', vendor)
         self.assertLess(vendor.index("cargo\", \"vendor\""), vendor.index('"/out/"'))
-        self.assertLess(vendor.index('"/out/"'), vendor.index("rm"))
+        self.assertLess(vendor.index('"/out/"'), vendor.index("reclaim_bind_owner"))
+        self.assertLess(vendor.index("reclaim_bind_owner"), vendor.index("rm"))
+        reclaim = inspect.getsource(run.reclaim_bind_owner)
+        self.assertIn("chown", reclaim)
+        self.assertIn("stat", reclaim)
+        self.assertNotIn("sudo", reclaim)
+        self.assertNotIn("except", reclaim)
         self.assertIn("pull_rust_image", materialize)
         self.assertIn("require_container_absent", vendor)
         live = inspect.getsource(
@@ -1298,8 +1304,44 @@ class MaterializeBytes(unittest.TestCase):
         self.assertIn("docker", ready)
         self.assertIn("info", ready)
         self.assertIn("ServerVersion", ready)
+        self.assertIn("FileNotFoundError", ready)
+        self.assertIn("DockerUnavailable", ready)
+        self.assertNotIn("shutil.which", ready)
         self.assertNotIn("shutil.which", inspect.getsource(_docker_ready))
         self.assertIn("require_docker_ready", inspect.getsource(_docker_ready))
+        cap = inspect.getsource(run.require_live_oci_capability)
+        self.assertIn("require_docker_ready", cap)
+        self.assertIn("build_inert_image", cap)
+        self.assertNotIn("shutil.which", cap)
+        live_setup = inspect.getsource(LiveInertProbes.setUpClass)
+        self.assertLess(
+            live_setup.index("require_live_oci_capability"), live_setup.index("TemporaryDirectory"))
+        self.assertIn("SkipTest", live_setup)
+        self.assertFalse(getattr(LiveInertProbes, "__unittest_skip__", False))
+
+    def test_missing_docker_executable_is_unavailable_not_an_import_crash(self):
+        with mock.patch.object(br, "_run_capped", side_effect=FileNotFoundError("docker")):
+            with self.assertRaises(run.DockerUnavailable) as ctx:
+                run.require_docker_ready()
+            self.assertFalse(_docker_ready())
+        self.assertIsInstance(ctx.exception, run.PrepareError)
+        self.assertEqual(str(ctx.exception), "docker executable is not available")
+
+    def test_daemon_not_ready_stays_distinct_from_unavailable(self):
+        fake = mock.Mock(returncode=1, stdout="", stderr="Cannot connect")
+        with mock.patch.object(br, "_run_capped", return_value=fake):
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.require_docker_ready()
+        self.assertNotIsInstance(ctx.exception, run.DockerUnavailable)
+        self.assertEqual(str(ctx.exception), "docker daemon is not ready")
+
+    def test_live_class_skips_with_exact_reason_when_daemon_not_ready(self):
+        with mock.patch.object(
+                run, "require_live_oci_capability",
+                side_effect=run.PrepareError("docker daemon is not ready")):
+            with self.assertRaises(unittest.SkipTest) as ctx:
+                LiveInertProbes.setUpClass()
+        self.assertEqual(str(ctx.exception), "docker daemon is not ready")
 
     def test_prepare_injected_materialize_failure_leaves_no_final(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1365,7 +1407,6 @@ class DurableVendorConfig(unittest.TestCase):
             self.assertTrue(any(vendor.iterdir()))
 
 
-@unittest.skipUnless(DOCKER, "docker daemon is not available")
 class LiveInertProbes(unittest.TestCase):
     image_id = ""
     prefix = "aee-sealed-inert-"
@@ -1373,20 +1414,25 @@ class LiveInertProbes(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        try:
+            cls.image_id = run.require_live_oci_capability(CONTAINERFILE.parent)
+        except run.PrepareError as exc:
+            raise unittest.SkipTest(str(exc)) from exc
+        run.require_image_id(cls.image_id)
         cls._tmp = tempfile.TemporaryDirectory()
         root = Path(cls._tmp.name)
         cls.mounts = {name: root / name for name in ("input", "vendor", "tool")}
         for path in cls.mounts.values():
             path.mkdir()
         cls.created_names = []
-        cls.image_id = run.build_inert_image(CONTAINERFILE.parent)
-        run.require_image_id(cls.image_id)
 
     @classmethod
     def tearDownClass(cls):
         for name in cls.created_names:
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
-        cls._tmp.cleanup()
+        tmp = getattr(cls, "_tmp", None)
+        if tmp is not None:
+            tmp.cleanup()
 
     def _run(self, mode: str, **kwargs):
         result = run.run_inert_probe(
@@ -1563,6 +1609,7 @@ class LiveInertProbes(unittest.TestCase):
                 run.docker_bounded(["start", live_name])
                 run.docker_ok(["exec", live_name, "sh", "-c", "echo packed > /vendor/keep"])
                 run.docker_ok(["exec", live_name, "cp", "-a", "/vendor/.", "/out/"])
+                run.reclaim_bind_owner(live_name)
                 self.assertTrue((live / "keep").is_file())
                 run.docker_bounded([
                     "create", "--name", stop_name,
@@ -1579,6 +1626,42 @@ class LiveInertProbes(unittest.TestCase):
                 for name in created:
                     run.docker_ok(["rm", "-f", name])
                     run.require_container_absent(name)
+
+    def test_container_written_host_bytes_are_owner_removable(self):
+        name = "aee-tmpfs-owner-%s" % hashlib.sha256(os.urandom(8)).hexdigest()[:8]
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "out"
+            dest.mkdir()
+            try:
+                run.docker_bounded([
+                    "create", "--name", name,
+                    "--tmpfs", "/vendor:rw,size=1048576,nr_inodes=128",
+                    "--mount", "type=bind,source=%s,destination=/out" % dest,
+                    self.image_id, "sleep", "60",
+                ])
+                run.docker_bounded(["start", name])
+                run.docker_ok([
+                    "exec", name, "sh", "-c",
+                    "mkdir -p /vendor/sub && echo packed > /vendor/keep "
+                    "&& echo x > /vendor/sub/LICENSE-APACHE",
+                ])
+                run.docker_ok(["exec", name, "cp", "-a", "/vendor/.", "/out/"])
+                run.reclaim_bind_owner(name)
+                keep = dest / "keep"
+                license_apache = dest / "sub" / "LICENSE-APACHE"
+                self.assertTrue(keep.is_file())
+                self.assertTrue(license_apache.is_file())
+                if hasattr(os, "getuid"):
+                    self.assertEqual(keep.stat().st_uid, os.getuid())
+                    self.assertEqual(license_apache.stat().st_uid, os.getuid())
+                keep.unlink()
+                license_apache.unlink()
+                (dest / "sub").rmdir()
+                self.assertFalse(keep.exists())
+                self.assertFalse((dest / "sub").exists())
+            finally:
+                run.docker_ok(["rm", "-f", name])
+                run.require_container_absent(name)
 
     @unittest.skipUnless(CARGO, "cargo is not available")
     def test_vendor_locked_live_copy_is_nonempty_and_builds_offline(self):
@@ -1600,6 +1683,10 @@ class LiveInertProbes(unittest.TestCase):
             result = run.vendor_locked(subject, vendor)
             self.assertNotEqual(result["vendor_sha256"], EMPTY_VENDOR)
             self.assertTrue(any(vendor.iterdir()))
+            owned = [path for path in vendor.rglob("*") if path.is_file()]
+            self.assertTrue(owned)
+            if hasattr(os, "getuid"):
+                self.assertTrue(all(path.stat().st_uid == os.getuid() for path in owned))
             run.bind_vendor_config(
                 tool, REPO_ROOT / "execution" / "aee-checker-sealed" / "cargo-config.toml")
             env = dict(os.environ)
@@ -1610,6 +1697,7 @@ class LiveInertProbes(unittest.TestCase):
                  str(subject / "Cargo.toml")],
                 cwd=subject, env=env, capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stderr)
+            owned[0].unlink()
 
 
 class FrozenAeeEol(unittest.TestCase):

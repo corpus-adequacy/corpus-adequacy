@@ -42,6 +42,10 @@ class PrepareError(Exception):
     """PREPARE refused before a sealed measurement could start."""
 
 
+class DockerUnavailable(PrepareError):
+    """docker executable is not available. Distinct from daemon-not-ready."""
+
+
 class MaterializeBudget:
     """One bytes/entries/deadline budget for downloads+subject+corpus+vendor."""
 
