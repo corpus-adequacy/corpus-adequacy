@@ -399,7 +399,7 @@ def main(argv: list[str]) -> int:
         pins = Path(argv[2]) if len(argv) > 2 else pins_default
         verify_phase_a_frozen(pins, adapter=adapter)
         return 0
-    if argv[1] == "prepare" and len(argv) in (4, 5):
+    if len(argv) in (4, 5) and argv[1] == "prepare":
         image_id = argv[4] if len(argv) == 5 else None
         prepare(Path(argv[2]), Path(argv[3]), root=_ROOT, adapter=adapter,
                 image_id=image_id)

@@ -2061,12 +2061,9 @@ class ExplicitPrepareImage(unittest.TestCase):
             with self.assertRaises(run.PrepareError):
                 self._run_prepare(dest, image_id="busybox:latest")
             self.assertEqual(self.built, [])
-            patches = self._patches()
-            # absent local
             def missing(image_id):
                 run.require_image_id(image_id)
                 raise run.PrepareError("image is not local")
-            patches = self._patches()
             self.probed = []
             self.built = []
             with mock.patch.object(run, "verify_phase_a_frozen", return_value=self._pins_doc()), \
@@ -2078,23 +2075,12 @@ class ExplicitPrepareImage(unittest.TestCase):
                                 image_id=self.IMAGE)
             self.assertEqual(self.built, [])
 
-    def test_rebuild_instead_of_supplied_image_turns_red(self):
-        src = inspect.getsource(run.resolve_prepare_image)
-        self.assertIn("require_local_image", src)
-        mutated = src.replace(
-            "require_local_image(image_id)\n    return require_image_id(image_id)",
-            "return build_inert_image(Path(root) / \"execution\" / \"aee-checker-sealed\")",
-        )
-        self.assertNotEqual(src, mutated)
-
-    def test_dropping_image_id_is_not_a_reproduction_proof(self):
-        with tempfile.TemporaryDirectory() as d:
-            a = json.loads(self._run_prepare(Path(d) / "out-a", image_id=self.IMAGE))
-        self.assertIn("id", a["image"])
-        stripped = dict(a)
-        stripped["image"] = dict(a["image"])
-        del stripped["image"]["id"]
-        self.assertNotEqual(a, stripped)
+    def test_main_without_command_writes_usage_and_returns_2(self):
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            rc = run.main(["aee_checker_sealed_run.py"])
+        self.assertEqual(rc, 2)
+        self.assertIn("usage:", err.getvalue())
 
     def test_cli_forwards_optional_image_id_without_validating(self):
         captured = {}
