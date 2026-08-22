@@ -1,7 +1,7 @@
 """Bounded sealed-OCI candidate backend. Synthetic host adapter only.
 
-Reuses the existing process/batch runner for mutation, classification, and
-scoring. Incomplete inner events become returncode 75; stdout is discarded.
+Reuses the existing process/batch runner and the canonical adapter
+expected_ids/project rule. Incomplete inner events become returncode 75.
 Does not run a real corpus/checker experiment.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from secrets import token_hex
 
@@ -25,46 +26,58 @@ from aee_checker_sealed_oci import (
 )
 import bounded_run as br
 
+_ROOT = Path(__file__).resolve().parents[1]
+_ADAPTERS = str(_ROOT / "adapters")
+if _ADAPTERS not in sys.path:
+    sys.path.insert(0, _ADAPTERS)
+import aee_checker_sealed as sealed_adapter  # noqa: E402
+
 CANDIDATE_MOUNT_SPEC = DEFAULT_MOUNT_SPEC + (("subject", "/subject"),)
 CANDIDATE_ENTRYPOINT = "/bin/sh"
 CANDIDATE_SCRIPT = (
     "set -eu; "
-    "test -d /input; test -d /vendor; test -d /tool; test -d /subject; "
+    "test -d /input/vectors; test -d /vendor; test -f /tool/config.toml; test -d /subject; "
     "cp -a /subject/. /work/; "
     "cd /work; "
-    "CARGO_HOME=/vendor cargo build --locked --offline 1>&2; "
-    "exec /tool/checker /input --json /dev/stdout"
+    "CARGO_HOME=/tool cargo build --release --locked --offline 1>&2; "
+    "set +e; "
+    "/work/target/release/aee-checker /input/vectors --json /work/report.json; "
+    "status=$?; "
+    "set -e; "
+    "cat /work/report.json; "
+    "exit $status"
 )
 UNPROVED_EXIT = 75
 COMPLETE_RETURNCODES = (0, 1)
-PROJECTION_KEYS = (
-    "verdict", "result", "tiersWithPinnedKey", "tiersWithoutKey",
-)
 
 
 def _unproved() -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=UNPROVED_EXIT, stdout="", stderr="")
 
 
-def normalize_inner_event(*, returncode, stdout) -> subprocess.CompletedProcess:
-    """Parse a complete inner JSON object once; otherwise emit rc 75."""
+def host_vectors_path(mounts: dict) -> str:
+    return str(Path(mounts["input"]) / "vectors")
+
+
+def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.CompletedProcess:
+    """Parse the inner report once, then reuse adapter expected_ids/project."""
     if returncode not in COMPLETE_RETURNCODES or type(stdout) is not str:
         return _unproved()
     if stdout == "" or stdout[0] != "{" or stdout != stdout.strip():
         return _unproved()
     try:
         inner = load_strict(stdout.encode("utf-8"))
-    except PrepareError:
+        expected = sealed_adapter.expected_ids(vectors)
+        projected = sealed_adapter.project(inner, expected)
+    except (PrepareError, KeyError, TypeError, ValueError, OSError):
         return _unproved()
     if type(inner) is not dict:
         return _unproved()
-    if any(key not in inner for key in PROJECTION_KEYS):
-        return _unproved()
-    outer = {key: inner[key] for key in PROJECTION_KEYS}
     return subprocess.CompletedProcess(
         args=[],
         returncode=0,
-        stdout=json.dumps(outer, separators=(",", ":")),
+        stdout=json.dumps(
+            projected, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         stderr="",
     )
 
@@ -139,7 +152,10 @@ def run_sealed_candidate(*, image_id: str, mounts: dict,
                 raise
         else:
             completed = normalize_inner_event(
-                returncode=proc.returncode, stdout=proc.stdout or "")
+                returncode=proc.returncode,
+                stdout=proc.stdout or "",
+                vectors=host_vectors_path(mounts),
+            )
         inspect = transport.inspect(name)
         validate_inspect_contract(
             inspect, sealed=sealed, mount_spec=CANDIDATE_MOUNT_SPEC)
