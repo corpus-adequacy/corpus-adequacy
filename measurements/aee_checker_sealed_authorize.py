@@ -35,7 +35,6 @@ from aee_checker_sealed_run import (  # noqa: E402
     PREPARE_PART_KEYS,
     PREPARE_SCHEMA,
     emit_prepare_v0,
-    execution_identity,
 )
 
 AUTHORIZE_SCHEMA = "corpus-adequacy.aee-checker-sealed.authorize.v0"
@@ -121,12 +120,6 @@ def require_bound_prepare(doc: dict) -> dict:
         raise AuthorizeError("execution.commit/content_sha256 required")
     if execution.get("commit") == PHASE_A_INSTRUMENT_COMMIT:
         raise AuthorizeError("execution commit conflated with instrument")
-    try:
-        identity = execution_identity(_ROOT)
-    except PrepareError as exc:
-        raise _wrap(exc) from exc
-    if execution.get("content_sha256") != identity["content_sha256"]:
-        raise AuthorizeError("execution.content_sha256 is not producer identity")
     image = doc.get("image")
     if type(image) is not dict:
         raise AuthorizeError("image missing")

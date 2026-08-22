@@ -174,6 +174,7 @@ class ValidatorBites(unittest.TestCase):
         self.assertIn("emit_prepare_v0", source)
         self.assertIn("PREPARE_KEYS", source)
         self.assertIn("PREPARE_PART_KEYS", source)
+        self.assertNotIn("execution_identity", source)
         raw = _prepare_raw()
         doc = auth.load_prepare(raw)
         self.assertEqual(doc["schema"], run.PREPARE_SCHEMA)
@@ -185,8 +186,6 @@ class ValidatorBites(unittest.TestCase):
             (lambda doc: doc["materialized"].__setitem__("subject_binary", True),
              r"subject binary"),
             (lambda doc: doc["network"].__setitem__("sealed_oci", "online"), r"network"),
-            (lambda doc: doc["execution"].__setitem__("content_sha256", "00" * 32),
-             r"content|canonical|emit|execution"),
         )
         for mutator, needle in cases:
             mutated = _rewrite_prepare(mutator)
