@@ -33,6 +33,42 @@ ISSUES_INTAKE = "https://github.com/corpus-adequacy/corpus-adequacy/issues/new?t
 ISSUES_PUBLISH = "https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=publish-measurement.yml"
 HEX64 = set("0123456789abcdef")
 DISPLAY_VERDICTS = ("killed", "survived", "silent", "unproved")
+NO_LOCAL_REPRODUCTION_COMMAND = (
+    "No local reproduction command is published for this measurement."
+)
+
+
+def published_local_command(report_path: Path):
+    """Return the copyable argv only for a regular sibling manifest.json.
+
+    Uses lstat + S_ISREG. Does not follow the path or read its bytes. A hit
+    proves only that the displayed argv names that sibling, not that it
+    succeeds or reproduces sealed execution.
+    """
+    sibling = Path(report_path).parent / "manifest.json"
+    try:
+        mode = os.lstat(sibling).st_mode
+    except OSError:
+        return None
+    if not stat.S_ISREG(mode):
+        return None
+    directory = Path(report_path).parent.name
+    return (
+        "python3 corpus_adequacy.py measurements/%s/manifest.json --json"
+        % directory
+    )
+
+
+def _card_command_html(record: dict) -> str:
+    command = record.get("command")
+    if command is None:
+        return "<p>%s</p>\n" % _esc(NO_LOCAL_REPRODUCTION_COMMAND)
+    return (
+        "<p>Copyable command</p>\n"
+        "<pre><code>%s</code></pre>\n" % _esc(command)
+    )
+
+
 CEILING_LINES = (
     "not a leaderboard/badge/certification/trust score/automatic admission/completeness of declared inventory",
     "not authenticity/endorsement/implementation safety",
@@ -236,7 +272,7 @@ def load_record(
     silent_label = "not measured" if (silent == 0 and not diagnostic) else str(silent)
     control = doc.get("control_status")
     rel_report = "measurements/%s/report.v0.json" % directory
-    command = "python3 corpus_adequacy.py measurements/%s/manifest.json --json" % directory
+    command = published_local_command(report_path)
     review_rel = "measurements/%s/PROVENANCE.md" % directory
     return {
         "directory": directory,
@@ -532,8 +568,7 @@ def _card_html(record: dict, build_commit: str) -> str:
         '<p>adapter <span class="mono">%s</span> · runner <span class="mono">%s</span></p>\n'
         '<p>report digest <span class="mono">%s</span></p>\n'
         '<p>source.json metadata SHA-256 <span class="mono">%s</span></p>\n'
-        '<p>Copyable command</p>\n'
-        '<pre><code>%s</code></pre>\n'
+        '%s'
         '%s\n'
         '<p class="plain">%s</p>\n'
         '<p class="links">\n'
@@ -551,7 +586,7 @@ def _card_html(record: dict, build_commit: str) -> str:
             _esc(record["runner"]),
             _esc(record["digest"]),
             _esc(record["source_digest"]),
-            _esc(record["command"]),
+            _card_command_html(record),
             _counts_html(record),
             _esc(_plain_sentence(record)),
             _esc(detail_href),
