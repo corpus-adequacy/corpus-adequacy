@@ -260,7 +260,7 @@ class InspectFollowsSuppliedProfile(unittest.TestCase):
         profile = common.CANDIDATE_RESOURCE_PROFILE
         inspect_doc = _inspect(("/input", "/vendor", "/tool"), profile=profile)
         inspect_doc["HostConfig"]["Tmpfs"]["/work"] = (
-            "rw,size=1048576,nr_inodes=128,mode=1777")
+            "rw,size=1048576,nr_inodes=128,mode=1777,exec")
         with self.assertRaises(PrepareError):
             oci.validate_inspect_contract(
                 inspect_doc, sealed=True, resource_profile=profile)
