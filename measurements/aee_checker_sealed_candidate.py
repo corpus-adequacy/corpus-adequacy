@@ -8,6 +8,7 @@ Does not run a real corpus/checker experiment.
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -40,20 +41,40 @@ import aee_checker_sealed as sealed_adapter  # noqa: E402
 
 CANDIDATE_MOUNT_SPEC = DEFAULT_MOUNT_SPEC + (("subject", "/subject"),)
 CANDIDATE_ENTRYPOINT = "/bin/sh"
-CANDIDATE_SCRIPT = (
+CONTAINER_BUILD = ("cargo", "build", "--release", "--locked", "--offline")
+CONTAINER_ENTRYPOINT = (
+    "/work/target/release/aee-checker", "/input/vectors", "--json", "/work/report.json",
+)
+
+
+def candidate_script(execution_contract: dict) -> str:
+    if type(execution_contract) is not dict:
+        raise PrepareError("candidate execution contract")
+    build = execution_contract.get("build")
+    entrypoint = execution_contract.get("entrypoint_command")
+    if build != list(CONTAINER_BUILD) or entrypoint != list(CONTAINER_ENTRYPOINT):
+        raise PrepareError("candidate execution contract")
+    return (
     "set -eu; "
     "test -d /input/vectors; test -d /vendor; test -f /tool/config.toml; test -d /subject; "
     "cp -R /subject/. /work/; "
     "cd /work; "
     "PATH=/usr/local/cargo/bin:$PATH CARGO_HOME=/tool "
-    "cargo build --release --locked --offline 1>&2; "
+    + shlex.join(build) + " 1>&2; "
     "set +e; "
-    "/work/target/release/aee-checker /input/vectors --json /work/report.json 1>&2; "
+    + shlex.join(entrypoint) + " 1>&2; "
     "status=$?; "
     "set -e; "
     "cat /work/report.json; "
     "exit $status"
-)
+    )
+
+
+DEFAULT_EXECUTION_CONTRACT = {
+    "build": list(CONTAINER_BUILD),
+    "entrypoint_command": list(CONTAINER_ENTRYPOINT),
+}
+CANDIDATE_SCRIPT = candidate_script(DEFAULT_EXECUTION_CONTRACT)
 UNPROVED_EXIT = 75
 COMPLETE_RETURNCODES = (0, 1)
 
@@ -103,7 +124,8 @@ def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.Complete
 
 
 def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
-                          sealed: bool = True, resource_profile=None) -> list[str]:
+                          sealed: bool = True, resource_profile=None,
+                          execution_contract=None) -> list[str]:
     expected = {key for key, _destination in CANDIDATE_MOUNT_SPEC}
     extra = set(mounts) - expected
     if extra:
@@ -112,7 +134,9 @@ def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
         image_id=image_id,
         name=name,
         mounts=mounts,
-        command=["-lc", CANDIDATE_SCRIPT],
+        command=["-lc", candidate_script(
+            DEFAULT_EXECUTION_CONTRACT
+            if execution_contract is None else execution_contract)],
         sealed=sealed,
         mount_spec=CANDIDATE_MOUNT_SPEC,
         entrypoint=CANDIDATE_ENTRYPOINT,
@@ -149,6 +173,7 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
                           resource_profile,
                           name_prefix: str = "aee-cand-",
                           sealed: bool = True, transport=None,
+                          execution_contract=None,
                           ) -> subprocess.CompletedProcess:
     image_id = require_image_id(image_id)
     profile = require_resource_profile(resource_profile)
@@ -163,7 +188,7 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
     try:
         argv = candidate_create_argv(
             image_id=image_id, name=name, mounts=mounts, sealed=sealed,
-            resource_profile=profile)
+            resource_profile=profile, execution_contract=execution_contract)
         transport.create(argv)
         try:
             proc = transport.start(name, profile["deadline_seconds"])
@@ -204,7 +229,7 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
 
 def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,
                          name_prefix: str = "aee-cand-",
-                         transport=None,
+                         transport=None, execution_contract=None,
                          ) -> subprocess.CompletedProcess:
     prepare = load_prepare_v1(prepare_raw)
     image_id = require_candidate_image(
@@ -219,4 +244,5 @@ def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,
         name_prefix=name_prefix,
         sealed=True,
         transport=transport,
+        execution_contract=execution_contract,
     )

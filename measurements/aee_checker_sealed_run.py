@@ -122,6 +122,12 @@ PREPARE_V1_PART_KEYS = PREPARE_PART_KEYS + ("candidate_profile",)
 PREPARE_V1_KEYS = ("phase", "schema") + PREPARE_V1_PART_KEYS
 PREPARE_IMAGE_KEYS = ("id", "id_scope", "kind", "platform")
 EXECUTION_PATHS = (
+    "bounded_run.py",
+    "corpus_adequacy.py",
+    "isolated_tree.py",
+    "module_child.py",
+    "adapters/aee_checker_sealed.py",
+    "measurements/aee-checker-25b9dfa/manifest.json",
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
     "measurements/aee_checker_sealed_oci.py",
@@ -129,6 +135,8 @@ EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_materialize.py",
     "measurements/aee_checker_sealed_authorize.py",
     "measurements/aee_checker_sealed_execute.py",
+    "measurements/aee_checker_sealed_driver.py",
+    "measurements/aee_checker_sealed_runtime.py",
     "execution/aee-checker-sealed/Containerfile",
     "execution/aee-checker-sealed/probe.sh",
     "execution/aee-checker-sealed/cargo-config.toml",
@@ -142,7 +150,7 @@ MATERIALIZED_KEYS = (
 PHASE_A_INSTRUMENT_COMMIT = "1347651c2087cbd5c2e958a758b380a9a6cfc67d"
 PHASE_A_PIN_DIGESTS = {
     "control.json": "5a85c46054240a4470da7c6a82e3f13b5f1c30ea301809a2500a47a6e2f91f71",
-    "manifest.json": "2f16654dd57a0b1719ec2ec5be7a833192ccae529d08c4c7695c7df4782c32c8",
+    "manifest.json": "d21f4831c48a633009cafb0672c2d4e986bffda21a2c82508c1b32486d414eee",
     "pins.json": "e2456cbfcbbda17800318703e296e72fcaf138037178bad1fe237bc2c460c7e4",
     "sites.json": "6223a15c5db5a7c19c4633474875615ec61f3d710e092939f46b80ee986e0c4c",
 }

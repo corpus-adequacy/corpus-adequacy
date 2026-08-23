@@ -658,6 +658,29 @@ def partition_declared_mutants(mutants: dict) -> tuple:
     return controls, ordinary
 
 
+def ordered_declared_mutants(mutants: dict, mutation_order=None) -> list:
+    """Return the complete control-first schedule, optionally by exact labels."""
+    controls, ordinary = partition_declared_mutants(mutants)
+    declared = controls + ordinary
+    if mutation_order is None:
+        return declared
+    if not isinstance(mutation_order, (list, tuple)) or not all(
+            isinstance(label, str) and label for label in mutation_order):
+        raise ManifestError("mutation_order must be a list of declared labels")
+    labels = [label_identity(mut) for _group, mut in declared]
+    if len(set(mutation_order)) != len(mutation_order):
+        raise ManifestError("mutation_order repeats a declared label")
+    if len(mutation_order) != len(labels) or set(mutation_order) != set(labels):
+        raise ManifestError("mutation_order must name every declared mutant once")
+    by_label = {label_identity(mut): (group, mut) for group, mut in declared}
+    ordered = [by_label[label] for label in mutation_order]
+    control_count = len(controls)
+    if any(not mut.get("control") for _group, mut in ordered[:control_count]) or any(
+            mut.get("control") for _group, mut in ordered[control_count:]):
+        raise ManifestError("mutation_order must place every control before ordinary mutants")
+    return ordered
+
+
 def _append_group_equivalents(results: list, m: dict, group: str,
                               baselines: dict, emitted: set) -> int:
     """Emit one group's declared equivalents once.
@@ -852,12 +875,16 @@ def _require_unique_labels(m: dict) -> None:
             seen_acknowledgements.add(ident)
 
 
-def load_manifest(path: Path) -> dict:
-    manifest_bytes = path.read_bytes()
+def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
+                        path_root: Path | None = None) -> dict:
+    """Load exact manifest bytes while resolving logical paths at one root."""
+    if type(manifest_bytes) is not bytes:
+        raise ManifestError("manifest bytes must be bytes")
+    path = Path(artifact_path)
     m = load_json_document(manifest_bytes, root=dict, where="manifest")
     if m.get("schema") != SCHEMA:
         raise ManifestError("schema must be %r, got %r" % (SCHEMA, m.get("schema")))
-    base = path.parent
+    base = Path(path_root) if path_root is not None else path.parent
     # Exact on-disk bytes are the input parsed above. Whitespace and key order
     # therefore remain addressable rather than being silently canonicalised.
     m["_manifest_sha256"] = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
@@ -1025,6 +1052,11 @@ def load_manifest(path: Path) -> dict:
                     % (group, i, e["label"]))
     _require_unique_labels(m)
     return m
+
+
+def load_manifest(path: Path) -> dict:
+    path = Path(path)
+    return load_manifest_bytes(path.read_bytes(), path)
 
 
 def _acknowledged_holes(m: dict) -> dict:
@@ -1961,8 +1993,14 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
 
 
 
-def _run_process(m: dict, manifest_path: Path, *, execution_backend=None) -> dict:
+def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
+                 mutation_order=None, separate_build_phase=True) -> dict:
     """Mutate declared sources, rebuild, and run the corpus against the binary."""
+    if type(separate_build_phase) is not bool:
+        raise ManifestError("separate_build_phase must be a bool")
+    # Validate caller-supplied identities before the lock, then resolve the
+    # actual rows again from the session's detached trusted manifest below.
+    ordered_declared_mutants(m["mutants"], mutation_order)
     all_vectors = load_vector_document(m)
     if m["runner"] == "batch" and m["group_key"] is None:
         m["group_key"] = "_g"
@@ -2017,11 +2055,13 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None) -> dic
     session = _ProcessMutationSession(
         m, backend, accumulator, acknowledged, declared_controls)
     m = session.manifest
+    ordered_mutants = ordered_declared_mutants(m["mutants"], mutation_order)
     try:
-        prepared = session.execute(None, rebuild=True)
-        if not prepared.built:
-            raise ManifestError(
-                "the UNMUTATED tree does not build: %s" % prepared.detail)
+        if separate_build_phase:
+            prepared = session.execute(None, rebuild=True)
+            if not prepared.built:
+                raise ManifestError(
+                    "the UNMUTATED tree does not build: %s" % prepared.detail)
 
         for group in sorted(m["mutants"]):
             vectors = [v for v in all_vectors if _group_of(v, m) == group]
@@ -2029,7 +2069,7 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None) -> dic
                 tally["failures"].append("%s: no vectors, so its mutants cannot be scored" % group)
                 continue
             baseline = session.execute(
-                vectors, rebuild=False, record_selectors=True)
+                vectors, rebuild=not separate_build_phase, record_selectors=True)
             if not baseline.built:
                 tally["failures"].append("%s: the UNMUTATED binary failed (%s) on %s"
                                          % (group, baseline.detail, ["<build>"]))
@@ -2063,24 +2103,24 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None) -> dic
                     "would have caught. Read the corpus's own declaration of its comparison "
                     "surface and match it." % (_selector, never_seen))
 
-        controls, ordinary = partition_declared_mutants(m["mutants"])
         prev_ordinary = None
         emitted_equivalents: set = set()
-        for wave_index, wave in enumerate((controls, ordinary)):
-            if wave_index == 1 and declared_controls and _control_status(
-                    tally["control_statuses"], declared_controls) != "killed":
-                break
-            for group, mut in wave:
-                if (wave_index == 1 and prev_ordinary is not None
-                        and group != prev_ordinary):
-                    tally["equivalent"] += _append_group_equivalents(
-                        tally["results"], m, prev_ordinary,
-                        session.baselines, emitted_equivalents)
-                if wave_index == 1:
-                    prev_ordinary = group
-                if group not in session.baselines:
-                    continue
-                _run_mutation_step(session, group, mut)
+        entered_ordinary = False
+        for group, mut in ordered_mutants:
+            if not mut.get("control") and not entered_ordinary:
+                if declared_controls and _control_status(
+                        tally["control_statuses"], declared_controls) != "killed":
+                    break
+                entered_ordinary = True
+            if entered_ordinary and prev_ordinary is not None and group != prev_ordinary:
+                tally["equivalent"] += _append_group_equivalents(
+                    tally["results"], m, prev_ordinary,
+                    session.baselines, emitted_equivalents)
+            if entered_ordinary:
+                prev_ordinary = group
+            if group not in session.baselines:
+                continue
+            _run_mutation_step(session, group, mut)
         if prev_ordinary is not None:
             tally["equivalent"] += _append_group_equivalents(
                 tally["results"], m, prev_ordinary,
