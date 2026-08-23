@@ -2,19 +2,59 @@
 
 ## Unreleased
 
-Opt-in `unproved_exit_codes` beside `accepted_exit_codes` (default `[]`,
-disjoint). A declared-unproved child exit is classified before stdout is
-parsed and never becomes a projected outcome. An ordinary mutant with any
-such exit is `unproved` (`killed == 0`, `moved == 0`), including when
-another process vector moved. Baseline voids; control is `control-error`.
-Host-child timeout, signal, output-cap and unexpected-exit are unchanged.
-Module unusable protocol remains `unproved`. Process/batch parse-error and
-incomplete keep their existing disposition; only a declared
-`unproved_exit_codes` exit on a living adapter is the new `unproved` class.
-A module manifest that declares the field is refused.
-This names adapter-declared inner incompleteness; it does not infer why
-the inner checker failed and does not turn a host-child crash into
-`unproved`. No new report verdict.
+## 0.1.2 — 2026-08-23
+
+Instrument and publication changes since 0.1.1, covering first-parent
+1347651 through 1593ccc.
+
+Process and batch adapters can declare inner incompleteness via
+`unproved_exit_codes`. A declared-unproved child exit is classified
+before stdout is parsed and is never a projected outcome. Baseline
+voids; a control with that exit is `control-error`. This names adapter
+declared incompleteness; it does not infer why an inner checker failed.
+
+Controls now run before ordinary process or batch mutants. Baseline or
+control failure voids before a scored result can be published.
+
+A sealed candidate accepts the pinned checker's JSON report when it ends
+in exactly one final LF, and retains a closed unproved reason
+(`timeout`, `output-cap`, `inner-exit`, `empty-or-missing`, `malformed`,
+`projection`). Return code 75 and `unproved` are unchanged. Hosted
+Docker readiness timeout maps to `PrepareError` reason
+`docker readiness timed out`, distinct from a missing executable and
+from a completed daemon-not-ready result. Hosted Windows and macOS skip
+that exact reason; hosted Linux still raises.
+
+Publication no longer invents a copyable measurement command when a
+sibling `manifest.json` is absent. A fail-closed void run attempt is a
+typed, digest-bound projection and cannot enter the standard measurement
+renderer. It does not manufacture a zero score.
+
+The inverse AEE rail on this interval is execution-funnel and OCI
+plumbing, not a product score: preregistered `check_sealed` sites, Phase
+B inert OCI, Phase C sequence and authorization, sealed candidate
+backend, inspect evidence from one mount contract, PREPARE image as an
+explicit reusable input, regenerated PREPARE and four-key authorization,
+candidate resource contract, one reusable process mutation step,
+provenance-bound driver, residual mount guards, authorization emitted
+from canonical PREPARE bytes, streaming and `docker_ok` characterization,
+primary-failure preservation during sealed cleanup, and CI syntax
+discover.
+
+Authorized one-shot, consumed: one invocation at execution commit
+`a95d2344` produced a void result with no score. Baseline is `unproved`.
+`control_status` is the recorded raw value `absent-or-invalid` (no valid
+control; this is not evidence that a control ran or was skipped as a
+verdict). There are no scored mutants. Do not retry.
+
+Raw report, PREPARE, and AUTHORIZE hashes on the public attempt are
+recorded values. Those source bytes are not recomputed on the public
+page. Only the public attempt digest
+`7b7e430145f0489107274ba92956bb3d1aaa87364923f92e74e1f0f70c613ee0` is
+recomputable from published bytes.
+
+This cut publishes fail-closed instrument and projection behavior. It
+does not claim adequacy, ranking, certification, or outreach.
 
 ## 0.1.1 — 2026-08-22
 
