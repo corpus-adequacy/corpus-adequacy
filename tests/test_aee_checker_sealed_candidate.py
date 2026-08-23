@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -349,6 +350,22 @@ class InnerNormalize(unittest.TestCase):
 
 
 class SealedLifecycle(unittest.TestCase):
+    def test_public_entrypoint_forces_sealed_mode(self):
+        prepare = {
+            "toolchain": {"image_id": IMAGE},
+            "image": {"id": "sha256:" + ("cd" * 32)},
+            "candidate_profile": INERT_RESOURCE_PROFILE,
+        }
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(cand, "load_prepare_v1", return_value=prepare), \
+                mock.patch.object(
+                    cand, "_run_sealed_candidate", return_value=completed) as inner:
+            actual = cand.run_sealed_candidate(
+                prepare_raw=b"prepare", mounts={"input": Path("input")})
+
+        self.assertIs(actual, completed)
+        self.assertIs(inner.call_args.kwargs["sealed"], True)
+
     def test_absence_proof_runs_on_success_and_error(self):
         with tempfile.TemporaryDirectory() as d:
             mounts = _mounts(Path(d))
