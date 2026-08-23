@@ -7,15 +7,19 @@
 Instrument and publication changes since 0.1.1, covering first-parent
 1347651 through 1593ccc.
 
-Process and batch adapters can declare inner incompleteness via
-`unproved_exit_codes`. A declared-unproved child exit is classified
-before stdout is parsed and is never a projected outcome. Baseline
-voids; a control with that exit is `control-error`. This names adapter
-declared incompleteness; it does not infer why an inner checker failed.
-
-Process/batch parse-error and incomplete keep their existing disposition;
-only a declared `unproved_exit_codes` exit on a living adapter is the new
-`unproved` class.
+Opt-in `unproved_exit_codes` beside `accepted_exit_codes` (default `[]`,
+disjoint). `accepted_exit_codes` stays default `[0]`. A declared-unproved child exit is classified before stdout is
+parsed and never becomes a projected outcome. An ordinary mutant with any
+such exit is `unproved` (`killed == 0`, `moved == 0`), including when
+another process vector moved. Baseline voids; control is `control-error`.
+Host-child timeout, signal, output-cap and unexpected-exit are unchanged.
+Module unusable protocol remains `unproved`. Process/batch parse-error and
+incomplete keep their existing disposition; only a declared
+`unproved_exit_codes` exit on a living adapter is the new `unproved` class.
+A module manifest that declares the field is refused.
+This names adapter-declared inner incompleteness; it does not infer why
+the inner checker failed and does not turn a host-child crash into
+`unproved`. No new report verdict.
 
 Controls now run before ordinary process or batch mutants. Baseline or
 control failure voids before a scored result can be published.

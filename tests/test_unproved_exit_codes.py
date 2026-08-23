@@ -315,6 +315,22 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
         self.assertIn(needle, src)
         self.assertLess(src.index(needle), src.index("if raised or moved"))
 
+    UNPROVED_0_1_2_BLOCK = (
+        "Opt-in `unproved_exit_codes` beside `accepted_exit_codes` (default `[]`,\n"
+        "disjoint). `accepted_exit_codes` stays default `[0]`. A declared-unproved child exit is classified before stdout is\n"
+        "parsed and never becomes a projected outcome. An ordinary mutant with any\n"
+        "such exit is `unproved` (`killed == 0`, `moved == 0`), including when\n"
+        "another process vector moved. Baseline voids; control is `control-error`.\n"
+        "Host-child timeout, signal, output-cap and unexpected-exit are unchanged.\n"
+        "Module unusable protocol remains `unproved`. Process/batch parse-error and\n"
+        "incomplete keep their existing disposition; only a declared\n"
+        "`unproved_exit_codes` exit on a living adapter is the new `unproved` class.\n"
+        "A module manifest that declares the field is refused.\n"
+        "This names adapter-declared inner incompleteness; it does not infer why\n"
+        "the inner checker failed and does not turn a host-child crash into\n"
+        "`unproved`. No new report verdict.\n"
+    )
+
     def test_docs_state_runner_specific_protocol_dispositions(self):
         root = Path(__file__).resolve().parent.parent
         readme = (root / "README.md").read_text(encoding="utf-8")
@@ -329,10 +345,17 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
         self.assertIn("parse-error", readme)
         self.assertIn("incomplete", readme)
         self.assertIn("existing", readme)
-        self.assertIn("unproved_exit_codes", changelog)
-        self.assertIn("parse-error", changelog)
-        self.assertIn("process/batch", changelog)
-
+        block = self.UNPROVED_0_1_2_BLOCK
+        self.assertIn(block, changelog)
+        inverted = block.replace(
+            "incomplete keep their existing disposition",
+            "incomplete do not keep their existing disposition")
+        self.assertIn("parse-error", inverted)
+        self.assertIn("Process/batch", inverted)
+        self.assertIn("unproved_exit_codes", inverted)
+        self.assertIn("existing disposition", inverted)
+        self.assertNotEqual(inverted, block)
+        self.assertNotIn(inverted, changelog)
 
 
 class CoreUnprovedReasonContract(unittest.TestCase):
