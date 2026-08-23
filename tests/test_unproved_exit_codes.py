@@ -334,5 +334,61 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
         self.assertIn("process/batch", changelog)
 
 
+
+class CoreUnprovedReasonContract(unittest.TestCase):
+    """Closed unproved tokens live on corpus_adequacy, not a measurement module."""
+
+    @unittest.skipIf(ca.fcntl is None, "process scoring requires an advisory lock")
+    def test_unproved_suffix_without_measurement_common(self):
+        saved = sys.modules.get("aee_checker_sealed_common")
+        sys.modules["aee_checker_sealed_common"] = None
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                (tmp / "check.py").write_text("print('x')\n", encoding="utf-8")
+                (tmp / "v1.json").write_text("{}\n", encoding="utf-8")
+                (tmp / "vectors.json").write_text(json.dumps({
+                    "vectors": [{"vector_id": "v1", "path": "v1.json"}],
+                }), encoding="utf-8")
+                raw = {
+                    "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+                    "implementation": "check.py",
+                    "implementation_sources": ["check.py"],
+                    "build": [],
+                    "entrypoint_command": [sys.executable, "check.py", "{vector}"],
+                    "outcome_from": ["ok"], "vectors": "vectors.json",
+                    "id_key": "vector_id", "vector_path_key": "path",
+                    "default_group": "g",
+                    "unproved_exit_codes": [75],
+                    "mutants": {"g": [
+                        {"label": "threshold",
+                         "anchor": "print('x')", "replacement": "print('y')"},
+                        {"label": "CONTROL", "control": True,
+                         "anchor": "print", "replacement": "print  # c"},
+                    ]},
+                }
+                manifest_path = tmp / "m.json"
+                manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+                loaded = ca.load_manifest(manifest_path)
+
+                def backend(manifest, vectors, rebuild=True):
+                    if not vectors:
+                        return ca._ProcessExecution(True, "built", {}, {}, {}, {})
+                    return ca._ProcessExecution(
+                        True, "timeout", {}, {}, {"<batch>": "unproved"}, {})
+
+                report = ca._run_process(
+                    loaded, manifest_path, execution_backend=backend,
+                    separate_build_phase=True)
+        finally:
+            if saved is None:
+                sys.modules.pop("aee_checker_sealed_common", None)
+            else:
+                sys.modules["aee_checker_sealed_common"] = saved
+        self.assertTrue(
+            any("failed (unproved) [timeout] on" in item
+                for item in report["failures"]),
+            report["failures"])
+
 if __name__ == "__main__":
     unittest.main()
