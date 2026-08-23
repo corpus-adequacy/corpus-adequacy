@@ -3914,7 +3914,7 @@ def _semantic_projection(report: dict) -> dict:
 
 def _normalized_full_report(report: dict) -> dict:
     report = json.loads(json.dumps(report))
-    for key in ("manifest", "tool_version", "tool_commit",
+    for key in ("manifest", "manifest_sha256", "tool_version", "tool_commit",
                 "tool_source_state", "tool_content_sha256"):
         report[key] = "<normalized>"
     return report
@@ -4279,8 +4279,7 @@ class SharedMutationStep(unittest.TestCase):
             "declared_total": 2, "diagnostic_channel_declared": False,
             "equivalent": 0, "failures": [], "hole_ratio": 0.0,
             "killed": 2, "known_holes": 0, "manifest": "<normalized>",
-            "manifest_sha256": (
-                "sha256:3f34955bc53b1695ed1b428880d6198d262ca562f976580dda0e2bbf63df71a1"),
+            "manifest_sha256": "<normalized>",
             "mutants": [
                 {"group": "a", "how": "harness detects a change on this path",
                  "label": "CONTROL", "moved": 1, "scope": "declared",
