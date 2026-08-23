@@ -540,6 +540,11 @@ class PublicationPage(unittest.TestCase):
         self.assertIn("quote=True", src)
         self.assertNotIn("quote=False", src)
 
+    def test_live_generated_site_matches_renderer(self):
+        site = REPO_ROOT / "site" / "index.html"
+        rc = rpp.main(["--root", str(REPO_ROOT), "--out", str(site), "--check"])
+        self.assertEqual(rc, 0)
+
     def test_live_repo_discovers_exactly_one_tersign_card(self):
         page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
         self.assertEqual(page.count('class="card"'), 1)
