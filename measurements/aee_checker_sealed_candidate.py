@@ -29,6 +29,7 @@ from aee_checker_sealed_oci import (
     require_local_image,
     validate_inspect_contract,
 )
+from aee_checker_sealed_run import load_prepare_v1
 import bounded_run as br
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -42,9 +43,10 @@ CANDIDATE_ENTRYPOINT = "/bin/sh"
 CANDIDATE_SCRIPT = (
     "set -eu; "
     "test -d /input/vectors; test -d /vendor; test -f /tool/config.toml; test -d /subject; "
-    "cp -a /subject/. /work/; "
+    "cp -R /subject/. /work/; "
     "cd /work; "
-    "CARGO_HOME=/tool cargo build --release --locked --offline 1>&2; "
+    "PATH=/usr/local/cargo/bin:$PATH CARGO_HOME=/tool "
+    "cargo build --release --locked --offline 1>&2; "
     "set +e; "
     "/work/target/release/aee-checker /input/vectors --json /work/report.json 1>&2; "
     "status=$?; "
@@ -143,20 +145,13 @@ class _DockerTransport:
         require_container_absent(name)
 
 
-def run_sealed_candidate(*, image_id: str, mounts: dict,
-                         name_prefix: str = "aee-cand-",
-                         sealed: bool = True, transport=None,
-                         resource_profile=None,
-                         toolchain_image_id=None, probe_image_id=None,
-                         ) -> subprocess.CompletedProcess:
-    profile = require_resource_profile(resource_profile or INERT_RESOURCE_PROFILE)
-    if toolchain_image_id is not None or probe_image_id is not None:
-        image_id = require_candidate_image(
-            image_id=image_id,
-            toolchain_image_id=toolchain_image_id,
-            probe_image_id=probe_image_id)
-    else:
-        require_image_id(image_id)
+def _run_sealed_candidate(*, image_id: str, mounts: dict,
+                          resource_profile,
+                          name_prefix: str = "aee-cand-",
+                          sealed: bool = True, transport=None,
+                          ) -> subprocess.CompletedProcess:
+    image_id = require_image_id(image_id)
+    profile = require_resource_profile(resource_profile)
     if transport is None:
         require_local_image(image_id)
         transport = _DockerTransport()
@@ -205,3 +200,23 @@ def run_sealed_candidate(*, image_id: str, mounts: dict,
     if error is not None:
         raise error
     return completed
+
+
+def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,
+                         name_prefix: str = "aee-cand-",
+                         sealed: bool = True, transport=None,
+                         ) -> subprocess.CompletedProcess:
+    prepare = load_prepare_v1(prepare_raw)
+    image_id = require_candidate_image(
+        image_id=prepare["toolchain"]["image_id"],
+        toolchain_image_id=prepare["toolchain"]["image_id"],
+        probe_image_id=prepare["image"]["id"],
+    )
+    return _run_sealed_candidate(
+        image_id=image_id,
+        mounts=mounts,
+        resource_profile=prepare["candidate_profile"],
+        name_prefix=name_prefix,
+        sealed=sealed,
+        transport=transport,
+    )

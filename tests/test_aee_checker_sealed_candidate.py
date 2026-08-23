@@ -21,7 +21,7 @@ import aee_checker_sealed_candidate as cand  # noqa: E402
 import aee_checker_sealed_oci as oci  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
 
-from aee_checker_sealed_common import PrepareError  # noqa: E402
+from aee_checker_sealed_common import INERT_RESOURCE_PROFILE, PrepareError  # noqa: E402
 
 IMAGE = "sha256:" + ("ab" * 32)
 POLICY = {"accepted_exit_codes": [0], "unproved_exit_codes": [75]}
@@ -341,26 +341,30 @@ class SealedLifecycle(unittest.TestCase):
             dests = ("/input", "/vendor", "/tool", "/subject")
             transport = FakeTransport(
                 stdout=json.dumps(RICH_REPORT), inspect=_inspect(dests))
-            cand.run_sealed_candidate(
-                image_id=IMAGE, mounts=mounts, transport=transport)
+            cand._run_sealed_candidate(
+                image_id=IMAGE, mounts=mounts, transport=transport,
+                resource_profile=INERT_RESOURCE_PROFILE)
             self.assertEqual(len(transport.removed), 1)
             broken = FakeTransport(returncode=2, stdout="fail", inspect=_inspect(dests))
-            cand.run_sealed_candidate(
-                image_id=IMAGE, mounts=mounts, transport=broken)
+            cand._run_sealed_candidate(
+                image_id=IMAGE, mounts=mounts, transport=broken,
+                resource_profile=INERT_RESOURCE_PROFILE)
             self.assertEqual(len(broken.absent_checked), 1)
 
     def test_partial_create_still_removes_then_proves_absent(self):
         with tempfile.TemporaryDirectory() as d:
             transport = FakeTransport(fail_create=True)
             with self.assertRaises(PrepareError) as ctx:
-                cand.run_sealed_candidate(
-                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport)
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
             self.assertEqual(str(ctx.exception), "partial create")
             self.assertEqual(len(transport.removed), 1)
             present = FakeTransport(fail_create=True, leave_present=True)
             with self.assertRaises(PrepareError) as ctx:
-                cand.run_sealed_candidate(
-                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=present)
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=present,
+                    resource_profile=INERT_RESOURCE_PROFILE)
             self.assertIn("still present", str(ctx.exception))
 
     def test_absence_proof_skipped_is_refused(self):
@@ -371,14 +375,16 @@ class SealedLifecycle(unittest.TestCase):
                 skip_absent=True,
             )
             with self.assertRaises(PrepareError):
-                cand.run_sealed_candidate(
-                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport)
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
 
     def test_noop_control_stays_green(self):
         with tempfile.TemporaryDirectory() as d:
             mounts = _mounts(Path(d))
-            completed = cand.run_sealed_candidate(
+            completed = cand._run_sealed_candidate(
                 image_id=IMAGE, mounts=mounts,
+                resource_profile=INERT_RESOURCE_PROFILE,
                 transport=FakeTransport(
                     stdout=json.dumps(RICH_REPORT),
                     inspect=_inspect(("/input", "/vendor", "/tool", "/subject")),

@@ -109,7 +109,7 @@ def parse_inspect_payload(raw: bytes) -> dict:
     return doc[0]
 
 
-def _tmpfs_spec(value) -> dict:
+def _tmpfs_spec(value, *, require_exec=False) -> dict:
     if not isinstance(value, str):
         raise PrepareError("tmpfs")
     size = inodes = None
@@ -122,6 +122,8 @@ def _tmpfs_spec(value) -> dict:
     except ValueError as exc:
         raise PrepareError("tmpfs") from exc
     if type(size) is not int or type(inodes) is not int:
+        raise PrepareError("tmpfs")
+    if require_exec and "exec" not in value.split(","):
         raise PrepareError("tmpfs")
     return {"nr_inodes": inodes, "size": size}
 
@@ -166,7 +168,11 @@ def validate_inspect_contract(
     tmpfs = host.get("Tmpfs")
     if type(tmpfs) is not dict:
         raise PrepareError("tmpfs")
-    parsed = {dest: _tmpfs_spec(tmpfs.get(dest)) for dest in ("/tmp", "/work")}
+    parsed = {
+        "/tmp": _tmpfs_spec(tmpfs.get("/tmp")),
+        "/work": _tmpfs_spec(
+            tmpfs.get("/work"), require_exec=profile["work_exec"]),
+    }
     _require_tmpfs_match(
         parsed["/tmp"], dest="/tmp",
         size=profile["tmp_bytes"], inodes=profile["tmp_inodes"])
@@ -277,6 +283,8 @@ def docker_create_argv(
         profile["tmp_bytes"], profile["tmp_inodes"])
     work_tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (
         profile["work_bytes"], profile["work_inodes"])
+    if profile["work_exec"]:
+        work_tmpfs += ",exec"
     argv = [
         "docker", "create",
         "--name", name,

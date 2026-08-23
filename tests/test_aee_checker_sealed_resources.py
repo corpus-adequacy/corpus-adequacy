@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -46,6 +47,8 @@ def _mounts(root: Path, *, subject=True):
 def _inspect(dests, *, profile):
     work = "rw,size=%d,nr_inodes=%d,mode=1777" % (
         profile["work_bytes"], profile["work_inodes"])
+    if profile["work_exec"]:
+        work += ",exec"
     tmp = "rw,size=%d,nr_inodes=%d,mode=1777" % (
         profile["tmp_bytes"], profile["tmp_inodes"])
     return {
@@ -137,7 +140,7 @@ class CandidateDeadline(unittest.TestCase):
         src = inspect.getsource(cand._DockerTransport.start)
         self.assertNotIn("60", src)
         profile = common.CANDIDATE_RESOURCE_PROFILE
-        self.assertEqual(profile["deadline_seconds"], 30)
+        self.assertEqual(profile["deadline_seconds"], 120)
         self.assertNotEqual(profile["deadline_seconds"], 60)
 
         class Capture:
@@ -165,16 +168,58 @@ class CandidateDeadline(unittest.TestCase):
 
         transport = Capture()
         with tempfile.TemporaryDirectory() as d:
-            cand.run_sealed_candidate(
+            cand._run_sealed_candidate(
                 image_id=TOOLCHAIN, mounts=_mounts(Path(d)),
                 resource_profile=profile, transport=transport,
-                toolchain_image_id=TOOLCHAIN, probe_image_id=PROBE)
-        self.assertEqual(transport.deadline, 30)
+            )
+        self.assertEqual(transport.deadline, profile["deadline_seconds"])
 
     def test_mutation_unbound_or_60_deadline(self):
         src = inspect.getsource(cand._DockerTransport.start)
         self.assertNotIn("60", src)
         self.assertNotIn("None", src.split("deadline")[1][:80] if "deadline" in src else "60")
+
+
+class CandidateCapacity(unittest.TestCase):
+    def test_candidate_restores_the_pinned_image_toolchain_path(self):
+        self.assertIn(
+            "PATH=/usr/local/cargo/bin:$PATH CARGO_HOME=/tool cargo build",
+            cand.CANDIDATE_SCRIPT,
+        )
+
+    def test_candidate_copy_does_not_preserve_host_metadata_on_tmpfs(self):
+        self.assertNotIn("cp -a", cand.CANDIDATE_SCRIPT)
+        self.assertIn("cp -R /subject/. /work/", cand.CANDIDATE_SCRIPT)
+
+    def test_candidate_profile_can_hold_a_bounded_offline_rust_build(self):
+        profile = common.CANDIDATE_RESOURCE_PROFILE
+        self.assertGreaterEqual(profile["work_bytes"], 256 * 1024 * 1024)
+        self.assertGreaterEqual(profile["tmp_bytes"], 16 * 1024 * 1024)
+        self.assertGreaterEqual(profile["work_inodes"], 16384)
+        self.assertGreaterEqual(profile["tmp_inodes"], 2048)
+        self.assertGreaterEqual(profile["deadline_seconds"], 120)
+        self.assertIs(profile["work_exec"], True)
+
+    def test_candidate_work_tmpfs_is_executable_without_changing_inert_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            candidate = cand.candidate_create_argv(
+                image_id=TOOLCHAIN,
+                name="candidate-exec",
+                mounts=_mounts(Path(d)),
+                resource_profile=common.CANDIDATE_RESOURCE_PROFILE,
+            )
+        candidate_work = next(value for value in candidate if value.startswith("/work:"))
+        self.assertIn(",exec", candidate_work)
+
+        with tempfile.TemporaryDirectory() as d:
+            inert = oci.docker_create_argv(
+                image_id=PROBE,
+                name="inert-noexec",
+                mounts=_mounts(Path(d), subject=False),
+                command=["ok"],
+            )
+        inert_work = next(value for value in inert if value.startswith("/work:"))
+        self.assertNotIn(",exec", inert_work)
 
 
 class CandidateProfileExactKeys(unittest.TestCase):
@@ -192,6 +237,16 @@ class CandidateProfileExactKeys(unittest.TestCase):
         missing.pop("work_bytes")
         with self.assertRaises(PrepareError):
             common.require_resource_profile(missing)
+        wrong_exec = dict(common.CANDIDATE_RESOURCE_PROFILE)
+        wrong_exec["work_exec"] = 1
+        with self.assertRaises(PrepareError):
+            common.require_resource_profile(wrong_exec)
+
+    def test_output_limit_cannot_drift_from_the_executor_cap(self):
+        drifted = dict(common.CANDIDATE_RESOURCE_PROFILE)
+        drifted["output_bytes"] += 1
+        with self.assertRaises(PrepareError):
+            common.require_resource_profile(drifted)
 
 
 class InspectFollowsSuppliedProfile(unittest.TestCase):
@@ -225,8 +280,147 @@ class InertArgvMutation(unittest.TestCase):
 
 class VersionedPrepare(unittest.TestCase):
     def _v0_parts(self):
-        from test_aee_checker_sealed_run import PrepareEvidence
+        from tests.test_aee_checker_sealed_run import PrepareEvidence
         return PrepareEvidence._parts(self)
+
+    def _v1_parts(self):
+        parts = {
+            **self._v0_parts(),
+            "candidate_profile": dict(common.CANDIDATE_RESOURCE_PROFILE),
+        }
+        parts["image"] = {
+            **parts["image"],
+            "id_scope": "host-local",
+            "platform": "linux/arm64",
+        }
+        return parts
+
+    def test_v1_emission_writes_only_the_final_schema(self):
+        with mock.patch.object(
+                Path, "write_bytes", autospec=True, return_value=None) as write_bytes:
+            raw = run.emit_prepare_v1(self._v1_parts(), Path("prepare.v1.json"))
+        self.assertEqual(write_bytes.call_count, 1)
+        self.assertEqual(json.loads(raw)["schema"], run.PREPARE_V1_SCHEMA)
+
+    def test_v1_bytes_have_a_canonical_validation_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            raw = run.emit_prepare_v1(self._v1_parts(), Path(d) / "prepare.v1.json")
+        self.assertEqual(run.load_prepare_v1(raw)["candidate_profile"],
+                         common.CANDIDATE_RESOURCE_PROFILE)
+        with self.assertRaises(PrepareError):
+            run.load_prepare_v1(raw + b"\n")
+
+    def test_v1_requires_the_inert_probe_image_identity(self):
+        parts = self._v1_parts()
+        parts["image"] = {key: value for key, value in parts["image"].items()
+                          if key != "id"}
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(PrepareError):
+                run.emit_prepare_v1(parts, Path(d) / "prepare.v1.json")
+
+    def test_prepare_v1_cli_selects_v1_without_changing_prepare_default(self):
+        with mock.patch.object(run, "prepare", return_value=b"") as prepare:
+            self.assertEqual(
+                run.main(["aee_checker_sealed_run.py", "prepare-v1", "pins", "out"]),
+                0,
+            )
+        prepare.assert_called_once()
+        self.assertEqual(prepare.call_args.kwargs["schema"], run.PREPARE_V1_SCHEMA)
+
+
+class MountContractResiduals(unittest.TestCase):
+    def test_malformed_mount_specs_are_refused_by_the_shared_validator(self):
+        malformed = (
+            (),
+            (("input", "/input"), ("input", "/other")),
+            (("input", "/input"), ("other", "/input")),
+            (("input", "relative"),),
+            (("", "/input"),),
+            (("input",),),
+        )
+        for mount_spec in malformed:
+            with self.subTest(mount_spec=mount_spec):
+                with self.assertRaises(PrepareError):
+                    oci._require_mount_spec(mount_spec)
+
+    def test_missing_mount_source_is_a_contract_error_not_keyerror(self):
+        with tempfile.TemporaryDirectory() as d:
+            mounts = _mounts(Path(d), subject=False)
+            mounts.pop("tool")
+            with self.assertRaises(PrepareError) as ctx:
+                oci.docker_create_argv(
+                    image_id=PROBE,
+                    name="missing-source",
+                    mounts=mounts,
+                    command=["ok"],
+                )
+        self.assertIn("mount source missing: tool", str(ctx.exception))
+
+
+class CandidatePrepareBinding(unittest.TestCase):
+    def _parts(self):
+        from tests.test_aee_checker_sealed_run import PrepareEvidence
+        parts = PrepareEvidence._parts(self)
+        parts["candidate_profile"] = dict(common.CANDIDATE_RESOURCE_PROFILE)
+        parts["image"] = {
+            **parts["image"],
+            "id": PROBE,
+            "id_scope": "host-local",
+            "platform": "linux/arm64",
+        }
+        parts["toolchain"]["image_id"] = TOOLCHAIN
+        return parts
+
+    def _raw(self, parts=None):
+        with tempfile.TemporaryDirectory() as d:
+            return run.emit_prepare_v1(
+                parts or self._parts(), Path(d) / "prepare.v1.json")
+
+    def test_public_candidate_entrypoint_accepts_only_canonical_prepare_bytes(self):
+        parameters = inspect.signature(cand.run_sealed_candidate).parameters
+        self.assertIn("prepare_raw", parameters)
+        self.assertNotIn("image_id", parameters)
+        self.assertNotIn("resource_profile", parameters)
+
+    def test_public_candidate_derives_toolchain_image_and_profile_from_prepare(self):
+        profile = common.CANDIDATE_RESOURCE_PROFILE
+
+        class Capture:
+            skip_absent = False
+
+            def create(self, argv):
+                self.argv = argv
+
+            def start(self, name, deadline_seconds):
+                self.deadline = deadline_seconds
+                raise subprocess.TimeoutExpired(["docker", "start", "-a", name], 1)
+
+            def inspect(self, name):
+                return _inspect(
+                    ("/input", "/vendor", "/tool", "/subject"), profile=profile)
+
+            def remove(self, name):
+                return None
+
+            def require_absent(self, name):
+                return None
+
+        transport = Capture()
+        with tempfile.TemporaryDirectory() as d:
+            cand.run_sealed_candidate(
+                prepare_raw=self._raw(), mounts=_mounts(Path(d)), transport=transport)
+        self.assertIn(TOOLCHAIN, transport.argv)
+        self.assertNotIn(PROBE, transport.argv)
+        self.assertEqual(transport.deadline, profile["deadline_seconds"])
+
+    def test_prepare_probe_image_cannot_be_substituted_for_toolchain(self):
+        parts = self._parts()
+        parts["toolchain"]["image_id"] = PROBE
+        with tempfile.TemporaryDirectory() as d:
+            mounts = _mounts(Path(d))
+            with self.assertRaises(PrepareError):
+                cand.run_sealed_candidate(
+                    prepare_raw=self._raw(parts), mounts=mounts, transport=object())
 
 class ExecutionIdentity(unittest.TestCase):
     def test_profile_helpers_live_on_listed_execution_paths(self):
