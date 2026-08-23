@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase C GO-RUN authorization contract for the frozen inverse-AEE experiment. Standard library only.
 
-Binds exact prepare.v0 bytes. Does not run the checker, baseline, control,
+Binds exact canonical PREPARE-v0 or PREPARE-v1 bytes. Does not run the checker, baseline, control,
 or mutants. Does not emit report.v0. Public non-claims: not MC/DC, not
 atomic-subcondition adequacy, not complete mutation adequacy, not
 sandbox-efficacy, not certification, not ranking.
@@ -9,13 +9,16 @@ sandbox-efficacy, not certification, not ranking.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import inspect
+import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -128,6 +131,61 @@ class ValidatorBites(unittest.TestCase):
 
 
 class CandidatePrepareAuthorization(unittest.TestCase):
+    def test_cli_emits_authorization_bound_to_exact_prepare_v1_bytes(self):
+        prepare_raw = _prepare_v1_raw()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepare_path = root / "prepare.v1.json"
+            authorize_path = root / "authorize.v0.json"
+            prepare_path.write_bytes(prepare_raw)
+
+            with mock.patch.object(
+                    auth, "emit_authorize_v0", wraps=auth.emit_authorize_v0) as emitter:
+                self.assertEqual(
+                    auth.main([
+                        "aee_checker_sealed_authorize.py", "emit",
+                        str(prepare_path), str(authorize_path),
+                    ]),
+                    0,
+                )
+                emitter.assert_called_once_with(prepare_raw, authorize_path)
+            authorize_raw = authorize_path.read_bytes()
+
+        doc = json.loads(authorize_raw)
+        self.assertEqual(set(doc), set(auth.AUTHORIZE_KEYS))
+        self.assertEqual(doc["prepare_schema"], run.PREPARE_V1_SCHEMA)
+        self.assertEqual(
+            doc["prepare_sha256"], hashlib.sha256(prepare_raw).hexdigest())
+        self.assertEqual(
+            auth.validate_authorize(authorize_raw, prepare_raw)["authorize"], doc)
+
+    def test_cli_refuses_extra_arguments_for_emit_and_validate(self):
+        prepare_raw = _prepare_v1_raw()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepare_path = root / "prepare.v1.json"
+            authorize_path = root / "authorize.v0.json"
+            prepare_path.write_bytes(prepare_raw)
+            auth.emit_authorize_v0(prepare_raw, authorize_path)
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                self.assertEqual(
+                    auth.main([
+                        "aee_checker_sealed_authorize.py", "emit",
+                        str(prepare_path), str(authorize_path), "extra",
+                    ]),
+                    2,
+                )
+                self.assertEqual(
+                    auth.main([
+                        "aee_checker_sealed_authorize.py", "validate",
+                        str(authorize_path), str(prepare_path), "extra",
+                    ]),
+                    2,
+                )
+            self.assertEqual(stderr.getvalue().count("usage:"), 2)
+
     def test_authorize_v0_binds_exact_canonical_prepare_v1_bytes(self):
         prepare_raw = _prepare_v1_raw()
         with tempfile.TemporaryDirectory() as tmp:
