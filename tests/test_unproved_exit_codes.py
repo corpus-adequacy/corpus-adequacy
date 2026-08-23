@@ -310,7 +310,7 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
         self.assertLess(src.index("unproved_exit_codes"), src.index("json.loads"))
 
     def test_mutation_unproved_must_not_sit_under_raised_or_moved(self):
-        src = inspect.getsource(ca._run_process)
+        src = inspect.getsource(ca._run_mutation_step)
         needle = 'any(kind == "unproved" for kind in raised.values())'
         self.assertIn(needle, src)
         self.assertLess(src.index(needle), src.index("if raised or moved"))
