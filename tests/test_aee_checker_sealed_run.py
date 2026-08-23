@@ -127,6 +127,17 @@ REQUIRED_EXECUTION_PATHS = (
     "execution/aee-checker-sealed/probe.sh",
     "execution/aee-checker-sealed/cargo-config.toml",
 )
+
+
+def _traceback_frames(exc: BaseException) -> list[str]:
+    frames = []
+    traceback = exc.__traceback__
+    while traceback is not None:
+        frames.append(traceback.tb_frame.f_code.co_name)
+        traceback = traceback.tb_next
+    return frames
+
+
 PHASE_B_PY = (
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
@@ -1054,6 +1065,30 @@ class MaterializeBytes(unittest.TestCase):
                 else:
                     self.fail("download primary did not propagate")
             self.assertFalse(dest.exists())
+        self.assertEqual(_traceback_frames(primary).count("download_bounded"), 1)
+
+    def test_download_exception_is_wrapped_with_exact_cause(self):
+        class RefusingResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                raise underlying
+
+        underlying = OSError("read refused")
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "download"
+            with mock.patch.object(
+                    mat.urllib.request, "urlopen",
+                    return_value=RefusingResponse()):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    mat.download_bounded("https://example.invalid/archive", dest)
+            self.assertFalse(dest.exists())
+        self.assertEqual(str(ctx.exception), "download failed")
+        self.assertIs(ctx.exception.__cause__, underlying)
 
     def test_download_prepare_refusal_survives_unlink_failure(self):
         class RefusingBudget:
@@ -1824,6 +1859,7 @@ class MaterializeBytes(unittest.TestCase):
                 else:
                     self.fail("prepare primary did not propagate")
             abort.assert_called_once()
+        self.assertEqual(_traceback_frames(primary).count("prepare"), 1)
 
 
 @unittest.skipUnless(CARGO, "cargo is not available")
