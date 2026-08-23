@@ -4111,6 +4111,28 @@ class SharedMutationStep(unittest.TestCase):
             names & {"PREPARE", "authorize", "funnel", "run_execution_funnel",
                      "sealed_candidate"})
 
+    def test_execution_result_boundary_validates_and_detaches_every_field(self):
+        mappings = [{"v": ["value"]}, {"v": ["diagnostic"]},
+                    {"v": "raised"}, {"outcome_from": {"ok"}}]
+        original = ca._ProcessExecution(True, "ok", *mappings)
+        snapshot = ca._snapshot_process_execution(original)
+        self.assertEqual(snapshot, original)
+        for source, detached in zip(mappings, snapshot[2:]):
+            self.assertIsNot(source, detached)
+
+        invalid = [
+            ca._ProcessExecution(1, "ok", {}, {}, {}, {}),
+            ca._ProcessExecution(True, None, {}, {}, {}, {}),
+        ]
+        for index in range(2, 6):
+            fields = [True, "ok", {}, {}, {}, {}]
+            fields[index] = []
+            invalid.append(ca._ProcessExecution(*fields))
+        for result in invalid:
+            with self.subTest(result=result):
+                with self.assertRaisesRegex(ca.ManifestError, "invalid result"):
+                    ca._snapshot_process_execution(result)
+
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_mutation_one_caller_on_old_inline_step_body(self):
         """Leave a second replace/compare body on `_run_process` and this reddens."""
@@ -4172,7 +4194,7 @@ class SharedMutationStep(unittest.TestCase):
         """Remove the step finally-restore and working-tree bytes drift."""
         step = inspect.getsource(ca._run_mutation_step)
         self.assertIn("finally:", step)
-        self.assertIn("write_text(original", step)
+        self.assertIn("step_guard.restore()", step)
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             path = BatchRunner()._corpus(tmp)
@@ -4219,6 +4241,86 @@ class SharedMutationStep(unittest.TestCase):
         }
         self.assertTrue(observed_keys)
         self.assertTrue(all(forbidden.isdisjoint(keys) for keys in observed_keys))
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_backend_cannot_change_another_declared_source_between_steps(self):
+        """A backend side effect cannot make a later no-op look killed."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _process_kill_manifest(tmp)
+            check = tmp / "check.py"
+            check.write_text(
+                check.read_text(encoding="utf-8")
+                .replace("import json, sys\n", "import json, sys\nfrom settings import THRESHOLD\n")
+                .replace("c['n'] > 10", "c['n'] > THRESHOLD")
+                + "# MUTATION_SLOT\n",
+                encoding="utf-8",
+            )
+            settings = tmp / "settings.py"
+            settings.write_text("THRESHOLD = 10\n", encoding="utf-8")
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["implementation_sources"] = ["check.py", "settings.py"]
+            raw["mutants"] = {"g": [
+                {"label": "CONTROL", "control": True,
+                 "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'"},
+                {"label": "no-op comment", "anchor": "# MUTATION_SLOT",
+                 "replacement": "# MUTATION_SLOT_CHANGED"},
+            ]}
+            path.write_text(json.dumps(raw), encoding="utf-8")
+
+            def contaminating_backend(m, vectors=None, *, rebuild=True):
+                result = ca._default_execution_backend(m, vectors, rebuild=rebuild)
+                sources = {path.name: path for path in m["_source_paths"]}
+                if (rebuild and vectors is not None
+                        and "'ok': 'MOVED'" in sources["check.py"].read_text()):
+                    sources["settings.py"].write_text(
+                        "THRESHOLD = 0\n", encoding="utf-8")
+                return result
+
+            with self.assertRaisesRegex(ca.ManifestError, "declared source"):
+                ca._run_process(
+                    ca.load_manifest(path), path,
+                    execution_backend=contaminating_backend,
+                )
+            self.assertEqual(settings.read_text(encoding="utf-8"), "THRESHOLD = 10\n")
+            self.assertIn("# MUTATION_SLOT\n", check.read_text(encoding="utf-8"))
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_backend_cannot_retain_and_rewrite_a_baseline_result(self):
+        """A retained result alias cannot make a no-op mutant look killed."""
+        retained = []
+
+        def retaining_backend(m, vectors=None, *, rebuild=True):
+            result = ca._default_execution_backend(m, vectors, rebuild=rebuild)
+            if vectors is not None and not rebuild:
+                retained.append(result.outcomes)
+            elif vectors is not None and rebuild and retained:
+                retained[0].clear()
+                retained[0]["v1"] = ("backend-poison",)
+            return result
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _process_kill_manifest(tmp)
+            check = tmp / "check.py"
+            check.write_text(
+                check.read_text(encoding="utf-8") + "# MUTATION_SLOT\n",
+                encoding="utf-8",
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["mutants"] = {"g": [{
+                "label": "no-op comment", "anchor": "# MUTATION_SLOT",
+                "replacement": "# MUTATION_SLOT_CHANGED",
+            }]}
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            report = ca._run_process(
+                ca.load_manifest(path), path,
+                execution_backend=retaining_backend,
+            )
+        self.assertEqual(report["killed"], 0)
+        self.assertEqual(report["survived"], 1)
+        self.assertEqual(report["score_percent"], 0.0)
+        self.assertFalse(report["adequate"])
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_two_groups_share_one_unmutated_build(self):

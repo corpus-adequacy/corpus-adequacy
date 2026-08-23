@@ -1652,6 +1652,28 @@ _ProcessExecution = namedtuple(
 )
 
 
+def _snapshot_process_execution(result) -> _ProcessExecution:
+    """Validate and detach one backend result before trusted state sees it."""
+    if not isinstance(result, _ProcessExecution):
+        raise ManifestError("execution backend returned an invalid result")
+    if type(result.built) is not bool or not isinstance(result.detail, str):
+        raise ManifestError("execution backend returned an invalid result")
+    mappings = (
+        result.outcomes, result.diagnostics, result.raised,
+        result.selector_keys_seen,
+    )
+    if any(not isinstance(value, dict) for value in mappings):
+        raise ManifestError("execution backend returned an invalid result")
+    return _ProcessExecution(
+        result.built,
+        result.detail,
+        copy.deepcopy(result.outcomes),
+        copy.deepcopy(result.diagnostics),
+        copy.deepcopy(result.raised),
+        copy.deepcopy(result.selector_keys_seen),
+    )
+
+
 def _execution_manifest(m: dict) -> dict:
     """Project only fields the build and child-outcome contract consumes."""
     return {key: copy.deepcopy(m[key]) for key in _EXECUTION_MANIFEST_KEYS if key in m}
@@ -1677,10 +1699,8 @@ class _ProcessMutationSession:
     def execute(self, vectors=None, *, rebuild=True, record_selectors=False):
         execution_manifest = _execution_manifest(self.manifest)
         execution_vectors = copy.deepcopy(vectors)
-        result = self.backend(
-            execution_manifest, execution_vectors, rebuild=rebuild)
-        if not isinstance(result, _ProcessExecution):
-            raise ManifestError("execution backend returned an invalid result")
+        result = _snapshot_process_execution(self.backend(
+            execution_manifest, execution_vectors, rebuild=rebuild))
         if record_selectors:
             trusted_seen = self.manifest.setdefault("_selector_keys_seen", {})
             for selector in ("outcome_from", "diagnostic_from"):
@@ -1790,12 +1810,23 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
 
     target = next(sp for sp, n in hits if n == 1)
     target = _resolved_contained_source(target, m["_repo_root"])
+    step_guard = _SourceGuard(sources, repo_root=None)
     original = target.read_text(encoding="utf-8")
     target = _resolved_contained_source(target, m["_repo_root"])
-    target.write_text(original.replace(mut["anchor"], mut["replacement"], 1),
-                      encoding="utf-8")
+    mutated = original.replace(mut["anchor"], mut["replacement"], 1)
+    target.write_text(mutated, encoding="utf-8")
+    expected_sources = dict(step_guard.original)
+    expected_sources[target] = target.read_bytes()
     try:
         execution = session.execute(vectors, rebuild=True)
+        changed = [
+            str(path) for path, expected in expected_sources.items()
+            if path.read_bytes() != expected
+        ]
+        if changed:
+            raise ManifestError(
+                "execution backend changed a declared source outside the active "
+                "mutation: %s" % changed)
         out = execution.outcomes
         out_diag = execution.diagnostics
         raised = execution.raised
@@ -1823,8 +1854,10 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
             tally["unproved"] += 1
             return
     finally:
-        target = _resolved_contained_source(target, m["_repo_root"])
-        target.write_text(original, encoding="utf-8")
+        step_guard.restore()
+        leaked = step_guard.verify_clean()
+        if leaked:
+            raise ManifestError("declared source restoration failed: %s" % leaked)
 
     moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
     # The silent class, adopted from the forcing gate in
