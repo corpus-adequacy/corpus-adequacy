@@ -1699,8 +1699,23 @@ class _ProcessMutationSession:
     def execute(self, vectors=None, *, rebuild=True, record_selectors=False):
         execution_manifest = _execution_manifest(self.manifest)
         execution_vectors = copy.deepcopy(vectors)
-        result = _snapshot_process_execution(self.backend(
-            execution_manifest, execution_vectors, rebuild=rebuild))
+        sources = [
+            _resolved_contained_source(path, self.manifest["_repo_root"])
+            for path in self.manifest["_source_paths"]
+        ]
+        source_guard = _SourceGuard(sources, repo_root=None)
+        try:
+            result = _snapshot_process_execution(self.backend(
+                execution_manifest, execution_vectors, rebuild=rebuild))
+            changed = source_guard.verify_clean()
+            if changed:
+                raise ManifestError(
+                    "execution backend changed a declared source: %s" % changed)
+        finally:
+            source_guard.restore()
+            leaked = source_guard.verify_clean()
+            if leaked:
+                raise ManifestError("declared source restoration failed: %s" % leaked)
         if record_selectors:
             trusted_seen = self.manifest.setdefault("_selector_keys_seen", {})
             for selector in ("outcome_from", "diagnostic_from"):
@@ -1815,18 +1830,8 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
     target = _resolved_contained_source(target, m["_repo_root"])
     mutated = original.replace(mut["anchor"], mut["replacement"], 1)
     target.write_text(mutated, encoding="utf-8")
-    expected_sources = dict(step_guard.original)
-    expected_sources[target] = target.read_bytes()
     try:
         execution = session.execute(vectors, rebuild=True)
-        changed = [
-            str(path) for path, expected in expected_sources.items()
-            if path.read_bytes() != expected
-        ]
-        if changed:
-            raise ManifestError(
-                "execution backend changed a declared source outside the active "
-                "mutation: %s" % changed)
         out = execution.outcomes
         out_diag = execution.diagnostics
         raised = execution.raised

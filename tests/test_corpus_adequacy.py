@@ -3983,6 +3983,35 @@ def _two_group_process_manifest(tmp: Path) -> Path:
     return path
 
 
+def _two_source_noop_process_manifest(tmp: Path, *, with_control: bool) -> Path:
+    path = _process_kill_manifest(tmp)
+    check = tmp / "check.py"
+    check.write_text(
+        check.read_text(encoding="utf-8")
+        .replace("import json, sys\n", "import json, sys\nfrom settings import THRESHOLD\n")
+        .replace("c['n'] > 10", "c['n'] > THRESHOLD")
+        + "# MUTATION_SLOT\n",
+        encoding="utf-8",
+    )
+    settings = tmp / "settings.py"
+    settings.write_text("THRESHOLD = 10\n", encoding="utf-8")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["implementation_sources"] = ["check.py", "settings.py"]
+    mutants = []
+    if with_control:
+        mutants.append({
+            "label": "CONTROL", "control": True,
+            "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'",
+        })
+    mutants.append({
+        "label": "no-op comment", "anchor": "# MUTATION_SLOT",
+        "replacement": "# MUTATION_SLOT_CHANGED",
+    })
+    raw["mutants"] = {"g": mutants}
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return path
+
+
 class SharedMutationStep(unittest.TestCase):
     """Freeze current reports, then pin the one-engine extract and its mutations."""
 
@@ -4247,26 +4276,9 @@ class SharedMutationStep(unittest.TestCase):
         """A backend side effect cannot make a later no-op look killed."""
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
-            path = _process_kill_manifest(tmp)
+            path = _two_source_noop_process_manifest(tmp, with_control=True)
             check = tmp / "check.py"
-            check.write_text(
-                check.read_text(encoding="utf-8")
-                .replace("import json, sys\n", "import json, sys\nfrom settings import THRESHOLD\n")
-                .replace("c['n'] > 10", "c['n'] > THRESHOLD")
-                + "# MUTATION_SLOT\n",
-                encoding="utf-8",
-            )
             settings = tmp / "settings.py"
-            settings.write_text("THRESHOLD = 10\n", encoding="utf-8")
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            raw["implementation_sources"] = ["check.py", "settings.py"]
-            raw["mutants"] = {"g": [
-                {"label": "CONTROL", "control": True,
-                 "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'"},
-                {"label": "no-op comment", "anchor": "# MUTATION_SLOT",
-                 "replacement": "# MUTATION_SLOT_CHANGED"},
-            ]}
-            path.write_text(json.dumps(raw), encoding="utf-8")
 
             def contaminating_backend(m, vectors=None, *, rebuild=True):
                 result = ca._default_execution_backend(m, vectors, rebuild=rebuild)
@@ -4284,6 +4296,31 @@ class SharedMutationStep(unittest.TestCase):
                 )
             self.assertEqual(settings.read_text(encoding="utf-8"), "THRESHOLD = 10\n")
             self.assertIn("# MUTATION_SLOT\n", check.read_text(encoding="utf-8"))
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_backend_cannot_contaminate_the_trusted_baseline_source(self):
+        """A baseline side effect cannot become the next mutant's pristine tree."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _two_source_noop_process_manifest(tmp, with_control=False)
+
+            def contaminating_baseline(m, vectors=None, *, rebuild=True):
+                result = ca._default_execution_backend(m, vectors, rebuild=rebuild)
+                if vectors is not None and not rebuild:
+                    sources = {source.name: source for source in m["_source_paths"]}
+                    sources["settings.py"].write_text(
+                        "THRESHOLD = 0\n", encoding="utf-8")
+                return result
+
+            with self.assertRaisesRegex(ca.ManifestError, "declared source"):
+                ca._run_process(
+                    ca.load_manifest(path), path,
+                    execution_backend=contaminating_baseline,
+                )
+            self.assertEqual(
+                (tmp / "settings.py").read_text(encoding="utf-8"),
+                "THRESHOLD = 10\n",
+            )
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_backend_cannot_retain_and_rewrite_a_baseline_result(self):
