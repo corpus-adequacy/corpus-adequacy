@@ -280,7 +280,8 @@ class VoidRunAttemptPublication(unittest.TestCase):
             page = rpp.render_html(root, BUILD)
         self.assertIn("Published measurements", page)
         self.assertIn('class="counts"', page)
-        self.assertNotIn("void run attempt", page.lower())
+        self.assertNotIn('id="void-attempts"', page)
+        self.assertNotIn("Void run attempt", page)
 
     def test_mutation_routing_void_report_through_standard_renderer_is_red(self):
         with tempfile.TemporaryDirectory() as d:
@@ -366,7 +367,8 @@ class VoidRunAttemptPublication(unittest.TestCase):
                 [rec["kind"] for rec in records],
                 [rpp.KIND_COMPLETED_MEASUREMENT],
             )
-            self.assertNotIn("void run attempt", page.lower())
+            self.assertNotIn('id="void-attempts"', page)
+            self.assertNotIn("Void run attempt", page)
             self.assertFalse(
                 (root / "publications" / "run-attempts" / "index.v0.json").exists()
             )
@@ -394,6 +396,52 @@ class VoidRunAttemptPublication(unittest.TestCase):
             self.assertNotEqual(hashlib.sha256(crlf_path.read_bytes()).hexdigest(), digest)
             with self.assertRaisesRegex(rpp.PublicationError, "attempt digest mismatch"):
                 rpp.load_run_attempt(crlf_path, expected_attempt_sha256=digest)
+
+    def test_load_run_attempt_refuses_non_string_non_claims(self):
+        base = _canonical_attempt()
+        for hostile in (1, {"claim": "x"}, ["nested"]):
+            with self.subTest(hostile=hostile):
+                doc = dict(base, non_claims=[hostile])
+                with tempfile.TemporaryDirectory() as d:
+                    path = Path(d) / "run-attempt.v0.json"
+                    path.write_text(
+                        json.dumps(doc, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(rpp.PublicationError, "non_claims"):
+                        rpp.load_run_attempt(path)
+
+    def test_overview_names_both_typed_indexes(self):
+        stale = (
+            "Committed <code>report.v0</code> records listed in "
+            "<code>publications/index.v0.json</code>."
+        )
+        with tempfile.TemporaryDirectory() as d:
+            mixed = rpp.render_html(REPO_ROOT, BUILD)
+            measurement_only = rpp.render_html(
+                _write_tree(Path(d), [VALID / "report.v0.json"]), BUILD
+            )
+            attempts_only = rpp.render_html(_attempt_tree(Path(d) / "attempts"), BUILD)
+        for page in (mixed, measurement_only, attempts_only):
+            self.assertNotIn(stale, page)
+            self.assertIn("completed measurements", page)
+            self.assertIn("void run attempts", page)
+            self.assertIn("publications/index.v0.json", page)
+            self.assertIn("publications/run-attempts/index.v0.json", page)
+
+    def test_attempts_only_overview_omits_handoff_cta(self):
+        with tempfile.TemporaryDirectory() as d:
+            page = rpp.render_html(_attempt_tree(Path(d)), BUILD)
+        self.assertNotIn("#publication-handoff", page)
+        self.assertNotIn("Hand off a completed measurement", page)
+        self.assertNotIn('id="publication-handoff"', page)
+        self.assertIn("Request source intake", page)
+        with tempfile.TemporaryDirectory() as d:
+            measured = rpp.render_html(
+                _write_tree(Path(d), [VALID / "report.v0.json"]), BUILD
+            )
+        self.assertIn("#publication-handoff", measured)
+        self.assertIn('id="publication-handoff"', measured)
 
 
 if __name__ == "__main__":

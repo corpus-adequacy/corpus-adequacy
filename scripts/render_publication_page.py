@@ -428,7 +428,7 @@ def load_run_attempt(
         if not isinstance(extra, list) or not extra:
             raise PublicationError("non_claims must be a non-empty list")
         non_claims.extend(
-            _require_portable_public_text(str(item), field="non_claims")
+            _require_portable_public_text(item, field="non_claims")
             for item in extra
         )
     for item in VOID_NON_CLAIMS:
@@ -924,6 +924,15 @@ def _split_publication_records(records: list[dict]) -> tuple[list[dict], list[di
     return measurements, attempts
 
 
+def _intake_nav_links(*, include_handoff: bool) -> str:
+    links = ['<a href="%s">Request source intake</a>' % _esc(ISSUES_INTAKE)]
+    if include_handoff:
+        links.append(
+            '<a href="#publication-handoff">Hand off a completed measurement</a>'
+        )
+    return "\n".join(links)
+
+
 def _page_body(records: list[dict], source_commit: str, projection_digest: str) -> str:
     measurements, attempts = _split_publication_records(records)
     cards = "\n".join(_card_html(rec, source_commit) for rec in measurements)
@@ -960,13 +969,12 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 <a class="skip" href="#results">Skip to results</a>
 <header>
 <h1>Published measurements</h1>
-<p>Committed <code>report.v0</code> records listed in <code>publications/index.v0.json</code>.</p>
+<p>Committed completed measurements listed in <code>publications/index.v0.json</code> and void run attempts listed in <code>publications/run-attempts/index.v0.json</code>.</p>
 </header>
 %s
 %s
 <nav class="ctas" aria-label="intake and publication forms">
-<a href="%s">Request source intake</a>
-<a href="#publication-handoff">Hand off a completed measurement</a>
+%s
 </nav>
 %s
 <main id="results" tabindex="-1">
@@ -983,7 +991,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
         SHARED_STYLE,
         first_run,
         non_claims,
-        _esc(ISSUES_INTAKE),
+        _intake_nav_links(include_handoff=bool(measurements)),
         handoff + void_section,
         cards,
     )
