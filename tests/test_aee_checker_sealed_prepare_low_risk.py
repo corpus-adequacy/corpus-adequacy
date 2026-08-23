@@ -76,6 +76,33 @@ def _download(dest, chunks, *, cap_bytes=BUDGET_1K, module=mat):
         )
 
 
+def _oversize_prewrite_guard(module=mat):
+    """Production-facing download: refuse oversize, dest gone, unlink saw 0 bytes."""
+    with tempfile.TemporaryDirectory() as raw:
+        dest = Path(raw) / "archive.tar.gz"
+        sizes = []
+        real_unlink = Path.unlink
+
+        def spy(self, *args, **kwargs):
+            if self.name == dest.name and self.exists():
+                sizes.append(self.stat().st_size)
+            return real_unlink(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", spy):
+            raised = None
+            try:
+                _download(dest, [b"x" * CHUNK_256K], module=module)
+            except PrepareError as exc:
+                raised = exc
+        return raised, dest.exists(), sizes
+
+
+FROZEN_ARCHIVE_PAIRS = (
+    ("Rul1an/aee-checker", "25b9dfa797986624f2d680530a7228232aa3ddda"),
+    ("astrogilda/aee-conformance", "59faf842098183ae7b5387ad13e6351c44687279"),
+)
+
+
 def _load_module(path: Path, name: str):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -97,11 +124,10 @@ def _scratch_oci(text: str, tmp: Path, *, name="mut_oci"):
 
 class StreamingDownloadCeiling(unittest.TestCase):
     def test_oversize_chunk_refuses_before_unbounded_write(self):
-        with tempfile.TemporaryDirectory() as raw:
-            dest = Path(raw) / "archive.tar.gz"
-            with self.assertRaises(PrepareError):
-                _download(dest, [b"x" * CHUNK_256K])
-            self.assertFalse(dest.exists())
+        raised, exists, sizes = _oversize_prewrite_guard(mat)
+        self.assertIsInstance(raised, PrepareError)
+        self.assertFalse(exists)
+        self.assertEqual(sizes, [0])
 
     def test_exact_cap_is_accepted(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -135,13 +161,16 @@ class DockerOkReturncode(unittest.TestCase):
 
 class PinnedArchiveUrl(unittest.TestCase):
     def test_frozen_manifest_pairs_use_github_archive_tarball(self):
-        pins = _pins()
-        pairs = (
-            (pins["subject"]["repository"], pins["subject"]["commit"]),
-            (pins["corpus"]["repository"], pins["corpus"]["commit"]),
+        self.assertEqual(
+            FROZEN_ARCHIVE_PAIRS,
+            (
+                ("Rul1an/aee-checker",
+                 "25b9dfa797986624f2d680530a7228232aa3ddda"),
+                ("astrogilda/aee-conformance",
+                 "59faf842098183ae7b5387ad13e6351c44687279"),
+            ),
         )
-        self.assertEqual(len(pairs), 2)
-        for repository, commit in pairs:
+        for repository, commit in FROZEN_ARCHIVE_PAIRS:
             self.assertEqual(
                 mat.pinned_archive_url(repository, commit),
                 "https://github.com/%s/archive/%s.tar.gz" % (repository, commit),
@@ -184,7 +213,7 @@ class ScratchMutations(unittest.TestCase):
             budget.charge(bytes=CHUNK_256K)
             self.assertGreater(budget.used_bytes, BUDGET_1K)
 
-    def test_charging_after_write_leaves_dest_on_refusal(self):
+    def test_charging_after_write_reddens_production_prewrite_guard(self):
         source = (REPO_ROOT / "measurements" / "aee_checker_sealed_materialize.py").read_text(
             encoding="utf-8")
         old = (
@@ -200,21 +229,12 @@ class ScratchMutations(unittest.TestCase):
         mutated = source.replace(old, new)
         self.assertNotEqual(mutated, source)
         with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            module = _scratch_materialize(mutated, tmp, name="mut_charge_after")
-            dest = tmp / "late.tar.gz"
-            sizes = []
-            real_unlink = Path.unlink
-
-            def spy(self, *args, **kwargs):
-                if self.name == dest.name and self.exists():
-                    sizes.append(self.stat().st_size)
-                return real_unlink(self, *args, **kwargs)
-
-            with mock.patch.object(Path, "unlink", spy):
-                with self.assertRaises(PrepareError):
-                    _download(dest, [b"x" * CHUNK_256K], module=module)
-            self.assertIn(CHUNK_256K, sizes)
+            module = _scratch_materialize(mutated, Path(raw), name="mut_charge_after")
+            raised, exists, sizes = _oversize_prewrite_guard(module)
+        self.assertIsInstance(raised, PrepareError)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(sizes, [0])
+        self.assertIn(CHUNK_256K, sizes)
 
     def test_ignoring_docker_returncode_turns_red(self):
         source = (REPO_ROOT / "measurements" / "aee_checker_sealed_oci.py").read_text(
@@ -228,6 +248,22 @@ class ScratchMutations(unittest.TestCase):
             with mock.patch.object(module.br, "_run_capped", return_value=failed):
                 proc = module.docker_ok(["info"])
         self.assertEqual(proc.returncode, 7)
+
+    def test_rewriting_archive_commit_reddens_literal_pair_guard(self):
+        source = (REPO_ROOT / "measurements" / "aee_checker_sealed_materialize.py").read_text(
+            encoding="utf-8")
+        mutated = source.replace(
+            '"https://github.com/%s/archive/%s.tar.gz" % (repository, commit)',
+            '"https://github.com/%s/archive/%s.tar.gz" % (repository, commit[::-1])',
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory() as raw:
+            module = _scratch_materialize(mutated, Path(raw), name="mut_commit")
+            repository, commit = FROZEN_ARCHIVE_PAIRS[0]
+            got = module.pinned_archive_url(repository, commit)
+        expected = "https://github.com/%s/archive/%s.tar.gz" % (repository, commit)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(got, expected)
 
     def test_rewriting_archive_url_host_or_scheme_turns_red(self):
         source = (REPO_ROOT / "measurements" / "aee_checker_sealed_materialize.py").read_text(
@@ -265,12 +301,10 @@ class ScratchMutations(unittest.TestCase):
                 args=["docker", "info"], returncode=0, stdout="ok", stderr="")
             with mock.patch.object(docker.br, "_run_capped", return_value=ok):
                 self.assertIs(docker.docker_ok(["info"]), ok)
-            pins = _pins()
+            repository, commit = FROZEN_ARCHIVE_PAIRS[1]
             self.assertEqual(
-                module.pinned_archive_url(
-                    pins["corpus"]["repository"], pins["corpus"]["commit"]),
-                mat.pinned_archive_url(
-                    pins["corpus"]["repository"], pins["corpus"]["commit"]),
+                module.pinned_archive_url(repository, commit),
+                mat.pinned_archive_url(repository, commit),
             )
 
 
