@@ -78,7 +78,19 @@ def _write_index(root: Path, ids: list[str] | None = None) -> Path:
     return dest
 
 
-def _write_tree(tmpdir: Path, reports: list[Path]) -> Path:
+NO_LOCAL_REPRODUCTION = (
+    "No local reproduction command is published for this measurement."
+)
+
+def _write_dummy_manifest(dest_dir: Path) -> Path:
+    path = dest_dir / "manifest.json"
+    path.write_bytes(b"{}\n")
+    return path
+
+
+def _write_tree(
+    tmpdir: Path, reports: list[Path], dummy_manifest: bool = True
+) -> Path:
     root = tmpdir / "tree"
     for report in reports:
         dest_dir = root / "measurements" / report.parent.name
@@ -87,6 +99,8 @@ def _write_tree(tmpdir: Path, reports: list[Path]) -> Path:
         src = report.parent / "source.json"
         if src.is_file():
             shutil.copy2(src, dest_dir / "source.json")
+        if dummy_manifest:
+            _write_dummy_manifest(dest_dir)
     _write_index(root)
     return root
 
@@ -535,8 +549,59 @@ class PublicationPage(unittest.TestCase):
         self.assertNotIn("score_percent", results)
         self.assertIn("projection-digest", page)
         command = "python3 corpus_adequacy.py measurements/tersign-1cc5ea32/manifest.json --json"
+        self.assertIn(command, page)
         self.assertLess(page.find(command), page.find('class="counts"'))
+        self.assertNotIn(NO_LOCAL_REPRODUCTION, page)
 
+
+
+    def test_absent_manifest_publishes_no_reproduction_command(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"], dummy_manifest=False)
+            page = _render(root)
+            self.assertNotIn("Copyable command", page)
+            invented = (
+                "python3 corpus_adequacy.py measurements/%s/manifest.json --json"
+                % "valid-tersign"
+            )
+            self.assertNotIn(invented, page)
+            self.assertIn(NO_LOCAL_REPRODUCTION, page)
+            self.assertIn("raw report.v0.json", page)
+            self.assertIn("review", page)
+            self.assertIn("source commit", page)
+            report = root / "measurements" / "valid-tersign" / "report.v0.json"
+            self.assertIsNone(rpp.published_local_command(report))
+
+    def test_directory_manifest_is_not_a_published_command(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"], dummy_manifest=False)
+            dest = root / "measurements" / "valid-tersign" / "manifest.json"
+            dest.mkdir()
+            self.assertTrue(dest.exists())
+            self.assertFalse(stat.S_ISREG(os.lstat(dest).st_mode))
+            page = _render(root)
+            self.assertNotIn("Copyable command", page)
+            invented = (
+                "python3 corpus_adequacy.py measurements/%s/manifest.json --json"
+                % "valid-tersign"
+            )
+            self.assertNotIn(invented, page)
+            self.assertIn(NO_LOCAL_REPRODUCTION, page)
+            report = root / "measurements" / "valid-tersign" / "report.v0.json"
+            self.assertIsNone(rpp.published_local_command(report))
+
+    def test_dummy_regular_manifest_keeps_copyable_command(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            command = (
+                "python3 corpus_adequacy.py measurements/valid-tersign/manifest.json --json"
+            )
+            page = _render(root)
+            self.assertIn("Copyable command", page)
+            self.assertIn(command, page)
+            self.assertNotIn(NO_LOCAL_REPRODUCTION, page)
+            report = root / "measurements" / "valid-tersign" / "report.v0.json"
+            self.assertEqual(rpp.published_local_command(report), command)
 
     def test_invalid_source_shape_fails(self):
         repo_msg = "source repository is not owner/name"
