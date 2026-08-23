@@ -562,5 +562,220 @@ class SealedLifecycle(unittest.TestCase):
         self.assertEqual(_classify(completed), "ok")
 
 
+
+class ClosedInnerProtocol(unittest.TestCase):
+    """#81: accept one final LF; retain a closed unproved reason. No live checker."""
+
+    def _vectors(self, tmp):
+        return cand.host_vectors_path(_mounts(tmp))
+
+    def test_compact_json_without_lf_still_projects(self):
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0, stdout=json.dumps(RICH_REPORT),
+                vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("rows", json.loads(completed.stdout))
+
+    def test_one_final_lf_on_compact_json_projects(self):
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0, stdout=json.dumps(RICH_REPORT) + "\n",
+                vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("rows", json.loads(completed.stdout))
+
+    def test_pretty_json_with_one_final_lf_projects(self):
+        pretty = common.encode_json(RICH_REPORT).decode("utf-8")
+        self.assertTrue(pretty.endswith("\n"))
+        self.assertIn("\n", pretty[:-1])
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0, stdout=pretty, vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("rows", json.loads(completed.stdout))
+
+    def test_human_prefix_stays_unproved_as_malformed(self):
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0, stdout="noise\n" + json.dumps(RICH_REPORT),
+                vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "malformed")
+
+    def test_crlf_and_extra_trailing_space_are_malformed(self):
+        with tempfile.TemporaryDirectory() as d:
+            vectors = self._vectors(Path(d))
+            for raw in (
+                    json.dumps(RICH_REPORT) + "\r\n",
+                    json.dumps(RICH_REPORT) + "\n\n",
+                    " " + json.dumps(RICH_REPORT),
+                    json.dumps(RICH_REPORT) + " "):
+                completed = cand.normalize_inner_event(
+                    returncode=0, stdout=raw, vectors=vectors)
+                self.assertEqual(completed.returncode, 75, raw)
+                self.assertEqual(
+                    getattr(completed, "unproved_reason", None), "malformed", raw)
+
+    def test_empty_stdout_is_empty_or_missing(self):
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0, stdout="", vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(
+            getattr(completed, "unproved_reason", None), "empty-or-missing")
+
+    def test_inner_rc2_is_inner_exit(self):
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=2, stdout=json.dumps(RICH_REPORT),
+                vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "inner-exit")
+        self.assertEqual(_classify(completed), "unproved")
+
+    def test_unprojectable_document_is_projection(self):
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0, stdout="{}", vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "projection")
+
+    def test_truncated_object_is_malformed_not_projection(self):
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0, stdout="{", vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "malformed")
+
+    def test_trailing_extra_json_is_malformed_not_projection(self):
+        extras = (
+            json.dumps(RICH_REPORT) + "{}",
+            json.dumps(RICH_REPORT) + "\n{}",
+            "{}{}",
+            "{ }{}",
+        )
+        with tempfile.TemporaryDirectory() as d:
+            vectors = self._vectors(Path(d))
+            for raw in extras:
+                completed = cand.normalize_inner_event(
+                    returncode=0, stdout=raw, vectors=vectors)
+                self.assertEqual(completed.returncode, 75, raw)
+                self.assertEqual(
+                    getattr(completed, "unproved_reason", None), "malformed", raw)
+
+    def test_duplicate_key_and_nonfinite_are_malformed(self):
+        with tempfile.TemporaryDirectory() as d:
+            vectors = self._vectors(Path(d))
+            for raw in ('{"vectors":[],"vectors":[]}', '{"n":1e999}'):
+                completed = cand.normalize_inner_event(
+                    returncode=0, stdout=raw, vectors=vectors)
+                self.assertEqual(completed.returncode, 75, raw)
+                self.assertEqual(
+                    getattr(completed, "unproved_reason", None), "malformed", raw)
+
+    def test_mutation_collapsing_parse_into_projection_turns_red(self):
+        src = Path(cand.__file__).read_text()
+        needle = "return _unproved(\"malformed\")\n    try:\n        expected ="
+        # more reliable: merge the two try blocks by sending load_strict errors to projection
+        collapsed = src.replace(
+            """    try:
+        inner = load_strict(body.encode("utf-8"))
+    except (PrepareError, json.JSONDecodeError, TypeError, ValueError):
+        return _unproved("malformed")
+    if type(inner) is not dict:
+        return _unproved("malformed")
+    try:
+        expected = sealed_adapter.expected_ids(vectors)
+        projected = sealed_adapter.project(inner, expected)
+    except (PrepareError, KeyError, TypeError, ValueError, OSError):
+        return _unproved("projection")
+""",
+            """    try:
+        inner = load_strict(body.encode("utf-8"))
+        expected = sealed_adapter.expected_ids(vectors)
+        projected = sealed_adapter.project(inner, expected)
+    except (PrepareError, KeyError, TypeError, ValueError, OSError):
+        return _unproved("projection")
+    if type(inner) is not dict:
+        return _unproved("malformed")
+""")
+        self.assertNotEqual(src, collapsed)
+        with tempfile.TemporaryDirectory() as d:
+            module = _load_mutated(collapsed, Path(d))
+            completed = module.normalize_inner_event(
+                returncode=0, stdout="{",
+                vectors=module.host_vectors_path(_mounts(Path(d))))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "projection")
+
+    def test_timeout_transport_retains_timeout(self):
+        dests = ("/input", "/vendor", "/tool", "/subject")
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand._run_sealed_candidate(
+                image_id=IMAGE, mounts=_mounts(Path(d)),
+                resource_profile=INERT_RESOURCE_PROFILE,
+                transport=FakeTransport(timeout=True, inspect=_inspect(dests)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "timeout")
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "")
+
+    def test_output_cap_transport_retains_output_cap(self):
+        dests = ("/input", "/vendor", "/tool", "/subject")
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand._run_sealed_candidate(
+                image_id=IMAGE, mounts=_mounts(Path(d)),
+                resource_profile=INERT_RESOURCE_PROFILE,
+                transport=FakeTransport(output_cap=True, inspect=_inspect(dests)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "output-cap")
+
+    def test_mutation_reinstating_strip_rejects_final_lf(self):
+        src = Path(cand.__file__).read_text()
+        self.assertIn("def inner_protocol_stdout", src)
+        mutated = src.replace(
+            "body = inner_protocol_stdout(stdout)",
+            "body = None if stdout != stdout.strip() else stdout")
+        self.assertNotEqual(src, mutated)
+        with tempfile.TemporaryDirectory() as d:
+            module = _load_mutated(mutated, Path(d))
+            completed = module.normalize_inner_event(
+                returncode=0, stdout=json.dumps(RICH_REPORT) + "\n",
+                vectors=module.host_vectors_path(_mounts(Path(d))))
+        self.assertEqual(completed.returncode, 75)
+
+    def test_mutation_dropping_reason_collapses_timeout(self):
+        src = Path(cand.__file__).read_text()
+        mutated = src.replace(
+            'completed.unproved_reason = token',
+            'pass  # mutation: drop closed reason')
+        self.assertNotEqual(src, mutated)
+        dests = ("/input", "/vendor", "/tool", "/subject")
+        with tempfile.TemporaryDirectory() as d:
+            module = _load_mutated(mutated, Path(d))
+            completed = module._run_sealed_candidate(
+                image_id=IMAGE, mounts=_mounts(Path(d)),
+                resource_profile=INERT_RESOURCE_PROFILE,
+                transport=FakeTransport(timeout=True, inspect=_inspect(dests)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertIsNone(getattr(completed, "unproved_reason", None))
+
+    def test_noop_source_control_keeps_lf_and_timeout(self):
+        src = Path(cand.__file__).read_text()
+        mutated = src.replace("does-not-occur", "still-does-not-occur")
+        self.assertEqual(src, mutated)
+        dests = ("/input", "/vendor", "/tool", "/subject")
+        with tempfile.TemporaryDirectory() as d:
+            pretty = common.encode_json(RICH_REPORT).decode("utf-8")
+            completed = cand.normalize_inner_event(
+                returncode=0, stdout=pretty, vectors=self._vectors(Path(d)))
+            timed = cand._run_sealed_candidate(
+                image_id=IMAGE, mounts=_mounts(Path(d)),
+                resource_profile=INERT_RESOURCE_PROFILE,
+                transport=FakeTransport(timeout=True, inspect=_inspect(dests)))
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(getattr(timed, "unproved_reason", None), "timeout")
+
 if __name__ == "__main__":
     unittest.main()

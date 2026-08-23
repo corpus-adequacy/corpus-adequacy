@@ -20,6 +20,7 @@ from aee_checker_sealed_common import (
     load_strict,
     preserve_cleanup_failure,
     require_resource_profile,
+    sanitize_unproved_reason,
 )
 from aee_checker_sealed_oci import (
     DEFAULT_MOUNT_SPEC,
@@ -80,8 +81,46 @@ UNPROVED_EXIT = 75
 COMPLETE_RETURNCODES = (0, 1)
 
 
-def _unproved() -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(args=[], returncode=UNPROVED_EXIT, stdout="", stderr="")
+def _unproved(reason: str = "malformed") -> subprocess.CompletedProcess:
+    token = sanitize_unproved_reason(reason)
+    if token is None:
+        token = "malformed"
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=UNPROVED_EXIT, stdout="", stderr="")
+    completed.unproved_reason = token
+    return completed
+
+
+def inner_protocol_stdout(stdout):
+    """Accept one JSON object, with at most one final LF.
+
+    Leading whitespace, CR, extra trailing whitespace, and a prefix
+    before the object are rejected. Internal pretty-print newlines are
+    allowed only when the value starts with '{' and ends as one object.
+    """
+    if type(stdout) is not str:
+        return None
+    if len(stdout.encode("utf-8")) > br.OUTPUT_CAP_BYTES:
+        return None
+    if stdout == "":
+        return None
+    if "\r" in stdout:
+        return None
+    if stdout.endswith("\n"):
+        if stdout.endswith("\n\n"):
+            return None
+        body = stdout[:-1]
+        if body.endswith((" ", "\t", "\n")):
+            return None
+    else:
+        body = stdout
+        if body.endswith((" ", "\t")):
+            return None
+    if body == "" or body[0] != "{":
+        return None
+    if body != body.lstrip(" \t\n"):
+        return None
+    return body
 
 
 def _cleanup_candidate(transport, name: str,
@@ -126,18 +165,24 @@ def host_vectors_path(mounts: dict) -> str:
 
 def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.CompletedProcess:
     """Parse the inner report once, then reuse adapter expected_ids/project."""
-    if returncode not in COMPLETE_RETURNCODES or type(stdout) is not str:
-        return _unproved()
-    if stdout == "" or stdout[0] != "{" or stdout != stdout.strip():
-        return _unproved()
+    if returncode not in COMPLETE_RETURNCODES:
+        return _unproved("inner-exit")
+    body = inner_protocol_stdout(stdout)
+    if body is None:
+        if stdout == "" or stdout is None:
+            return _unproved("empty-or-missing")
+        return _unproved("malformed")
     try:
-        inner = load_strict(stdout.encode("utf-8"))
+        inner = load_strict(body.encode("utf-8"))
+    except (PrepareError, json.JSONDecodeError, TypeError, ValueError):
+        return _unproved("malformed")
+    if type(inner) is not dict:
+        return _unproved("malformed")
+    try:
         expected = sealed_adapter.expected_ids(vectors)
         projected = sealed_adapter.project(inner, expected)
     except (PrepareError, KeyError, TypeError, ValueError, OSError):
-        return _unproved()
-    if type(inner) is not dict:
-        return _unproved()
+        return _unproved("projection")
     return subprocess.CompletedProcess(
         args=[],
         returncode=0,
@@ -207,7 +252,7 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
     if getattr(transport, "skip_absent", False):
         raise PrepareError("absence proof skipped")
     name = "%s%s" % (name_prefix, token_hex(4))
-    completed = _unproved()
+    completed = _unproved("malformed")
     try:
         argv = candidate_create_argv(
             image_id=image_id, name=name, mounts=mounts, sealed=sealed,
@@ -216,12 +261,12 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
         try:
             proc = transport.start(name, profile["deadline_seconds"])
         except subprocess.TimeoutExpired:
-            completed = _unproved()
+            completed = _unproved("timeout")
         except br._OutputTooLarge:
-            completed = _unproved()
+            completed = _unproved("output-cap")
         except Exception as exc:
             if str(exc) == "output_cap":
-                completed = _unproved()
+                completed = _unproved("output-cap")
             else:
                 raise
         else:

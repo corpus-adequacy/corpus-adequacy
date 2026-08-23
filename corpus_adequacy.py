@@ -2076,8 +2076,13 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
                 continue
             if baseline.raised:
                 kinds = sorted(set(baseline.raised.values()))
-                tally["failures"].append("%s: the UNMUTATED binary failed (%s) on %s"
-                                         % (group, ", ".join(kinds),
+                extra = ""
+                if kinds == ["unproved"] and baseline.detail in (
+                        "timeout", "output-cap", "inner-exit",
+                        "empty-or-missing", "malformed", "projection"):
+                    extra = " [%s]" % baseline.detail
+                tally["failures"].append("%s: the UNMUTATED binary failed (%s)%s on %s"
+                                         % (group, ", ".join(kinds), extra,
                                             sorted(baseline.raised)))
                 continue
             session.baselines[group] = (

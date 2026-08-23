@@ -6,7 +6,7 @@ from pathlib import Path
 
 import corpus_adequacy as ca
 import aee_checker_sealed_candidate as candidate
-from aee_checker_sealed_common import PrepareError
+from aee_checker_sealed_common import PrepareError, sanitize_unproved_reason
 
 
 def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, transport=None):
@@ -35,9 +35,11 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, transport=Non
         )
         outcome, diagnostic, kind = ca.child_outcome(execution_manifest, completed)
         seen = execution_manifest.get("_selector_keys_seen", {})
+        reason = sanitize_unproved_reason(getattr(completed, "unproved_reason", None))
         if kind is not None:
+            detail = reason if (kind == "unproved" and reason) else "sealed candidate completed"
             return ca._ProcessExecution(
-                True, "sealed candidate completed", {}, {}, {"<batch>": kind}, seen)
+                True, detail, {}, {}, {"<batch>": kind}, seen)
         return ca._ProcessExecution(
             True, "sealed candidate completed",
             {"<batch>": outcome}, {"<batch>": diagnostic}, {}, seen)

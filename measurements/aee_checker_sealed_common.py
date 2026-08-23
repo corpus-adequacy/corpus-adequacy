@@ -167,6 +167,23 @@ class MaterializeBudget:
         self.used_entries = nxt_entries
 
 
+CLOSED_UNPROVED_REASONS = (
+    "timeout",
+    "output-cap",
+    "inner-exit",
+    "empty-or-missing",
+    "malformed",
+    "projection",
+)
+
+
+def sanitize_unproved_reason(value):
+    """Return a harness-owned reason token, or None. Never copies child bytes."""
+    if value in CLOSED_UNPROVED_REASONS:
+        return value
+    return None
+
+
 def encode_json(doc) -> bytes:
     return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
