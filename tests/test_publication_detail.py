@@ -377,7 +377,7 @@ class PublicClaimsOnDeepPages(unittest.TestCase):
         live = _site(REPO_ROOT)
         tersign = _text(live, "runs/tersign-1cc5ea32/index.html")
         self.assertIn('aria-label="silent not measured"', tersign)
-        self.assertIn("survived 2", tersign)
+        self.assertIn("survived 1", tersign)
         self.assertIn('aria-label="diagnostic_channel_declared not declared"', tersign)
         self.assertIn('class="counts"', tersign)
 

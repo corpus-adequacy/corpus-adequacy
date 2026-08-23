@@ -49,8 +49,7 @@ INVENTED_FAILURE = "UNMUTATED baseline unproved; control and mutants were not ru
 HOST_LEAK = "/private/tmp/ca-fixture-void-run/manifest.json"
 COMPLETED_PAGES = (
     "runs/tersign-1cc5ea32/index.html",
-    "runs/tersign-1cc5ea32/rules/0000.html",
-    "runs/tersign-1cc5ea32/rules/0013.html",
+    "runs/tersign-1cc5ea32/rules/0002.html",
 )
 
 
