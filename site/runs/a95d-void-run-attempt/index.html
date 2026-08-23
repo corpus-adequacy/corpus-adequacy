@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Void run attempt — a95d-void-run-attempt</title>
+<style>
+
+:root { color-scheme: light; }
+html, body { max-width: 100%; overflow-x: hidden; margin: 0; }
+body { font-family: system-ui, sans-serif; line-height: 1.45; color: #1a1a1a; background: #f7f5f0; padding: 1rem; }
+a:focus, button:focus, .skip:focus { outline: 3px solid #0033aa; outline-offset: 2px; }
+.skip { position: absolute; left: -999px; top: 0; background: #fff; padding: 0.5rem; }
+.skip:focus { left: 1rem; z-index: 2; }
+h1, h2, h3 { line-height: 1.2; }
+.non-claims { max-width: 46rem; }
+.ctas { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1rem 0 1.5rem; }
+.ctas a { display: inline-block; padding: 0.5rem 0.75rem; background: #0033aa; color: #fff; text-decoration: underline; }
+.cards { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 1rem; }
+.card { box-sizing: border-box; width: min(100%, 390px); max-width: 100%; background: #fff; border: 2px solid #1a1a1a; padding: 1rem; }
+.counts { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.count { border: 1px solid #333; padding: 0.35rem 0.5rem; min-width: 5rem; }
+.count-label { display: block; font-size: 0.8rem; }
+.mono, pre { overflow-wrap: anywhere; word-break: break-word; }
+pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wrap; }
+.links a { margin-right: 0.75rem; overflow-wrap: anywhere; }
+.finding { box-sizing: border-box; width: min(100%, 390px); max-width: 100%; background: #fff; border: 2px solid #1a1a1a; padding: 1rem; }
+
+</style>
+</head>
+<body>
+<a class="skip" href="#attempt">Skip to attempt</a>
+<header>
+<h1>Void run attempt</h1>
+<p><a href="../../index.html">overview</a></p>
+</header>
+<section class="non-claims" aria-labelledby="non-claims-heading">
+<h2 id="non-claims-heading">Non-claims</h2>
+<ul>
+<li>A void-attempt page does not validate the corpus, checker, execution environment, control, mutants, or adequacy.</li>
+<li>It is an auditable record that a bounded authorized attempt occurred and failed closed.</li>
+<li>This is an attempt/void result, not a measurement or score.</li>
+<li>PREPARE, AUTHORIZE, and raw-report source artifact bytes are not publicly retained or recomputed here.</li>
+</ul>
+</section>
+<main id="attempt" tabindex="-1">
+<p class="plain">This is a void run attempt, not a measurement or score. Baseline unproved. No valid control result. No scored mutants. No score.</p>
+<p>recorded raw report SHA-256 <span class="mono">88cc1b7e0e37ef9c4a6da17ecc1d62168b9f0f17b199203ca03c55471e587600</span></p>
+<p>execution commit <span class="mono">a95d2344b5a242774cc03edf599359d2aaabedf2</span></p>
+<p>recorded PREPARE digest <span class="mono">6b533b30ed1ba83a234826800a9e4d5d58574ac8201c17e6b996e249556197ce</span></p>
+<p>recorded AUTHORIZE digest <span class="mono">4b06114a5dc194734b9fe1cbba3f8e6ab6dfe40215857194ccce684d2d5c7599</span></p>
+<p>attempt digest <span class="mono">7b7e430145f0489107274ba92956bb3d1aaa87364923f92e74e1f0f70c613ee0</span></p>
+<h2>Retained failure</h2>
+<ul>
+<li><span class="mono">sealed: the UNMUTATED binary failed (unproved) on [&#x27;&lt;batch&gt;&#x27;]</span></li>
+</ul>
+<p class="links">
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/commit/a95d2344b5a242774cc03edf599359d2aaabedf2">execution commit a95d2344b5a242774cc03edf599359d2aaabedf2</a>
+<a href="run-attempt.v0.json">run-attempt.v0.json</a>
+</p>
+</main>
+</body>
+</html>

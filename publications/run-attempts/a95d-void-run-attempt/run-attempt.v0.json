@@ -1,0 +1,20 @@
+{
+  "schema": "corpus-adequacy.run-attempt.v0",
+  "kind": "void-run-attempt",
+  "raw_report_sha256": "88cc1b7e0e37ef9c4a6da17ecc1d62168b9f0f17b199203ca03c55471e587600",
+  "execution_commit": "a95d2344b5a242774cc03edf599359d2aaabedf2",
+  "prepare_sha256": "6b533b30ed1ba83a234826800a9e4d5d58574ac8201c17e6b996e249556197ce",
+  "authorize_sha256": "4b06114a5dc194734b9fe1cbba3f8e6ab6dfe40215857194ccce684d2d5c7599",
+  "baseline_status": "unproved",
+  "control_status": "absent-or-invalid",
+  "mutant_status": "not-scored",
+  "score_status": "none",
+  "failures": [
+    "sealed: the UNMUTATED binary failed (unproved) on ['<batch>']"
+  ],
+  "non_claims": [
+    "A void-attempt page does not validate the corpus, checker, execution environment, control, mutants, or adequacy.",
+    "It is an auditable record that a bounded authorized attempt occurred and failed closed.",
+    "This is an attempt/void result, not a measurement or score."
+  ]
+}

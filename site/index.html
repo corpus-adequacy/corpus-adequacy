@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="projection-digest" content="6905948b935ebe637f5390b16efbdb8ad8afa0d0ac1f55f3b299f5ed2e6c7109">
+<meta name="projection-digest" content="7028642079fdd7888c65c4afd928733e02da1e2997b833082144ecff598dbc8c">
 <meta name="source-commit" content="a4a39bb38f6ba4512872fec4798b640086863619">
-<title>Published corpus-adequacy measurements</title>
+<title>Published corpus-adequacy records</title>
 <style>
 
 :root { color-scheme: light; }
@@ -34,8 +34,8 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 <body>
 <a class="skip" href="#results">Skip to results</a>
 <header>
-<h1>Published measurements</h1>
-<p>Committed <code>report.v0</code> records listed in <code>publications/index.v0.json</code>.</p>
+<h1>Published corpus-adequacy records</h1>
+<p>Committed completed measurements listed in <code>publications/index.v0.json</code> and void run attempts listed in <code>publications/run-attempts/index.v0.json</code>.</p>
 </header>
 <section id="first-run" class="non-claims" aria-labelledby="first-run-heading">
 <h2 id="first-run-heading">What this measures</h2>
@@ -77,6 +77,30 @@ python3 corpus_adequacy.py --survivors measurements/tersign-1cc5ea32/report.v0.j
 <p><a href="https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=publish-measurement.yml">Manual empty publication form</a> (fallback if the local command is unavailable).</p>
 </section>
 <main id="results" tabindex="-1">
+<section id="void-attempts" class="non-claims" aria-labelledby="void-attempts-heading">
+<h2 id="void-attempts-heading">Void run attempts</h2>
+<ul class="cards">
+<li class="card">
+<h3>Void run attempt</h3>
+<p>attempt id <span class="mono">a95d-void-run-attempt</span></p>
+<p>recorded raw report SHA-256 <span class="mono">88cc1b7e0e37ef9c4a6da17ecc1d62168b9f0f17b199203ca03c55471e587600</span></p>
+<p>execution commit <span class="mono">a95d2344b5a242774cc03edf599359d2aaabedf2</span></p>
+<p>recorded PREPARE digest <span class="mono">6b533b30ed1ba83a234826800a9e4d5d58574ac8201c17e6b996e249556197ce</span></p>
+<p>recorded AUTHORIZE digest <span class="mono">4b06114a5dc194734b9fe1cbba3f8e6ab6dfe40215857194ccce684d2d5c7599</span></p>
+<p>attempt digest <span class="mono">7b7e430145f0489107274ba92956bb3d1aaa87364923f92e74e1f0f70c613ee0</span></p>
+<p class="plain">This is a void run attempt, not a measurement or score. Baseline unproved. No valid control result. No scored mutants. No score.</p>
+<h4>Retained failure</h4>
+<ul>
+<li><span class="mono">sealed: the UNMUTATED binary failed (unproved) on [&#x27;&lt;batch&gt;&#x27;]</span></li>
+</ul>
+<p class="links">
+<a href="runs/a95d-void-run-attempt/">attempt detail</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/commit/a95d2344b5a242774cc03edf599359d2aaabedf2">execution commit a95d2344b5a242774cc03edf599359d2aaabedf2</a>
+<a href="runs/a95d-void-run-attempt/run-attempt.v0.json">run-attempt.v0.json</a>
+</p>
+</li>
+</ul>
+</section>
 <h2>Committed records</h2>
 <ul class="cards">
 <li class="card">

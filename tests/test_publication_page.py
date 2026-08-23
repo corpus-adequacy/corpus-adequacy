@@ -547,11 +547,22 @@ class PublicationPage(unittest.TestCase):
 
     def test_live_repo_discovers_exactly_one_tersign_card(self):
         page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
-        self.assertEqual(page.count('class="card"'), 1)
+        self.assertEqual(page.count('class="card"'), 2)
+        results = page[page.find("<h2>Committed records</h2>") :]
+        self.assertIn("tersign-1cc5ea32", results)
+        self.assertNotIn("void run attempt", results.lower())
         self.assertIn(REPORT_SHA256, page)
+        self.assertIn("void run attempt", page.lower())
+        self.assertIn(
+            "88cc1b7e0e37ef9c4a6da17ecc1d62168b9f0f17b199203ca03c55471e587600",
+            page,
+        )
         self.assertNotIn("b1a10e8c", page)
-        results = page[page.find('id="results"'):]
+        void = page[page.find('id="void-attempts"') : page.find("<h2>Committed records</h2>")]
+        self.assertNotIn("score_percent", void)
         self.assertNotIn("score_percent", results)
+        self.assertNotIn('class="counts"', void)
+        self.assertNotIn("Copyable command", void)
         self.assertIn("projection-digest", page)
         command = "python3 corpus_adequacy.py measurements/tersign-1cc5ea32/manifest.json --json"
         self.assertIn(command, page)
@@ -672,6 +683,15 @@ class PublicationPage(unittest.TestCase):
 
 
 
+    def _sync_worktree_attempts(self, clone: Path) -> None:
+        src = REPO_ROOT / "publications" / "run-attempts"
+        dest = clone / "publications" / "run-attempts"
+        for rel in (
+            Path("index.v0.json"),
+            Path("a95d-void-run-attempt") / "run-attempt.v0.json",
+        ):
+            shutil.copy2(src / rel, dest / rel)
+
     def test_implicit_check_rejects_nonexistent_recorded_commit(self):
         zeros = "0" * 40
         with tempfile.TemporaryDirectory() as d:
@@ -683,6 +703,7 @@ class PublicationPage(unittest.TestCase):
                 ],
                 check=True,
             )
+            self._sync_worktree_attempts(clone)
             site = clone / "site" / "index.html"
             original = site.read_text(encoding="utf-8")
             recorded = rpp.source_commit_from_html(original)
@@ -707,6 +728,7 @@ class PublicationPage(unittest.TestCase):
                 ],
                 check=True,
             )
+            self._sync_worktree_attempts(clone)
             proven = clone / "measurements" / "tersign-1cc5ea32" / "PROVENANCE.md"
             raw = proven.read_bytes()
             self.assertTrue(b"\n" in raw and b"\r\n" not in raw)
