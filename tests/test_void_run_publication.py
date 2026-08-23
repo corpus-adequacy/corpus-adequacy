@@ -56,15 +56,35 @@ def _text(files: dict[str, bytes], rel: str) -> str:
     return files[rel].decode("utf-8")
 
 
+ATTEMPT_INDEX_SCHEMA = "corpus-adequacy.run-attempt-index.v0"
+PINNED_DIGESTS = (
+    RAW_REPORT_SHA256,
+    EXECUTION_COMMIT,
+    PREPARE_SHA256,
+    AUTHORIZE_SHA256,
+)
+OTHER_HEX64 = "11" * 32
+OTHER_COMMIT = "b" * 40
+
+
 def _write_attempt_index(root: Path, *, measurement_ids: list[str] | None = None) -> None:
     _write_index(root, ids=measurement_ids if measurement_ids is not None else [])
-    dest = root / "publications" / "index.v0.json"
-    doc = json.loads(dest.read_text(encoding="utf-8"))
     attempt = root / "publications" / "run-attempts" / ATTEMPT_ID / "run-attempt.v0.json"
-    doc["attempts"] = [
-        {"id": ATTEMPT_ID, "attempt_sha256": _hex(attempt)},
-    ]
-    dest.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    dest = root / "publications" / "run-attempts" / "index.v0.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(
+        json.dumps(
+            {
+                "schema": ATTEMPT_INDEX_SCHEMA,
+                "attempts": [
+                    {"id": ATTEMPT_ID, "attempt_sha256": _hex(attempt)},
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _attempt_tree(tmpdir: Path, attempt_doc: dict | None = None) -> Path:
@@ -86,6 +106,14 @@ def _canonical_attempt() -> dict:
     return json.loads(LIVE_ATTEMPT.read_text(encoding="utf-8"))
 
 
+def _void_measurement_tree(tmpdir: Path) -> Path:
+    staged = tmpdir / "staged" / "void-run-attempt"
+    staged.mkdir(parents=True)
+    shutil.copy2(VOID_REPORT, staged / "report.v0.json")
+    shutil.copy2(VALID / "source.json", staged / "source.json")
+    return _write_tree(tmpdir, [staged / "report.v0.json"], dummy_manifest=False)
+
+
 class VoidRunAttemptPublication(unittest.TestCase):
     def test_void_shaped_report_cannot_enter_measurement_renderer(self):
         doc = json.loads(VOID_REPORT.read_text(encoding="utf-8"))
@@ -98,7 +126,7 @@ class VoidRunAttemptPublication(unittest.TestCase):
         self.assertIn("void", message)
         self.assertIn("measurement", message)
         with tempfile.TemporaryDirectory() as d:
-            root = _write_tree(Path(d), [VOID_REPORT], dummy_manifest=False)
+            root = _void_measurement_tree(Path(d))
             with self.assertRaises(rpp.PublicationError):
                 rpp.render_site(root, BUILD)
 
@@ -117,12 +145,43 @@ class VoidRunAttemptPublication(unittest.TestCase):
         self.assertIn(FAILURE, doc["failures"])
         self.assertNotIn("commit", doc)
         self.assertNotIn("source", doc)
+        live_text = LIVE_ATTEMPT.read_text(encoding="utf-8")
+        for marker in rpp.HOST_MARKERS:
+            self.assertNotIn(marker, live_text)
         record = rpp.load_run_attempt(LIVE_ATTEMPT)
         self.assertEqual(record["kind"], rpp.KIND_VOID_RUN_ATTEMPT)
         self.assertEqual(record["raw_report_sha256"], RAW_REPORT_SHA256)
         self.assertEqual(record["execution_commit"], EXECUTION_COMMIT)
         self.assertEqual(record["prepare_sha256"], PREPARE_SHA256)
         self.assertEqual(record["authorize_sha256"], AUTHORIZE_SHA256)
+
+    def test_generic_loader_accepts_any_well_formed_attempt(self):
+        src = Path(rpp.__file__).read_text(encoding="utf-8")
+        for name in (
+            "VOID_RAW_REPORT_SHA256",
+            "VOID_EXECUTION_COMMIT",
+            "VOID_PREPARE_SHA256",
+            "VOID_AUTHORIZE_SHA256",
+        ):
+            self.assertNotIn(name, src)
+        for digest in PINNED_DIGESTS:
+            self.assertNotIn(digest, src)
+        doc = dict(_canonical_attempt())
+        doc["raw_report_sha256"] = OTHER_HEX64
+        doc["execution_commit"] = OTHER_COMMIT
+        doc["prepare_sha256"] = "22" * 32
+        doc["authorize_sha256"] = "33" * 32
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "run-attempt.v0.json"
+            path.write_text(
+                json.dumps(doc, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            record = rpp.load_run_attempt(path)
+        self.assertEqual(record["raw_report_sha256"], OTHER_HEX64)
+        self.assertEqual(record["execution_commit"], OTHER_COMMIT)
+        self.assertEqual(record["prepare_sha256"], "22" * 32)
+        self.assertEqual(record["authorize_sha256"], "33" * 32)
 
     def _assert_void_publication(self, page: str) -> None:
         lower = page.lower()
@@ -174,7 +233,7 @@ class VoidRunAttemptPublication(unittest.TestCase):
         for mutated in (
             {key: value for key, value in base.items() if key != "authorize_sha256"},
             {key: value for key, value in base.items() if key != "prepare_sha256"},
-            dict(base, authorize_sha256="0" * 64),
+            dict(base, authorize_sha256="ab"),
             dict(base, prepare_sha256="ab"),
         ):
             with self.subTest(mutated=sorted(set(base) ^ set(mutated))):
@@ -225,7 +284,7 @@ class VoidRunAttemptPublication(unittest.TestCase):
 
     def test_mutation_routing_void_report_through_standard_renderer_is_red(self):
         with tempfile.TemporaryDirectory() as d:
-            root = _write_tree(Path(d), [VOID_REPORT], dummy_manifest=False)
+            root = _void_measurement_tree(Path(d))
             with self.assertRaises(rpp.PublicationError):
                 rpp.render_site(root, BUILD)
             with mock.patch.object(rpp, "is_void_run_attempt", return_value=False):
@@ -256,14 +315,71 @@ class VoidRunAttemptPublication(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self._assert_void_publication(mutated)
 
-    def test_host_path_in_attempt_failure_is_redacted(self):
-        doc = _canonical_attempt()
-        doc["failures"] = [HOST_LEAK + " " + FAILURE]
+    def test_load_run_attempt_refuses_host_leak(self):
+        base = _canonical_attempt()
+        leaked = (
+            dict(base, failures=[HOST_LEAK]),
+            dict(base, non_claims=[HOST_LEAK]),
+        )
+        for doc in leaked:
+            with self.subTest(fields=sorted(k for k in ("failures", "non_claims") if HOST_LEAK in str(doc.get(k)))):
+                with tempfile.TemporaryDirectory() as d:
+                    path = Path(d) / "run-attempt.v0.json"
+                    path.write_text(
+                        json.dumps(doc, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(rpp.PublicationError, "host"):
+                        rpp.load_run_attempt(path)
+
+    def test_publication_index_v0_is_closed_to_schema_and_records(self):
+        live = json.loads(
+            (REPO_ROOT / "publications" / "index.v0.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(set(live), {"schema", "records"})
+        self.assertEqual(live["schema"], INDEX_SCHEMA)
+        self.assertNotIn("attempts", live)
         with tempfile.TemporaryDirectory() as d:
-            page = _text(rpp.render_site(_attempt_tree(Path(d), doc), BUILD), "index.html")
-        self.assertNotIn(HOST_LEAK, page)
-        self.assertNotIn("/private/tmp/", page)
-        self.assertIn(FAILURE, page)
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            raw, entries = rpp.load_publication_index(root)
+            doc = json.loads(raw.decode("utf-8"))
+            self.assertEqual(set(doc), {"schema", "records"})
+            self.assertEqual([item["id"] for item in entries], ["valid-tersign"])
+            widened = dict(doc, attempts=[{"id": ATTEMPT_ID, "attempt_sha256": "0" * 64}])
+            (root / "publications" / "index.v0.json").write_text(
+                json.dumps(widened, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(rpp.PublicationError, "unknown"):
+                rpp.load_publication_index(root)
+
+    def test_legacy_index_without_attempts_stays_identical(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            index_path = root / "publications" / "index.v0.json"
+            before = index_path.read_bytes()
+            _index_bytes, records = rpp.load_listed_records(root)
+            page = rpp.render_html(root, BUILD)
+            self.assertEqual(index_path.read_bytes(), before)
+            self.assertEqual(set(json.loads(before.decode("utf-8"))), {"schema", "records"})
+            self.assertEqual(
+                [rec["kind"] for rec in records],
+                [rpp.KIND_COMPLETED_MEASUREMENT],
+            )
+            self.assertNotIn("void run attempt", page.lower())
+            self.assertFalse(
+                (root / "publications" / "run-attempts" / "index.v0.json").exists()
+            )
+
+    def test_separate_attempts_index_lists_the_committed_record(self):
+        dest = REPO_ROOT / "publications" / "run-attempts" / "index.v0.json"
+        doc = json.loads(dest.read_text(encoding="utf-8"))
+        self.assertEqual(doc["schema"], ATTEMPT_INDEX_SCHEMA)
+        self.assertEqual(set(doc), {"schema", "attempts"})
+        self.assertEqual(doc["attempts"][0]["id"], ATTEMPT_ID)
+        self.assertEqual(doc["attempts"][0]["attempt_sha256"], _hex(LIVE_ATTEMPT))
+        _raw, attempts = rpp.load_attempt_index(REPO_ROOT)
+        self.assertEqual(attempts[0]["id"], ATTEMPT_ID)
 
 
 if __name__ == "__main__":

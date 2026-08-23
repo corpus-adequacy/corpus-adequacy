@@ -27,6 +27,10 @@ from corpus_adequacy import (  # noqa: E402
 
 INDEX_REL = "publications/index.v0.json"
 INDEX_SCHEMA = "corpus-adequacy.publication-index.v0"
+INDEX_KEYS = frozenset({"schema", "records"})
+ATTEMPT_INDEX_REL = "publications/run-attempts/index.v0.json"
+ATTEMPT_INDEX_SCHEMA = "corpus-adequacy.run-attempt-index.v0"
+ATTEMPT_INDEX_KEYS = frozenset({"schema", "attempts"})
 RAW_PREFIX = "https://github.com/corpus-adequacy/corpus-adequacy/raw"
 BLOB_PREFIX = "https://github.com/corpus-adequacy/corpus-adequacy/blob"
 ISSUES_INTAKE = "https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=add-corpus.yml"
@@ -41,16 +45,6 @@ KIND_COMPLETED_MEASUREMENT = "completed-measurement"
 VOID_RENDER_REFUSAL = "void run attempt cannot enter the measurement renderer"
 ATTEMPT_SCHEMA = "corpus-adequacy.run-attempt.v0"
 ATTEMPT_REL_PREFIX = "publications/run-attempts"
-VOID_RAW_REPORT_SHA256 = (
-    "88cc1b7e0e37ef9c4a6da17ecc1d62168b9f0f17b199203ca03c55471e587600"
-)
-VOID_EXECUTION_COMMIT = "a95d2344b5a242774cc03edf599359d2aaabedf2"
-VOID_PREPARE_SHA256 = (
-    "6b533b30ed1ba83a234826800a9e4d5d58574ac8201c17e6b996e249556197ce"
-)
-VOID_AUTHORIZE_SHA256 = (
-    "4b06114a5dc194734b9fe1cbba3f8e6ab6dfe40215857194ccce684d2d5c7599"
-)
 ATTEMPT_REQUIRED = (
     "schema",
     "kind",
@@ -66,9 +60,8 @@ ATTEMPT_REQUIRED = (
 )
 HOST_MARKERS = (
     "/Users/", "/home/", "/private/tmp/", "/private/var/", "/var/folders/",
-    "C:/", "C:\\",
+    "/tmp/", "C:/", "C:\\",
 )
-HOST_REDACTION = "[host-local-path]"
 VOID_NON_CLAIMS = (
     "A void-attempt page does not validate the corpus, checker, execution "
     "environment, control, mutants, or adequacy.",
@@ -146,23 +139,15 @@ def _esc(value) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
-def sanitize_public_text(value: str) -> str:
-    """Redact host-local absolute paths from public derived bytes."""
-    if not isinstance(value, str):
-        return ""
-    result = value
-    for marker in HOST_MARKERS:
-        start = 0
-        while True:
-            idx = result.find(marker, start)
-            if idx < 0:
-                break
-            end = idx + len(marker)
-            while end < len(result) and result[end] not in " \t\n<>\"'":
-                end += 1
-            result = result[:idx] + HOST_REDACTION + result[end:]
-            start = idx + len(HOST_REDACTION)
-    return result
+def _require_portable_public_text(value: str, *, field: str) -> str:
+    """Refuse host markers or absolute local paths before a record is public."""
+    if not isinstance(value, str) or not value:
+        raise PublicationError("%s must be a non-empty string" % field)
+    if any(marker in value for marker in HOST_MARKERS):
+        raise PublicationError("%s contains a host-local path" % field)
+    if value.startswith("/") or value.startswith("\\") or ":\\" in value:
+        raise PublicationError("%s contains an absolute local path" % field)
+    return value
 
 
 def is_void_run_attempt(doc) -> bool:
@@ -413,19 +398,11 @@ def load_run_attempt(
     if doc.get("kind") != KIND_VOID_RUN_ATTEMPT:
         raise PublicationError("run-attempt kind is not %s" % KIND_VOID_RUN_ATTEMPT)
     raw_report = _require_hex64(doc.get("raw_report_sha256"), field="raw_report_sha256")
-    if raw_report != VOID_RAW_REPORT_SHA256:
-        raise PublicationError("raw_report_sha256 is not the retained void digest")
     execution_commit = doc.get("execution_commit")
     if not _looks_like_commit(execution_commit):
         raise PublicationError("execution_commit is not a 40-hex digest")
-    if execution_commit != VOID_EXECUTION_COMMIT:
-        raise PublicationError("execution_commit is not the retained execution commit")
     prepare = _require_hex64(doc.get("prepare_sha256"), field="prepare_sha256")
     authorize = _require_hex64(doc.get("authorize_sha256"), field="authorize_sha256")
-    if prepare != VOID_PREPARE_SHA256:
-        raise PublicationError("prepare_sha256 is not the retained prepare digest")
-    if authorize != VOID_AUTHORIZE_SHA256:
-        raise PublicationError("authorize_sha256 is not the retained authorize digest")
     if doc.get("baseline_status") != "unproved":
         raise PublicationError("baseline_status must be unproved")
     if doc.get("control_status") != "not-run":
@@ -438,20 +415,22 @@ def load_run_attempt(
     if not isinstance(raw_failures, list) or not raw_failures:
         raise PublicationError("void run attempt must retain a failure")
     failures = [
-        sanitize_public_text(item)
+        _require_portable_public_text(item, field="failures")
         for item in raw_failures
-        if isinstance(item, str) and item
     ]
-    if not failures:
-        raise PublicationError("void run attempt must retain a failure")
     digest = _sha256_bytes(raw)
     if expected_attempt_sha256 is not None and digest != expected_attempt_sha256:
         raise PublicationError("attempt digest mismatch for %s" % attempt_path)
     directory = record_id if record_id is not None else attempt_path.parent.name
     non_claims = []
     extra = doc.get("non_claims")
-    if isinstance(extra, list):
-        non_claims.extend(sanitize_public_text(str(item)) for item in extra)
+    if extra is not None:
+        if not isinstance(extra, list) or not extra:
+            raise PublicationError("non_claims must be a non-empty list")
+        non_claims.extend(
+            _require_portable_public_text(str(item), field="non_claims")
+            for item in extra
+        )
     for item in VOID_NON_CLAIMS:
         if item not in non_claims:
             non_claims.append(item)
@@ -471,9 +450,15 @@ def load_run_attempt(
     }
 
 
-def load_publication_index(root: Path) -> tuple[bytes, list[dict], list[dict]]:
+def load_publication_index(root: Path) -> tuple[bytes, list[dict]]:
     index_path = Path(root) / INDEX_REL
     raw, doc = _load_json_object(index_path, label=INDEX_REL)
+    unknown = sorted(set(doc) - INDEX_KEYS)
+    if unknown:
+        raise PublicationError("publication index has unknown fields: %s" % unknown)
+    missing = sorted(INDEX_KEYS - set(doc))
+    if missing:
+        raise PublicationError("publication index missing fields: %s" % missing)
     if doc.get("schema") != INDEX_SCHEMA:
         raise PublicationError("publication index schema is not %s" % INDEX_SCHEMA)
     listed = doc.get("records")
@@ -495,16 +480,33 @@ def load_publication_index(root: Path) -> tuple[bytes, list[dict], list[dict]]:
                 "source_sha256": _require_hex64(item.get("source_sha256"), field="source_sha256"),
             }
         )
-    listed_attempts = doc.get("attempts", [])
-    if not isinstance(listed_attempts, list):
-        raise PublicationError("publication index attempts must be a list")
+    return raw, entries
+
+
+def load_attempt_index(root: Path) -> tuple[bytes, list[dict]]:
+    index_path = Path(root) / ATTEMPT_INDEX_REL
+    if not index_path.exists():
+        return b"", []
+    raw, doc = _load_json_object(index_path, label=ATTEMPT_INDEX_REL)
+    unknown = sorted(set(doc) - ATTEMPT_INDEX_KEYS)
+    if unknown:
+        raise PublicationError("run-attempt index has unknown fields: %s" % unknown)
+    missing = sorted(ATTEMPT_INDEX_KEYS - set(doc))
+    if missing:
+        raise PublicationError("run-attempt index missing fields: %s" % missing)
+    if doc.get("schema") != ATTEMPT_INDEX_SCHEMA:
+        raise PublicationError("run-attempt index schema is not %s" % ATTEMPT_INDEX_SCHEMA)
+    listed = doc.get("attempts")
+    if not isinstance(listed, list):
+        raise PublicationError("run-attempt index attempts must be a list")
     attempts = []
-    for i, item in enumerate(listed_attempts):
+    seen = set()
+    for i, item in enumerate(listed):
         if not isinstance(item, dict):
-            raise PublicationError("publication index attempts[%d] is not an object" % i)
+            raise PublicationError("run-attempt index attempts[%d] is not an object" % i)
         rec_id = _require_record_id(item.get("id"))
         if rec_id in seen:
-            raise PublicationError("publication index lists %s more than once" % rec_id)
+            raise PublicationError("run-attempt index lists %s more than once" % rec_id)
         seen.add(rec_id)
         attempts.append(
             {
@@ -514,13 +516,14 @@ def load_publication_index(root: Path) -> tuple[bytes, list[dict], list[dict]]:
                 ),
             }
         )
-    return raw, entries, attempts
+    return raw, attempts
 
 
 def load_listed_records(root: Path) -> tuple[bytes, list[dict]]:
     """Load only index-listed measurements and typed run attempts."""
     root = Path(root)
-    index_bytes, entries, attempts = load_publication_index(root)
+    index_bytes, entries = load_publication_index(root)
+    _attempt_index_bytes, attempts = load_attempt_index(root)
     records = []
     for entry in entries:
         rec_id = entry["id"]
@@ -536,8 +539,12 @@ def load_listed_records(root: Path) -> tuple[bytes, list[dict]]:
                 record_id=rec_id,
             )
         )
+    seen = {entry["id"] for entry in entries}
     for entry in attempts:
         rec_id = entry["id"]
+        if rec_id in seen:
+            raise PublicationError("run-attempt index lists %s more than once" % rec_id)
+        seen.add(rec_id)
         attempt_path = (
             root / ATTEMPT_REL_PREFIX / rec_id / "run-attempt.v0.json"
         )
@@ -987,6 +994,7 @@ def compute_projection_digest(
     records: list[dict],
     renderer_bytes: bytes,
     source_commit: str,
+    attempts_index_bytes: bytes = b"",
 ) -> str:
     """SHA-256 of projection inputs, not of the emitted HTML.
 
@@ -1005,6 +1013,8 @@ def compute_projection_digest(
         hasher.update(payload)
 
     _add(b"index", index_bytes)
+    if attempts_index_bytes:
+        _add(b"attempts_index", attempts_index_bytes)
     for record in records:
         kind = record.get("kind", KIND_COMPLETED_MEASUREMENT)
         if kind == KIND_VOID_RUN_ATTEMPT:
@@ -1185,9 +1195,14 @@ def _rule_page(record: dict, finding: dict, build_commit: str) -> str:
 
 def render_site(root: Path, source_commit: str) -> dict[str, bytes]:
     index_bytes, records = load_listed_records(Path(root))
+    attempts_index_bytes, _attempts = load_attempt_index(Path(root))
     renderer_bytes = read_bounded_regular_file(Path(__file__))
     digest = compute_projection_digest(
-        index_bytes, records, renderer_bytes, source_commit
+        index_bytes,
+        records,
+        renderer_bytes,
+        source_commit,
+        attempts_index_bytes=attempts_index_bytes,
     )
     files = {
         "index.html": _page_body(records, source_commit, digest).encode("utf-8"),

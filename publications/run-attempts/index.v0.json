@@ -1,0 +1,9 @@
+{
+  "schema": "corpus-adequacy.run-attempt-index.v0",
+  "attempts": [
+    {
+      "id": "a95d-void-run-attempt",
+      "attempt_sha256": "8d89fcae844f56a8879dedcfa4dc78be7a311dee28f5df461f03f28620e94249"
+    }
+  ]
+}
