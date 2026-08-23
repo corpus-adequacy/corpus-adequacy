@@ -8,7 +8,12 @@ This is not a GitHub-expression evaluator: values are compared as literals.
 from __future__ import annotations
 
 import ast
+import os
 import re
+import shlex
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -29,12 +34,8 @@ UNITTEST_RUN = (
     "python -W error::ResourceWarning -m unittest discover -s tests -v"
 )
 COMPILE_RUN = (
-    "python -m py_compile corpus_adequacy.py bounded_run.py "
-    "adapters/tersign_evidence_record.py measurements/tersign_checks.py "
-    "tests/test_corpus_adequacy.py tests/test_repository_ci_contract.py "
-    "tests/test_tersign_evidence_record.py "
-    "tests/test_tersign_verifier_measurement.py "
-    "adapters/algovoi_jcs_edge.py tests/test_algovoi_jcs_edge.py"
+    "python -m compileall -q -f "
+    "-x '^(?:\\.[/\\\\])?fixtures[/\\\\]' ."
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_ON = {
@@ -301,6 +302,50 @@ class RepositoryCiContract(unittest.TestCase):
     def test_workflow_matches_allowlisted_shape(self):
         self.assertEqual(workflow_shape_violations(self.tree), [])
         self.assertEqual(self.tree, ALLOWED_WORKFLOW)
+
+    def test_syntax_compile_discovers_future_modules_and_excludes_fixtures(self):
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            (root / "future").mkdir()
+            (root / "fixtures").mkdir()
+            future = root / "future" / "new_module.py"
+            future.write_text("VALUE = 1234\n", encoding="utf-8")
+            (root / "fixtures" / "upstream.py").write_text(
+                "this is not valid Python\n", encoding="utf-8"
+            )
+
+            command = shlex.split(COMPILE_RUN)
+            self.assertEqual(command[0], "python")
+            command[0] = sys.executable
+            clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertEqual(clean.returncode, 0, clean.stderr)
+
+            ordinary = root / "ordinary"
+            ordinary.mkdir()
+            fixture_named_module = ordinary / "fixtures_runtime.py"
+            fixture_named_module.write_text("def broken(:\n", encoding="utf-8")
+            overbroad_name = subprocess.run(
+                command, cwd=root, capture_output=True, text=True
+            )
+            self.assertNotEqual(overbroad_name.returncode, 0)
+            fixture_named_module.write_text("VALUE = 1\n", encoding="utf-8")
+
+            not_fixtures = root / "notfixtures"
+            not_fixtures.mkdir()
+            misleading_dir = not_fixtures / "module.py"
+            misleading_dir.write_text("def broken(:\n", encoding="utf-8")
+            overbroad_dir = subprocess.run(
+                command, cwd=root, capture_output=True, text=True
+            )
+            self.assertNotEqual(overbroad_dir.returncode, 0)
+            misleading_dir.write_text("VALUE = 1\n", encoding="utf-8")
+
+            original = future.stat()
+            future.write_text("def broken(:\n", encoding="utf-8")
+            self.assertEqual(future.stat().st_size, original.st_size)
+            os.utime(future, ns=(original.st_atime_ns, original.st_mtime_ns))
+            broken = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(broken.returncode, 0)
 
     def test_runs_on_is_exactly_matrix_os(self):
         self.assertEqual(self.job.get("runs-on"), RUNS_ON)
