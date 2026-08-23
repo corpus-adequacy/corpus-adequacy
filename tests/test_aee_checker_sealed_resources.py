@@ -258,6 +258,39 @@ class CandidateProfileExactKeys(unittest.TestCase):
 
 
 class InspectFollowsSuppliedProfile(unittest.TestCase):
+    def test_memory_swap_and_pids_flow_independently_through_argv_and_inspect(self):
+        profile = {
+            **common.CANDIDATE_RESOURCE_PROFILE,
+            "memory_bytes": 2 * 1024 * 1024 * 1024,
+            "memory_swap_bytes": 3 * 1024 * 1024 * 1024,
+            "pids": 313,
+        }
+        common.require_resource_profile(profile)
+        with tempfile.TemporaryDirectory() as d:
+            argv = cand.candidate_create_argv(
+                image_id=TOOLCHAIN,
+                name="distinct-host-limits",
+                mounts=_mounts(Path(d)),
+                resource_profile=profile,
+            )
+        self.assertEqual(argv[argv.index("--memory") + 1], str(profile["memory_bytes"]))
+        self.assertEqual(
+            argv[argv.index("--memory-swap") + 1], str(profile["memory_swap_bytes"]))
+        self.assertEqual(argv[argv.index("--pids-limit") + 1], "313")
+
+        observed = _inspect(("/input", "/vendor", "/tool"), profile=profile)
+        oci.validate_inspect_contract(
+            observed, sealed=True, resource_profile=profile)
+        for field, inert_value in (
+                ("Memory", common.INERT_RESOURCE_PROFILE["memory_bytes"]),
+                ("MemorySwap", common.INERT_RESOURCE_PROFILE["memory_swap_bytes"]),
+                ("PidsLimit", common.INERT_RESOURCE_PROFILE["pids"])):
+            mutated = _inspect(("/input", "/vendor", "/tool"), profile=profile)
+            mutated["HostConfig"][field] = inert_value
+            with self.subTest(field=field), self.assertRaises(PrepareError):
+                oci.validate_inspect_contract(
+                    mutated, sealed=True, resource_profile=profile)
+
     def test_candidate_inspect_accepts_fixture_tmpfs(self):
         profile = common.CANDIDATE_RESOURCE_PROFILE
         oci.validate_inspect_contract(
