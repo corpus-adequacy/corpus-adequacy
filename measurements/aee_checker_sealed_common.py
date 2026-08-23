@@ -75,7 +75,7 @@ INERT_RESOURCE_PROFILE = _resource_profile(
     memory_swap_bytes=MEMORY_4G,
     pids=512,
 )
-# Bounded fixture only. Not measured, not optimal, not an efficacy claim.
+# Exercised only with a tiny offline Rust fixture; not an optimality or efficacy claim.
 CANDIDATE_RESOURCE_PROFILE = _resource_profile(
     work_bytes=256 * 1024 * 1024,
     tmp_bytes=16 * 1024 * 1024,
