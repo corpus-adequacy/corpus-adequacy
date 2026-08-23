@@ -28,6 +28,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
 import aee_checker_sealed_materialize as mat  # noqa: E402
+import aee_checker_sealed_oci as oci  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
 import bounded_run as br  # noqa: E402
 
@@ -393,6 +394,36 @@ class ClassifyAbnormal(unittest.TestCase):
 
 
 class DockerArgvContract(unittest.TestCase):
+    def test_mount_spec_rejects_every_invalid_shape(self):
+        invalid_specs = (
+            (),
+            (("input",),),
+            ((1, "/input"),),
+            (("", "/input"),),
+            (("input", "input"),),
+            (("input", "/input"), ("input", "/other")),
+            (("input", "/input"), ("other", "/input")),
+        )
+        for mount_spec in invalid_specs:
+            with self.subTest(mount_spec=mount_spec):
+                with self.assertRaisesRegex(
+                        run.PrepareError, "^mount specification$"):
+                    oci._require_mount_spec(mount_spec)
+
+    def test_create_argv_names_a_missing_required_mount_source(self):
+        with tempfile.TemporaryDirectory() as d:
+            mounts = {name: Path(d) / name for name in ("input", "vendor")}
+            for path in mounts.values():
+                path.mkdir()
+            with self.assertRaisesRegex(
+                    run.PrepareError, "^mount source missing: tool$"):
+                run.docker_create_argv(
+                    image_id="sha256:" + ("cd" * 32),
+                    name="aee-sealed-inert-missing-mount",
+                    mounts=mounts,
+                    command=["ok"],
+                )
+
     def test_create_argv_binds_immutable_id_and_resource_contract(self):
         image = "sha256:" + ("cd" * 32)
         with tempfile.TemporaryDirectory() as d:
