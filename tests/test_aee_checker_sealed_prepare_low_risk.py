@@ -33,8 +33,16 @@ CHUNK_256K = 256 * 1024
 BUDGET_1K = 1024
 
 
-def _pins():
-    return json.loads(PINS_PATH.read_text(encoding="utf-8"))
+def _pins(path=PINS_PATH):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _pairs_from_pins(pins=None):
+    pins = _pins() if pins is None else pins
+    return (
+        (pins["subject"]["repository"], pins["subject"]["commit"]),
+        (pins["corpus"]["repository"], pins["corpus"]["commit"]),
+    )
 
 
 def _budget(disk_bytes=BUDGET_1K):
@@ -161,16 +169,9 @@ class DockerOkReturncode(unittest.TestCase):
 
 class PinnedArchiveUrl(unittest.TestCase):
     def test_frozen_manifest_pairs_use_github_archive_tarball(self):
-        self.assertEqual(
-            FROZEN_ARCHIVE_PAIRS,
-            (
-                ("Rul1an/aee-checker",
-                 "25b9dfa797986624f2d680530a7228232aa3ddda"),
-                ("astrogilda/aee-conformance",
-                 "59faf842098183ae7b5387ad13e6351c44687279"),
-            ),
-        )
-        for repository, commit in FROZEN_ARCHIVE_PAIRS:
+        pairs = _pairs_from_pins()
+        self.assertEqual(pairs, FROZEN_ARCHIVE_PAIRS)
+        for repository, commit in pairs:
             self.assertEqual(
                 mat.pinned_archive_url(repository, commit),
                 "https://github.com/%s/archive/%s.tar.gz" % (repository, commit),
@@ -248,6 +249,24 @@ class ScratchMutations(unittest.TestCase):
             with mock.patch.object(module.br, "_run_capped", return_value=failed):
                 proc = module.docker_ok(["info"])
         self.assertEqual(proc.returncode, 7)
+
+    def test_mutating_pins_subject_commit_reddens_frozen_pair_guard(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "pins.json"
+            dest.write_bytes(PINS_PATH.read_bytes())
+            doc = json.loads(dest.read_text(encoding="utf-8"))
+            original = doc["subject"]["commit"]
+            self.assertEqual(original, FROZEN_ARCHIVE_PAIRS[0][1])
+            doc["subject"]["commit"] = "a" * 40
+            dest.write_text(json.dumps(doc), encoding="utf-8")
+            mutated = _pins(dest)
+            self.assertEqual(
+                mutated["corpus"]["commit"], FROZEN_ARCHIVE_PAIRS[1][1])
+            self.assertEqual(
+                mutated["subject"]["repository"], FROZEN_ARCHIVE_PAIRS[0][0])
+            pairs = _pairs_from_pins(mutated)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(pairs, FROZEN_ARCHIVE_PAIRS)
 
     def test_rewriting_archive_commit_reddens_literal_pair_guard(self):
         source = (REPO_ROOT / "measurements" / "aee_checker_sealed_materialize.py").read_text(
