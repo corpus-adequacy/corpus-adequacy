@@ -13,6 +13,10 @@ before stdout is parsed and is never a projected outcome. Baseline
 voids; a control with that exit is `control-error`. This names adapter
 declared incompleteness; it does not infer why an inner checker failed.
 
+Process/batch parse-error and incomplete keep their existing disposition;
+only a declared `unproved_exit_codes` exit on a living adapter is the new
+`unproved` class.
+
 Controls now run before ordinary process or batch mutants. Baseline or
 control failure voids before a scored result can be published.
 
