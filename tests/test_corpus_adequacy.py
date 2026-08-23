@@ -4197,19 +4197,22 @@ class SharedMutationStep(unittest.TestCase):
             m["diagnostic_from"] = ["poison"]
             m["_corpus_digest"] = "sha256:" + "f" * 64
             m["_manifest_sha256"] = "sha256:" + "f" * 64
-            built, detail, child = ca._default_execution_backend(
+            result = ca._default_execution_backend(
                 m, vectors, rebuild=rebuild)
-            return built, detail, child
+            if vectors is not None:
+                vectors.clear()
+            return result
 
         with tempfile.TemporaryDirectory() as d:
-            loaded = ca.load_manifest(BatchRunner()._corpus(Path(d)))
-            default = ca._run_process(dict(loaded), Path(d) / "m.json")
+            manifest = _two_group_process_manifest(Path(d))
+            loaded = ca.load_manifest(manifest)
+            default = ca._run_process(dict(loaded), manifest)
             poisoned = ca._run_process(
-                dict(loaded), Path(d) / "m.json", execution_backend=hostile)
+                dict(loaded), manifest, execution_backend=hostile)
         self.assertEqual(_semantic_projection(default), _semantic_projection(poisoned))
         self.assertEqual(poisoned["schema"], ca.REPORT_SCHEMA)
         self.assertEqual(poisoned["score_percent"], 100.0)
-        self.assertEqual(poisoned["killed"], 1)
+        self.assertEqual(poisoned["killed"], 2)
         forbidden = {
             "mutants", "equivalent", "known_holes", "_corpus_digest",
             "_manifest_sha256", "control_status", "score_percent",

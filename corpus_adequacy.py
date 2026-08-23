@@ -1592,19 +1592,24 @@ def _default_execution_backend(m: dict, vectors=None, *, rebuild=True):
     `vectors is None` is compile/build only, matching the unmutated tree gate.
     `rebuild=False` reuses that build for another baseline group. Mutant steps
     always pass `rebuild=True`.
-    A caller may compile or run elsewhere and still return
-    `(built, detail, (outcomes, diags, raised))`. The backend never scores,
+    A caller may compile or run elsewhere and still return one
+    `_ProcessExecution`. The backend never scores,
     never writes a denominator, and never emits a report.
     """
     if rebuild:
         built, detail = _build(m)
         if not built or vectors is None:
-            return built, detail, ({}, {}, {})
+            return _ProcessExecution(
+                built, detail, {}, {}, {}, {})
     else:
         detail = "reused unmutated build"
         if vectors is None:
-            return True, detail, ({}, {}, {})
-    return True, detail, _process_outcomes(m, vectors)
+            return _ProcessExecution(
+                True, detail, {}, {}, {}, {})
+    outcomes, diagnostics, raised = _process_outcomes(m, vectors)
+    seen = copy.deepcopy(m.get("_selector_keys_seen", {}))
+    return _ProcessExecution(
+        True, detail, outcomes, diagnostics, raised, seen)
 
 
 def _new_process_tally() -> dict:
@@ -1641,6 +1646,12 @@ _EXECUTION_MANIFEST_KEYS = (
 )
 
 
+_ProcessExecution = namedtuple(
+    "_ProcessExecution",
+    "built detail outcomes diagnostics raised selector_keys_seen",
+)
+
+
 def _execution_manifest(m: dict) -> dict:
     """Project only fields the build and child-outcome contract consumes."""
     return {key: copy.deepcopy(m[key]) for key in _EXECUTION_MANIFEST_KEYS if key in m}
@@ -1665,12 +1676,16 @@ class _ProcessMutationSession:
 
     def execute(self, vectors=None, *, rebuild=True, record_selectors=False):
         execution_manifest = _execution_manifest(self.manifest)
-        result = self.backend(execution_manifest, vectors, rebuild=rebuild)
+        execution_vectors = copy.deepcopy(vectors)
+        result = self.backend(
+            execution_manifest, execution_vectors, rebuild=rebuild)
+        if not isinstance(result, _ProcessExecution):
+            raise ManifestError("execution backend returned an invalid result")
         if record_selectors:
-            seen = execution_manifest.get("_selector_keys_seen", {})
             trusted_seen = self.manifest.setdefault("_selector_keys_seen", {})
             for selector in ("outcome_from", "diagnostic_from"):
-                trusted_seen.setdefault(selector, set()).update(seen.get(selector, set()))
+                trusted_seen.setdefault(selector, set()).update(
+                    result.selector_keys_seen.get(selector, set()))
         return result
 
 
@@ -1780,9 +1795,11 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
     target.write_text(original.replace(mut["anchor"], mut["replacement"], 1),
                       encoding="utf-8")
     try:
-        built, detail, (out, out_diag, raised) = session.execute(
-            vectors, rebuild=True)
-        if not built:
+        execution = session.execute(vectors, rebuild=True)
+        out = execution.outcomes
+        out_diag = execution.diagnostics
+        raised = execution.raised
+        if not execution.built:
             # Cursor's ruling on the design: rustc exit 1 yields no verdict, so
             # the corpus never saw this mutant. Counting it killed would let a
             # typo in the substitution print as "rule covered". Measure a
@@ -1792,15 +1809,17 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
                 _record_control(
                     tally["results"], tally["control_statuses"],
                     group, mut["label"], scope, detected=False,
-                    moved=0, error=detail)
+                    moved=0, error=execution.detail)
                 tally["failures"].append(
                     "control %r ended abnormally (%s); that is not a kill and "
-                    "this run has no adequacy score" % (mut["label"], detail))
+                    "this run has no adequacy score"
+                    % (mut["label"], execution.detail))
                 return
             tally["results"].append({"group": group, "label": mut["label"],
                                      "verdict": "unproved", "scope": scope, "moved": 0,
                                      "how": "the mutant does not build, so the corpus was "
-                                            "never run against it: %s" % detail})
+                                            "never run against it: %s"
+                                            % execution.detail})
             tally["unproved"] += 1
             return
     finally:
@@ -1961,27 +1980,30 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None) -> dic
         m, backend, accumulator, acknowledged, declared_controls)
     m = session.manifest
     try:
-        ok, detail, _unused = session.execute(None, rebuild=True)
-        if not ok:
-            raise ManifestError("the UNMUTATED tree does not build: %s" % detail)
+        prepared = session.execute(None, rebuild=True)
+        if not prepared.built:
+            raise ManifestError(
+                "the UNMUTATED tree does not build: %s" % prepared.detail)
 
         for group in sorted(m["mutants"]):
             vectors = [v for v in all_vectors if _group_of(v, m) == group]
             if not vectors:
                 tally["failures"].append("%s: no vectors, so its mutants cannot be scored" % group)
                 continue
-            _ok, _detail, (base, base_diag, raised) = session.execute(
+            baseline = session.execute(
                 vectors, rebuild=False, record_selectors=True)
-            if not _ok:
+            if not baseline.built:
                 tally["failures"].append("%s: the UNMUTATED binary failed (%s) on %s"
-                                         % (group, _detail, ["<build>"]))
+                                         % (group, baseline.detail, ["<build>"]))
                 continue
-            if raised:
-                kinds = sorted(set(raised.values()))
+            if baseline.raised:
+                kinds = sorted(set(baseline.raised.values()))
                 tally["failures"].append("%s: the UNMUTATED binary failed (%s) on %s"
-                                         % (group, ", ".join(kinds), sorted(raised)))
+                                         % (group, ", ".join(kinds),
+                                            sorted(baseline.raised)))
                 continue
-            session.baselines[group] = (vectors, base, base_diag)
+            session.baselines[group] = (
+                vectors, baseline.outcomes, baseline.diagnostics)
 
         # An outcome member the implementation never emits contributes a constant
         # None to every comparison, so it discriminates nothing and every score
