@@ -522,6 +522,21 @@ class SealedLifecycle(unittest.TestCase):
             traceback = traceback.tb_next
         self.assertEqual(frames.count("_run_sealed_candidate"), 1)
 
+    def test_cleanup_context_survives_a_broken_optional_note_hook(self):
+        class NoteHookFailure(BaseException):
+            pass
+
+        class BrokenNoteHook(BaseException):
+            def add_note(self, _note):
+                raise NoteHookFailure("note hook failed")
+
+        primary = BrokenNoteHook("primary")
+        cleanup = OSError("cleanup refused")
+        common.preserve_cleanup_failure(primary, "candidate cleanup", cleanup)
+
+        failures = getattr(primary, "cleanup_failures", ())
+        self.assertEqual(failures, (("candidate cleanup", cleanup),))
+
     def test_absence_proof_skipped_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             transport = FakeTransport(

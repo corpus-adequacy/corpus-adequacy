@@ -123,8 +123,11 @@ def preserve_cleanup_failure(primary: BaseException, action: str,
     primary.cleanup_failures = failures + ((action, failure),)
     add_note = getattr(primary, "add_note", None)
     if callable(add_note):
-        add_note("%s failed: %s: %s" % (
-            action, type(failure).__name__, failure))
+        try:
+            add_note("%s failed: %s: %s" % (
+                action, type(failure).__name__, failure))
+        except BaseException:
+            pass
 
 
 class MaterializeBudget:

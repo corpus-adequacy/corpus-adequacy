@@ -1020,6 +1020,41 @@ class ExecutionIdentityDirty(unittest.TestCase):
 
 
 class MaterializeBytes(unittest.TestCase):
+    def test_download_baseexception_removes_partial_and_preserves_primary(self):
+        class FlightSignal(BaseException):
+            pass
+
+        class PartialResponse:
+            def __init__(self, primary):
+                self.primary = primary
+                self.reads = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                self.reads += 1
+                if self.reads == 1:
+                    return b"partial"
+                raise self.primary
+
+        primary = FlightSignal("stop download")
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "download"
+            with mock.patch.object(
+                    mat.urllib.request, "urlopen",
+                    return_value=PartialResponse(primary)):
+                try:
+                    mat.download_bounded("https://example.invalid/archive", dest)
+                except BaseException as actual:
+                    self.assertIs(actual, primary)
+                else:
+                    self.fail("download primary did not propagate")
+            self.assertFalse(dest.exists())
+
     def test_download_prepare_refusal_survives_unlink_failure(self):
         class RefusingBudget:
             ceilings = {"deadline_seconds": 1}
@@ -1758,6 +1793,37 @@ class MaterializeBytes(unittest.TestCase):
                             self.fail("%s primary did not propagate" % stage)
                     failures = getattr(primary, "cleanup_failures", ())
                     self.assertEqual(str(failures[0][1]), "abort cleanup")
+
+    def test_prepare_baseexception_aborts_atomic_staging_and_preserves_primary(self):
+        class FlightSignal(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "root"
+            pins = Path(d) / "pins"
+            template = root / "execution" / "aee-checker-sealed"
+            template.mkdir(parents=True)
+            primary = FlightSignal("stop prepare")
+            abort = mock.Mock()
+            with mock.patch.object(run, "verify_phase_a_frozen", return_value={
+                    "corpus": {"commit": "corpus", "corpusDigest": "digest"},
+                    "instrument": {"commit": "instrument"},
+                    "subject": {"commit": "subject"},
+            }), \
+                    mock.patch.object(run, "require_docker_ready", return_value="test"), \
+                    mock.patch.object(
+                        run, "resolve_prepare_image",
+                        return_value="sha256:" + ("00" * 32)), \
+                    mock.patch.object(run, "run_inert_probe", return_value={}), \
+                    mock.patch.object(run, "materialize_pinned", side_effect=primary), \
+                    mock.patch.object(run, "abort_atomic_dest", abort):
+                try:
+                    run.prepare(pins, Path(d) / "bundle", root=root)
+                except BaseException as actual:
+                    self.assertIs(actual, primary)
+                else:
+                    self.fail("prepare primary did not propagate")
+            abort.assert_called_once()
 
 
 @unittest.skipUnless(CARGO, "cargo is not available")

@@ -355,7 +355,7 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
         else:
             raise PrepareError("prepare schema")
         commit_atomic_dest(state)
-    except Exception as primary:
+    except BaseException as primary:
         try:
             abort_atomic_dest(state)
         except BaseException as cleanup_exc:

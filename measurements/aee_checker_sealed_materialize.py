@@ -156,6 +156,9 @@ def download_bounded(
         primary = PrepareError("download failed")
         _unlink_preserving(dest, primary)
         raise primary from exc
+    except BaseException as primary:
+        _unlink_preserving(dest, primary)
+        raise
     if written == 0:
         primary = PrepareError("download empty")
         _unlink_preserving(dest, primary)
