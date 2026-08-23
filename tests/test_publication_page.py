@@ -548,7 +548,7 @@ class PublicationPage(unittest.TestCase):
     def test_live_repo_discovers_exactly_one_tersign_card(self):
         page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
         self.assertEqual(page.count('class="card"'), 2)
-        results = page[page.find('id="results"') :]
+        results = page[page.find("<h2>Committed records</h2>") :]
         self.assertIn("tersign-1cc5ea32", results)
         self.assertNotIn("void run attempt", results.lower())
         self.assertIn(REPORT_SHA256, page)

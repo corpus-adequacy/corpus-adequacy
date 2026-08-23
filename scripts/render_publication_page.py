@@ -933,6 +933,35 @@ def _intake_nav_links(*, include_handoff: bool) -> str:
     return "\n".join(links)
 
 
+def _overview_heading(*, has_attempts: bool) -> tuple[str, str]:
+    if has_attempts:
+        label = "Published corpus-adequacy records"
+        return label, label
+    return "Published corpus-adequacy measurements", "Published measurements"
+
+
+def _listing_copy(*, has_measurements: bool, has_attempts: bool) -> str:
+    parts = []
+    if has_measurements:
+        parts.append(
+            "completed measurements listed in "
+            "<code>publications/index.v0.json</code>"
+        )
+    if has_attempts:
+        parts.append(
+            "void run attempts listed in "
+            "<code>publications/run-attempts/index.v0.json</code>"
+        )
+    if not parts:
+        parts.append(
+            "completed measurements listed in "
+            "<code>publications/index.v0.json</code>"
+        )
+    if len(parts) == 2:
+        return "Committed %s and %s." % (parts[0], parts[1])
+    return "Committed %s." % parts[0]
+
+
 def _page_body(records: list[dict], source_commit: str, projection_digest: str) -> str:
     measurements, attempts = _split_publication_records(records)
     cards = "\n".join(_card_html(rec, source_commit) for rec in measurements)
@@ -945,13 +974,24 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
     void_section = ""
     if attempts:
         void_section = (
-            '\n<section id="void-attempts" class="non-claims" '
+            '<section id="void-attempts" class="non-claims" '
             'aria-labelledby="void-attempts-heading">\n'
             '<h2 id="void-attempts-heading">Void run attempts</h2>\n'
             '<ul class="cards">\n%s\n</ul>\n'
-            "</section>"
+            "</section>\n"
             % "\n".join(_void_card_html(rec, source_commit) for rec in attempts)
         )
+    measurement_block = ""
+    if measurements:
+        measurement_block = (
+            "<h2>Committed records</h2>\n"
+            '<ul class="cards">\n%s\n</ul>\n' % cards
+        )
+    title, heading = _overview_heading(has_attempts=bool(attempts))
+    listing = _listing_copy(
+        has_measurements=bool(measurements),
+        has_attempts=bool(attempts),
+    )
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -959,7 +999,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="projection-digest" content="%s">
 <meta name="source-commit" content="%s">
-<title>Published corpus-adequacy measurements</title>
+<title>%s</title>
 <style>
 %s
 #results:focus { outline: 3px solid #0033aa; outline-offset: 2px; }
@@ -968,8 +1008,8 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 <body>
 <a class="skip" href="#results">Skip to results</a>
 <header>
-<h1>Published measurements</h1>
-<p>Committed completed measurements listed in <code>publications/index.v0.json</code> and void run attempts listed in <code>publications/run-attempts/index.v0.json</code>.</p>
+<h1>%s</h1>
+<p>%s</p>
 </header>
 %s
 %s
@@ -978,22 +1018,22 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 </nav>
 %s
 <main id="results" tabindex="-1">
-<h2>Committed records</h2>
-<ul class="cards">
-%s
-</ul>
-</main>
+%s%s</main>
 </body>
 </html>
 """ % (
         _esc(projection_digest),
         _esc(source_commit),
+        _esc(title),
         SHARED_STYLE,
+        _esc(heading),
+        listing,
         first_run,
         non_claims,
         _intake_nav_links(include_handoff=bool(measurements)),
-        handoff + void_section,
-        cards,
+        handoff,
+        void_section,
+        measurement_block,
     )
 
 

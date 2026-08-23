@@ -411,23 +411,65 @@ class VoidRunAttemptPublication(unittest.TestCase):
                     with self.assertRaisesRegex(rpp.PublicationError, "non_claims"):
                         rpp.load_run_attempt(path)
 
-    def test_overview_names_both_typed_indexes(self):
-        stale = (
-            "Committed <code>report.v0</code> records listed in "
-            "<code>publications/index.v0.json</code>."
+    def _title_and_h1(self, page: str) -> tuple[str, str]:
+        title_start = page.find("<title>")
+        title_end = page.find("</title>")
+        h1_start = page.find("<h1>")
+        h1_end = page.find("</h1>")
+        self.assertNotEqual(title_start, -1)
+        self.assertNotEqual(h1_start, -1)
+        return (
+            page[title_start + len("<title>") : title_end],
+            page[h1_start + len("<h1>") : h1_end],
         )
+
+    def _skip_target(self, page: str) -> str:
+        marker = '<a class="skip" href="#'
+        start = page.find(marker)
+        self.assertNotEqual(start, -1)
+        href_end = page.find('"', start + len(marker))
+        target_id = page[start + len(marker) : href_end]
+        target = page.find('id="%s"' % target_id)
+        self.assertNotEqual(target, -1, target_id)
+        return page[target:]
+
+    def test_attempts_only_heading_avoids_measurements(self):
         with tempfile.TemporaryDirectory() as d:
-            mixed = rpp.render_html(REPO_ROOT, BUILD)
-            measurement_only = rpp.render_html(
+            page = rpp.render_html(_attempt_tree(Path(d)), BUILD)
+        title, heading = self._title_and_h1(page)
+        self.assertNotIn("measurements", title.lower())
+        self.assertNotIn("measurements", heading.lower())
+        self.assertNotIn("Committed records", page)
+
+    def test_skip_target_contains_void_section(self):
+        mixed = rpp.render_html(REPO_ROOT, BUILD)
+        with tempfile.TemporaryDirectory() as d:
+            attempts_only = rpp.render_html(_attempt_tree(Path(d)), BUILD)
+        for page in (mixed, attempts_only):
+            with self.subTest(page=page[page.find("<h1>") : page.find("</h1>")]):
+                self.assertIn('id="void-attempts"', self._skip_target(page))
+
+    def test_measurement_only_copy_names_only_its_index(self):
+        with tempfile.TemporaryDirectory() as d:
+            page = rpp.render_html(
                 _write_tree(Path(d), [VALID / "report.v0.json"]), BUILD
             )
-            attempts_only = rpp.render_html(_attempt_tree(Path(d) / "attempts"), BUILD)
-        for page in (mixed, measurement_only, attempts_only):
-            self.assertNotIn(stale, page)
-            self.assertIn("completed measurements", page)
-            self.assertIn("void run attempts", page)
-            self.assertIn("publications/index.v0.json", page)
-            self.assertIn("publications/run-attempts/index.v0.json", page)
+        title, heading = self._title_and_h1(page)
+        self.assertIn("Published measurements", heading)
+        self.assertIn("publications/index.v0.json", page)
+        self.assertNotIn("publications/run-attempts/index.v0.json", page)
+        self.assertNotIn("void run attempts listed", page.lower())
+        self.assertIn("measurements", title.lower())
+
+    def test_mixed_copy_names_both_typed_indexes(self):
+        page = rpp.render_html(REPO_ROOT, BUILD)
+        title, heading = self._title_and_h1(page)
+        self.assertNotIn("Published measurements", heading)
+        self.assertNotIn("measurements", title.lower())
+        self.assertIn("publications/index.v0.json", page)
+        self.assertIn("publications/run-attempts/index.v0.json", page)
+        self.assertIn("completed measurements", page)
+        self.assertIn("void run attempts", page)
 
     def test_attempts_only_overview_omits_handoff_cta(self):
         with tempfile.TemporaryDirectory() as d:
