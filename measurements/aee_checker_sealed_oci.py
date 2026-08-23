@@ -109,7 +109,7 @@ def parse_inspect_payload(raw: bytes) -> dict:
     return doc[0]
 
 
-def _tmpfs_spec(value, *, require_exec=False) -> dict:
+def _tmpfs_spec(value, *, expected_exec=False) -> dict:
     if not isinstance(value, str):
         raise PrepareError("tmpfs")
     size = inodes = None
@@ -123,7 +123,8 @@ def _tmpfs_spec(value, *, require_exec=False) -> dict:
         raise PrepareError("tmpfs") from exc
     if type(size) is not int or type(inodes) is not int:
         raise PrepareError("tmpfs")
-    if require_exec and "exec" not in value.split(","):
+    has_exec = "exec" in value.split(",")
+    if has_exec is not expected_exec:
         raise PrepareError("tmpfs")
     return {"nr_inodes": inodes, "size": size}
 
@@ -136,7 +137,8 @@ def _require_tmpfs_match(parsed: dict, *, dest: str, size: int, inodes: int) -> 
 def validate_inspect_contract(
         inspect, *, sealed: bool, mount_spec=DEFAULT_MOUNT_SPEC,
         resource_profile=None) -> dict:
-    profile = require_resource_profile(resource_profile or INERT_RESOURCE_PROFILE)
+    profile = require_resource_profile(
+        INERT_RESOURCE_PROFILE if resource_profile is None else resource_profile)
     if type(inspect) is not dict:
         raise PrepareError("inspect missing")
     host, cfg = inspect.get("HostConfig"), inspect.get("Config")
@@ -171,7 +173,7 @@ def validate_inspect_contract(
     parsed = {
         "/tmp": _tmpfs_spec(tmpfs.get("/tmp")),
         "/work": _tmpfs_spec(
-            tmpfs.get("/work"), require_exec=profile["work_exec"]),
+            tmpfs.get("/work"), expected_exec=profile["work_exec"]),
     }
     _require_tmpfs_match(
         parsed["/tmp"], dest="/tmp",
@@ -278,7 +280,8 @@ def docker_create_argv(
         sealed: bool = True, mount_spec=DEFAULT_MOUNT_SPEC,
         entrypoint: str = "/probe", resource_profile=None) -> list[str]:
     image_id = require_image_id(image_id)
-    profile = require_resource_profile(resource_profile or INERT_RESOURCE_PROFILE)
+    profile = require_resource_profile(
+        INERT_RESOURCE_PROFILE if resource_profile is None else resource_profile)
     tmp_tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (
         profile["tmp_bytes"], profile["tmp_inodes"])
     work_tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (

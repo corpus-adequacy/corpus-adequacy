@@ -136,6 +136,14 @@ class CandidateImageBinding(unittest.TestCase):
 
 
 class CandidateDeadline(unittest.TestCase):
+    def test_docker_transport_uses_the_bounded_runner(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr="")
+        with mock.patch.object(cand.br, "_run_capped", return_value=completed) as bounded:
+            self.assertIs(cand._DockerTransport().start("candidate", 120), completed)
+        bounded.assert_called_once_with(
+            ["docker", "start", "-a", "candidate"], Path.cwd(), 120)
+
     def test_transport_start_uses_profile_deadline_not_sixty(self):
         src = inspect.getsource(cand._DockerTransport.start)
         self.assertNotIn("60", src)
@@ -265,6 +273,43 @@ class InspectFollowsSuppliedProfile(unittest.TestCase):
             oci.validate_inspect_contract(
                 inspect_doc, sealed=True, resource_profile=profile)
 
+    def test_work_exec_must_equal_the_supplied_profile_in_both_directions(self):
+        inert = common.INERT_RESOURCE_PROFILE
+        inspect_doc = _inspect(("/input", "/vendor", "/tool"), profile=inert)
+        inspect_doc["HostConfig"]["Tmpfs"]["/work"] += ",exec"
+        with self.assertRaises(PrepareError):
+            oci.validate_inspect_contract(
+                inspect_doc, sealed=True, resource_profile=inert)
+
+        candidate = common.CANDIDATE_RESOURCE_PROFILE
+        inspect_doc = _inspect(("/input", "/vendor", "/tool"), profile=candidate)
+        inspect_doc["HostConfig"]["Tmpfs"]["/work"] = (
+            inspect_doc["HostConfig"]["Tmpfs"]["/work"].replace(",exec", ""))
+        with self.assertRaises(PrepareError):
+            oci.validate_inspect_contract(
+                inspect_doc, sealed=True, resource_profile=candidate)
+
+    def test_explicit_empty_profile_is_not_an_omitted_profile(self):
+        with tempfile.TemporaryDirectory() as d:
+            mounts = _mounts(Path(d), subject=False)
+            with self.assertRaises(PrepareError):
+                oci.docker_create_argv(
+                    image_id=PROBE,
+                    name="empty-profile",
+                    mounts=mounts,
+                    command=["ok"],
+                    resource_profile={},
+                )
+        with self.assertRaises(PrepareError):
+            oci.validate_inspect_contract(
+                _inspect(
+                    ("/input", "/vendor", "/tool"),
+                    profile=common.INERT_RESOURCE_PROFILE,
+                ),
+                sealed=True,
+                resource_profile={},
+            )
+
 
 class InertArgvMutation(unittest.TestCase):
     def test_mutation_changes_inert_default_argv_while_adding_candidate(self):
@@ -327,6 +372,32 @@ class VersionedPrepare(unittest.TestCase):
         prepare.assert_called_once()
         self.assertEqual(prepare.call_args.kwargs["schema"], run.PREPARE_V1_SCHEMA)
 
+    def test_production_prepare_v1_never_calls_the_v0_emitter(self):
+        from tests.test_aee_checker_sealed_run import ExplicitPrepareImage
+
+        fixture = ExplicitPrepareImage()
+        patches = fixture._patches()
+        with tempfile.TemporaryDirectory() as d, \
+                patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6], patches[7], patches[8], patches[9], \
+                mock.patch.object(
+                    run, "emit_prepare_v0",
+                    side_effect=AssertionError("prepare-v1 called v0 emitter"),
+                ) as v0, \
+                mock.patch.object(
+                    run, "emit_prepare_v1", wraps=run.emit_prepare_v1,
+                ) as v1:
+            raw = run.prepare(
+                Path(d) / "pins",
+                Path(d) / "out",
+                root=Path(d) / "root",
+                image_id=fixture.IMAGE,
+                schema=run.PREPARE_V1_SCHEMA,
+            )
+        v0.assert_not_called()
+        v1.assert_called_once()
+        self.assertEqual(json.loads(raw)["schema"], run.PREPARE_V1_SCHEMA)
+
 
 class MountContractResiduals(unittest.TestCase):
     def test_malformed_mount_specs_are_refused_by_the_shared_validator(self):
@@ -381,6 +452,7 @@ class CandidatePrepareBinding(unittest.TestCase):
         self.assertIn("prepare_raw", parameters)
         self.assertNotIn("image_id", parameters)
         self.assertNotIn("resource_profile", parameters)
+        self.assertNotIn("sealed", parameters)
 
     def test_public_candidate_derives_toolchain_image_and_profile_from_prepare(self):
         profile = common.CANDIDATE_RESOURCE_PROFILE

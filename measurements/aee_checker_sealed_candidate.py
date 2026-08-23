@@ -204,7 +204,7 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
 
 def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,
                          name_prefix: str = "aee-cand-",
-                         sealed: bool = True, transport=None,
+                         transport=None,
                          ) -> subprocess.CompletedProcess:
     prepare = load_prepare_v1(prepare_raw)
     image_id = require_candidate_image(
@@ -217,6 +217,6 @@ def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,
         mounts=mounts,
         resource_profile=prepare["candidate_profile"],
         name_prefix=name_prefix,
-        sealed=sealed,
+        sealed=True,
         transport=transport,
     )
