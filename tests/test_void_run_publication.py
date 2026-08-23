@@ -381,6 +381,20 @@ class VoidRunAttemptPublication(unittest.TestCase):
         _raw, attempts = rpp.load_attempt_index(REPO_ROOT)
         self.assertEqual(attempts[0]["id"], ATTEMPT_ID)
 
+    def test_crlf_working_tree_bytes_miss_the_pinned_attempt_digest(self):
+        attrs = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("publications/run-attempts/** text eol=lf", attrs)
+        lf = LIVE_ATTEMPT.read_bytes()
+        self.assertNotIn(b"\r\n", lf)
+        digest = hashlib.sha256(lf).hexdigest()
+        self.assertEqual(digest, _hex(LIVE_ATTEMPT))
+        with tempfile.TemporaryDirectory() as d:
+            crlf_path = Path(d) / "run-attempt.v0.json"
+            crlf_path.write_bytes(lf.replace(b"\n", b"\r\n"))
+            self.assertNotEqual(hashlib.sha256(crlf_path.read_bytes()).hexdigest(), digest)
+            with self.assertRaisesRegex(rpp.PublicationError, "attempt digest mismatch"):
+                rpp.load_run_attempt(crlf_path, expected_attempt_sha256=digest)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
