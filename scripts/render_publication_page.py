@@ -139,11 +139,24 @@ def _esc(value) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
+def _has_ascii_drive_root(value: str) -> bool:
+    """True when value contains an ASCII Windows drive root such as D:/ or D:\\."""
+    for index in range(len(value) - 2):
+        letter = value[index]
+        if not letter.isascii() or not letter.isalpha():
+            continue
+        if value[index + 1] == ":" and value[index + 2] in "/\\":
+            return True
+    return False
+
+
 def _require_portable_public_text(value: str, *, field: str) -> str:
     """Refuse host markers or absolute local paths before a record is public."""
     if not isinstance(value, str) or not value:
         raise PublicationError("%s must be a non-empty string" % field)
     if any(marker in value for marker in HOST_MARKERS):
+        raise PublicationError("%s contains a host-local path" % field)
+    if _has_ascii_drive_root(value):
         raise PublicationError("%s contains a host-local path" % field)
     if value.startswith("/") or value.startswith("\\") or ":\\" in value:
         raise PublicationError("%s contains an absolute local path" % field)

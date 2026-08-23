@@ -43,7 +43,8 @@ PREPARE_SHA256 = (
 AUTHORIZE_SHA256 = (
     "4b06114a5dc194734b9fe1cbba3f8e6ab6dfe40215857194ccce684d2d5c7599"
 )
-FAILURE = "UNMUTATED baseline unproved; control and mutants were not run"
+FAILURE = "sealed: the UNMUTATED binary failed (unproved) on ['<batch>']"
+INVENTED_FAILURE = "UNMUTATED baseline unproved; control and mutants were not run"
 HOST_LEAK = "/private/tmp/ca-fixture-void-run/manifest.json"
 COMPLETED_PAGES = (
     "runs/tersign-1cc5ea32/index.html",
@@ -191,7 +192,7 @@ class VoidRunAttemptPublication(unittest.TestCase):
         self.assertIn("no scored mutants", lower)
         self.assertIn("no score", lower)
         self.assertIn("not a measurement", lower)
-        self.assertIn(FAILURE, page)
+        self.assertIn(rpp._esc(FAILURE), page)
         self.assertIn(RAW_REPORT_SHA256, page)
         self.assertIn(EXECUTION_COMMIT, page)
         self.assertIn(PREPARE_SHA256, page)
@@ -312,7 +313,7 @@ class VoidRunAttemptPublication(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             page = _text(rpp.render_site(_attempt_tree(Path(d)), BUILD), "index.html")
         self._assert_void_publication(page)
-        mutated = page.replace(FAILURE, "", 1)
+        mutated = page.replace(rpp._esc(FAILURE), "", 1)
         with self.assertRaises(AssertionError):
             self._assert_void_publication(mutated)
 
@@ -331,6 +332,40 @@ class VoidRunAttemptPublication(unittest.TestCase):
                         encoding="utf-8",
                     )
                     with self.assertRaisesRegex(rpp.PublicationError, "host"):
+                        rpp.load_run_attempt(path)
+
+    def test_committed_attempt_keeps_exact_retained_failure(self):
+        src = (REPO_ROOT / "corpus_adequacy.py").read_text(encoding="utf-8")
+        self.assertIn(
+            '"%s: the UNMUTATED binary failed (%s) on %s"',
+            src,
+        )
+        doc = _canonical_attempt()
+        self.assertEqual(doc["raw_report_sha256"], RAW_REPORT_SHA256)
+        self.assertEqual(doc["failures"][0], FAILURE)
+        self.assertNotEqual(doc["failures"][0], INVENTED_FAILURE)
+        live = LIVE_ATTEMPT.read_text(encoding="utf-8")
+        self.assertIn(FAILURE, live)
+        self.assertNotIn(INVENTED_FAILURE, live)
+        self.assertNotIn(HOST_LEAK, live)
+        self.assertNotIn("/private/tmp/", live)
+
+    def test_load_run_attempt_refuses_other_windows_drive_roots(self):
+        base = _canonical_attempt()
+        for leak in (
+            "D:/Users/leak/manifest.json",
+            "D:\\Users\\leak\\manifest.json",
+            "D:/leak/manifest.json",
+        ):
+            with self.subTest(leak=leak):
+                doc = dict(base, failures=[leak])
+                with tempfile.TemporaryDirectory() as d:
+                    path = Path(d) / "run-attempt.v0.json"
+                    path.write_text(
+                        json.dumps(doc, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(rpp.PublicationError, "host|absolute"):
                         rpp.load_run_attempt(path)
 
     def test_publication_index_v0_is_closed_to_schema_and_records(self):

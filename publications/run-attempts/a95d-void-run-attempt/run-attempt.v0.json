@@ -10,7 +10,7 @@
   "mutant_status": "not-scored",
   "score_status": "none",
   "failures": [
-    "UNMUTATED baseline unproved; control and mutants were not run"
+    "sealed: the UNMUTATED binary failed (unproved) on ['<batch>']"
   ],
   "non_claims": [
     "A void-attempt page does not validate the corpus, checker, execution environment, control, mutants, or adequacy.",
