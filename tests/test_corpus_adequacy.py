@@ -4077,6 +4077,7 @@ class SharedMutationStep(unittest.TestCase):
                     ca.run(path)
                     self.assertEqual((tmp / "check.py").read_bytes(), before)
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_run_process_uses_one_shared_step_primitive(self):
         calls = []
         original = ca._run_mutation_step
@@ -4110,6 +4111,7 @@ class SharedMutationStep(unittest.TestCase):
             names & {"PREPARE", "authorize", "funnel", "run_execution_funnel",
                      "sealed_candidate"})
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_mutation_one_caller_on_old_inline_step_body(self):
         """Leave a second replace/compare body on `_run_process` and this reddens."""
         marker = RuntimeError("shared-step-witness")
