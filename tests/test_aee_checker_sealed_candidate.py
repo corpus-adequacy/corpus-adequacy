@@ -19,6 +19,8 @@ sys.path.insert(0, str(REPO_ROOT / "adapters"))
 
 import aee_checker_sealed as sealed_adapter  # noqa: E402
 import aee_checker_sealed_candidate as cand  # noqa: E402
+import aee_checker_sealed_common as common  # noqa: E402
+import aee_checker_sealed_materialize as mat  # noqa: E402
 import aee_checker_sealed_oci as oci  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
 
@@ -89,7 +91,8 @@ class FakeTransport:
     def __init__(
             self, *, returncode=0, stdout="", inspect=None,
             timeout=False, output_cap=False, skip_absent=False,
-            leave_present=False, fail_create=False):
+            leave_present=False, fail_create=False, create_error=None,
+            remove_error=None, absent_error=None):
         self.returncode = returncode
         self.stdout = stdout
         self.inspect_doc = inspect
@@ -98,6 +101,9 @@ class FakeTransport:
         self.skip_absent = skip_absent
         self.leave_present = leave_present
         self.fail_create = fail_create
+        self.create_error = create_error
+        self.remove_error = remove_error
+        self.absent_error = absent_error
         self.created = []
         self.removed = []
         self.absent_checked = []
@@ -105,6 +111,8 @@ class FakeTransport:
 
     def create(self, argv):
         self.created.append(list(argv))
+        if self.create_error is not None:
+            raise self.create_error
         if self.fail_create:
             raise PrepareError("partial create")
 
@@ -127,9 +135,13 @@ class FakeTransport:
 
     def remove(self, name):
         self.removed.append(name)
+        if self.remove_error is not None:
+            raise self.remove_error
 
     def require_absent(self, name):
         self.absent_checked.append(name)
+        if self.absent_error is not None:
+            raise self.absent_error
         if self.leave_present:
             raise PrepareError("container still present: %s" % name)
 
@@ -396,7 +408,134 @@ class SealedLifecycle(unittest.TestCase):
                 cand._run_sealed_candidate(
                     image_id=IMAGE, mounts=_mounts(Path(d)), transport=present,
                     resource_profile=INERT_RESOURCE_PROFILE)
-            self.assertIn("still present", str(ctx.exception))
+            self.assertEqual(str(ctx.exception), "partial create")
+            failures = getattr(ctx.exception, "cleanup_failures", ())
+            self.assertEqual(
+                str(failures[0][1]),
+                "container still present: %s" % present.removed[0])
+
+    def test_remove_failure_without_primary_is_chained_and_absence_still_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            underlying = OSError("remove refused")
+            transport = FakeTransport(
+                stdout=json.dumps(RICH_REPORT),
+                inspect=_inspect(("/input", "/vendor", "/tool", "/subject")),
+                remove_error=underlying,
+            )
+            with self.assertRaises(PrepareError) as ctx:
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
+        self.assertRegex(str(ctx.exception), r"remove|cleanup")
+        self.assertIs(ctx.exception.__cause__, underlying)
+        self.assertEqual(len(transport.absent_checked), 1)
+
+    def test_absence_failure_without_primary_is_chained(self):
+        with tempfile.TemporaryDirectory() as d:
+            underlying = OSError("absence unavailable")
+            transport = FakeTransport(
+                stdout=json.dumps(RICH_REPORT),
+                inspect=_inspect(("/input", "/vendor", "/tool", "/subject")),
+                absent_error=underlying,
+            )
+            with self.assertRaises(PrepareError) as ctx:
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
+        self.assertRegex(str(ctx.exception), r"absence")
+        self.assertIs(ctx.exception.__cause__, underlying)
+
+    def test_cleanup_failures_do_not_replace_prepare_primary(self):
+        with tempfile.TemporaryDirectory() as d:
+            primary = PrepareError("primary create refusal")
+            transport = FakeTransport(
+                create_error=primary,
+                remove_error=OSError("remove refused"),
+                absent_error=PrepareError("absence refused"),
+            )
+            with self.assertRaises(PrepareError) as ctx:
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
+        self.assertIs(ctx.exception, primary)
+        self.assertEqual(len(transport.absent_checked), 1)
+        failures = getattr(primary, "cleanup_failures", ())
+        self.assertEqual([action for action, _failure in failures], [
+            "candidate remove", "candidate absence proof"])
+        self.assertEqual([str(failure) for _action, failure in failures], [
+            "remove refused", "absence refused"])
+
+    def test_cleanup_failures_do_not_replace_baseexception_in_flight(self):
+        class FlightSignal(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as d:
+            primary = FlightSignal("stop now")
+            transport = FakeTransport(
+                create_error=primary,
+                remove_error=OSError("remove refused"),
+                absent_error=PrepareError("absence refused"),
+            )
+            with self.assertRaises(FlightSignal) as ctx:
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
+        self.assertIs(ctx.exception, primary)
+        self.assertEqual(len(transport.absent_checked), 1)
+        failures = getattr(primary, "cleanup_failures", ())
+        self.assertEqual([str(failure) for _action, failure in failures], [
+            "remove refused", "absence refused"])
+
+    def test_shared_cleanup_context_is_legacy_safe_without_add_note(self):
+        class LegacyPrimary(PrepareError):
+            add_note = None
+
+        with tempfile.TemporaryDirectory() as d:
+            primary = LegacyPrimary("legacy primary")
+            remove_error = OSError("legacy remove")
+            transport = FakeTransport(
+                create_error=primary,
+                remove_error=remove_error,
+                absent_error=PrepareError("legacy absence"),
+            )
+            try:
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
+            except BaseException as actual:
+                self.assertIs(actual, primary)
+            else:
+                self.fail("legacy primary did not propagate")
+        self.assertIs(
+            getattr(cand, "preserve_cleanup_failure", None),
+            getattr(common, "preserve_cleanup_failure", None))
+        self.assertIs(
+            getattr(mat, "preserve_cleanup_failure", None),
+            getattr(common, "preserve_cleanup_failure", None))
+        failures = getattr(primary, "cleanup_failures", ())
+        self.assertIs(failures[0][1], remove_error)
+        self.assertEqual(str(failures[1][1]), "legacy absence")
+        frames = []
+        traceback = primary.__traceback__
+        while traceback is not None:
+            frames.append(traceback.tb_frame.f_code.co_name)
+            traceback = traceback.tb_next
+        self.assertEqual(frames.count("_run_sealed_candidate"), 1)
+
+    def test_cleanup_context_survives_a_broken_optional_note_hook(self):
+        class NoteHookFailure(BaseException):
+            pass
+
+        class BrokenNoteHook(BaseException):
+            def add_note(self, _note):
+                raise NoteHookFailure("note hook failed")
+
+        primary = BrokenNoteHook("primary")
+        cleanup = OSError("cleanup refused")
+        common.preserve_cleanup_failure(primary, "candidate cleanup", cleanup)
+
+        failures = getattr(primary, "cleanup_failures", ())
+        self.assertEqual(failures, (("candidate cleanup", cleanup),))
 
     def test_absence_proof_skipped_is_refused(self):
         with tempfile.TemporaryDirectory() as d:

@@ -116,6 +116,20 @@ class DockerUnavailable(PrepareError):
     """docker executable is not available. Distinct from daemon-not-ready."""
 
 
+def preserve_cleanup_failure(primary: BaseException, action: str,
+                             failure: BaseException) -> None:
+    """Retain cleanup context without changing the primary or its traceback."""
+    failures = tuple(getattr(primary, "cleanup_failures", ()))
+    primary.cleanup_failures = failures + ((action, failure),)
+    add_note = getattr(primary, "add_note", None)
+    if callable(add_note):
+        try:
+            add_note("%s failed: %s: %s" % (
+                action, type(failure).__name__, failure))
+        except BaseException:
+            pass
+
+
 class MaterializeBudget:
     """One bytes/entries/deadline budget for downloads+subject+corpus+vendor."""
 

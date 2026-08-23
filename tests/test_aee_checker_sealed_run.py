@@ -127,6 +127,17 @@ REQUIRED_EXECUTION_PATHS = (
     "execution/aee-checker-sealed/probe.sh",
     "execution/aee-checker-sealed/cargo-config.toml",
 )
+
+
+def _traceback_frames(exc: BaseException) -> list[str]:
+    frames = []
+    traceback = exc.__traceback__
+    while traceback is not None:
+        frames.append(traceback.tb_frame.f_code.co_name)
+        traceback = traceback.tb_next
+    return frames
+
+
 PHASE_B_PY = (
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
@@ -1020,6 +1031,99 @@ class ExecutionIdentityDirty(unittest.TestCase):
 
 
 class MaterializeBytes(unittest.TestCase):
+    def test_download_baseexception_removes_partial_and_preserves_primary(self):
+        class FlightSignal(BaseException):
+            pass
+
+        class PartialResponse:
+            def __init__(self, primary):
+                self.primary = primary
+                self.reads = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                self.reads += 1
+                if self.reads == 1:
+                    return b"partial"
+                raise self.primary
+
+        primary = FlightSignal("stop download")
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "download"
+            with mock.patch.object(
+                    mat.urllib.request, "urlopen",
+                    return_value=PartialResponse(primary)):
+                try:
+                    mat.download_bounded("https://example.invalid/archive", dest)
+                except BaseException as actual:
+                    self.assertIs(actual, primary)
+                else:
+                    self.fail("download primary did not propagate")
+            self.assertFalse(dest.exists())
+        self.assertEqual(_traceback_frames(primary).count("download_bounded"), 1)
+
+    def test_download_exception_is_wrapped_with_exact_cause(self):
+        class RefusingResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                raise underlying
+
+        underlying = OSError("read refused")
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "download"
+            with mock.patch.object(
+                    mat.urllib.request, "urlopen",
+                    return_value=RefusingResponse()):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    mat.download_bounded("https://example.invalid/archive", dest)
+            self.assertFalse(dest.exists())
+        self.assertEqual(str(ctx.exception), "download failed")
+        self.assertIs(ctx.exception.__cause__, underlying)
+
+    def test_download_prepare_refusal_survives_unlink_failure(self):
+        class RefusingBudget:
+            ceilings = {"deadline_seconds": 1}
+
+            def charge(self, *, entries=0, bytes=0):
+                if bytes:
+                    raise primary
+
+            def check_deadline(self):
+                pass
+
+        primary = run.PrepareError("download byte refusal")
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "download"
+            with mock.patch.object(mat.urllib.request, "urlopen", return_value=io.BytesIO(b"x")), \
+                    mock.patch.object(Path, "unlink", side_effect=OSError("unlink refused")):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    mat.download_bounded("https://example.invalid/archive", dest,
+                                         budget=RefusingBudget())
+        self.assertIs(ctx.exception, primary)
+        failures = getattr(primary, "cleanup_failures", ())
+        self.assertEqual(str(failures[0][1]), "unlink refused")
+
+    def test_download_empty_refusal_survives_unlink_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "download"
+            with mock.patch.object(mat.urllib.request, "urlopen", return_value=io.BytesIO(b"")), \
+                    mock.patch.object(Path, "unlink", side_effect=OSError("unlink refused")):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    mat.download_bounded("https://example.invalid/archive", dest)
+        self.assertEqual(str(ctx.exception), "download empty")
+        failures = getattr(ctx.exception, "cleanup_failures", ())
+        self.assertEqual(str(failures[0][1]), "unlink refused")
+
     def test_empty_vendor_tree_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             vendor = Path(d) / "vendor"
@@ -1443,6 +1547,82 @@ class MaterializeBytes(unittest.TestCase):
             self.assertNotIn("os.replace(", commit)
             self.assertIn("os.rename(", commit)
 
+    def test_dest_precheck_primary_survives_abort_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            state = run.begin_atomic_dest(dest)
+            dest.mkdir()
+            with mock.patch.object(
+                    mat, "abort_atomic_dest", side_effect=OSError("abort refused")):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    run.commit_atomic_dest(state)
+        self.assertEqual(str(ctx.exception), "dest exists")
+        failures = getattr(ctx.exception, "cleanup_failures", ())
+        self.assertEqual(str(failures[0][1]), "abort refused")
+
+    def test_rename_primary_survives_abort_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = run.begin_atomic_dest(Path(d) / "bundle")
+            rename_error = OSError("rename refused")
+            with mock.patch.object(mat.os, "rename", side_effect=rename_error), \
+                    mock.patch.object(
+                        mat, "abort_atomic_dest", side_effect=OSError("abort refused")):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    run.commit_atomic_dest(state)
+        self.assertEqual(str(ctx.exception), "dest exists")
+        self.assertIs(ctx.exception.__cause__, rename_error)
+        failures = getattr(ctx.exception, "cleanup_failures", ())
+        self.assertEqual(str(failures[0][1]), "abort refused")
+
+    def test_fsync_failure_is_best_effort_and_commit_succeeds(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            state = run.begin_atomic_dest(dest)
+            (state["staging"] / "content").write_text("ready\n", encoding="utf-8")
+            with mock.patch.object(mat.os, "fsync", side_effect=OSError("fsync refused")):
+                committed = run.commit_atomic_dest(state)
+            self.assertEqual(committed, dest)
+            self.assertEqual((dest / "content").read_text(encoding="utf-8"), "ready\n")
+
+    def test_dest_precheck_wins_before_fsync(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            state = run.begin_atomic_dest(dest)
+            dest.mkdir()
+            with mock.patch.object(
+                    mat, "_fsync_tree", side_effect=AssertionError("fsync ran")):
+                with self.assertRaisesRegex(run.PrepareError, "dest exists"):
+                    run.commit_atomic_dest(state)
+
+    def test_commit_order_is_precheck_then_fsync_then_rename(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = run.begin_atomic_dest(Path(d) / "bundle")
+            events = []
+            original_exists = Path.exists
+
+            def exists(path):
+                if path == state["dest"]:
+                    events.append("precheck")
+                return original_exists(path)
+
+            with mock.patch.object(Path, "exists", autospec=True, side_effect=exists), \
+                    mock.patch.object(
+                        mat, "_fsync_tree", side_effect=lambda _path: events.append("fsync")), \
+                    mock.patch.object(
+                        mat.os, "rename", side_effect=lambda _src, _dest: events.append("rename")):
+                run.commit_atomic_dest(state)
+        self.assertEqual(events[:3], ["precheck", "fsync", "rename"])
+
+    def test_atomic_rename_nonclaim_names_windows_existing_target_refusal(self):
+        comment = inspect.getsource(run.commit_atomic_dest)
+        self.assertIn("Windows refuses an existing target", comment)
+
+    def test_fsync_docstring_disclaims_durability_and_power_loss(self):
+        doc = (mat._fsync_tree.__doc__ or "").lower()
+        self.assertIn("no durability", doc)
+        self.assertIn("crash", doc)
+        self.assertIn("power-loss", doc)
+
     def test_mid_materialize_failure_leaves_no_consumable_final(self):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "bundle"
@@ -1594,6 +1774,92 @@ class MaterializeBytes(unittest.TestCase):
             self.assertFalse(dest.exists())
             leftovers = [p.name for p in Path(d).iterdir() if p.name.startswith("bundle")]
             self.assertEqual(leftovers, [])
+
+    def test_prepare_outer_abort_never_replaces_materialize_or_commit_primary(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "root"
+            pins = Path(d) / "pins"
+            template = root / "execution" / "aee-checker-sealed"
+            template.mkdir(parents=True)
+            parts = PrepareEvidence()._parts()
+            mats = dict(parts["materialized"])
+            mats.update({
+                "corpus": Path(d) / "corpus",
+                "tool": Path(d) / "tool",
+                "toolchain": parts["toolchain"],
+                "vendor": Path(d) / "vendor",
+            })
+            for stage in ("materialize", "commit"):
+                with self.subTest(stage=stage):
+                    primary = run.PrepareError("%s primary" % stage)
+                    dest = Path(d) / stage
+                    materialize_effect = primary if stage == "materialize" else mats
+                    commit_effect = primary if stage == "commit" else None
+                    with mock.patch.object(
+                            run, "verify_phase_a_frozen", return_value={
+                                "corpus": {"commit": "corpus", "corpusDigest": "digest"},
+                                "instrument": {"commit": "instrument"},
+                                "subject": {"commit": "subject"},
+                            }), \
+                            mock.patch.object(run, "require_docker_ready", return_value="test"), \
+                            mock.patch.object(
+                                run, "resolve_prepare_image",
+                                return_value="sha256:" + ("00" * 32)), \
+                            mock.patch.object(run, "run_inert_probe", return_value={}), \
+                            mock.patch.object(run, "materialize_pinned", side_effect=(
+                                materialize_effect if isinstance(materialize_effect, BaseException)
+                                else None), return_value=(
+                                None if isinstance(materialize_effect, BaseException)
+                                else materialize_effect)), \
+                            mock.patch.object(run, "PROBE_MECHANISMS", ()), \
+                            mock.patch.object(run, "execution_identity", return_value={}), \
+                            mock.patch.object(run, "image_platform", return_value="linux/amd64"), \
+                            mock.patch.object(run, "docker_bounded", return_value=b"test"), \
+                            mock.patch.object(run, "record_toolchain", return_value={}), \
+                            mock.patch.object(run, "emit_prepare_v0", return_value=b"prepare"), \
+                            mock.patch.object(run, "commit_atomic_dest", side_effect=commit_effect), \
+                            mock.patch.object(
+                                run, "abort_atomic_dest", side_effect=OSError("abort cleanup")):
+                        try:
+                            run.prepare(pins, dest, root=root)
+                        except BaseException as actual:
+                            self.assertIs(actual, primary)
+                        else:
+                            self.fail("%s primary did not propagate" % stage)
+                    failures = getattr(primary, "cleanup_failures", ())
+                    self.assertEqual(str(failures[0][1]), "abort cleanup")
+
+    def test_prepare_baseexception_aborts_atomic_staging_and_preserves_primary(self):
+        class FlightSignal(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "root"
+            pins = Path(d) / "pins"
+            template = root / "execution" / "aee-checker-sealed"
+            template.mkdir(parents=True)
+            primary = FlightSignal("stop prepare")
+            abort = mock.Mock()
+            with mock.patch.object(run, "verify_phase_a_frozen", return_value={
+                    "corpus": {"commit": "corpus", "corpusDigest": "digest"},
+                    "instrument": {"commit": "instrument"},
+                    "subject": {"commit": "subject"},
+            }), \
+                    mock.patch.object(run, "require_docker_ready", return_value="test"), \
+                    mock.patch.object(
+                        run, "resolve_prepare_image",
+                        return_value="sha256:" + ("00" * 32)), \
+                    mock.patch.object(run, "run_inert_probe", return_value={}), \
+                    mock.patch.object(run, "materialize_pinned", side_effect=primary), \
+                    mock.patch.object(run, "abort_atomic_dest", abort):
+                try:
+                    run.prepare(pins, Path(d) / "bundle", root=root)
+                except BaseException as actual:
+                    self.assertIs(actual, primary)
+                else:
+                    self.fail("prepare primary did not propagate")
+            abort.assert_called_once()
+        self.assertEqual(_traceback_frames(primary).count("prepare"), 1)
 
 
 @unittest.skipUnless(CARGO, "cargo is not available")
