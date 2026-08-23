@@ -19,6 +19,8 @@ sys.path.insert(0, str(REPO_ROOT / "adapters"))
 
 import aee_checker_sealed as sealed_adapter  # noqa: E402
 import aee_checker_sealed_candidate as cand  # noqa: E402
+import aee_checker_sealed_common as common  # noqa: E402
+import aee_checker_sealed_materialize as mat  # noqa: E402
 import aee_checker_sealed_oci as oci  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
 
@@ -407,8 +409,10 @@ class SealedLifecycle(unittest.TestCase):
                     image_id=IMAGE, mounts=_mounts(Path(d)), transport=present,
                     resource_profile=INERT_RESOURCE_PROFILE)
             self.assertEqual(str(ctx.exception), "partial create")
-            self.assertIn(
-                "still present", "\n".join(getattr(ctx.exception, "__notes__", ())))
+            failures = getattr(ctx.exception, "cleanup_failures", ())
+            self.assertEqual(
+                str(failures[0][1]),
+                "container still present: %s" % present.removed[0])
 
     def test_remove_failure_without_primary_is_chained_and_absence_still_runs(self):
         with tempfile.TemporaryDirectory() as d:
@@ -455,9 +459,11 @@ class SealedLifecycle(unittest.TestCase):
                     resource_profile=INERT_RESOURCE_PROFILE)
         self.assertIs(ctx.exception, primary)
         self.assertEqual(len(transport.absent_checked), 1)
-        notes = "\n".join(getattr(primary, "__notes__", ()))
-        self.assertIn("remove refused", notes)
-        self.assertIn("absence refused", notes)
+        failures = getattr(primary, "cleanup_failures", ())
+        self.assertEqual([action for action, _failure in failures], [
+            "candidate remove", "candidate absence proof"])
+        self.assertEqual([str(failure) for _action, failure in failures], [
+            "remove refused", "absence refused"])
 
     def test_cleanup_failures_do_not_replace_baseexception_in_flight(self):
         class FlightSignal(BaseException):
@@ -476,9 +482,45 @@ class SealedLifecycle(unittest.TestCase):
                     resource_profile=INERT_RESOURCE_PROFILE)
         self.assertIs(ctx.exception, primary)
         self.assertEqual(len(transport.absent_checked), 1)
-        notes = "\n".join(getattr(primary, "__notes__", ()))
-        self.assertIn("remove refused", notes)
-        self.assertIn("absence refused", notes)
+        failures = getattr(primary, "cleanup_failures", ())
+        self.assertEqual([str(failure) for _action, failure in failures], [
+            "remove refused", "absence refused"])
+
+    def test_shared_cleanup_context_is_legacy_safe_without_add_note(self):
+        class LegacyPrimary(PrepareError):
+            add_note = None
+
+        with tempfile.TemporaryDirectory() as d:
+            primary = LegacyPrimary("legacy primary")
+            remove_error = OSError("legacy remove")
+            transport = FakeTransport(
+                create_error=primary,
+                remove_error=remove_error,
+                absent_error=PrepareError("legacy absence"),
+            )
+            try:
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
+            except BaseException as actual:
+                self.assertIs(actual, primary)
+            else:
+                self.fail("legacy primary did not propagate")
+        self.assertIs(
+            getattr(cand, "preserve_cleanup_failure", None),
+            getattr(common, "preserve_cleanup_failure", None))
+        self.assertIs(
+            getattr(mat, "preserve_cleanup_failure", None),
+            getattr(common, "preserve_cleanup_failure", None))
+        failures = getattr(primary, "cleanup_failures", ())
+        self.assertIs(failures[0][1], remove_error)
+        self.assertEqual(str(failures[1][1]), "legacy absence")
+        frames = []
+        traceback = primary.__traceback__
+        while traceback is not None:
+            frames.append(traceback.tb_frame.f_code.co_name)
+            traceback = traceback.tb_next
+        self.assertEqual(frames.count("_run_sealed_candidate"), 1)
 
     def test_absence_proof_skipped_is_refused(self):
         with tempfile.TemporaryDirectory() as d:

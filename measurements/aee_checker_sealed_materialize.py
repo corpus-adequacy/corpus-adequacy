@@ -23,6 +23,7 @@ from aee_checker_sealed_common import (
     PrepareError,
     exact_object,
     load_strict,
+    preserve_cleanup_failure,
     verify_file_digest,
 )
 from aee_checker_sealed_oci import (
@@ -50,19 +51,13 @@ VENDOR_TOOLCHAIN_KEYS = (
 COPY_CHUNK_BYTES = 65536
 
 
-def _note_cleanup_failure(primary: BaseException, action: str,
-                          failure: BaseException) -> None:
-    primary.add_note("%s failed: %s: %s" % (
-        action, type(failure).__name__, failure))
-
-
 def _unlink_preserving(dest: Path, primary: BaseException) -> None:
     if not dest.exists():
         return
     try:
         dest.unlink()
     except OSError as exc:
-        _note_cleanup_failure(primary, "download cleanup", exc)
+        preserve_cleanup_failure(primary, "download cleanup", exc)
 
 
 def require_vendor_outside(subject: Path, vendor: Path) -> None:
@@ -579,14 +574,15 @@ def commit_atomic_dest(state: dict) -> Path:
     dest = Path(state["dest"])
     staging = Path(state["staging"])
     # os.rename is deliberate: lease plus dest precheck is the exclusion boundary.
-    # POSIX may replace an empty target; residual TOCTOU is accepted. This makes
-    # no exclusive-create claim and never authorizes removing a foreign dest.
+    # POSIX may replace an empty target; Windows refuses an existing target.
+    # Residual TOCTOU is accepted. This makes no exclusive-create claim and never
+    # authorizes removing a foreign dest.
     if dest.exists():
         primary = PrepareError("dest exists")
         try:
             abort_atomic_dest(state)
         except BaseException as exc:
-            _note_cleanup_failure(primary, "atomic abort", exc)
+            preserve_cleanup_failure(primary, "atomic abort", exc)
         raise primary
     _fsync_tree(staging)
     try:
@@ -596,7 +592,7 @@ def commit_atomic_dest(state: dict) -> Path:
         try:
             abort_atomic_dest(state)
         except BaseException as cleanup_exc:
-            _note_cleanup_failure(primary, "atomic abort", cleanup_exc)
+            preserve_cleanup_failure(primary, "atomic abort", cleanup_exc)
         raise primary from exc
     _release_owned_lease(state["lease"], state["token"])
     return dest

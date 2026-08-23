@@ -42,6 +42,7 @@ from aee_checker_sealed_common import (  # noqa: E402
     encode_json,
     exact_object,
     load_strict,
+    preserve_cleanup_failure,
     verify_file_digest,
 )
 from aee_checker_sealed_materialize import (  # noqa: E402
@@ -354,8 +355,11 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
         else:
             raise PrepareError("prepare schema")
         commit_atomic_dest(state)
-    except Exception:
-        abort_atomic_dest(state)
+    except Exception as primary:
+        try:
+            abort_atomic_dest(state)
+        except BaseException as cleanup_exc:
+            preserve_cleanup_failure(primary, "atomic abort", cleanup_exc)
         raise
     return raw
 

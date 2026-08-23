@@ -1040,7 +1040,8 @@ class MaterializeBytes(unittest.TestCase):
                     mat.download_bounded("https://example.invalid/archive", dest,
                                          budget=RefusingBudget())
         self.assertIs(ctx.exception, primary)
-        self.assertIn("unlink refused", "\n".join(getattr(primary, "__notes__", ())))
+        failures = getattr(primary, "cleanup_failures", ())
+        self.assertEqual(str(failures[0][1]), "unlink refused")
 
     def test_download_empty_refusal_survives_unlink_failure(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1050,7 +1051,8 @@ class MaterializeBytes(unittest.TestCase):
                 with self.assertRaises(run.PrepareError) as ctx:
                     mat.download_bounded("https://example.invalid/archive", dest)
         self.assertEqual(str(ctx.exception), "download empty")
-        self.assertIn("unlink refused", "\n".join(getattr(ctx.exception, "__notes__", ())))
+        failures = getattr(ctx.exception, "cleanup_failures", ())
+        self.assertEqual(str(failures[0][1]), "unlink refused")
 
     def test_empty_vendor_tree_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1485,7 +1487,8 @@ class MaterializeBytes(unittest.TestCase):
                 with self.assertRaises(run.PrepareError) as ctx:
                     run.commit_atomic_dest(state)
         self.assertEqual(str(ctx.exception), "dest exists")
-        self.assertIn("abort refused", "\n".join(getattr(ctx.exception, "__notes__", ())))
+        failures = getattr(ctx.exception, "cleanup_failures", ())
+        self.assertEqual(str(failures[0][1]), "abort refused")
 
     def test_rename_primary_survives_abort_failure(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1498,7 +1501,8 @@ class MaterializeBytes(unittest.TestCase):
                     run.commit_atomic_dest(state)
         self.assertEqual(str(ctx.exception), "dest exists")
         self.assertIs(ctx.exception.__cause__, rename_error)
-        self.assertIn("abort refused", "\n".join(getattr(ctx.exception, "__notes__", ())))
+        failures = getattr(ctx.exception, "cleanup_failures", ())
+        self.assertEqual(str(failures[0][1]), "abort refused")
 
     def test_fsync_failure_is_best_effort_and_commit_succeeds(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1519,6 +1523,29 @@ class MaterializeBytes(unittest.TestCase):
                     mat, "_fsync_tree", side_effect=AssertionError("fsync ran")):
                 with self.assertRaisesRegex(run.PrepareError, "dest exists"):
                     run.commit_atomic_dest(state)
+
+    def test_commit_order_is_precheck_then_fsync_then_rename(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = run.begin_atomic_dest(Path(d) / "bundle")
+            events = []
+            original_exists = Path.exists
+
+            def exists(path):
+                if path == state["dest"]:
+                    events.append("precheck")
+                return original_exists(path)
+
+            with mock.patch.object(Path, "exists", autospec=True, side_effect=exists), \
+                    mock.patch.object(
+                        mat, "_fsync_tree", side_effect=lambda _path: events.append("fsync")), \
+                    mock.patch.object(
+                        mat.os, "rename", side_effect=lambda _src, _dest: events.append("rename")):
+                run.commit_atomic_dest(state)
+        self.assertEqual(events[:3], ["precheck", "fsync", "rename"])
+
+    def test_atomic_rename_nonclaim_names_windows_existing_target_refusal(self):
+        comment = inspect.getsource(run.commit_atomic_dest)
+        self.assertIn("Windows refuses an existing target", comment)
 
     def test_fsync_docstring_disclaims_durability_and_power_loss(self):
         doc = (mat._fsync_tree.__doc__ or "").lower()
@@ -1677,6 +1704,60 @@ class MaterializeBytes(unittest.TestCase):
             self.assertFalse(dest.exists())
             leftovers = [p.name for p in Path(d).iterdir() if p.name.startswith("bundle")]
             self.assertEqual(leftovers, [])
+
+    def test_prepare_outer_abort_never_replaces_materialize_or_commit_primary(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "root"
+            pins = Path(d) / "pins"
+            template = root / "execution" / "aee-checker-sealed"
+            template.mkdir(parents=True)
+            parts = PrepareEvidence()._parts()
+            mats = dict(parts["materialized"])
+            mats.update({
+                "corpus": Path(d) / "corpus",
+                "tool": Path(d) / "tool",
+                "toolchain": parts["toolchain"],
+                "vendor": Path(d) / "vendor",
+            })
+            for stage in ("materialize", "commit"):
+                with self.subTest(stage=stage):
+                    primary = run.PrepareError("%s primary" % stage)
+                    dest = Path(d) / stage
+                    materialize_effect = primary if stage == "materialize" else mats
+                    commit_effect = primary if stage == "commit" else None
+                    with mock.patch.object(
+                            run, "verify_phase_a_frozen", return_value={
+                                "corpus": {"commit": "corpus", "corpusDigest": "digest"},
+                                "instrument": {"commit": "instrument"},
+                                "subject": {"commit": "subject"},
+                            }), \
+                            mock.patch.object(run, "require_docker_ready", return_value="test"), \
+                            mock.patch.object(
+                                run, "resolve_prepare_image",
+                                return_value="sha256:" + ("00" * 32)), \
+                            mock.patch.object(run, "run_inert_probe", return_value={}), \
+                            mock.patch.object(run, "materialize_pinned", side_effect=(
+                                materialize_effect if isinstance(materialize_effect, BaseException)
+                                else None), return_value=(
+                                None if isinstance(materialize_effect, BaseException)
+                                else materialize_effect)), \
+                            mock.patch.object(run, "PROBE_MECHANISMS", ()), \
+                            mock.patch.object(run, "execution_identity", return_value={}), \
+                            mock.patch.object(run, "image_platform", return_value="linux/amd64"), \
+                            mock.patch.object(run, "docker_bounded", return_value=b"test"), \
+                            mock.patch.object(run, "record_toolchain", return_value={}), \
+                            mock.patch.object(run, "emit_prepare_v0", return_value=b"prepare"), \
+                            mock.patch.object(run, "commit_atomic_dest", side_effect=commit_effect), \
+                            mock.patch.object(
+                                run, "abort_atomic_dest", side_effect=OSError("abort cleanup")):
+                        try:
+                            run.prepare(pins, dest, root=root)
+                        except BaseException as actual:
+                            self.assertIs(actual, primary)
+                        else:
+                            self.fail("%s primary did not propagate" % stage)
+                    failures = getattr(primary, "cleanup_failures", ())
+                    self.assertEqual(str(failures[0][1]), "abort cleanup")
 
 
 @unittest.skipUnless(CARGO, "cargo is not available")

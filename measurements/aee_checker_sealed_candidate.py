@@ -18,6 +18,7 @@ from aee_checker_sealed_common import (
     INERT_RESOURCE_PROFILE,
     PrepareError,
     load_strict,
+    preserve_cleanup_failure,
     require_resource_profile,
 )
 from aee_checker_sealed_oci import (
@@ -83,12 +84,6 @@ def _unproved() -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=UNPROVED_EXIT, stdout="", stderr="")
 
 
-def _note_cleanup_failure(primary: BaseException, action: str,
-                          failure: BaseException) -> None:
-    primary.add_note("candidate %s failed: %s: %s" % (
-        action, type(failure).__name__, failure))
-
-
 def _cleanup_candidate(transport, name: str,
                        primary: BaseException | None) -> None:
     remove_failure = None
@@ -97,15 +92,15 @@ def _cleanup_candidate(transport, name: str,
     except BaseException as exc:
         remove_failure = exc
         if primary is not None:
-            _note_cleanup_failure(primary, "remove", exc)
+            preserve_cleanup_failure(primary, "candidate remove", exc)
     try:
         transport.require_absent(name)
     except BaseException as exc:
         if primary is not None:
-            _note_cleanup_failure(primary, "absence proof", exc)
+            preserve_cleanup_failure(primary, "candidate absence proof", exc)
         elif remove_failure is not None:
             refusal = PrepareError("candidate remove failed")
-            _note_cleanup_failure(refusal, "absence proof", exc)
+            preserve_cleanup_failure(refusal, "candidate absence proof", exc)
             raise refusal from remove_failure
         else:
             raise PrepareError("candidate absence proof failed") from exc
@@ -213,7 +208,6 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
         raise PrepareError("absence proof skipped")
     name = "%s%s" % (name_prefix, token_hex(4))
     completed = _unproved()
-    error = None
     try:
         argv = candidate_create_argv(
             image_id=image_id, name=name, mounts=mounts, sealed=sealed,
@@ -241,11 +235,9 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
             inspect, sealed=sealed, mount_spec=CANDIDATE_MOUNT_SPEC,
             resource_profile=profile)
     except BaseException as exc:
-        error = exc
-    finally:
-        _cleanup_candidate(transport, name, error)
-    if error is not None:
-        raise error
+        _cleanup_candidate(transport, name, exc)
+        raise
+    _cleanup_candidate(transport, name, None)
     return completed
 
 
