@@ -12,6 +12,7 @@ import bounded_run as br
 from aee_checker_sealed_common import (
     DECLARED_CEILINGS,
     HEX64,
+    INERT_RESOURCE_PROFILE,
     MEMORY_4G,
     TMPFS_BYTES,
     TMPFS_INODES,
@@ -19,6 +20,7 @@ from aee_checker_sealed_common import (
     PrepareError,
     exact_object,
     load_strict,
+    require_resource_profile,
 )
 
 INSPECT_SNAPSHOT_KEYS = (
@@ -107,7 +109,7 @@ def parse_inspect_payload(raw: bytes) -> dict:
     return doc[0]
 
 
-def _tmpfs_spec(value) -> dict:
+def _tmpfs_spec(value, *, expected_exec=False) -> dict:
     if not isinstance(value, str):
         raise PrepareError("tmpfs")
     size = inodes = None
@@ -119,13 +121,24 @@ def _tmpfs_spec(value) -> dict:
                 inodes = int(part[10:])
     except ValueError as exc:
         raise PrepareError("tmpfs") from exc
-    if size != TMPFS_BYTES or inodes != TMPFS_INODES:
+    if type(size) is not int or type(inodes) is not int:
+        raise PrepareError("tmpfs")
+    has_exec = "exec" in value.split(",")
+    if has_exec is not expected_exec:
         raise PrepareError("tmpfs")
     return {"nr_inodes": inodes, "size": size}
 
 
+def _require_tmpfs_match(parsed: dict, *, dest: str, size: int, inodes: int) -> None:
+    if parsed.get("size") != size or parsed.get("nr_inodes") != inodes:
+        raise PrepareError("tmpfs")
+
+
 def validate_inspect_contract(
-        inspect, *, sealed: bool, mount_spec=DEFAULT_MOUNT_SPEC) -> dict:
+        inspect, *, sealed: bool, mount_spec=DEFAULT_MOUNT_SPEC,
+        resource_profile=None) -> dict:
+    profile = require_resource_profile(
+        INERT_RESOURCE_PROFILE if resource_profile is None else resource_profile)
     if type(inspect) is not dict:
         raise PrepareError("inspect missing")
     host, cfg = inspect.get("HostConfig"), inspect.get("Config")
@@ -142,11 +155,12 @@ def validate_inspect_contract(
         raise PrepareError("no-new-privileges")
     if cfg.get("User") != "65532:65532":
         raise PrepareError("user")
-    if (type(host.get("Memory")) is not int or host.get("Memory") != MEMORY_4G or
+    if (type(host.get("Memory")) is not int or
+            host.get("Memory") != profile["memory_bytes"] or
             type(host.get("MemorySwap")) is not int or
-            host.get("MemorySwap") != MEMORY_4G):
+            host.get("MemorySwap") != profile["memory_swap_bytes"]):
         raise PrepareError("defense-in-depth inspect mismatch")
-    if type(host.get("PidsLimit")) is not int or host.get("PidsLimit") != 512:
+    if type(host.get("PidsLimit")) is not int or host.get("PidsLimit") != profile["pids"]:
         raise PrepareError("defense-in-depth inspect mismatch")
     network = host.get("NetworkMode")
     if sealed and network != "none":
@@ -156,7 +170,17 @@ def validate_inspect_contract(
     tmpfs = host.get("Tmpfs")
     if type(tmpfs) is not dict:
         raise PrepareError("tmpfs")
-    parsed = {dest: _tmpfs_spec(tmpfs.get(dest)) for dest in ("/tmp", "/work")}
+    parsed = {
+        "/tmp": _tmpfs_spec(tmpfs.get("/tmp")),
+        "/work": _tmpfs_spec(
+            tmpfs.get("/work"), expected_exec=profile["work_exec"]),
+    }
+    _require_tmpfs_match(
+        parsed["/tmp"], dest="/tmp",
+        size=profile["tmp_bytes"], inodes=profile["tmp_inodes"])
+    _require_tmpfs_match(
+        parsed["/work"], dest="/work",
+        size=profile["work_bytes"], inodes=profile["work_inodes"])
     mounts = inspect.get("Mounts")
     if type(mounts) is not list:
         raise PrepareError("readonly mount")
@@ -245,12 +269,25 @@ def require_container_absent(name: str) -> None:
         raise PrepareError("container still present: %s" % name)
 
 
+def _docker_mem(value: int) -> str:
+    if value == MEMORY_4G:
+        return "4g"
+    return str(value)
+
+
 def docker_create_argv(
         *, image_id: str, name: str, mounts: dict, command: list[str],
         sealed: bool = True, mount_spec=DEFAULT_MOUNT_SPEC,
-        entrypoint: str = "/probe") -> list[str]:
+        entrypoint: str = "/probe", resource_profile=None) -> list[str]:
     image_id = require_image_id(image_id)
-    tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (TMPFS_BYTES, TMPFS_INODES)
+    profile = require_resource_profile(
+        INERT_RESOURCE_PROFILE if resource_profile is None else resource_profile)
+    tmp_tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (
+        profile["tmp_bytes"], profile["tmp_inodes"])
+    work_tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (
+        profile["work_bytes"], profile["work_inodes"])
+    if profile["work_exec"]:
+        work_tmpfs += ",exec"
     argv = [
         "docker", "create",
         "--name", name,
@@ -259,11 +296,11 @@ def docker_create_argv(
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true",
         "--user", "65532:65532",
-        "--memory", "4g",
-        "--memory-swap", "4g",
-        "--pids-limit", "512",
-        "--tmpfs", "/tmp:%s" % tmpfs,
-        "--tmpfs", "/work:%s" % tmpfs,
+        "--memory", _docker_mem(profile["memory_bytes"]),
+        "--memory-swap", _docker_mem(profile["memory_swap_bytes"]),
+        "--pids-limit", str(profile["pids"]),
+        "--tmpfs", "/tmp:%s" % tmp_tmpfs,
+        "--tmpfs", "/work:%s" % work_tmpfs,
     ]
     if sealed:
         argv.extend(["--env", "CARGO_NET_OFFLINE=true"])

@@ -28,12 +28,15 @@ from aee_checker_sealed_common import (  # noqa: E402
     FROZEN_CORPUS_MANIFEST_SHA256,
     FROZEN_CORPUS_TREE_SHA256,
     FROZEN_SUBJECT_TREE_SHA256,
+    CANDIDATE_RESOURCE_PROFILE,
+    INERT_RESOURCE_PROFILE,
     MATERIALIZE_CEILINGS,
     MaterializeBudget,
     HEX64,
     MEMORY_4G,
     TMPFS_BYTES,
     TMPFS_INODES,
+    require_resource_profile,
     DockerUnavailable,
     PrepareError,
     encode_json,
@@ -101,6 +104,7 @@ from aee_checker_sealed_oci import (  # noqa: E402
 )
 
 PREPARE_SCHEMA = "corpus-adequacy.aee-checker-sealed.prepare.v0"
+PREPARE_V1_SCHEMA = "corpus-adequacy.aee-checker-sealed.prepare.v1"
 PREPARE_PART_KEYS = (
     "ceilings", "execution", "image", "materialize_ceilings", "materialized",
     "network", "non_claims", "oci", "pins", "probe_evidence", "runtime",
@@ -114,6 +118,9 @@ SEALED_PROBE_PAIRS = {
     "protocol-exit": ("ok", "exit2-json"),
 }
 PREPARE_KEYS = ("phase", "schema") + PREPARE_PART_KEYS
+PREPARE_V1_PART_KEYS = PREPARE_PART_KEYS + ("candidate_profile",)
+PREPARE_V1_KEYS = ("phase", "schema") + PREPARE_V1_PART_KEYS
+PREPARE_IMAGE_KEYS = ("id", "id_scope", "kind", "platform")
 EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
@@ -254,7 +261,7 @@ def resolve_prepare_image(image_id, *, root: Path) -> str:
 
 
 def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = None,
-            image_id=None) -> bytes:
+            image_id=None, schema=PREPARE_SCHEMA) -> bytes:
     dest = Path(dest)
     pins_doc = verify_phase_a_frozen(Path(pins_dir), adapter=adapter)
     require_docker_ready()
@@ -329,7 +336,15 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
             },
             "toolchain": record_toolchain(mats["toolchain"]),
         }
-        raw = emit_prepare_v0(parts, state["staging"] / "prepare.v0.json")
+        if schema == PREPARE_SCHEMA:
+            raw = emit_prepare_v0(parts, state["staging"] / "prepare.v0.json")
+        elif schema == PREPARE_V1_SCHEMA:
+            raw = emit_prepare_v1(
+                {**parts, "candidate_profile": dict(CANDIDATE_RESOURCE_PROFILE)},
+                state["staging"] / "prepare.v1.json",
+            )
+        else:
+            raise PrepareError("prepare schema")
         commit_atomic_dest(state)
     except Exception:
         abort_atomic_dest(state)
@@ -352,7 +367,7 @@ def _refuse_timings(doc) -> None:
                 raise PrepareError("prepare must not store host paths")
 
 
-def emit_prepare_v0(parts: dict, dest: Path) -> bytes:
+def _prepare_v0_doc(parts: dict) -> dict:
     exact_object(parts, PREPARE_PART_KEYS, "prepare")
     _distinct_identities(parts["pins"], parts["execution"])
     if parts["ceilings"] != DECLARED_CEILINGS:
@@ -385,11 +400,56 @@ def emit_prepare_v0(parts: dict, dest: Path) -> bytes:
     doc = {"phase": "prepare", "schema": PREPARE_SCHEMA, **parts}
     exact_object(doc, PREPARE_KEYS, "prepare.v0")
     _refuse_timings(doc)
-    raw = encode_json(doc)
+    return doc
+
+
+def emit_prepare_v0(parts: dict, dest: Path) -> bytes:
+    raw = encode_json(_prepare_v0_doc(parts))
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(raw)
     return raw
+
+
+def _prepare_v1_doc(parts: dict) -> dict:
+    exact_object(parts, PREPARE_V1_PART_KEYS, "prepare")
+    profile = require_resource_profile(parts["candidate_profile"])
+    if profile == INERT_RESOURCE_PROFILE:
+        raise PrepareError("candidate profile must not be the inert profile")
+    if profile != CANDIDATE_RESOURCE_PROFILE:
+        raise PrepareError("candidate profile must be the bounded fixture")
+    image = parts["image"]
+    exact_object(image, PREPARE_IMAGE_KEYS, "prepare image")
+    require_image_id(image.get("id"))
+    if image.get("id_scope") != "host-local" or image.get("kind") != "inert-probe":
+        raise PrepareError("prepare image must remain the host-local inert probe")
+    if not isinstance(image.get("platform"), str) or not image["platform"]:
+        raise PrepareError("prepare image platform")
+    doc = _prepare_v0_doc({key: parts[key] for key in PREPARE_PART_KEYS})
+    doc["schema"] = PREPARE_V1_SCHEMA
+    doc["candidate_profile"] = profile
+    exact_object(doc, PREPARE_V1_KEYS, "prepare.v1")
+    return doc
+
+
+def emit_prepare_v1(parts: dict, dest: Path) -> bytes:
+    raw = encode_json(_prepare_v1_doc(parts))
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(raw)
+    return raw
+
+
+def load_prepare_v1(raw: bytes) -> dict:
+    doc = load_strict(raw)
+    if type(doc) is not dict or doc.get("schema") != PREPARE_V1_SCHEMA:
+        raise PrepareError("prepare.v1 schema")
+    exact_object(doc, PREPARE_V1_KEYS, "prepare.v1")
+    parts = {key: doc[key] for key in PREPARE_V1_PART_KEYS}
+    canonical = _prepare_v1_doc(parts)
+    if encode_json(canonical) != raw:
+        raise PrepareError("prepare.v1 is not canonical")
+    return canonical
 
 
 def main(argv: list[str]) -> int:
@@ -399,14 +459,17 @@ def main(argv: list[str]) -> int:
         pins = Path(argv[2]) if len(argv) > 2 else pins_default
         verify_phase_a_frozen(pins, adapter=adapter)
         return 0
-    if len(argv) in (4, 5) and argv[1] == "prepare":
+    if len(argv) in (4, 5) and argv[1] in ("prepare", "prepare-v1"):
         image_id = argv[4] if len(argv) == 5 else None
-        prepare(Path(argv[2]), Path(argv[3]), root=_ROOT, adapter=adapter,
-                image_id=image_id)
+        kwargs = {"root": _ROOT, "adapter": adapter, "image_id": image_id}
+        if argv[1] == "prepare-v1":
+            kwargs["schema"] = PREPARE_V1_SCHEMA
+        prepare(Path(argv[2]), Path(argv[3]), **kwargs)
         return 0
     sys.stderr.write(
         "usage: aee_checker_sealed_run.py verify-phase-a [pins-dir]\n"
-        "       aee_checker_sealed_run.py prepare <pins-dir> <out-dir> [image-id]\n")
+        "       aee_checker_sealed_run.py prepare <pins-dir> <out-dir> [image-id]\n"
+        "       aee_checker_sealed_run.py prepare-v1 <pins-dir> <out-dir> [image-id]\n")
     return 2
 
 

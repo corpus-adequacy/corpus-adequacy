@@ -37,6 +37,76 @@ MATERIALIZE_CEILINGS = {
     "output_bytes": br.OUTPUT_CAP_BYTES,
 }
 
+RESOURCE_PROFILE_SCHEMA = "corpus-adequacy.aee-checker-sealed.resource-profile.v1"
+RESOURCE_PROFILE_KEYS = (
+    "schema", "work_bytes", "tmp_bytes", "work_inodes", "tmp_inodes",
+    "work_exec", "deadline_seconds", "output_bytes", "memory_bytes",
+    "memory_swap_bytes", "pids",
+)
+
+
+def _resource_profile(*, work_bytes, tmp_bytes, work_inodes, tmp_inodes,
+                      work_exec, deadline_seconds, output_bytes, memory_bytes,
+                      memory_swap_bytes, pids) -> dict:
+    return {
+        "schema": RESOURCE_PROFILE_SCHEMA,
+        "work_bytes": work_bytes,
+        "tmp_bytes": tmp_bytes,
+        "work_inodes": work_inodes,
+        "tmp_inodes": tmp_inodes,
+        "work_exec": work_exec,
+        "deadline_seconds": deadline_seconds,
+        "output_bytes": output_bytes,
+        "memory_bytes": memory_bytes,
+        "memory_swap_bytes": memory_swap_bytes,
+        "pids": pids,
+    }
+
+
+INERT_RESOURCE_PROFILE = _resource_profile(
+    work_bytes=TMPFS_BYTES,
+    tmp_bytes=TMPFS_BYTES,
+    work_inodes=TMPFS_INODES,
+    tmp_inodes=TMPFS_INODES,
+    work_exec=False,
+    deadline_seconds=DECLARED_CEILINGS["deadline_seconds"],
+    output_bytes=DECLARED_CEILINGS["output_bytes"],
+    memory_bytes=MEMORY_4G,
+    memory_swap_bytes=MEMORY_4G,
+    pids=512,
+)
+# Exercised only with a tiny offline Rust fixture; not an optimality or efficacy claim.
+CANDIDATE_RESOURCE_PROFILE = _resource_profile(
+    work_bytes=256 * 1024 * 1024,
+    tmp_bytes=16 * 1024 * 1024,
+    work_inodes=16384,
+    tmp_inodes=2048,
+    work_exec=True,
+    deadline_seconds=120,
+    output_bytes=DECLARED_CEILINGS["output_bytes"],
+    memory_bytes=MEMORY_4G,
+    memory_swap_bytes=MEMORY_4G,
+    pids=512,
+)
+
+
+def require_resource_profile(profile) -> dict:
+    exact_object(profile, RESOURCE_PROFILE_KEYS, "resource profile")
+    if profile.get("schema") != RESOURCE_PROFILE_SCHEMA:
+        raise PrepareError("resource profile schema")
+    for key in RESOURCE_PROFILE_KEYS:
+        if key in ("schema", "work_exec"):
+            continue
+        value = profile[key]
+        if type(value) is not int or value <= 0:
+            raise PrepareError("resource profile %s" % key)
+    if type(profile["work_exec"]) is not bool:
+        raise PrepareError("resource profile work_exec")
+    if profile["output_bytes"] != br.OUTPUT_CAP_BYTES:
+        raise PrepareError("resource profile output_bytes is not enforced")
+    return dict(profile)
+
+
 
 class PrepareError(Exception):
     """PREPARE refused before a sealed measurement could start."""

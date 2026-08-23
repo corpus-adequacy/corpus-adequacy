@@ -13,7 +13,12 @@ import sys
 from pathlib import Path
 from secrets import token_hex
 
-from aee_checker_sealed_common import PrepareError, load_strict
+from aee_checker_sealed_common import (
+    INERT_RESOURCE_PROFILE,
+    PrepareError,
+    load_strict,
+    require_resource_profile,
+)
 from aee_checker_sealed_oci import (
     DEFAULT_MOUNT_SPEC,
     docker_bounded,
@@ -24,6 +29,7 @@ from aee_checker_sealed_oci import (
     require_local_image,
     validate_inspect_contract,
 )
+from aee_checker_sealed_run import load_prepare_v1
 import bounded_run as br
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -37,9 +43,10 @@ CANDIDATE_ENTRYPOINT = "/bin/sh"
 CANDIDATE_SCRIPT = (
     "set -eu; "
     "test -d /input/vectors; test -d /vendor; test -f /tool/config.toml; test -d /subject; "
-    "cp -a /subject/. /work/; "
+    "cp -R /subject/. /work/; "
     "cd /work; "
-    "CARGO_HOME=/tool cargo build --release --locked --offline 1>&2; "
+    "PATH=/usr/local/cargo/bin:$PATH CARGO_HOME=/tool "
+    "cargo build --release --locked --offline 1>&2; "
     "set +e; "
     "/work/target/release/aee-checker /input/vectors --json /work/report.json 1>&2; "
     "status=$?; "
@@ -53,6 +60,19 @@ COMPLETE_RETURNCODES = (0, 1)
 
 def _unproved() -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=UNPROVED_EXIT, stdout="", stderr="")
+
+
+
+def require_candidate_image(*, image_id: str, toolchain_image_id: str,
+                            probe_image_id: str) -> str:
+    image_id = require_image_id(image_id)
+    toolchain_image_id = require_image_id(toolchain_image_id)
+    probe_image_id = require_image_id(probe_image_id)
+    if image_id == probe_image_id:
+        raise PrepareError("candidate cannot use inert probe image")
+    if image_id != toolchain_image_id:
+        raise PrepareError("candidate image must be toolchain.image_id")
+    return image_id
 
 
 def host_vectors_path(mounts: dict) -> str:
@@ -83,7 +103,7 @@ def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.Complete
 
 
 def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
-                          sealed: bool = True) -> list[str]:
+                          sealed: bool = True, resource_profile=None) -> list[str]:
     expected = {key for key, _destination in CANDIDATE_MOUNT_SPEC}
     extra = set(mounts) - expected
     if extra:
@@ -96,6 +116,7 @@ def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
         sealed=sealed,
         mount_spec=CANDIDATE_MOUNT_SPEC,
         entrypoint=CANDIDATE_ENTRYPOINT,
+        resource_profile=resource_profile,
     )
 
 
@@ -105,11 +126,13 @@ class _DockerTransport:
     def create(self, argv):
         docker_bounded(argv[1:])
 
-    def start(self, name):
+    def start(self, name, deadline_seconds):
+        if type(deadline_seconds) is not int or deadline_seconds <= 0:
+            raise PrepareError("candidate deadline")
         return br._run_capped(
             ["docker", "start", "-a", name],
             Path.cwd(),
-            60,
+            deadline_seconds,
         )
 
     def inspect(self, name):
@@ -122,11 +145,13 @@ class _DockerTransport:
         require_container_absent(name)
 
 
-def run_sealed_candidate(*, image_id: str, mounts: dict,
-                         name_prefix: str = "aee-cand-",
-                         sealed: bool = True, transport=None,
-                         ) -> subprocess.CompletedProcess:
-    require_image_id(image_id)
+def _run_sealed_candidate(*, image_id: str, mounts: dict,
+                          resource_profile,
+                          name_prefix: str = "aee-cand-",
+                          sealed: bool = True, transport=None,
+                          ) -> subprocess.CompletedProcess:
+    image_id = require_image_id(image_id)
+    profile = require_resource_profile(resource_profile)
     if transport is None:
         require_local_image(image_id)
         transport = _DockerTransport()
@@ -137,10 +162,11 @@ def run_sealed_candidate(*, image_id: str, mounts: dict,
     error = None
     try:
         argv = candidate_create_argv(
-            image_id=image_id, name=name, mounts=mounts, sealed=sealed)
+            image_id=image_id, name=name, mounts=mounts, sealed=sealed,
+            resource_profile=profile)
         transport.create(argv)
         try:
-            proc = transport.start(name)
+            proc = transport.start(name, profile["deadline_seconds"])
         except subprocess.TimeoutExpired:
             completed = _unproved()
         except br._OutputTooLarge:
@@ -158,7 +184,8 @@ def run_sealed_candidate(*, image_id: str, mounts: dict,
             )
         inspect = transport.inspect(name)
         validate_inspect_contract(
-            inspect, sealed=sealed, mount_spec=CANDIDATE_MOUNT_SPEC)
+            inspect, sealed=sealed, mount_spec=CANDIDATE_MOUNT_SPEC,
+            resource_profile=profile)
     except Exception as exc:
         error = exc
     finally:
@@ -173,3 +200,23 @@ def run_sealed_candidate(*, image_id: str, mounts: dict,
     if error is not None:
         raise error
     return completed
+
+
+def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,
+                         name_prefix: str = "aee-cand-",
+                         transport=None,
+                         ) -> subprocess.CompletedProcess:
+    prepare = load_prepare_v1(prepare_raw)
+    image_id = require_candidate_image(
+        image_id=prepare["toolchain"]["image_id"],
+        toolchain_image_id=prepare["toolchain"]["image_id"],
+        probe_image_id=prepare["image"]["id"],
+    )
+    return _run_sealed_candidate(
+        image_id=image_id,
+        mounts=mounts,
+        resource_profile=prepare["candidate_profile"],
+        name_prefix=name_prefix,
+        sealed=True,
+        transport=transport,
+    )
