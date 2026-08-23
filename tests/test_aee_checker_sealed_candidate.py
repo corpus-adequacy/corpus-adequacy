@@ -107,8 +107,9 @@ class FakeTransport:
         if self.fail_create:
             raise PrepareError("partial create")
 
-    def start(self, name):
+    def start(self, name, deadline_seconds=None):
         self.started.append(name)
+        self.deadline_seconds = deadline_seconds
         if self.timeout:
             raise subprocess.TimeoutExpired(["docker", "start", "-a", name], 1)
         if self.output_cap:
