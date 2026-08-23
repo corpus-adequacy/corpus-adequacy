@@ -13,6 +13,7 @@ import hashlib
 import inspect
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -48,6 +49,13 @@ FORBIDDEN_AUTHORIZE_KEYS = (
 
 def _prepare_raw() -> bytes:
     return PREPARE_PATH.read_bytes()
+
+
+def _prepare_v1_raw() -> bytes:
+    doc = json.loads(_prepare_raw())
+    doc["schema"] = run.PREPARE_V1_SCHEMA
+    doc["candidate_profile"] = dict(common.CANDIDATE_RESOURCE_PROFILE)
+    return _dump(doc)
 
 
 def _sites() -> dict:
@@ -117,6 +125,32 @@ class ValidatorBites(unittest.TestCase):
         del missing["prepare_sha256"]
         with self.assertRaises(auth.AuthorizeError):
             auth.validate_authorize(_dump(missing), raw)
+
+
+class CandidatePrepareAuthorization(unittest.TestCase):
+    def test_authorize_v0_binds_exact_canonical_prepare_v1_bytes(self):
+        prepare_raw = _prepare_v1_raw()
+        with tempfile.TemporaryDirectory() as tmp:
+            authorize_raw = auth.emit_authorize_v0(
+                prepare_raw, Path(tmp) / "authorize.v0.json")
+
+        doc = json.loads(authorize_raw)
+        self.assertEqual(set(doc), set(auth.AUTHORIZE_KEYS))
+        self.assertEqual(doc["schema"], auth.AUTHORIZE_SCHEMA)
+        self.assertEqual(doc["prepare_schema"], run.PREPARE_V1_SCHEMA)
+        self.assertEqual(
+            doc["prepare_sha256"], hashlib.sha256(prepare_raw).hexdigest())
+        validated = auth.validate_authorize(authorize_raw, prepare_raw)
+        self.assertEqual(validated["prepare"]["candidate_profile"],
+                         common.CANDIDATE_RESOURCE_PROFILE)
+
+    def test_v1_bound_authorization_does_not_accept_v0_prepare(self):
+        v0 = _prepare_raw()
+        v1 = _prepare_v1_raw()
+        with tempfile.TemporaryDirectory() as tmp:
+            v1_auth = auth.emit_authorize_v0(v1, Path(tmp) / "authorize.v0.json")
+        with self.assertRaises(auth.AuthorizeError):
+            auth.validate_authorize(v1_auth, v0)
 
     def test_empty_wrong_or_other_file_prepare_hash_is_refused(self):
         raw = _prepare_raw()

@@ -312,12 +312,15 @@ class FrozenPin(unittest.TestCase):
             self.assertNotEqual(item["span"], next(
                 s["span"] for s in sites["sites"] if s["condition"] == item["condition"]))
 
-    def test_frozen_manifest_pins_issue_45_unproved_policy(self):
+    def test_frozen_manifest_pins_unproved_and_container_execution_contract(self):
         manifest = _load("manifest.json")
         self.assertEqual(manifest["runner"], "batch")
         self.assertEqual(manifest["accepted_exit_codes"], [0])
         self.assertEqual(manifest["unproved_exit_codes"], [75])
-        self.assertEqual(manifest["build"], ["cargo", "build", "--locked", "--release"])
+        self.assertEqual(
+            manifest["build"],
+            ["cargo", "build", "--release", "--locked", "--offline"],
+        )
         pins = _load("pins.json")
         self.assertNotIn("vector_ids", pins["corpus"])
         self.assertNotIn("vector_count", pins["corpus"])
@@ -329,8 +332,19 @@ class FrozenPin(unittest.TestCase):
             "b5aa5fdb4a9320e037658b2877f048d5c3dd7351fd93701d3c4977d69ae7a579")
         self.assertEqual(pins["corpus"]["vectors"], "corpus/vectors/MANIFEST.json")
         self.assertEqual(manifest["vectors"], "corpus/vectors/MANIFEST.json")
+        self.assertEqual(manifest["repo_root"], "subject")
+        self.assertEqual(manifest["implementation"], "subject/src/check.rs")
         self.assertEqual(manifest["implementation_sources"],
-                         ["src/check.rs", "aee_checker_sealed.py"])
+                         ["subject/src/check.rs"])
+        self.assertEqual(
+            manifest["entrypoint_command"],
+            ["/work/target/release/aee-checker", "/input/vectors",
+             "--json", "/work/report.json"],
+        )
+        self.assertEqual(
+            [row["id"] for row in manifest["mutants"]["sealed"]],
+            [*("sealed-%d" % n for n in range(1, 8)), "control"],
+        )
         self.assertEqual(manifest["outcome_from"], ["rows"])
         self.assertEqual(manifest["diagnostic_from"], ["diagnostics"])
         self.assertNotIn("code", manifest["outcome_from"])

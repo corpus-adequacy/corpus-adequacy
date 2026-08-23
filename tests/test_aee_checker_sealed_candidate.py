@@ -165,6 +165,20 @@ class InertByteCompat(unittest.TestCase):
 
 
 class CandidateArgv(unittest.TestCase):
+    def test_old_host_checker_or_build_contract_is_refused(self):
+        old = {
+            "build": ["cargo", "build", "--locked", "--release"],
+            "entrypoint_command": [
+                "python3", "aee_checker_sealed.py", "--checker",
+                "./target/release/aee-checker", "corpus/vectors",
+            ],
+        }
+        with self.assertRaisesRegex(PrepareError, "execution contract"):
+            cand.candidate_script(old)
+        with self.assertRaisesRegex(PrepareError, "execution contract"):
+            cand.candidate_create_argv(
+                image_id=IMAGE, name="cand", mounts={}, execution_contract={})
+
     def test_command_uses_release_binary_and_tool_cargo_home(self):
         script = cand.CANDIDATE_SCRIPT
         self.assertIn("/work/target/release/aee-checker", script)

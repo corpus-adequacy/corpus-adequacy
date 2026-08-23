@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Execution funnel for the frozen inverse-AEE experiment. Stdlib only.
+"""Bind the frozen AEE sequence into the sole generic process engine.
 
-Validates authorize+prepare, then walks load_frozen_sites ->
-required_sequence. Each returned step is executed once by an injected
-fake child and classified by classify_observation. This module does not
-run the checker. Public non-claims: not MC/DC, not atomic-subcondition
-adequacy, not complete mutation adequacy, not sandbox-efficacy, not
-certification, not ranking.
+No scoring, mutation, comparison or report logic lives here. Public
+non-claims: not MC/DC, not atomic-subcondition adequacy, not complete
+mutation adequacy, not sandbox-efficacy, not certification, not ranking.
 """
 
 from __future__ import annotations
@@ -21,19 +18,24 @@ if str(_HERE) not in sys.path:
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import corpus_adequacy as ca  # noqa: E402
 from aee_checker_sealed_authorize import (  # noqa: E402
-    KNOWN_DISPOSITIONS,
     AuthorizeError,
-    classify_observation,
     load_frozen_sites,
     require_authorized_sequence,
     required_sequence,
     validate_authorize,
-    voids_before_scored,
+)
+from aee_checker_sealed_common import (  # noqa: E402
+    PrepareError,
+    load_strict,
+    verify_file_digest,
+)
+from aee_checker_sealed_run import (  # noqa: E402
+    PHASE_A_PIN_DIGESTS,
+    PREPARE_V1_SCHEMA,
 )
 
-FUNNEL_SCHEMA = "corpus-adequacy.aee-checker-sealed.execution-funnel.v0"
-FUNNEL_PHASE = "execution-funnel"
 NON_CLAIMS = (
     "MC/DC",
     "atomic-subcondition adequacy",
@@ -45,54 +47,79 @@ NON_CLAIMS = (
 
 
 class ExecuteError(Exception):
-    """The execution funnel refused the run."""
+    """The authorized execution funnel refused the run."""
+
+
+def _same_mutation(got: dict, expected: dict) -> bool:
+    keys = ("label", "anchor", "replacement")
+    return all(got.get(key) == expected.get(key) for key in keys)
+
+
+def bind_authorized_mutation_order(*, manifest: dict, sites: dict,
+                                   control: dict, steps) -> tuple[str, ...]:
+    """Resolve the authorized IDs to exact trusted manifest mutations."""
+    try:
+        steps = require_authorized_sequence(steps)
+    except AuthorizeError as exc:
+        raise ExecuteError(str(exc)) from exc
+    if type(manifest) is not dict or set(manifest.get("mutants", {})) != {"sealed"}:
+        raise ExecuteError("manifest mutation groups")
+    rows = manifest["mutants"]["sealed"]
+    if type(rows) is not list or len(rows) != len(steps) - 1:
+        raise ExecuteError("manifest mutation count")
+    by_id = {}
+    for row in rows:
+        row_id = row.get("id") if type(row) is dict else None
+        if not isinstance(row_id, str) or row_id in by_id:
+            raise ExecuteError("manifest mutation id")
+        by_id[row_id] = row
+    if set(by_id) != {step["id"] for step in steps[1:]}:
+        raise ExecuteError("manifest mutation ids")
+    expected_control = dict(control)
+    if not by_id["control"].get("control") or not _same_mutation(
+            by_id["control"], expected_control):
+        raise ExecuteError("manifest control drift")
+    site_rows = sites.get("sites") if type(sites) is dict else None
+    if type(site_rows) is not list or len(site_rows) != 7:
+        raise ExecuteError("manifest site sequence")
+    for site in site_rows:
+        expected = {
+            "label": site.get("label"),
+            "anchor": site.get("anchor"),
+            "replacement": site.get("manifest_replacement"),
+        }
+        row = by_id.get(site.get("id"))
+        if row is None or row.get("control") or not _same_mutation(row, expected):
+            raise ExecuteError("manifest site drift")
+    return tuple(by_id[step["id"]]["label"] for step in steps[1:])
 
 
 def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
-                         pins_dir: Path, child) -> dict:
-    if child is None:
-        raise ExecuteError("funnel-only; fake child required")
-    validate_authorize(authorize_raw, prepare_raw)
+                         pins_dir: Path, manifest: dict, manifest_path: Path,
+                         execution_backend) -> dict:
     try:
-        steps = list(require_authorized_sequence(
-            required_sequence(load_frozen_sites(Path(pins_dir)))))
-    except AuthorizeError as exc:
+        validated = validate_authorize(authorize_raw, prepare_raw)
+        if validated["prepare"].get("schema") != PREPARE_V1_SCHEMA:
+            raise ExecuteError("production funnel requires prepare.v1")
+        sites = load_frozen_sites(Path(pins_dir))
+        control_raw = verify_file_digest(
+            Path(pins_dir) / "control.json", PHASE_A_PIN_DIGESTS["control.json"])
+        control = load_strict(control_raw)
+        steps = required_sequence(sites)
+        order = bind_authorized_mutation_order(
+            manifest=manifest, sites=sites, control=control, steps=steps)
+    except (AuthorizeError, PrepareError) as exc:
         raise ExecuteError(str(exc)) from exc
-    observations = []
-    dispositions = []
-    executed = []
-    closed = False
-    close_reason = None
-    for step in steps:
-        observation = child(step)
-        if type(observation) is not dict:
-            raise ExecuteError("observation")
-        disposition = classify_observation(step, observation)
-        if disposition not in KNOWN_DISPOSITIONS:
-            raise ExecuteError("unknown disposition")
-        observations.append(observation)
-        dispositions.append(disposition)
-        executed.append(step["id"])
-        if voids_before_scored(step, disposition):
-            closed = True
-            close_reason = "void-before-scored"
-            break
-    return {
-        "phase": FUNNEL_PHASE,
-        "schema": FUNNEL_SCHEMA,
-        "closed": closed,
-        "close_reason": close_reason,
-        "sequence": [step["id"] for step in steps],
-        "executed": executed,
-        "observations": observations,
-        "dispositions": dispositions,
-        "non_claims": list(NON_CLAIMS),
-    }
+    return ca._run_process(
+        manifest, Path(manifest_path),
+        execution_backend=execution_backend,
+        mutation_order=order,
+        separate_build_phase=False,
+    )
 
 
 def main(argv: list[str]) -> int:
-    sys.stderr.write(
-        "execution-funnel is test-only; fake child required\n")
+    sys.stderr.write("execution funnel is library-only; use the authorized driver\n")
     return 2
 
 

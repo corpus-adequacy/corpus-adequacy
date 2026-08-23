@@ -39,3 +39,7 @@ measurements/aee_checker_sealed_execute.py text eol=lf
 tests/test_aee_checker_sealed_execute.py text eol=lf
 measurements/aee_checker_sealed_candidate.py text eol=lf
 tests/test_aee_checker_sealed_candidate.py text eol=lf
+measurements/aee_checker_sealed_driver.py text eol=lf
+measurements/aee_checker_sealed_runtime.py text eol=lf
+tests/test_aee_checker_sealed_driver.py text eol=lf
+tests/test_aee_checker_sealed_runtime.py text eol=lf

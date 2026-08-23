@@ -40,7 +40,7 @@ PHASE_A_DIGESTS = {
         "130b36d50df8a286954649771c9d65f35541ecd2f7007918ce5b261ace3aa769"
     ),
     "measurements/aee-checker-25b9dfa/manifest.json": (
-        "2f16654dd57a0b1719ec2ec5be7a833192ccae529d08c4c7695c7df4782c32c8"
+        "d21f4831c48a633009cafb0672c2d4e986bffda21a2c82508c1b32486d414eee"
     ),
     "measurements/aee-checker-25b9dfa/pins.json": (
         "e2456cbfcbbda17800318703e296e72fcaf138037178bad1fe237bc2c460c7e4"
@@ -64,17 +64,29 @@ FORBIDDEN_PUBLIC = (
 EMPTY_VENDOR = hashlib.sha256(b"").hexdigest()
 MEMORY_4G = 4 * 1024 * 1024 * 1024
 AEE_LF_ATTRS = (
+    "bounded_run.py text eol=lf",
+    "corpus_adequacy.py text eol=lf",
+    "isolated_tree.py text eol=lf",
+    "module_child.py text eol=lf",
     "adapters/aee_checker_sealed.py text eol=lf",
     "measurements/aee-checker-25b9dfa/** text eol=lf",
     "measurements/aee_checker_sealed_common.py text eol=lf",
     "measurements/aee_checker_sealed_materialize.py text eol=lf",
     "measurements/aee_checker_sealed_oci.py text eol=lf",
     "measurements/aee_checker_sealed_candidate.py text eol=lf",
+    "measurements/aee_checker_sealed_driver.py text eol=lf",
+    "measurements/aee_checker_sealed_runtime.py text eol=lf",
+    "tests/test_aee_checker_sealed_driver.py text eol=lf",
+    "tests/test_aee_checker_sealed_runtime.py text eol=lf",
     "measurements/aee_checker_sealed_run.py text eol=lf",
     "tests/test_aee_checker_sealed_run.py text eol=lf",
     "execution/aee-checker-sealed/** text eol=lf",
 )
 AEE_LF_PATHS = (
+    "bounded_run.py",
+    "corpus_adequacy.py",
+    "isolated_tree.py",
+    "module_child.py",
     "adapters/aee_checker_sealed.py",
     "measurements/aee-checker-25b9dfa/control.json",
     "measurements/aee-checker-25b9dfa/manifest.json",
@@ -84,6 +96,10 @@ AEE_LF_PATHS = (
     "measurements/aee_checker_sealed_materialize.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_candidate.py",
+    "measurements/aee_checker_sealed_driver.py",
+    "measurements/aee_checker_sealed_runtime.py",
+    "tests/test_aee_checker_sealed_driver.py",
+    "tests/test_aee_checker_sealed_runtime.py",
     "measurements/aee_checker_sealed_run.py",
     "tests/test_aee_checker_sealed_run.py",
     "execution/aee-checker-sealed/Containerfile",
@@ -91,6 +107,12 @@ AEE_LF_PATHS = (
     "execution/aee-checker-sealed/cargo-config.toml",
 )
 REQUIRED_EXECUTION_PATHS = (
+    "bounded_run.py",
+    "corpus_adequacy.py",
+    "isolated_tree.py",
+    "module_child.py",
+    "adapters/aee_checker_sealed.py",
+    "measurements/aee-checker-25b9dfa/manifest.json",
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
     "measurements/aee_checker_sealed_oci.py",
@@ -98,6 +120,8 @@ REQUIRED_EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_materialize.py",
     "measurements/aee_checker_sealed_authorize.py",
     "measurements/aee_checker_sealed_execute.py",
+    "measurements/aee_checker_sealed_driver.py",
+    "measurements/aee_checker_sealed_runtime.py",
     "execution/aee-checker-sealed/Containerfile",
     "execution/aee-checker-sealed/probe.sh",
     "execution/aee-checker-sealed/cargo-config.toml",

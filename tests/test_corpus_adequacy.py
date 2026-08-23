@@ -4018,6 +4018,44 @@ class SharedMutationStep(unittest.TestCase):
     def _batch(self, tmp: Path) -> dict:
         return ca.run(BatchRunner()._corpus(tmp))
 
+    def test_manifest_bytes_rebind_logical_paths_without_changing_identity(self):
+        raw = json.dumps({
+            "schema": ca.SCHEMA,
+            "runner": "batch",
+            "repo_root": "subject",
+            "implementation": "subject/check.py",
+            "implementation_sources": ["subject/check.py"],
+            "entrypoint_command": ["checker"],
+            "outcome_from": ["rows"],
+            "vectors": "corpus/vectors.json",
+            "default_group": "g",
+            "mutants": {"g": [{
+                "label": "rule", "anchor": "return True",
+                "replacement": "return False",
+            }]},
+        }, sort_keys=True).encode("utf-8")
+        loaded = []
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            for name in ("one", "two"):
+                root = tmp / name
+                (root / "subject").mkdir(parents=True)
+                (root / "corpus").mkdir()
+                (root / "subject" / "check.py").write_text(
+                    "def check():\n    return True\n", encoding="utf-8")
+                (root / "corpus" / "vectors.json").write_text(
+                    '{"vectors":[]}', encoding="utf-8")
+                loaded.append(ca.load_manifest_bytes(
+                    raw, Path("measurements/frozen-manifest.json"),
+                    path_root=root,
+                ))
+
+        self.assertEqual(loaded[0]["_manifest_sha256"],
+                         loaded[1]["_manifest_sha256"])
+        self.assertNotEqual(loaded[0]["_repo_root"], loaded[1]["_repo_root"])
+        self.assertEqual(loaded[0]["_repo_root"].name, "subject")
+        self.assertEqual(loaded[1]["_repo_root"].name, "subject")
+
     def test_parity_module_report_projection(self):
         with tempfile.TemporaryDirectory() as d:
             report = ca.run(_manifest(Path(d), {"a": [KILLABLE]}))
@@ -4121,6 +4159,64 @@ class SharedMutationStep(unittest.TestCase):
         self.assertTrue(report["adequate"])
         self.assertEqual(calls, [("g", "CONTROL"), ("g", "threshold")])
 
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_authorized_order_drives_the_shared_step_without_a_second_engine(self):
+        calls = []
+        original = ca._run_mutation_step
+
+        def witnessed(session, group, mutant):
+            calls.append((group, mutant["label"]))
+            return original(session, group, mutant)
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+                ca, "_run_mutation_step", side_effect=witnessed):
+            path = _two_group_process_manifest(Path(d))
+            report = ca._run_process(
+                ca.load_manifest(path), path,
+                mutation_order=("CONTROL", "b outcome", "a threshold"),
+            )
+
+        self.assertTrue(report["adequate"])
+        self.assertEqual(
+            calls,
+            [("a", "CONTROL"), ("b", "b outcome"), ("a", "a threshold")],
+        )
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_authorized_order_must_name_every_declared_mutant_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _two_group_process_manifest(Path(d))
+            loaded = ca.load_manifest(path)
+            for order in (
+                ("CONTROL", "a threshold"),
+                ("CONTROL", "a threshold", "a threshold"),
+                ("a threshold", "CONTROL", "b outcome"),
+                ("CONTROL", "a threshold", "b outcome", "unknown"),
+            ):
+                with self.subTest(order=order), self.assertRaisesRegex(
+                        ca.ManifestError, "mutation_order"):
+                    ca._run_process(dict(loaded), path, mutation_order=order)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_combined_build_run_has_no_fabricated_compile_only_execution(self):
+        calls = []
+
+        def witnessed(m, vectors=None, *, rebuild=True):
+            calls.append((vectors is None, rebuild))
+            return ca._default_execution_backend(m, vectors, rebuild=rebuild)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = _process_kill_manifest(Path(d))
+            report = ca._run_process(
+                ca.load_manifest(path), path,
+                execution_backend=witnessed,
+                separate_build_phase=False,
+            )
+
+        self.assertTrue(report["adequate"])
+        self.assertNotIn((True, True), calls)
+        self.assertEqual(calls[0], (False, True))
+
     def test_one_authoritative_tally_and_default_backend_seam(self):
         self.assertTrue(callable(ca._default_execution_backend))
         self.assertTrue(callable(ca._finalize_process_tally))
@@ -4211,8 +4307,10 @@ class SharedMutationStep(unittest.TestCase):
     def test_mutation_ordinary_mutants_before_declared_control(self):
         """Run ordinary mutants first and the frozen CONTROL-then-threshold order reddens."""
         src = inspect.getsource(ca._run_process)
-        self.assertIn("partition_declared_mutants", src)
-        self.assertIn('(controls, ordinary)', src)
+        order = inspect.getsource(ca.ordered_declared_mutants)
+        self.assertIn("partition_declared_mutants", order)
+        self.assertIn("controls + ordinary", order)
+        self.assertIn("ordered_declared_mutants", src)
         with tempfile.TemporaryDirectory() as d:
             labels = [row["label"] for row in self._batch(Path(d))["mutants"]]
         self.assertEqual(labels[0], "CONTROL")
