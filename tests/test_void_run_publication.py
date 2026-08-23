@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import shutil
 import sys
@@ -140,7 +141,8 @@ class VoidRunAttemptPublication(unittest.TestCase):
         self.assertEqual(doc["prepare_sha256"], PREPARE_SHA256)
         self.assertEqual(doc["authorize_sha256"], AUTHORIZE_SHA256)
         self.assertEqual(doc["baseline_status"], "unproved")
-        self.assertEqual(doc["control_status"], "not-run")
+        self.assertEqual(doc["control_status"], "absent-or-invalid")
+        self.assertNotEqual(doc["control_status"], "not-run")
         self.assertEqual(doc["mutant_status"], "not-scored")
         self.assertEqual(doc["score_status"], "none")
         self.assertIn(FAILURE, doc["failures"])
@@ -188,7 +190,8 @@ class VoidRunAttemptPublication(unittest.TestCase):
         lower = page.lower()
         self.assertIn("void run attempt", lower)
         self.assertIn("baseline unproved", lower)
-        self.assertIn("control not run", lower)
+        self.assertIn("no valid control result", lower)
+        self.assertNotIn("control not run", lower)
         self.assertIn("no scored mutants", lower)
         self.assertIn("no score", lower)
         self.assertIn("not a measurement", lower)
@@ -197,12 +200,20 @@ class VoidRunAttemptPublication(unittest.TestCase):
         self.assertIn(EXECUTION_COMMIT, page)
         self.assertIn(PREPARE_SHA256, page)
         self.assertIn(AUTHORIZE_SHA256, page)
+        self.assertIn("recorded raw report sha-256", lower)
+        self.assertIn("source artifact bytes", lower)
+        self.assertIn("not publicly retained or recomputed here", lower)
+        self.assertNotIn("digest bytes are not publicly retained", lower)
+        self.assertNotIn("verified raw report", lower)
         self.assertNotIn("raw report.v0.json", lower)
         self.assertNotIn("/report.v0.json", page)
         self.assertNotIn(rpp.RAW_PREFIX, page)
         self.assertNotIn(HOST_LEAK, page)
         self.assertNotIn("/private/tmp/", page)
         self.assertNotIn("/Users/", page)
+        self.assertNotIn("score_percent", lower)
+        self.assertNotIn("leaderboard", lower)
+        self.assertNotIn("ranking", lower)
         self.assertNotIn('class="counts"', page)
         self.assertNotIn("Copyable command", page)
         self.assertNotIn(
@@ -295,27 +306,33 @@ class VoidRunAttemptPublication(unittest.TestCase):
                 self._assert_void_publication(_text(mutated, "index.html"))
 
     def test_mutation_presenting_null_score_as_zero_is_red(self):
+        orig = rpp._void_card_html
+
+        def mutated_card(record):
+            return orig(record).replace(
+                "</li>",
+                '<p>score_percent 0</p>'
+                '<ul class="counts"><li class="count" aria-label="killed 0">'
+                '<span class="count-label">killed</span> '
+                '<span class="count-value">0</span></li></ul></li>',
+                1,
+            )
+
         with tempfile.TemporaryDirectory() as d:
-            page = _text(rpp.render_site(_attempt_tree(Path(d)), BUILD), "index.html")
-        self._assert_void_publication(page)
-        mutated = page.replace("No score", "0", 1)
-        mutated = mutated.replace(
-            "No scored mutants",
-            '<ul class="counts"><li class="count" aria-label="killed 0">'
-            '<span class="count-label">killed</span> '
-            '<span class="count-value">0</span></li></ul>',
-            1,
-        )
+            with mock.patch.object(rpp, "_void_card_html", mutated_card):
+                page = _text(rpp.render_site(_attempt_tree(Path(d)), BUILD), "index.html")
         with self.assertRaises(AssertionError):
-            self._assert_void_publication(mutated)
+            self._assert_void_publication(page)
 
     def test_mutation_omitting_the_failure_is_red(self):
+        def mutated_failures(record, heading="h2"):
+            return ""
+
         with tempfile.TemporaryDirectory() as d:
-            page = _text(rpp.render_site(_attempt_tree(Path(d)), BUILD), "index.html")
-        self._assert_void_publication(page)
-        mutated = page.replace(rpp._esc(FAILURE), "", 1)
+            with mock.patch.object(rpp, "_void_failures_html", mutated_failures):
+                page = _text(rpp.render_site(_attempt_tree(Path(d)), BUILD), "index.html")
         with self.assertRaises(AssertionError):
-            self._assert_void_publication(mutated)
+            self._assert_void_publication(page)
 
     def test_load_run_attempt_refuses_host_leak(self):
         base = _canonical_attempt()
@@ -519,6 +536,74 @@ class VoidRunAttemptPublication(unittest.TestCase):
             )
         self.assertIn("#publication-handoff", measured)
         self.assertIn('id="publication-handoff"', measured)
+
+    def test_void_pages_link_exact_site_local_attempt_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            files = rpp.render_site(_attempt_tree(Path(d)), BUILD)
+        rel = "runs/%s/run-attempt.v0.json" % ATTEMPT_ID
+        self.assertEqual(files[rel], LIVE_ATTEMPT.read_bytes())
+        overview = _text(files, "index.html")
+        detail = _text(files, "runs/%s/index.html" % ATTEMPT_ID)
+        self.assertIn('href="runs/%s/run-attempt.v0.json"' % ATTEMPT_ID, overview)
+        self.assertIn('href="run-attempt.v0.json"', detail)
+        for page in (overview, detail):
+            self.assertNotIn("/publications/run-attempts/", page)
+            self.assertNotIn(rpp.BLOB_PREFIX, page)
+
+    def test_overview_void_card_does_not_nest_h2(self):
+        with tempfile.TemporaryDirectory() as d:
+            page = rpp.render_html(_attempt_tree(Path(d)), BUILD)
+        start = page.find("<h3>Void run attempt</h3>")
+        end = page.find("</li>", start)
+        card = page[start:end]
+        self.assertNotIn("<h2>", card)
+        self.assertIn("<h4>Retained failure</h4>", card)
+
+    def test_void_detail_skip_target_is_focusable(self):
+        with tempfile.TemporaryDirectory() as d:
+            detail = _text(
+                rpp.render_site(_attempt_tree(Path(d)), BUILD),
+                "runs/%s/index.html" % ATTEMPT_ID,
+            )
+        self.assertIn('href="#attempt"', detail)
+        self.assertIn('id="attempt" tabindex="-1"', self._skip_target(detail))
+
+    def test_digest_wording_marks_recorded_not_verified(self):
+        with tempfile.TemporaryDirectory() as d:
+            page = rpp.render_html(_attempt_tree(Path(d)), BUILD)
+        lower = page.lower()
+        self.assertIn("recorded raw report sha-256", lower)
+        self.assertIn("recorded prepare digest", lower)
+        self.assertIn("recorded authorize digest", lower)
+        self.assertNotIn("verified raw report", lower)
+        self.assertNotIn("verified prepare", lower)
+        self.assertNotIn("verified authorize", lower)
+        self.assertIn("source artifact bytes", lower)
+        self.assertIn("not publicly retained or recomputed here", lower)
+        self.assertNotIn("digest bytes are not publicly retained", lower)
+        self.assertIn("attempt digest", lower)
+        self.assertNotIn("recorded attempt digest", lower)
+        self.assertNotIn("verified attempt digest", lower)
+
+    def test_void_helpers_do_not_take_build_commit(self):
+        record = rpp.load_run_attempt(LIVE_ATTEMPT)
+        for name in ("_void_links_html", "_void_card_html", "_void_run_page"):
+            fn = getattr(rpp, name)
+            self.assertEqual(list(inspect.signature(fn).parameters), ["record"], name)
+            html = fn(record)
+            self.assertIn("run-attempt.v0.json", html)
+            self.assertNotIn(BUILD, html)
+
+    def test_loader_refuses_narrowed_not_run_control_status(self):
+        doc = dict(_canonical_attempt(), control_status="not-run")
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "run-attempt.v0.json"
+            path.write_text(
+                json.dumps(doc, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(rpp.PublicationError, "control_status"):
+                rpp.load_run_attempt(path)
 
 
 if __name__ == "__main__":

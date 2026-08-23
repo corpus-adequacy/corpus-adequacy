@@ -68,6 +68,8 @@ VOID_NON_CLAIMS = (
     "It is an auditable record that a bounded authorized attempt occurred "
     "and failed closed.",
     "This is an attempt/void result, not a measurement or score.",
+    "PREPARE, AUTHORIZE, and raw-report source artifact bytes are not "
+    "publicly retained or recomputed here.",
 )
 
 
@@ -418,8 +420,8 @@ def load_run_attempt(
     authorize = _require_hex64(doc.get("authorize_sha256"), field="authorize_sha256")
     if doc.get("baseline_status") != "unproved":
         raise PublicationError("baseline_status must be unproved")
-    if doc.get("control_status") != "not-run":
-        raise PublicationError("control_status must be not-run")
+    if doc.get("control_status") != "absent-or-invalid":
+        raise PublicationError("control_status must be absent-or-invalid")
     if doc.get("mutant_status") != "not-scored":
         raise PublicationError("mutant_status must be not-scored")
     if doc.get("score_status") != "none":
@@ -848,16 +850,16 @@ def _handoff_section(records: list[dict]) -> str:
 def _void_plain_sentence() -> str:
     return (
         "This is a void run attempt, not a measurement or score. "
-        "Baseline unproved. Control not run. No scored mutants. No score."
+        "Baseline unproved. No valid control result. No scored mutants. No score."
     )
 
 
 def _void_digest_html(record: dict) -> str:
     rows = (
-        ("raw report SHA-256", record["raw_report_sha256"]),
+        ("recorded raw report SHA-256", record["raw_report_sha256"]),
         ("execution commit", record["execution_commit"]),
-        ("prepare digest", record["prepare_sha256"]),
-        ("authorize digest", record["authorize_sha256"]),
+        ("recorded PREPARE digest", record["prepare_sha256"]),
+        ("recorded AUTHORIZE digest", record["authorize_sha256"]),
         ("attempt digest", record["digest"]),
     )
     return "\n".join(
@@ -866,24 +868,27 @@ def _void_digest_html(record: dict) -> str:
     )
 
 
-def _void_failures_html(record: dict) -> str:
+def _void_failures_html(record: dict, *, heading: str = "h2") -> str:
+    if heading not in ("h2", "h4"):
+        raise PublicationError("void failure heading must be h2 or h4")
     items = [
         '<li><span class="mono">%s</span></li>' % _esc(item)
         for item in record["failures"]
     ]
     return (
-        "<h2>Retained failure</h2>\n"
-        "<ul>\n%s\n</ul>" % "\n".join(items)
+        "<%s>Retained failure</%s>\n"
+        "<ul>\n%s\n</ul>" % (heading, heading, "\n".join(items))
     )
 
 
-def _void_attempt_href(record: dict, build_commit: str) -> str:
-    if _looks_like_commit(build_commit):
-        return "%s/%s/%s" % (BLOB_PREFIX, build_commit, record["attempt_rel"])
-    return record["attempt_rel"]
+def _void_site_attempt_href(record: dict, *, from_overview: bool) -> str:
+    name = "run-attempt.v0.json"
+    if from_overview:
+        return "runs/%s/%s" % (record["directory"], name)
+    return name
 
 
-def _void_links_html(record: dict, build_commit: str) -> str:
+def _void_links_html(record: dict) -> str:
     execution_href = (
         "https://github.com/corpus-adequacy/corpus-adequacy/commit/%s"
         % record["execution_commit"]
@@ -898,12 +903,12 @@ def _void_links_html(record: dict, build_commit: str) -> str:
             _esc("runs/%s/" % record["directory"]),
             _esc(execution_href),
             _esc(record["execution_commit"]),
-            _esc(_void_attempt_href(record, build_commit)),
+            _esc(_void_site_attempt_href(record, from_overview=True)),
         )
     )
 
 
-def _void_card_html(record: dict, build_commit: str) -> str:
+def _void_card_html(record: dict) -> str:
     return (
         '<li class="card">\n'
         "<h3>Void run attempt</h3>\n"
@@ -917,8 +922,8 @@ def _void_card_html(record: dict, build_commit: str) -> str:
             _esc(record["directory"]),
             _void_digest_html(record),
             _esc(_void_plain_sentence()),
-            _void_failures_html(record),
-            _void_links_html(record, build_commit),
+            _void_failures_html(record, heading="h4"),
+            _void_links_html(record),
         )
     )
 
@@ -992,7 +997,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
             '<h2 id="void-attempts-heading">Void run attempts</h2>\n'
             '<ul class="cards">\n%s\n</ul>\n'
             "</section>\n"
-            % "\n".join(_void_card_html(rec, source_commit) for rec in attempts)
+            % "\n".join(_void_card_html(rec) for rec in attempts)
         )
     measurement_block = ""
     if measurements:
@@ -1166,7 +1171,7 @@ def _run_page(record: dict, findings: list[dict], build_commit: str) -> str:
     )
 
 
-def _void_run_page(record: dict, build_commit: str) -> str:
+def _void_run_page(record: dict) -> str:
     execution_href = (
         "https://github.com/corpus-adequacy/corpus-adequacy/commit/%s"
         % record["execution_commit"]
@@ -1177,7 +1182,7 @@ def _void_run_page(record: dict, build_commit: str) -> str:
         '<p><a href="../../index.html">overview</a></p>\n'
         "</header>\n"
         "%s\n"
-        '<main id="attempt">\n'
+        '<main id="attempt" tabindex="-1">\n'
         '<p class="plain">%s</p>\n'
         "%s\n"
         "%s\n"
@@ -1190,10 +1195,10 @@ def _void_run_page(record: dict, build_commit: str) -> str:
             _non_claims_html([record], ceilings=()),
             _esc(_void_plain_sentence()),
             _void_digest_html(record),
-            _void_failures_html(record),
+            _void_failures_html(record, heading="h2"),
             _esc(execution_href),
             _esc(record["execution_commit"]),
-            _esc(_void_attempt_href(record, build_commit)),
+            _esc(_void_site_attempt_href(record, from_overview=False)),
         )
     )
     return _shell_page(
@@ -1272,9 +1277,10 @@ def render_site(root: Path, source_commit: str) -> dict[str, bytes]:
         rec_id = record["directory"]
         kind = record.get("kind", KIND_COMPLETED_MEASUREMENT)
         if kind == KIND_VOID_RUN_ATTEMPT:
-            files["runs/%s/index.html" % rec_id] = _void_run_page(
-                record, source_commit
-            ).encode("utf-8")
+            files["runs/%s/index.html" % rec_id] = _void_run_page(record).encode(
+                "utf-8"
+            )
+            files["runs/%s/run-attempt.v0.json" % rec_id] = record["attempt_bytes"]
             continue
         if kind != KIND_COMPLETED_MEASUREMENT:
             raise PublicationError("unknown publication kind %r" % kind)

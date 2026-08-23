@@ -40,22 +40,23 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 <li>A void-attempt page does not validate the corpus, checker, execution environment, control, mutants, or adequacy.</li>
 <li>It is an auditable record that a bounded authorized attempt occurred and failed closed.</li>
 <li>This is an attempt/void result, not a measurement or score.</li>
+<li>PREPARE, AUTHORIZE, and raw-report source artifact bytes are not publicly retained or recomputed here.</li>
 </ul>
 </section>
-<main id="attempt">
-<p class="plain">This is a void run attempt, not a measurement or score. Baseline unproved. Control not run. No scored mutants. No score.</p>
-<p>raw report SHA-256 <span class="mono">88cc1b7e0e37ef9c4a6da17ecc1d62168b9f0f17b199203ca03c55471e587600</span></p>
+<main id="attempt" tabindex="-1">
+<p class="plain">This is a void run attempt, not a measurement or score. Baseline unproved. No valid control result. No scored mutants. No score.</p>
+<p>recorded raw report SHA-256 <span class="mono">88cc1b7e0e37ef9c4a6da17ecc1d62168b9f0f17b199203ca03c55471e587600</span></p>
 <p>execution commit <span class="mono">a95d2344b5a242774cc03edf599359d2aaabedf2</span></p>
-<p>prepare digest <span class="mono">6b533b30ed1ba83a234826800a9e4d5d58574ac8201c17e6b996e249556197ce</span></p>
-<p>authorize digest <span class="mono">4b06114a5dc194734b9fe1cbba3f8e6ab6dfe40215857194ccce684d2d5c7599</span></p>
-<p>attempt digest <span class="mono">6bfa74df3d2d7559b403a46db814d8b071ffc45a8e34d499499457e679006fed</span></p>
+<p>recorded PREPARE digest <span class="mono">6b533b30ed1ba83a234826800a9e4d5d58574ac8201c17e6b996e249556197ce</span></p>
+<p>recorded AUTHORIZE digest <span class="mono">4b06114a5dc194734b9fe1cbba3f8e6ab6dfe40215857194ccce684d2d5c7599</span></p>
+<p>attempt digest <span class="mono">7b7e430145f0489107274ba92956bb3d1aaa87364923f92e74e1f0f70c613ee0</span></p>
 <h2>Retained failure</h2>
 <ul>
 <li><span class="mono">sealed: the UNMUTATED binary failed (unproved) on [&#x27;&lt;batch&gt;&#x27;]</span></li>
 </ul>
 <p class="links">
 <a href="https://github.com/corpus-adequacy/corpus-adequacy/commit/a95d2344b5a242774cc03edf599359d2aaabedf2">execution commit a95d2344b5a242774cc03edf599359d2aaabedf2</a>
-<a href="https://github.com/corpus-adequacy/corpus-adequacy/blob/a4a39bb38f6ba4512872fec4798b640086863619/publications/run-attempts/a95d-void-run-attempt/run-attempt.v0.json">run-attempt.v0.json</a>
+<a href="run-attempt.v0.json">run-attempt.v0.json</a>
 </p>
 </main>
 </body>
