@@ -1,0 +1,31 @@
+{
+  "acknowledged_digests": 0,
+  "adequate": false,
+  "control_status": "absent-or-invalid",
+  "corpus_digest": null,
+  "declared_total": 0,
+  "diagnostic_channel_declared": false,
+  "equivalent": 0,
+  "failures": [
+    "aee-checker: the UNMUTATED implementation could not be measured (unproved)"
+  ],
+  "hole_ratio": null,
+  "killed": 0,
+  "known_holes": 0,
+  "manifest": "/private/tmp/ca-fixture-void-run/manifest.json",
+  "manifest_sha256": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "mutants": [],
+  "out_of_scope_ratio": null,
+  "runner": "process",
+  "schema": "corpus-adequacy.report.v0",
+  "score_means": "percent of author-declared in-scope rules killed; NOT percent of the rules the implementation actually has. Silent mutants count in the denominator and never the numerator. Without diagnostic_from the silent class is unreachable, so a zero there means it was not measured, not that none exist",
+  "score_percent": null,
+  "silent": 0,
+  "survived": 0,
+  "tool_commit": "a95d2344b5a242774cc03edf599359d2aaabedf2",
+  "tool_content_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "tool_source_state": "exact",
+  "tool_version": "0.1.1",
+  "unexercised_out_of_scope": 0,
+  "unproved": 0
+}
