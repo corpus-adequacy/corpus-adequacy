@@ -1232,6 +1232,23 @@ def _module_outcomes(m: dict, source: str, tag: str, vectors: list, tmp: Path) -
         abnormal=None)
 
 
+CLOSED_UNPROVED_REASONS = (
+    "timeout",
+    "output-cap",
+    "inner-exit",
+    "empty-or-missing",
+    "malformed",
+    "projection",
+)
+
+
+def sanitize_unproved_reason(value):
+    """Return a harness-owned reason token, or None. Never copies child bytes."""
+    if value in CLOSED_UNPROVED_REASONS:
+        return value
+    return None
+
+
 def classify(returncode, accepted, unproved=()) -> str:
     """ok | unproved | unexpected-exit | signal | incomplete. Never reads stdout.
 
@@ -2076,8 +2093,13 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
                 continue
             if baseline.raised:
                 kinds = sorted(set(baseline.raised.values()))
-                tally["failures"].append("%s: the UNMUTATED binary failed (%s) on %s"
-                                         % (group, ", ".join(kinds),
+                extra = ""
+                if kinds == ["unproved"]:
+                    token = sanitize_unproved_reason(baseline.detail)
+                    if token is not None:
+                        extra = " [%s]" % token
+                tally["failures"].append("%s: the UNMUTATED binary failed (%s)%s on %s"
+                                         % (group, ", ".join(kinds), extra,
                                             sorted(baseline.raised)))
                 continue
             session.baselines[group] = (
