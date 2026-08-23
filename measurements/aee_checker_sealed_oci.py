@@ -75,6 +75,8 @@ def require_docker_ready() -> str:
             ["docker", "info", "--format", "{{.ServerVersion}}"], Path.cwd(), 15)
     except FileNotFoundError as exc:
         raise DockerUnavailable("docker executable is not available") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise PrepareError("docker readiness timed out") from exc
     version = (proc.stdout or "").strip()
     if proc.returncode != 0 or not version:
         raise PrepareError("docker daemon is not ready")
