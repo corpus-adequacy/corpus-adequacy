@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="projection-digest" content="eb0cc027b35585301cba8f960881cd42f48d26ebd9d7c38ac578711700107af3">
+<meta name="projection-digest" content="04d739b3ec6673f748a95e642986dbf6e2b2f9b19c4f5441b7cc5de51d9e3e38">
 <meta name="source-commit" content="a4a39bb38f6ba4512872fec4798b640086863619">
 <title>Published corpus-adequacy measurements</title>
 <style>
@@ -75,6 +75,30 @@ python3 corpus_adequacy.py --survivors measurements/tersign-1cc5ea32/report.v0.j
 <p>Recompute machine prefills from local report and source.json metadata bytes. Review must recompute those fields. Query values stay untrusted.</p>
 <pre><code>python3 scripts/publication_handoff.py measurements/tersign-1cc5ea32/report.v0.json</code></pre>
 <p><a href="https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=publish-measurement.yml">Manual empty publication form</a> (fallback if the local command is unavailable).</p>
+</section>
+<section id="void-attempts" class="non-claims" aria-labelledby="void-attempts-heading">
+<h2 id="void-attempts-heading">Void run attempts</h2>
+<ul class="cards">
+<li class="card">
+<h3>Void run attempt</h3>
+<p>attempt id <span class="mono">a95d-void-run-attempt</span></p>
+<p>raw report SHA-256 <span class="mono">88cc1b7e0e37ef9c4a6da17ecc1d62168b9f0f17b199203ca03c55471e587600</span></p>
+<p>execution commit <span class="mono">a95d2344b5a242774cc03edf599359d2aaabedf2</span></p>
+<p>prepare digest <span class="mono">6b533b30ed1ba83a234826800a9e4d5d58574ac8201c17e6b996e249556197ce</span></p>
+<p>authorize digest <span class="mono">4b06114a5dc194734b9fe1cbba3f8e6ab6dfe40215857194ccce684d2d5c7599</span></p>
+<p>attempt digest <span class="mono">8d89fcae844f56a8879dedcfa4dc78be7a311dee28f5df461f03f28620e94249</span></p>
+<p class="plain">This is a void run attempt, not a measurement or score. Baseline unproved. Control not run. No scored mutants. No score.</p>
+<h2>Retained failure</h2>
+<ul>
+<li><span class="mono">UNMUTATED baseline unproved; control and mutants were not run</span></li>
+</ul>
+<p class="links">
+<a href="runs/a95d-void-run-attempt/">attempt detail</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/commit/a95d2344b5a242774cc03edf599359d2aaabedf2">execution commit a95d2344b5a242774cc03edf599359d2aaabedf2</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/blob/a4a39bb38f6ba4512872fec4798b640086863619/publications/run-attempts/a95d-void-run-attempt/run-attempt.v0.json">run-attempt.v0.json</a>
+</p>
+</li>
+</ul>
 </section>
 <main id="results" tabindex="-1">
 <h2>Committed records</h2>

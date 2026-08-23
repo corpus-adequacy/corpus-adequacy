@@ -39,6 +39,31 @@ NO_LOCAL_REPRODUCTION_COMMAND = (
 KIND_VOID_RUN_ATTEMPT = "void-run-attempt"
 KIND_COMPLETED_MEASUREMENT = "completed-measurement"
 VOID_RENDER_REFUSAL = "void run attempt cannot enter the measurement renderer"
+ATTEMPT_SCHEMA = "corpus-adequacy.run-attempt.v0"
+ATTEMPT_REL_PREFIX = "publications/run-attempts"
+VOID_RAW_REPORT_SHA256 = (
+    "88cc1b7e0e37ef9c4a6da17ecc1d62168b9f0f17b199203ca03c55471e587600"
+)
+VOID_EXECUTION_COMMIT = "a95d2344b5a242774cc03edf599359d2aaabedf2"
+VOID_PREPARE_SHA256 = (
+    "6b533b30ed1ba83a234826800a9e4d5d58574ac8201c17e6b996e249556197ce"
+)
+VOID_AUTHORIZE_SHA256 = (
+    "4b06114a5dc194734b9fe1cbba3f8e6ab6dfe40215857194ccce684d2d5c7599"
+)
+ATTEMPT_REQUIRED = (
+    "schema",
+    "kind",
+    "raw_report_sha256",
+    "execution_commit",
+    "prepare_sha256",
+    "authorize_sha256",
+    "baseline_status",
+    "control_status",
+    "mutant_status",
+    "score_status",
+    "failures",
+)
 HOST_MARKERS = (
     "/Users/", "/home/", "/private/tmp/", "/private/var/", "/var/folders/",
     "C:/", "C:\\",
@@ -160,12 +185,6 @@ def is_void_run_attempt(doc) -> bool:
         and "unproved" in item.lower()
         for item in failures
     )
-
-
-def classify_report(doc) -> str:
-    if is_void_run_attempt(doc):
-        return KIND_VOID_RUN_ATTEMPT
-    return KIND_COMPLETED_MEASUREMENT
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -369,95 +388,90 @@ def load_record(
     }
 
 
-def _bound_input_digests(doc: dict, source: dict) -> dict[str, str]:
-    bound = {}
-    manifest = doc.get("manifest_sha256") or ""
-    if isinstance(manifest, str) and manifest.startswith("sha256:"):
-        bound["manifest_sha256"] = manifest[len("sha256:") :]
-    elif isinstance(manifest, str) and manifest:
-        bound["manifest_sha256"] = manifest
-    for field in ("prepare_sha256", "authorize_sha256"):
-        value = source.get(field)
-        if value is None:
-            continue
-        bound[field] = _require_hex64(value, field=field)
-    return bound
-
-
-def load_void_run_attempt(
-    report_path: Path,
+def load_run_attempt(
+    attempt_path: Path,
     *,
-    expected_report_sha256: str | None = None,
-    expected_source_sha256: str | None = None,
+    expected_attempt_sha256: str | None = None,
     record_id: str | None = None,
 ) -> dict:
-    """Load a digest-bound void attempt. Never a measurement record."""
-    report_path = Path(report_path)
-    raw, doc = _load_json_object(report_path, label=str(report_path))
-    if classify_report(doc) != KIND_VOID_RUN_ATTEMPT:
-        raise PublicationError("report is not a void run attempt")
-    try:
-        mutants = _require_report_rows(doc)
-    except ca.ManifestError as exc:
-        raise PublicationError(str(exc)) from exc
-    if mutants:
-        raise PublicationError("void run attempt mutants must be empty")
+    """Load one public run-attempt.v0.json. Never reads a raw report."""
+    attempt_path = Path(attempt_path)
+    raw, doc = _load_json_object(attempt_path, label=str(attempt_path))
+    if "execution_commit" not in doc or "commit" in doc or "source" in doc:
+        raise PublicationError(
+            "execution_commit is required; source.commit cannot substitute"
+        )
+    allowed = set(ATTEMPT_REQUIRED) | {"non_claims"}
+    unknown = sorted(set(doc) - allowed)
+    if unknown:
+        raise PublicationError("run-attempt has unknown fields: %s" % unknown)
+    missing = [key for key in ATTEMPT_REQUIRED if key not in doc]
+    if missing:
+        raise PublicationError("run-attempt missing fields: %s" % missing)
+    if doc.get("schema") != ATTEMPT_SCHEMA:
+        raise PublicationError("run-attempt schema is not %s" % ATTEMPT_SCHEMA)
+    if doc.get("kind") != KIND_VOID_RUN_ATTEMPT:
+        raise PublicationError("run-attempt kind is not %s" % KIND_VOID_RUN_ATTEMPT)
+    raw_report = _require_hex64(doc.get("raw_report_sha256"), field="raw_report_sha256")
+    if raw_report != VOID_RAW_REPORT_SHA256:
+        raise PublicationError("raw_report_sha256 is not the retained void digest")
+    execution_commit = doc.get("execution_commit")
+    if not _looks_like_commit(execution_commit):
+        raise PublicationError("execution_commit is not a 40-hex digest")
+    if execution_commit != VOID_EXECUTION_COMMIT:
+        raise PublicationError("execution_commit is not the retained execution commit")
+    prepare = _require_hex64(doc.get("prepare_sha256"), field="prepare_sha256")
+    authorize = _require_hex64(doc.get("authorize_sha256"), field="authorize_sha256")
+    if prepare != VOID_PREPARE_SHA256:
+        raise PublicationError("prepare_sha256 is not the retained prepare digest")
+    if authorize != VOID_AUTHORIZE_SHA256:
+        raise PublicationError("authorize_sha256 is not the retained authorize digest")
+    if doc.get("baseline_status") != "unproved":
+        raise PublicationError("baseline_status must be unproved")
+    if doc.get("control_status") != "not-run":
+        raise PublicationError("control_status must be not-run")
+    if doc.get("mutant_status") != "not-scored":
+        raise PublicationError("mutant_status must be not-scored")
+    if doc.get("score_status") != "none":
+        raise PublicationError("score_status must be none")
+    raw_failures = doc.get("failures")
+    if not isinstance(raw_failures, list) or not raw_failures:
+        raise PublicationError("void run attempt must retain a failure")
+    failures = [
+        sanitize_public_text(item)
+        for item in raw_failures
+        if isinstance(item, str) and item
+    ]
+    if not failures:
+        raise PublicationError("void run attempt must retain a failure")
     digest = _sha256_bytes(raw)
-    if expected_report_sha256 is not None and digest != expected_report_sha256:
-        raise PublicationError("report digest mismatch for %s" % report_path)
-    source_path = report_path.parent / "source.json"
-    source_raw, source = _load_json_object(source_path, label=str(source_path))
-    source_digest = _sha256_bytes(source_raw)
-    if expected_source_sha256 is not None and source_digest != expected_source_sha256:
-        raise PublicationError("source digest mismatch for %s" % source_path)
-    directory = record_id if record_id is not None else report_path.parent.name
-    repository, source_commit = _require_source_shape(source)
+    if expected_attempt_sha256 is not None and digest != expected_attempt_sha256:
+        raise PublicationError("attempt digest mismatch for %s" % attempt_path)
+    directory = record_id if record_id is not None else attempt_path.parent.name
     non_claims = []
-    extra = source.get("non_claims")
+    extra = doc.get("non_claims")
     if isinstance(extra, list):
         non_claims.extend(sanitize_public_text(str(item)) for item in extra)
     for item in VOID_NON_CLAIMS:
         if item not in non_claims:
             non_claims.append(item)
-    failures = []
-    raw_failures = doc.get("failures")
-    if isinstance(raw_failures, list):
-        failures.extend(
-            sanitize_public_text(item)
-            for item in raw_failures
-            if isinstance(item, str) and item
-        )
-    if not failures:
-        raise PublicationError("void run attempt must retain a failure")
-    input_digests = _bound_input_digests(doc, source)
-    runner = doc.get("runner") if doc.get("runner") is not None else ""
     return {
         "directory": directory,
-        "digest": digest,
-        "source_digest": source_digest,
-        "report_bytes": raw,
-        "source_bytes": source_raw,
-        "doc": doc,
-        "source": source,
-        "repository": repository,
-        "source_commit": source_commit,
-        "non_claims": non_claims,
-        "adapter": _adapter_name(source, directory),
-        "runner": sanitize_public_text(str(runner)),
-        "failures": failures,
-        "input_digests": input_digests,
-        "report_rel": "measurements/%s/report.v0.json" % directory,
-        "review_rel": "measurements/%s/PROVENANCE.md" % directory,
-        "command": None,
-        "tool_commit": sanitize_public_text(str(doc.get("tool_commit") or "")),
-        "tool_content_sha256": doc.get("tool_content_sha256") or "",
-        "tool_version": doc.get("tool_version") or "",
-        "manifest_sha256": input_digests.get("manifest_sha256", ""),
         "kind": KIND_VOID_RUN_ATTEMPT,
+        "attempt_bytes": raw,
+        "digest": digest,
+        "doc": doc,
+        "raw_report_sha256": raw_report,
+        "execution_commit": execution_commit,
+        "prepare_sha256": prepare,
+        "authorize_sha256": authorize,
+        "failures": failures,
+        "non_claims": non_claims,
+        "attempt_rel": "%s/%s/run-attempt.v0.json" % (ATTEMPT_REL_PREFIX, directory),
     }
 
 
-def load_publication_index(root: Path) -> tuple[bytes, list[dict]]:
+def load_publication_index(root: Path) -> tuple[bytes, list[dict], list[dict]]:
     index_path = Path(root) / INDEX_REL
     raw, doc = _load_json_object(index_path, label=INDEX_REL)
     if doc.get("schema") != INDEX_SCHEMA:
@@ -481,13 +495,32 @@ def load_publication_index(root: Path) -> tuple[bytes, list[dict]]:
                 "source_sha256": _require_hex64(item.get("source_sha256"), field="source_sha256"),
             }
         )
-    return raw, entries
+    listed_attempts = doc.get("attempts", [])
+    if not isinstance(listed_attempts, list):
+        raise PublicationError("publication index attempts must be a list")
+    attempts = []
+    for i, item in enumerate(listed_attempts):
+        if not isinstance(item, dict):
+            raise PublicationError("publication index attempts[%d] is not an object" % i)
+        rec_id = _require_record_id(item.get("id"))
+        if rec_id in seen:
+            raise PublicationError("publication index lists %s more than once" % rec_id)
+        seen.add(rec_id)
+        attempts.append(
+            {
+                "id": rec_id,
+                "attempt_sha256": _require_hex64(
+                    item.get("attempt_sha256"), field="attempt_sha256"
+                ),
+            }
+        )
+    return raw, entries, attempts
 
 
 def load_listed_records(root: Path) -> tuple[bytes, list[dict]]:
-    """Load only index-listed measurements. Unlisted dirs are not published."""
+    """Load only index-listed measurements and typed run attempts."""
     root = Path(root)
-    index_bytes, entries = load_publication_index(root)
+    index_bytes, entries, attempts = load_publication_index(root)
     records = []
     for entry in entries:
         rec_id = entry["id"]
@@ -495,19 +528,25 @@ def load_listed_records(root: Path) -> tuple[bytes, list[dict]]:
         source_path = root / "measurements" / rec_id / "source.json"
         if not report_path.exists() and not source_path.exists():
             raise PublicationError("listed measurement %s is missing" % rec_id)
-        _raw, doc = _load_json_object(report_path, label=str(report_path))
-        kind = classify_report(doc)
-        if kind == KIND_VOID_RUN_ATTEMPT:
-            loader = load_void_run_attempt
-        elif kind == KIND_COMPLETED_MEASUREMENT:
-            loader = load_record
-        else:
-            raise PublicationError("unknown publication kind %r" % kind)
         records.append(
-            loader(
+            load_record(
                 report_path,
                 expected_report_sha256=entry["report_sha256"],
                 expected_source_sha256=entry["source_sha256"],
+                record_id=rec_id,
+            )
+        )
+    for entry in attempts:
+        rec_id = entry["id"]
+        attempt_path = (
+            root / ATTEMPT_REL_PREFIX / rec_id / "run-attempt.v0.json"
+        )
+        if not attempt_path.exists():
+            raise PublicationError("listed run attempt %s is missing" % rec_id)
+        records.append(
+            load_run_attempt(
+                attempt_path,
+                expected_attempt_sha256=entry["attempt_sha256"],
                 record_id=rec_id,
             )
         )
@@ -794,21 +833,13 @@ def _void_plain_sentence() -> str:
 
 
 def _void_digest_html(record: dict) -> str:
-    rows = [
-        ("report digest", record["digest"]),
-        ("execution commit", record["source_commit"]),
-        ("source.json metadata SHA-256", record["source_digest"]),
-    ]
-    if record.get("tool_commit"):
-        rows.append(("tool_commit", record["tool_commit"]))
-    for field, label in (
-        ("manifest_sha256", "manifest digest"),
-        ("prepare_sha256", "prepare digest"),
-        ("authorize_sha256", "authorize digest"),
-    ):
-        value = record.get("input_digests", {}).get(field)
-        if value:
-            rows.append((label, value))
+    rows = (
+        ("raw report SHA-256", record["raw_report_sha256"]),
+        ("execution commit", record["execution_commit"]),
+        ("prepare digest", record["prepare_sha256"]),
+        ("authorize digest", record["authorize_sha256"]),
+        ("attempt digest", record["digest"]),
+    )
     return "\n".join(
         '<p>%s <span class="mono">%s</span></p>' % (_esc(label), _esc(value))
         for label, value in rows
@@ -826,103 +857,84 @@ def _void_failures_html(record: dict) -> str:
     )
 
 
-def _void_card_html(record: dict, build_commit: str) -> str:
-    raw_href, review_href, source_href = _evidence_hrefs(record, build_commit)
-    source_link = (
-        '<a href="%s">source commit %s</a>'
-        % (_esc(source_href), _esc(record["source_commit"]))
+def _void_attempt_href(record: dict, build_commit: str) -> str:
+    if _looks_like_commit(build_commit):
+        return "%s/%s/%s" % (BLOB_PREFIX, build_commit, record["attempt_rel"])
+    return record["attempt_rel"]
+
+
+def _void_links_html(record: dict, build_commit: str) -> str:
+    execution_href = (
+        "https://github.com/corpus-adequacy/corpus-adequacy/commit/%s"
+        % record["execution_commit"]
     )
-    detail_href = "runs/%s/" % record["directory"]
+    return (
+        '<p class="links">\n'
+        '<a href="%s">attempt detail</a>\n'
+        '<a href="%s">execution commit %s</a>\n'
+        '<a href="%s">run-attempt.v0.json</a>\n'
+        "</p>"
+        % (
+            _esc("runs/%s/" % record["directory"]),
+            _esc(execution_href),
+            _esc(record["execution_commit"]),
+            _esc(_void_attempt_href(record, build_commit)),
+        )
+    )
+
+
+def _void_card_html(record: dict, build_commit: str) -> str:
     return (
         '<li class="card">\n'
         "<h3>Void run attempt</h3>\n"
-        '<p>corpus id <span class="mono">%s</span></p>\n'
+        '<p>attempt id <span class="mono">%s</span></p>\n'
         "%s\n"
         '<p class="plain">%s</p>\n'
         "%s\n"
-        '<p class="links">\n'
-        '<a href="%s">attempt detail</a>\n'
-        '<a href="%s">raw report.v0.json</a>\n'
         "%s\n"
-        '<a href="%s">review</a>\n'
-        "</p>\n"
         "</li>"
         % (
             _esc(record["directory"]),
             _void_digest_html(record),
             _esc(_void_plain_sentence()),
             _void_failures_html(record),
-            _esc(detail_href),
-            _esc(raw_href),
-            source_link,
-            _esc(review_href),
+            _void_links_html(record, build_commit),
         )
     )
 
 
-def _record_card_html(record: dict, build_commit: str) -> str:
-    kind = record.get("kind", KIND_COMPLETED_MEASUREMENT)
-    if kind == KIND_VOID_RUN_ATTEMPT:
-        return _void_card_html(record, build_commit)
-    if kind == KIND_COMPLETED_MEASUREMENT:
-        return _card_html(record, build_commit)
-    raise PublicationError("unknown publication kind %r" % kind)
+def _split_publication_records(records: list[dict]) -> tuple[list[dict], list[dict]]:
+    measurements = []
+    attempts = []
+    for record in records:
+        kind = record.get("kind", KIND_COMPLETED_MEASUREMENT)
+        if kind == KIND_VOID_RUN_ATTEMPT:
+            attempts.append(record)
+        elif kind == KIND_COMPLETED_MEASUREMENT:
+            measurements.append(record)
+        else:
+            raise PublicationError("unknown publication kind %r" % kind)
+    return measurements, attempts
 
 
 def _page_body(records: list[dict], source_commit: str, projection_digest: str) -> str:
-    void_records = [
-        rec for rec in records if rec.get("kind") == KIND_VOID_RUN_ATTEMPT
-    ]
-    measurement_records = [
-        rec for rec in records if rec.get("kind") != KIND_VOID_RUN_ATTEMPT
-    ]
-    if void_records:
-        cards = "\n".join(_record_card_html(rec, source_commit) for rec in records)
-        first_run = (
-            _first_run_html(measurement_records, source_commit)
-            if measurement_records
-            else ""
-        )
-        handoff = (
-            _handoff_section(measurement_records) if measurement_records else ""
-        )
-        non_claims = _non_claims_html(
-            records,
-            ceilings=CEILING_LINES if measurement_records else (),
-        )
-        if measurement_records:
-            title = "Published corpus-adequacy records"
-            heading = "Published records"
-        else:
-            title = "Published corpus-adequacy void run attempts"
-            heading = "Published void run attempts"
-        cta = (
-            '<nav class="ctas" aria-label="intake and publication forms">\n'
-            '<a href="%s">Request source intake</a>\n'
-            "</nav>"
-            % _esc(ISSUES_INTAKE)
-            if not measurement_records
-            else (
-                '<nav class="ctas" aria-label="intake and publication forms">\n'
-                '<a href="%s">Request source intake</a>\n'
-                '<a href="#publication-handoff">Hand off a completed measurement</a>\n'
-                "</nav>"
-                % _esc(ISSUES_INTAKE)
-            )
-        )
-    else:
-        cards = "\n".join(_card_html(rec, source_commit) for rec in records)
-        first_run = _first_run_html(records, source_commit)
-        handoff = _handoff_section(records)
-        non_claims = _non_claims_html(records)
-        title = "Published corpus-adequacy measurements"
-        heading = "Published measurements"
-        cta = (
-            '<nav class="ctas" aria-label="intake and publication forms">\n'
-            '<a href="%s">Request source intake</a>\n'
-            '<a href="#publication-handoff">Hand off a completed measurement</a>\n'
-            "</nav>"
-            % _esc(ISSUES_INTAKE)
+    measurements, attempts = _split_publication_records(records)
+    cards = "\n".join(_card_html(rec, source_commit) for rec in measurements)
+    first_run = _first_run_html(measurements, source_commit) if measurements else ""
+    handoff = _handoff_section(measurements) if measurements else ""
+    non_claims = _non_claims_html(
+        measurements or attempts,
+        ceilings=CEILING_LINES if measurements else (),
+    )
+    void_section = ""
+    if attempts:
+        void_section = (
+            '\n<section id="void-attempts" class="non-claims" '
+            'aria-labelledby="void-attempts-heading">\n'
+            '<h2 id="void-attempts-heading">Void run attempts</h2>\n'
+            '<ul class="cards">\n%s\n</ul>\n'
+            "</section>"
+            % "\n".join(_void_card_html(rec, source_commit) for rec in attempts)
         )
     return """<!DOCTYPE html>
 <html lang="en">
@@ -931,7 +943,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="projection-digest" content="%s">
 <meta name="source-commit" content="%s">
-<title>%s</title>
+<title>Published corpus-adequacy measurements</title>
 <style>
 %s
 #results:focus { outline: 3px solid #0033aa; outline-offset: 2px; }
@@ -940,12 +952,15 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 <body>
 <a class="skip" href="#results">Skip to results</a>
 <header>
-<h1>%s</h1>
+<h1>Published measurements</h1>
 <p>Committed <code>report.v0</code> records listed in <code>publications/index.v0.json</code>.</p>
 </header>
 %s
 %s
-%s
+<nav class="ctas" aria-label="intake and publication forms">
+<a href="%s">Request source intake</a>
+<a href="#publication-handoff">Hand off a completed measurement</a>
+</nav>
 %s
 <main id="results" tabindex="-1">
 <h2>Committed records</h2>
@@ -958,13 +973,11 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 """ % (
         _esc(projection_digest),
         _esc(source_commit),
-        _esc(title),
         SHARED_STYLE,
-        _esc(heading),
         first_run,
         non_claims,
-        cta,
-        handoff,
+        _esc(ISSUES_INTAKE),
+        handoff + void_section,
         cards,
     )
 
@@ -993,8 +1006,14 @@ def compute_projection_digest(
 
     _add(b"index", index_bytes)
     for record in records:
-        _add(b"report", record["report_bytes"])
-        _add(b"source", record["source_bytes"])
+        kind = record.get("kind", KIND_COMPLETED_MEASUREMENT)
+        if kind == KIND_VOID_RUN_ATTEMPT:
+            _add(b"attempt", record["attempt_bytes"])
+        elif kind == KIND_COMPLETED_MEASUREMENT:
+            _add(b"report", record["report_bytes"])
+            _add(b"source", record["source_bytes"])
+        else:
+            raise PublicationError("unknown publication kind %r" % kind)
     _add(b"renderer", renderer_bytes)
     _add(b"source_commit", source_commit.encode("ascii"))
     _add(b"version", ca.VERSION.encode("ascii"))
@@ -1077,6 +1096,10 @@ def _run_page(record: dict, findings: list[dict], build_commit: str) -> str:
 
 
 def _void_run_page(record: dict, build_commit: str) -> str:
+    execution_href = (
+        "https://github.com/corpus-adequacy/corpus-adequacy/commit/%s"
+        % record["execution_commit"]
+    )
     body = (
         "<header>\n"
         "<h1>Void run attempt</h1>\n"
@@ -1087,14 +1110,19 @@ def _void_run_page(record: dict, build_commit: str) -> str:
         '<p class="plain">%s</p>\n'
         "%s\n"
         "%s\n"
-        "%s\n"
+        '<p class="links">\n'
+        '<a href="%s">execution commit %s</a>\n'
+        '<a href="%s">run-attempt.v0.json</a>\n'
+        "</p>\n"
         "</main>"
         % (
             _non_claims_html([record], ceilings=()),
             _esc(_void_plain_sentence()),
             _void_digest_html(record),
             _void_failures_html(record),
-            _evidence_links_html(record, build_commit),
+            _esc(execution_href),
+            _esc(record["execution_commit"]),
+            _esc(_void_attempt_href(record, build_commit)),
         )
     )
     return _shell_page(
@@ -1321,6 +1349,8 @@ def _require_recorded_link_commit(root: Path, recorded: str, records: list[dict]
     if _git_run(root, ["git", "merge-base", "--is-ancestor", recorded, "HEAD"]) != 0:
         raise PublicationError("recorded source-commit is not an ancestor of HEAD")
     for record in records:
+        if record.get("kind") == KIND_VOID_RUN_ATTEMPT:
+            continue
         source_rel = "measurements/%s/source.json" % record["directory"]
         for rel in (record["report_rel"], source_rel, record["review_rel"]):
             recorded_oid = _git_oid(root, "%s:%s" % (recorded, rel))

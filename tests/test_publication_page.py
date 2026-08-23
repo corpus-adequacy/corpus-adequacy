@@ -547,10 +547,17 @@ class PublicationPage(unittest.TestCase):
 
     def test_live_repo_discovers_exactly_one_tersign_card(self):
         page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
-        self.assertEqual(page.count('class="card"'), 1)
+        self.assertEqual(page.count('class="card"'), 2)
+        results = page[page.find('id="results"') :]
+        self.assertIn("tersign-1cc5ea32", results)
+        self.assertNotIn("void run attempt", results.lower())
         self.assertIn(REPORT_SHA256, page)
+        self.assertIn("void run attempt", page.lower())
+        self.assertIn(
+            "88cc1b7e0e37ef9c4a6da17ecc1d62168b9f0f17b199203ca03c55471e587600",
+            page,
+        )
         self.assertNotIn("b1a10e8c", page)
-        results = page[page.find('id="results"'):]
         self.assertNotIn("score_percent", results)
         self.assertIn("projection-digest", page)
         command = "python3 corpus_adequacy.py measurements/tersign-1cc5ea32/manifest.json --json"
