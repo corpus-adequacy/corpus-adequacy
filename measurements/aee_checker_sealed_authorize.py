@@ -265,7 +265,7 @@ def main(argv: list[str]) -> int:
         prep_raw = ca.read_bounded_regular_file(Path(argv[2]))
         emit_authorize_v0(prep_raw, Path(argv[3]))
         return 0
-    if len(argv) >= 4 and argv[1] == "validate":
+    if len(argv) == 4 and argv[1] == "validate":
         auth_raw = ca.read_bounded_regular_file(Path(argv[2]))
         prep_raw = ca.read_bounded_regular_file(Path(argv[3]))
         validate_authorize(auth_raw, prep_raw)
