@@ -1752,6 +1752,91 @@ class MaterializeBytes(unittest.TestCase):
         self.assertEqual(str(daemon), "docker daemon is not ready")
         self.assertEqual(str(unavailable), "docker executable is not available")
 
+    def _readiness_timeout(self):
+        return subprocess.TimeoutExpired(
+            ["docker", "info", "--format", "{{.ServerVersion}}"], 15)
+
+    def test_readiness_timeout_is_prepare_error_distinct_from_missing_and_daemon(self):
+        with mock.patch.object(br, "_run_capped", side_effect=self._readiness_timeout()):
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.require_docker_ready()
+        self.assertNotIsInstance(ctx.exception, run.DockerUnavailable)
+        self.assertNotIsInstance(ctx.exception, subprocess.TimeoutExpired)
+        self.assertEqual(str(ctx.exception), "docker readiness timed out")
+        self.assertNotEqual(str(ctx.exception), "docker daemon is not ready")
+        self.assertNotEqual(str(ctx.exception), "docker executable is not available")
+
+    def test_hosted_windows_skips_readiness_timeout_with_exact_reason(self):
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Windows"}):
+            with mock.patch.object(br, "_run_capped", side_effect=self._readiness_timeout()):
+                with self.assertRaises(unittest.SkipTest) as ctx:
+                    LiveInertProbes.setUpClass()
+        self.assertEqual(str(ctx.exception), "docker readiness timed out")
+
+    def test_hosted_macos_skips_readiness_timeout_with_exact_reason(self):
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "macOS"}):
+            with mock.patch.object(br, "_run_capped", side_effect=self._readiness_timeout()):
+                with self.assertRaises(unittest.SkipTest) as ctx:
+                    LiveInertProbes.setUpClass()
+        self.assertEqual(str(ctx.exception), "docker readiness timed out")
+
+    def test_hosted_linux_readiness_timeout_is_not_a_skip(self):
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}):
+            with mock.patch.object(br, "_run_capped", side_effect=self._readiness_timeout()):
+                try:
+                    LiveInertProbes.setUpClass()
+                except unittest.SkipTest as skip:
+                    self.fail("hosted Linux skipped: %s" % skip)
+                except run.PrepareError as exc:
+                    timed_out = exc
+                else:
+                    self.fail("hosted Linux readiness timeout must raise")
+        self.assertNotIsInstance(timed_out, run.DockerUnavailable)
+        self.assertEqual(str(timed_out), "docker readiness timed out")
+
+    def test_deleting_timeout_mapping_lets_timeout_escape(self):
+        src = inspect.getsource(run.require_docker_ready)
+        self.assertIn("TimeoutExpired", src)
+        mutated = src.replace("except subprocess.TimeoutExpired as exc:", "except ZeroDivisionError as exc:")
+        self.assertNotEqual(src, mutated)
+        ns = {
+            "br": br,
+            "Path": Path,
+            "FileNotFoundError": FileNotFoundError,
+            "DockerUnavailable": run.DockerUnavailable,
+            "PrepareError": run.PrepareError,
+            "subprocess": subprocess,
+        }
+        exec(compile(mutated, "<mutated-require_docker_ready>", "exec"), ns)
+        with mock.patch.object(br, "_run_capped", side_effect=self._readiness_timeout()):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                ns["require_docker_ready"]()
+
+    def test_noop_loaded_copy_keeps_timeout_mapping(self):
+        src = inspect.getsource(run.require_docker_ready)
+        ns = {
+            "br": br,
+            "Path": Path,
+            "FileNotFoundError": FileNotFoundError,
+            "DockerUnavailable": run.DockerUnavailable,
+            "PrepareError": run.PrepareError,
+            "subprocess": subprocess,
+        }
+        exec(compile(src, "<noop-require_docker_ready>", "exec"), ns)
+        with mock.patch.object(br, "_run_capped", side_effect=self._readiness_timeout()):
+            with self.assertRaises(run.PrepareError) as ctx:
+                ns["require_docker_ready"]()
+        self.assertEqual(str(ctx.exception), "docker readiness timed out")
+        fake = mock.Mock(returncode=1, stdout="", stderr="Cannot connect")
+        with mock.patch.object(br, "_run_capped", return_value=fake):
+            with self.assertRaises(run.PrepareError) as ctx:
+                ns["require_docker_ready"]()
+        self.assertEqual(str(ctx.exception), "docker daemon is not ready")
+        with mock.patch.object(br, "_run_capped", side_effect=FileNotFoundError("docker")):
+            with self.assertRaises(run.DockerUnavailable) as ctx:
+                ns["require_docker_ready"]()
+        self.assertEqual(str(ctx.exception), "docker executable is not available")
+
     def test_prepare_injected_materialize_failure_leaves_no_final(self):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "bundle"
