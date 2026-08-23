@@ -3890,5 +3890,582 @@ class SurvivorFindings(unittest.TestCase):
                     self.assertEqual(loads.call_count, 1)
                     self.assertEqual(rows[0]["vector_id"], "v1")
 
+
+# ---------------------------------------------------------------------------
+# #66: one process/batch mutation step, one backend seam, one tally closer
+# ---------------------------------------------------------------------------
+
+_HOST_LOCAL_REPORT_KEYS = frozenset({
+    "tool_commit", "tool_source_state", "tool_content_sha256",
+    "manifest", "originals_unverified_against_head",
+})
+_ROW_KEYS = ("group", "label", "verdict", "scope", "moved", "how", "moved_diagnostic")
+
+
+def _semantic_projection(report: dict) -> dict:
+    """Byte-stable report fields. Host-local identity is not the fixture."""
+    projected = {key: report[key] for key in report if key not in _HOST_LOCAL_REPORT_KEYS}
+    projected["mutants"] = [
+        {key: row[key] for key in _ROW_KEYS if key in row}
+        for row in report.get("mutants", [])
+    ]
+    return projected
+
+
+def _normalized_full_report(report: dict) -> dict:
+    report = json.loads(json.dumps(report))
+    for key in ("manifest", "manifest_sha256", "tool_version", "tool_commit",
+                "tool_source_state", "tool_content_sha256"):
+        report[key] = "<normalized>"
+    return report
+
+
+def _process_kill_manifest(tmp: Path) -> Path:
+    (tmp / "check.py").write_text(
+        "import json, sys\n"
+        "doc = json.load(open(sys.argv[1]))\n"
+        "fails = [c['id'] for c in doc['cases'] if c['n'] > 10]\n"
+        "print(json.dumps({'ok': not fails, 'failures': fails}))\n")
+    (tmp / "vec.json").write_text(json.dumps({"cases": [
+        {"id": "c1", "n": 1}, {"id": "c2", "n": 2}]}))
+    (tmp / "vectors.json").write_text(json.dumps({
+        "vectors": [{"vector_id": "v1", "path": "vec.json"}]}))
+    path = tmp / "m.json"
+    path.write_text(json.dumps({
+        "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+        "implementation_sources": ["check.py"], "implementation": "check.py",
+        "build": [],
+        "entrypoint_command": [_batch_python(), "check.py", "{vector}"],
+        "outcome_from": ["ok", "failures"], "vectors": "vectors.json",
+        "id_key": "vector_id", "vector_path_key": "path", "default_group": "g",
+        "mutants": {"g": [
+            {"label": "threshold", "anchor": "c['n'] > 10", "replacement": "c['n'] > 1"},
+            {"label": "CONTROL", "control": True,
+             "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'"}]},
+    }))
+    return path
+
+
+def _two_group_process_manifest(tmp: Path) -> Path:
+    (tmp / "check.py").write_text(
+        "import json, sys\n"
+        "doc = json.load(open(sys.argv[1]))\n"
+        "fails = [c['id'] for c in doc['cases'] if c['n'] > 10]\n"
+        "print(json.dumps({'ok': not fails, 'failures': fails}))\n")
+    for name, value in (("a", 1), ("b", 2)):
+        (tmp / (name + ".json")).write_text(json.dumps({
+            "cases": [{"id": name, "n": value}]}))
+    (tmp / "vectors.json").write_text(json.dumps({"vectors": [
+        {"vector_id": "v-a", "group": "a", "path": "a.json"},
+        {"vector_id": "v-b", "group": "b", "path": "b.json"},
+    ]}))
+    path = tmp / "m.json"
+    path.write_text(json.dumps({
+        "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+        "implementation_sources": ["check.py"], "implementation": "check.py",
+        "build": [],
+        "entrypoint_command": [_batch_python(), "check.py", "{vector}"],
+        "outcome_from": ["ok", "failures"], "vectors": "vectors.json",
+        "id_key": "vector_id", "group_key": "group", "vector_path_key": "path",
+        "mutants": {
+            "a": [
+                {"label": "CONTROL", "control": True,
+                 "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'"},
+                {"label": "a threshold", "anchor": "c['n'] > 10",
+                 "replacement": "c['n'] > 0"},
+            ],
+            "b": [
+                {"label": "b outcome", "anchor": "'failures': fails",
+                 "replacement": "'failures': ['MOVED']"},
+            ],
+        },
+    }))
+    return path
+
+
+def _two_source_noop_process_manifest(tmp: Path, *, with_control: bool) -> Path:
+    path = _process_kill_manifest(tmp)
+    check = tmp / "check.py"
+    check.write_text(
+        check.read_text(encoding="utf-8")
+        .replace("import json, sys\n", "import json, sys\nfrom settings import THRESHOLD\n")
+        .replace("c['n'] > 10", "c['n'] > THRESHOLD")
+        + "# MUTATION_SLOT\n",
+        encoding="utf-8",
+    )
+    settings = tmp / "settings.py"
+    settings.write_text("THRESHOLD = 10\n", encoding="utf-8")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["implementation_sources"] = ["check.py", "settings.py"]
+    mutants = []
+    if with_control:
+        mutants.append({
+            "label": "CONTROL", "control": True,
+            "anchor": "'ok': not fails", "replacement": "'ok': 'MOVED'",
+        })
+    mutants.append({
+        "label": "no-op comment", "anchor": "# MUTATION_SLOT",
+        "replacement": "# MUTATION_SLOT_CHANGED",
+    })
+    raw["mutants"] = {"g": mutants}
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return path
+
+
+class SharedMutationStep(unittest.TestCase):
+    """Freeze current reports, then pin the one-engine extract and its mutations."""
+
+    def _batch(self, tmp: Path) -> dict:
+        return ca.run(BatchRunner()._corpus(tmp))
+
+    def test_parity_module_report_projection(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_manifest(Path(d), {"a": [KILLABLE]}))
+        projected = _semantic_projection(report)
+        self.assertEqual(projected["runner"], "module")
+        self.assertEqual(projected["killed"], 1)
+        self.assertEqual(projected["survived"], 0)
+        self.assertEqual(projected["score_percent"], 100.0)
+        self.assertTrue(projected["adequate"])
+        self.assertEqual(projected["control_status"], "killed")
+        self.assertEqual(
+            [(row["label"], row["verdict"], row["moved"]) for row in projected["mutants"]],
+            [("rejects bad input", "killed", 1),
+             ("CONTROL harness reachability [a]", "control-killed", 2)])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_parity_process_report_projection(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_process_kill_manifest(Path(d)))
+        projected = _semantic_projection(report)
+        self.assertEqual(projected["runner"], "process")
+        self.assertEqual(
+            (projected["killed"], projected["survived"], projected["score_percent"],
+             projected["adequate"], projected["control_status"], projected["failures"]),
+            (1, 0, 100.0, True, "killed", []))
+        self.assertEqual(
+            [(row["label"], row["verdict"], row["moved"]) for row in projected["mutants"]],
+            [("CONTROL", "control-killed", 1), ("threshold", "killed", 1)])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_parity_batch_report_projection(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = self._batch(Path(d))
+        projected = _semantic_projection(report)
+        self.assertEqual(projected["runner"], "batch")
+        self.assertEqual(
+            (projected["killed"], projected["survived"], projected["score_percent"],
+             projected["adequate"], projected["control_status"], projected["failures"]),
+            (1, 0, 100.0, True, "killed", []))
+        self.assertEqual(
+            [(row["label"], row["verdict"], row["moved"]) for row in projected["mutants"]],
+            [("CONTROL", "control-killed", 1), ("threshold", "killed", 1)])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_parity_controls_first_before_ordinary(self):
+        with tempfile.TemporaryDirectory() as d:
+            labels = [row["label"] for row in self._batch(Path(d))["mutants"]]
+        self.assertEqual(labels, ["CONTROL", "threshold"])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_parity_baseline_failure_has_no_score(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = BatchRunner()._corpus(Path(d))
+            with mock.patch.object(ca, "_run_capped", return_value=_completed(1)):
+                report = ca.run(path)
+        self.assertIsNone(report["score_percent"])
+        self.assertFalse(report["adequate"])
+        self.assertEqual(report["killed"], 0)
+        self.assertTrue(any("UNMUTATED" in item for item in report["failures"]))
+        self.assertEqual(report["mutants"], [])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_parity_abnormal_child_is_control_error_not_killed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = BatchRunner()._corpus(Path(d))
+            with mock.patch.object(
+                    ca, "_run_capped",
+                    side_effect=ChildExitRunSemantics()._fake_from_source(control_rc=1)):
+                report = ca.run(path)
+        row = next(item for item in report["mutants"] if item["label"] == "CONTROL")
+        self.assertEqual(row["verdict"], "control-error")
+        self.assertEqual(report["control_status"], "error")
+        self.assertIsNone(report["score_percent"])
+        self.assertEqual(report["killed"], 0)
+        self.assertNotIn("threshold", [item["label"] for item in report["mutants"]])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_parity_source_restored_after_process_and_batch(self):
+        for factory in (BatchRunner()._corpus, _process_kill_manifest):
+            name = factory.__name__ if hasattr(factory, "__name__") else factory
+            with self.subTest(factory=name):
+                with tempfile.TemporaryDirectory() as d:
+                    tmp = Path(d)
+                    path = factory(tmp)
+                    before = (tmp / "check.py").read_bytes()
+                    ca.run(path)
+                    self.assertEqual((tmp / "check.py").read_bytes(), before)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_run_process_uses_one_shared_step_primitive(self):
+        calls = []
+        original = ca._run_mutation_step
+
+        def witnessed(session, group, mutant):
+            calls.append((group, mutant["label"]))
+            return original(session, group, mutant)
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+                ca, "_run_mutation_step", side_effect=witnessed):
+            report = self._batch(Path(d))
+        self.assertTrue(report["adequate"])
+        self.assertEqual(calls, [("g", "CONTROL"), ("g", "threshold")])
+
+    def test_one_authoritative_tally_and_default_backend_seam(self):
+        self.assertTrue(callable(ca._default_execution_backend))
+        self.assertTrue(callable(ca._finalize_process_tally))
+        self.assertTrue(callable(ca._new_process_tally))
+        backend_src = inspect.getsource(ca._default_execution_backend)
+        self.assertIn("_build(", backend_src)
+        self.assertIn("_process_outcomes(", backend_src)
+        self.assertNotIn("_report_v0", backend_src)
+        self.assertNotIn("score_percent", backend_src)
+        self.assertNotIn("denom =", backend_src)
+        closer = inspect.getsource(ca._finalize_process_tally)
+        self.assertIn("killed + survived + silent", closer)
+        self.assertNotIn("_report_v0", closer)
+        tree = ast.parse(Path(ca.__file__).read_text(encoding="utf-8"))
+        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        self.assertFalse(
+            names & {"PREPARE", "authorize", "funnel", "run_execution_funnel",
+                     "sealed_candidate"})
+
+    def test_execution_result_boundary_validates_and_detaches_every_field(self):
+        mappings = [{"v": ["value"]}, {"v": ["diagnostic"]},
+                    {"v": "raised"}, {"outcome_from": {"ok"}}]
+        original = ca._ProcessExecution(True, "ok", *mappings)
+        snapshot = ca._snapshot_process_execution(original)
+        self.assertEqual(snapshot, original)
+        for source, detached in zip(mappings, snapshot[2:]):
+            self.assertIsNot(source, detached)
+
+        invalid = [
+            ca._ProcessExecution(1, "ok", {}, {}, {}, {}),
+            ca._ProcessExecution(True, None, {}, {}, {}, {}),
+        ]
+        for index in range(2, 6):
+            fields = [True, "ok", {}, {}, {}, {}]
+            fields[index] = []
+            invalid.append(ca._ProcessExecution(*fields))
+        for result in invalid:
+            with self.subTest(result=result):
+                with self.assertRaisesRegex(ca.ManifestError, "invalid result"):
+                    ca._snapshot_process_execution(result)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_mutation_one_caller_on_old_inline_step_body(self):
+        """Leave a second replace/compare body on `_run_process` and this reddens."""
+        marker = RuntimeError("shared-step-witness")
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+                ca, "_run_mutation_step", side_effect=marker):
+            with self.assertRaisesRegex(RuntimeError, "shared-step-witness"):
+                self._batch(Path(d))
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_mutation_extracted_helper_compares_only_outcomes(self):
+        """Drop diagnostic comparison and the silent fixture becomes a survivor."""
+        step = inspect.getsource(ca._run_mutation_step)
+        self.assertIn("diagnostic_from", step)
+        self.assertIn("moved_diag", step)
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_silent_manifest(Path(d), {"diagnostic_from": ["reason"]}))
+        row = next(item for item in report["mutants"] if item["label"] == "reason-text")
+        self.assertEqual(row["verdict"], "silent")
+        self.assertEqual(row["moved"], 0)
+        self.assertEqual(row["moved_diagnostic"], 1)
+        self.assertEqual(report["silent"], 1)
+        self.assertEqual(report["survived"], 0)
+        self.assertEqual(report["score_percent"], 0.0)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_mutation_compile_or_child_abnormality_counted_as_killed(self):
+        """Count a non-build or abnormal control as killed and this reddens."""
+        step = inspect.getsource(ca._run_mutation_step)
+        self.assertIn('verdict": "unproved"', step)
+        self.assertIn("does not build", step)
+        self.assertIn("ended abnormally", step)
+        self.assertLess(step.index("does not build"), step.index("if raised or moved"))
+        with tempfile.TemporaryDirectory() as d:
+            path = BatchRunner()._corpus(Path(d))
+            with mock.patch.object(
+                    ca, "_run_capped",
+                    side_effect=ChildExitRunSemantics()._fake_from_source(control_rc=1)):
+                report = ca.run(path)
+        self.assertEqual(report["killed"], 0)
+        self.assertEqual(report["control_status"], "error")
+        self.assertNotEqual(
+            next(item["verdict"] for item in report["mutants"] if item["label"] == "CONTROL"),
+            "killed")
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_mutation_ordinary_mutants_before_declared_control(self):
+        """Run ordinary mutants first and the frozen CONTROL-then-threshold order reddens."""
+        src = inspect.getsource(ca._run_process)
+        self.assertIn("partition_declared_mutants", src)
+        self.assertIn('(controls, ordinary)', src)
+        with tempfile.TemporaryDirectory() as d:
+            labels = [row["label"] for row in self._batch(Path(d))["mutants"]]
+        self.assertEqual(labels[0], "CONTROL")
+        self.assertLess(labels.index("CONTROL"), labels.index("threshold"))
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_mutation_skip_source_restoration(self):
+        """Remove the step finally-restore and working-tree bytes drift."""
+        step = inspect.getsource(ca._run_mutation_step)
+        self.assertIn("finally:", step)
+        self.assertIn("step_guard.restore()", step)
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = BatchRunner()._corpus(tmp)
+            before = (tmp / "check.py").read_bytes()
+            ca.run(path)
+            self.assertEqual((tmp / "check.py").read_bytes(), before)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_mutation_backend_alters_denominator_or_report(self):
+        """A backend that poisons the manifest cannot change score or schema."""
+        backend_src = inspect.getsource(ca._default_execution_backend)
+        self.assertNotIn("_finalize_process_tally", backend_src)
+        self.assertNotIn("_report_v0", backend_src)
+
+        observed_keys = []
+
+        def hostile(m, vectors=None, *, rebuild=True):
+            observed_keys.append(set(m))
+            m["mutants"] = {}
+            m["equivalent"] = {"poison": [{"label": "x", "reason": "x"}]}
+            m["known_holes"] = {"sha256:" + "f" * 64: []}
+            m["diagnostic_from"] = ["poison"]
+            m["_corpus_digest"] = "sha256:" + "f" * 64
+            m["_manifest_sha256"] = "sha256:" + "f" * 64
+            result = ca._default_execution_backend(
+                m, vectors, rebuild=rebuild)
+            if vectors is not None:
+                vectors.clear()
+            return result
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest = _two_group_process_manifest(Path(d))
+            loaded = ca.load_manifest(manifest)
+            default = ca._run_process(dict(loaded), manifest)
+            poisoned = ca._run_process(
+                dict(loaded), manifest, execution_backend=hostile)
+        self.assertEqual(_semantic_projection(default), _semantic_projection(poisoned))
+        self.assertEqual(poisoned["schema"], ca.REPORT_SCHEMA)
+        self.assertEqual(poisoned["score_percent"], 100.0)
+        self.assertEqual(poisoned["killed"], 2)
+        forbidden = {
+            "mutants", "equivalent", "known_holes", "_corpus_digest",
+            "_manifest_sha256", "control_status", "score_percent",
+        }
+        self.assertTrue(observed_keys)
+        self.assertTrue(all(forbidden.isdisjoint(keys) for keys in observed_keys))
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_backend_cannot_change_another_declared_source_between_steps(self):
+        """A backend side effect cannot make a later no-op look killed."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _two_source_noop_process_manifest(tmp, with_control=True)
+            check = tmp / "check.py"
+            settings = tmp / "settings.py"
+
+            def contaminating_backend(m, vectors=None, *, rebuild=True):
+                result = ca._default_execution_backend(m, vectors, rebuild=rebuild)
+                sources = {path.name: path for path in m["_source_paths"]}
+                if (rebuild and vectors is not None
+                        and "'ok': 'MOVED'" in sources["check.py"].read_text()):
+                    sources["settings.py"].write_text(
+                        "THRESHOLD = 0\n", encoding="utf-8")
+                return result
+
+            with self.assertRaisesRegex(ca.ManifestError, "declared source"):
+                ca._run_process(
+                    ca.load_manifest(path), path,
+                    execution_backend=contaminating_backend,
+                )
+            self.assertEqual(settings.read_text(encoding="utf-8"), "THRESHOLD = 10\n")
+            self.assertIn("# MUTATION_SLOT\n", check.read_text(encoding="utf-8"))
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_backend_cannot_contaminate_the_trusted_baseline_source(self):
+        """A baseline side effect cannot become the next mutant's pristine tree."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _two_source_noop_process_manifest(tmp, with_control=False)
+
+            def contaminating_baseline(m, vectors=None, *, rebuild=True):
+                result = ca._default_execution_backend(m, vectors, rebuild=rebuild)
+                if vectors is not None and not rebuild:
+                    sources = {source.name: source for source in m["_source_paths"]}
+                    sources["settings.py"].write_text(
+                        "THRESHOLD = 0\n", encoding="utf-8")
+                return result
+
+            with self.assertRaisesRegex(ca.ManifestError, "declared source"):
+                ca._run_process(
+                    ca.load_manifest(path), path,
+                    execution_backend=contaminating_baseline,
+                )
+            self.assertEqual(
+                (tmp / "settings.py").read_text(encoding="utf-8"),
+                "THRESHOLD = 10\n",
+            )
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_backend_cannot_retain_and_rewrite_a_baseline_result(self):
+        """A retained result alias cannot make a no-op mutant look killed."""
+        retained = []
+
+        def retaining_backend(m, vectors=None, *, rebuild=True):
+            result = ca._default_execution_backend(m, vectors, rebuild=rebuild)
+            if vectors is not None and not rebuild:
+                retained.append(result.outcomes)
+            elif vectors is not None and rebuild and retained:
+                retained[0].clear()
+                retained[0]["v1"] = ("backend-poison",)
+            return result
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _process_kill_manifest(tmp)
+            check = tmp / "check.py"
+            check.write_text(
+                check.read_text(encoding="utf-8") + "# MUTATION_SLOT\n",
+                encoding="utf-8",
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["mutants"] = {"g": [{
+                "label": "no-op comment", "anchor": "# MUTATION_SLOT",
+                "replacement": "# MUTATION_SLOT_CHANGED",
+            }]}
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            report = ca._run_process(
+                ca.load_manifest(path), path,
+                execution_backend=retaining_backend,
+            )
+        self.assertEqual(report["killed"], 0)
+        self.assertEqual(report["survived"], 1)
+        self.assertEqual(report["score_percent"], 0.0)
+        self.assertFalse(report["adequate"])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_two_groups_share_one_unmutated_build(self):
+        snapshots = []
+        original_build = ca._build
+
+        def witnessed_build(m):
+            snapshots.append(m["_source_paths"][0].read_text(encoding="utf-8"))
+            return original_build(m)
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+                ca, "_build", side_effect=witnessed_build):
+            tmp = Path(d)
+            path = _two_group_process_manifest(tmp)
+            pristine = (tmp / "check.py").read_text(encoding="utf-8")
+            report = ca.run(path)
+        self.assertTrue(report["adequate"])
+        self.assertEqual(snapshots.count(pristine), 1)
+        self.assertEqual(len(snapshots), 4)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_every_mutation_backend_call_sees_only_its_own_replacement(self):
+        snapshots = []
+
+        def witnessed(m, vectors=None, *, rebuild=True):
+            if rebuild and vectors is not None:
+                snapshots.append(m["_source_paths"][0].read_text(encoding="utf-8"))
+            return ca._default_execution_backend(m, vectors, rebuild=rebuild)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = _two_group_process_manifest(Path(d))
+            loaded = ca.load_manifest(path)
+            report = ca._run_process(loaded, path, execution_backend=witnessed)
+        self.assertTrue(report["adequate"])
+        replacements = ("'ok': 'MOVED'", "c['n'] > 0", "'failures': ['MOVED']")
+        self.assertEqual(len(snapshots), len(replacements))
+        for snapshot, expected in zip(snapshots, replacements):
+            self.assertIn(expected, snapshot)
+            self.assertEqual(sum(item in snapshot for item in replacements), 1)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_one_process_run_projects_report_once(self):
+        original = ca._report_v0
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+                ca, "_report_v0", wraps=original) as report_v0:
+            report = ca.run(_process_kill_manifest(Path(d)))
+        self.assertTrue(report["adequate"])
+        self.assertEqual(report_v0.call_count, 1)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_full_process_report_matches_the_pre_refactor_contract(self):
+        """Frozen from `daef54815563`; only host-local identity is normalized."""
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_two_group_process_manifest(Path(d)))
+        expected = {
+            "acknowledged_digests": 0, "adequate": True,
+            "control_status": "killed", "corpus_digest": None,
+            "declared_total": 2, "diagnostic_channel_declared": False,
+            "equivalent": 0, "failures": [], "hole_ratio": 0.0,
+            "killed": 2, "known_holes": 0, "manifest": "<normalized>",
+            "manifest_sha256": "<normalized>",
+            "mutants": [
+                {"group": "a", "how": "harness detects a change on this path",
+                 "label": "CONTROL", "moved": 1, "scope": "declared",
+                 "verdict": "control-killed"},
+                {"group": "a", "how": "1 vector(s) moved", "label": "a threshold",
+                 "moved": 1, "scope": "declared", "verdict": "killed"},
+                {"group": "b", "how": "1 vector(s) moved", "label": "b outcome",
+                 "moved": 1, "scope": "declared", "verdict": "killed"},
+            ],
+            "originals_unverified_against_head": [], "out_of_scope_ratio": 0.0,
+            "runner": "process", "schema": ca.REPORT_SCHEMA,
+            "score_means": ca.SCORE_MEANS, "score_percent": 100.0,
+            "silent": 0, "survived": 0, "tool_commit": "<normalized>",
+            "tool_content_sha256": "<normalized>",
+            "tool_source_state": "<normalized>", "tool_version": "<normalized>",
+            "unexercised_out_of_scope": 0, "unproved": 0,
+        }
+        self.assertEqual(_normalized_full_report(report), expected)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_mutation_default_backend_output_differs_from_prerefactor_fixtures(self):
+        """Default backend must keep the regenerated pre-refactor projections."""
+        expected = {
+            "module": (1, 0, 0, 100.0, True, "killed"),
+            "process": (1, 0, 0, 100.0, True, "killed"),
+            "batch": (1, 0, 0, 100.0, True, "killed"),
+            "silent": (0, 0, 1, 0.0, False, "killed"),
+        }
+        with tempfile.TemporaryDirectory() as d:
+            reports = {
+                "module": ca.run(_manifest(Path(d), {"a": [KILLABLE]})),
+            }
+        with tempfile.TemporaryDirectory() as d:
+            reports["process"] = ca.run(_process_kill_manifest(Path(d)))
+        with tempfile.TemporaryDirectory() as d:
+            reports["batch"] = self._batch(Path(d))
+        with tempfile.TemporaryDirectory() as d:
+            reports["silent"] = ca.run(_silent_manifest(
+                Path(d), {"diagnostic_from": ["reason"]}))
+        for name, report in reports.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    (report["killed"], report["survived"], report["silent"],
+                     report["score_percent"], report["adequate"],
+                     report["control_status"]),
+                    expected[name])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
