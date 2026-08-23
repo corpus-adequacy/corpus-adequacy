@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO_ROOT / "adapters"))
 import aee_checker_sealed as sealed_adapter  # noqa: E402
 import aee_checker_sealed_candidate as cand  # noqa: E402
 import aee_checker_sealed_common as common  # noqa: E402
+import bounded_run as br  # noqa: E402
 import aee_checker_sealed_materialize as mat  # noqa: E402
 import aee_checker_sealed_oci as oci  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
@@ -90,7 +91,8 @@ def _inspect(dests):
 class FakeTransport:
     def __init__(
             self, *, returncode=0, stdout="", inspect=None,
-            timeout=False, output_cap=False, skip_absent=False,
+            timeout=False, output_cap=False, output_too_large=False,
+            skip_absent=False,
             leave_present=False, fail_create=False, create_error=None,
             remove_error=None, absent_error=None):
         self.returncode = returncode
@@ -98,6 +100,7 @@ class FakeTransport:
         self.inspect_doc = inspect
         self.timeout = timeout
         self.output_cap = output_cap
+        self.output_too_large = output_too_large
         self.skip_absent = skip_absent
         self.leave_present = leave_present
         self.fail_create = fail_create
@@ -121,6 +124,8 @@ class FakeTransport:
         self.deadline_seconds = deadline_seconds
         if self.timeout:
             raise subprocess.TimeoutExpired(["docker", "start", "-a", name], 1)
+        if self.output_too_large:
+            raise br._OutputTooLarge()
         if self.output_cap:
             raise Exception("output_cap")
         return subprocess.CompletedProcess(
@@ -644,6 +649,130 @@ class ClosedInnerProtocol(unittest.TestCase):
                 vectors=self._vectors(Path(d)))
         self.assertEqual(completed.returncode, 75)
         self.assertEqual(getattr(completed, "unproved_reason", None), "malformed")
+
+    def test_leading_space_with_one_final_lf_is_malformed(self):
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0,
+                stdout=" " + json.dumps(RICH_REPORT) + "\n",
+                vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "malformed")
+
+    def test_human_prefix_with_one_final_lf_is_malformed(self):
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0,
+                stdout="noise\n" + json.dumps(RICH_REPORT) + "\n",
+                vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "malformed")
+
+    def test_space_or_tab_before_final_lf_is_malformed(self):
+        compact = json.dumps(RICH_REPORT)
+        with tempfile.TemporaryDirectory() as d:
+            vectors = self._vectors(Path(d))
+            for raw in (compact + " \n", compact + "\t\n"):
+                completed = cand.normalize_inner_event(
+                    returncode=0, stdout=raw, vectors=vectors)
+                self.assertEqual(completed.returncode, 75, raw)
+                self.assertEqual(
+                    getattr(completed, "unproved_reason", None), "malformed", raw)
+
+    def test_human_suffix_before_final_lf_is_malformed(self):
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0,
+                stdout=json.dumps(RICH_REPORT) + " note\n",
+                vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "malformed")
+
+    def _two_line_guard(self, src, prefix):
+        start = src.find(prefix)
+        self.assertNotEqual(start, -1, prefix)
+        first_nl = src.find("\n", start)
+        second_nl = src.find("\n", first_nl + 1)
+        return src[start:second_nl + 1]
+
+    def test_mutation_dropping_leading_object_guard_accepts_leading_space(self):
+        src = Path(cand.__file__).read_text()
+        guard = self._two_line_guard(src, '    if body == "" or body[0] != "{":')
+        mutated = src.replace(guard, "")
+        self.assertNotEqual(src, mutated)
+        with tempfile.TemporaryDirectory() as d:
+            module = _load_mutated(mutated, Path(d))
+            completed = module.normalize_inner_event(
+                returncode=0,
+                stdout=" " + json.dumps(RICH_REPORT) + "\n",
+                vectors=module.host_vectors_path(_mounts(Path(d))))
+        self.assertEqual(completed.returncode, 0)
+
+    def test_mutation_dropping_trailing_body_guard_accepts_space_before_lf(self):
+        src = Path(cand.__file__).read_text()
+        guard = self._two_line_guard(src, "    if body.endswith((")
+        mutated = src.replace(guard, "")
+        self.assertNotEqual(src, mutated)
+        with tempfile.TemporaryDirectory() as d:
+            module = _load_mutated(mutated, Path(d))
+            completed = module.normalize_inner_event(
+                returncode=0,
+                stdout=json.dumps(RICH_REPORT) + " \n",
+                vectors=module.host_vectors_path(_mounts(Path(d))))
+        self.assertEqual(completed.returncode, 0)
+
+    def test_bare_cr_in_otherwise_valid_object_is_malformed(self):
+        compact = json.dumps(RICH_REPORT)
+        raw = "{" + "\r" + compact[1:] + "\n"
+        self.assertTrue(raw.startswith("{"))
+        self.assertTrue(raw.endswith("\n"))
+        self.assertFalse(raw.endswith("\n\n"))
+        self.assertIn("\r", raw)
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0, stdout=raw, vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "malformed")
+
+    def test_mutation_dropping_cr_guard_accepts_bare_cr_in_body(self):
+        src = Path(cand.__file__).read_text()
+        guard = self._two_line_guard(src, "    if \"" + chr(92) + "r\" in stdout:")
+        mutated = src.replace(guard, "")
+        self.assertNotEqual(src, mutated)
+        compact = json.dumps(RICH_REPORT)
+        raw = "{" + "\r" + compact[1:] + "\n"
+        with tempfile.TemporaryDirectory() as d:
+            module = _load_mutated(mutated, Path(d))
+            completed = module.normalize_inner_event(
+                returncode=0, stdout=raw,
+                vectors=module.host_vectors_path(_mounts(Path(d))))
+        self.assertEqual(completed.returncode, 0)
+
+    def test_transport_output_too_large_is_output_cap(self):
+        dests = ("/input", "/vendor", "/tool", "/subject")
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand._run_sealed_candidate(
+                image_id=IMAGE, mounts=_mounts(Path(d)),
+                resource_profile=INERT_RESOURCE_PROFILE,
+                transport=FakeTransport(
+                    output_too_large=True, inspect=_inspect(dests)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "output-cap")
+
+    def test_mutation_dropping_output_too_large_arm_raises(self):
+        src = Path(cand.__file__).read_text()
+        guard = self._two_line_guard(src, "        except br._OutputTooLarge:")
+        mutated = src.replace(guard, "")
+        self.assertNotEqual(src, mutated)
+        dests = ("/input", "/vendor", "/tool", "/subject")
+        with tempfile.TemporaryDirectory() as d:
+            module = _load_mutated(mutated, Path(d))
+            with self.assertRaises(br._OutputTooLarge):
+                module._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)),
+                    resource_profile=INERT_RESOURCE_PROFILE,
+                    transport=FakeTransport(
+                        output_too_large=True, inspect=_inspect(dests)))
 
     def test_crlf_and_extra_trailing_space_are_malformed(self):
         with tempfile.TemporaryDirectory() as d:
