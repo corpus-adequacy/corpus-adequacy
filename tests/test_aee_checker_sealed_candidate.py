@@ -210,7 +210,7 @@ class CandidateArgv(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             report = root / "report.json"
-            report.write_text(json.dumps(RICH_REPORT), encoding="utf-8")
+            report.write_text(json.dumps(RICH_REPORT) + "\n", encoding="utf-8")
             mixed = subprocess.run(
                 ["sh", "-lc", "printf 'wrote %s\\n'; cat report.json"],
                 cwd=root, capture_output=True, text=True, check=True)
@@ -275,7 +275,7 @@ class InnerNormalize(unittest.TestCase):
             vectors = cand.host_vectors_path(mounts)
             for rc in (0, 1):
                 completed = cand.normalize_inner_event(
-                    returncode=rc, stdout=json.dumps(RICH_REPORT), vectors=vectors)
+                    returncode=rc, stdout=json.dumps(RICH_REPORT) + "\n", vectors=vectors)
                 self.assertEqual(completed.returncode, 0)
                 outer = json.loads(completed.stdout)
                 expected = sealed_adapter.project(
@@ -307,7 +307,7 @@ class InnerNormalize(unittest.TestCase):
     def test_empty_or_missing_projection_is_unproved(self):
         with tempfile.TemporaryDirectory() as d:
             vectors = cand.host_vectors_path(_mounts(Path(d)))
-            for raw in ("{}", json.dumps({"vectors": []})):
+            for raw in ("{}\n", json.dumps({"vectors": []}) + "\n"):
                 completed = cand.normalize_inner_event(
                     returncode=0, stdout=raw, vectors=vectors)
                 self.assertEqual(completed.returncode, 75)
@@ -318,7 +318,7 @@ class InnerNormalize(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             vectors = cand.host_vectors_path(_mounts(Path(d)))
             normalized = cand.normalize_inner_event(
-                returncode=2, stdout=json.dumps(RICH_REPORT), vectors=vectors)
+                returncode=2, stdout=json.dumps(RICH_REPORT) + "\n", vectors=vectors)
         self.assertEqual(normalized.returncode, 75)
         self.assertEqual(_classify(normalized), "unproved")
 
@@ -344,7 +344,7 @@ class InnerNormalize(unittest.TestCase):
             mounts = _mounts(Path(d))
             module = _load_mutated(mutated, Path(d))
             completed = module.normalize_inner_event(
-                returncode=0, stdout=json.dumps(RICH_REPORT),
+                returncode=0, stdout=json.dumps(RICH_REPORT) + "\n",
                 vectors=cand.host_vectors_path(mounts))
         outer = json.loads(completed.stdout)
         self.assertNotIn("rows", outer)
@@ -356,7 +356,7 @@ class InnerNormalize(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             module = _load_mutated(mutated, Path(d))
             completed = module.normalize_inner_event(
-                returncode=1, stdout=json.dumps(RICH_REPORT),
+                returncode=1, stdout=json.dumps(RICH_REPORT) + "\n",
                 vectors=cand.host_vectors_path(_mounts(Path(d))))
         self.assertEqual(completed.returncode, 75)
 
@@ -383,7 +383,7 @@ class SealedLifecycle(unittest.TestCase):
             mounts = _mounts(Path(d))
             dests = ("/input", "/vendor", "/tool", "/subject")
             transport = FakeTransport(
-                stdout=json.dumps(RICH_REPORT), inspect=_inspect(dests))
+                stdout=json.dumps(RICH_REPORT) + "\n", inspect=_inspect(dests))
             cand._run_sealed_candidate(
                 image_id=IMAGE, mounts=mounts, transport=transport,
                 resource_profile=INERT_RESOURCE_PROFILE)
@@ -418,7 +418,7 @@ class SealedLifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             underlying = OSError("remove refused")
             transport = FakeTransport(
-                stdout=json.dumps(RICH_REPORT),
+                stdout=json.dumps(RICH_REPORT) + "\n",
                 inspect=_inspect(("/input", "/vendor", "/tool", "/subject")),
                 remove_error=underlying,
             )
@@ -434,7 +434,7 @@ class SealedLifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             underlying = OSError("absence unavailable")
             transport = FakeTransport(
-                stdout=json.dumps(RICH_REPORT),
+                stdout=json.dumps(RICH_REPORT) + "\n",
                 inspect=_inspect(("/input", "/vendor", "/tool", "/subject")),
                 absent_error=underlying,
             )
@@ -540,7 +540,7 @@ class SealedLifecycle(unittest.TestCase):
     def test_absence_proof_skipped_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             transport = FakeTransport(
-                stdout=json.dumps(RICH_REPORT),
+                stdout=json.dumps(RICH_REPORT) + "\n",
                 inspect=_inspect(("/input", "/vendor", "/tool", "/subject")),
                 skip_absent=True,
             )
@@ -556,7 +556,7 @@ class SealedLifecycle(unittest.TestCase):
                 image_id=IMAGE, mounts=mounts,
                 resource_profile=INERT_RESOURCE_PROFILE,
                 transport=FakeTransport(
-                    stdout=json.dumps(RICH_REPORT),
+                    stdout=json.dumps(RICH_REPORT) + "\n",
                     inspect=_inspect(("/input", "/vendor", "/tool", "/subject")),
                 ))
         self.assertEqual(_classify(completed), "ok")
@@ -564,18 +564,18 @@ class SealedLifecycle(unittest.TestCase):
 
 
 class ClosedInnerProtocol(unittest.TestCase):
-    """#81: accept one final LF; retain a closed unproved reason. No live checker."""
+    """#81: exactly one final LF; retain a closed unproved reason. No live checker."""
 
     def _vectors(self, tmp):
         return cand.host_vectors_path(_mounts(tmp))
 
-    def test_compact_json_without_lf_still_projects(self):
+    def test_zero_final_lf_is_malformed(self):
         with tempfile.TemporaryDirectory() as d:
             completed = cand.normalize_inner_event(
                 returncode=0, stdout=json.dumps(RICH_REPORT),
                 vectors=self._vectors(Path(d)))
-        self.assertEqual(completed.returncode, 0)
-        self.assertIn("rows", json.loads(completed.stdout))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "malformed")
 
     def test_one_final_lf_on_compact_json_projects(self):
         with tempfile.TemporaryDirectory() as d:
@@ -589,11 +589,53 @@ class ClosedInnerProtocol(unittest.TestCase):
         pretty = common.encode_json(RICH_REPORT).decode("utf-8")
         self.assertTrue(pretty.endswith("\n"))
         self.assertIn("\n", pretty[:-1])
+        self.assertFalse(pretty.endswith("\n\n"))
         with tempfile.TemporaryDirectory() as d:
             completed = cand.normalize_inner_event(
                 returncode=0, stdout=pretty, vectors=self._vectors(Path(d)))
         self.assertEqual(completed.returncode, 0)
         self.assertIn("rows", json.loads(completed.stdout))
+
+    def test_internal_cr_crlf_and_bare_trailing_cr_are_malformed(self):
+        compact = json.dumps(RICH_REPORT)
+        cases = (
+            compact.replace(": ", ":\r "),
+            "{\r\n\"vectors\": []\n}",
+            compact + "\r",
+            compact + "\r\n",
+        )
+        with tempfile.TemporaryDirectory() as d:
+            vectors = self._vectors(Path(d))
+            for raw in cases:
+                self.assertIn("\r", raw)
+                completed = cand.normalize_inner_event(
+                    returncode=0, stdout=raw, vectors=vectors)
+                self.assertEqual(completed.returncode, 75, raw)
+                self.assertEqual(
+                    getattr(completed, "unproved_reason", None), "malformed", raw)
+
+    def test_oversized_protocol_stdout_is_output_cap(self):
+        import bounded_run as br
+        body = "{" + ("a" * br.OUTPUT_CAP_BYTES) + "}\n"
+        self.assertGreater(len(body.encode("utf-8")), br.OUTPUT_CAP_BYTES)
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.normalize_inner_event(
+                returncode=0, stdout=body, vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "output-cap")
+
+    def test_project_manifest_error_is_closed_projection(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(
+                    cand.sealed_adapter, "project",
+                    side_effect=ca.ManifestError("/host/secret")):
+                completed = cand.normalize_inner_event(
+                    returncode=0, stdout=json.dumps(RICH_REPORT) + "\n",
+                    vectors=self._vectors(Path(d)))
+        self.assertEqual(completed.returncode, 75)
+        self.assertEqual(getattr(completed, "unproved_reason", None), "projection")
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "")
 
     def test_human_prefix_stays_unproved_as_malformed(self):
         with tempfile.TemporaryDirectory() as d:
@@ -637,7 +679,7 @@ class ClosedInnerProtocol(unittest.TestCase):
     def test_unprojectable_document_is_projection(self):
         with tempfile.TemporaryDirectory() as d:
             completed = cand.normalize_inner_event(
-                returncode=0, stdout="{}", vectors=self._vectors(Path(d)))
+                returncode=0, stdout="{}\n", vectors=self._vectors(Path(d)))
         self.assertEqual(completed.returncode, 75)
         self.assertEqual(getattr(completed, "unproved_reason", None), "projection")
 
@@ -650,10 +692,10 @@ class ClosedInnerProtocol(unittest.TestCase):
 
     def test_trailing_extra_json_is_malformed_not_projection(self):
         extras = (
-            json.dumps(RICH_REPORT) + "{}",
-            json.dumps(RICH_REPORT) + "\n{}",
-            "{}{}",
-            "{ }{}",
+            json.dumps(RICH_REPORT) + "{}\n",
+            json.dumps(RICH_REPORT) + "\n{}\n",
+            "{}{}\n",
+            "{ }{}\n",
         )
         with tempfile.TemporaryDirectory() as d:
             vectors = self._vectors(Path(d))
@@ -667,7 +709,7 @@ class ClosedInnerProtocol(unittest.TestCase):
     def test_duplicate_key_and_nonfinite_are_malformed(self):
         with tempfile.TemporaryDirectory() as d:
             vectors = self._vectors(Path(d))
-            for raw in ('{"vectors":[],"vectors":[]}', '{"n":1e999}'):
+            for raw in ('{"vectors":[],"vectors":[]}\n', '{"n":1e999}\n'):
                 completed = cand.normalize_inner_event(
                     returncode=0, stdout=raw, vectors=vectors)
                 self.assertEqual(completed.returncode, 75, raw)
@@ -686,14 +728,14 @@ class ClosedInnerProtocol(unittest.TestCase):
     try:
         expected = sealed_adapter.expected_ids(vectors)
         projected = sealed_adapter.project(inner, expected)
-    except (PrepareError, KeyError, TypeError, ValueError, OSError):
+    except (PrepareError, ca.ManifestError, KeyError, TypeError, ValueError, OSError):
         return _unproved("projection")
 """,
             """    try:
         inner = load_strict(body.encode("utf-8"))
         expected = sealed_adapter.expected_ids(vectors)
         projected = sealed_adapter.project(inner, expected)
-    except (PrepareError, KeyError, TypeError, ValueError, OSError):
+    except (PrepareError, ca.ManifestError, KeyError, TypeError, ValueError, OSError):
         return _unproved("projection")
     if type(inner) is not dict:
         return _unproved("malformed")
@@ -702,7 +744,7 @@ class ClosedInnerProtocol(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             module = _load_mutated(collapsed, Path(d))
             completed = module.normalize_inner_event(
-                returncode=0, stdout="{",
+                returncode=0, stdout="{\n",
                 vectors=module.host_vectors_path(_mounts(Path(d))))
         self.assertEqual(completed.returncode, 75)
         self.assertEqual(getattr(completed, "unproved_reason", None), "projection")
@@ -730,48 +772,53 @@ class ClosedInnerProtocol(unittest.TestCase):
         self.assertEqual(getattr(completed, "unproved_reason", None), "output-cap")
 
     def test_mutation_reinstating_strip_rejects_final_lf(self):
-        src = Path(cand.__file__).read_text()
-        self.assertIn("def inner_protocol_stdout", src)
-        mutated = src.replace(
-            "body = inner_protocol_stdout(stdout)",
-            "body = None if stdout != stdout.strip() else stdout")
-        self.assertNotEqual(src, mutated)
-        with tempfile.TemporaryDirectory() as d:
-            module = _load_mutated(mutated, Path(d))
-            completed = module.normalize_inner_event(
-                returncode=0, stdout=json.dumps(RICH_REPORT) + "\n",
-                vectors=module.host_vectors_path(_mounts(Path(d))))
+        orig = cand.inner_protocol_stdout
+
+        def stripped(stdout):
+            if type(stdout) is str and stdout != stdout.strip():
+                return None
+            return orig(stdout)
+
+        with mock.patch.object(cand, "inner_protocol_stdout", stripped):
+            with tempfile.TemporaryDirectory() as d:
+                completed = cand.normalize_inner_event(
+                    returncode=0, stdout=json.dumps(RICH_REPORT) + "\n",
+                    vectors=self._vectors(Path(d)))
         self.assertEqual(completed.returncode, 75)
 
     def test_mutation_dropping_reason_collapses_timeout(self):
-        src = Path(cand.__file__).read_text()
-        mutated = src.replace(
-            'completed.unproved_reason = token',
-            'pass  # mutation: drop closed reason')
-        self.assertNotEqual(src, mutated)
+        orig = cand._unproved
+
+        def mute(reason="malformed"):
+            completed = orig(reason)
+            if hasattr(completed, "unproved_reason"):
+                del completed.unproved_reason
+            return completed
+
         dests = ("/input", "/vendor", "/tool", "/subject")
-        with tempfile.TemporaryDirectory() as d:
-            module = _load_mutated(mutated, Path(d))
-            completed = module._run_sealed_candidate(
-                image_id=IMAGE, mounts=_mounts(Path(d)),
-                resource_profile=INERT_RESOURCE_PROFILE,
-                transport=FakeTransport(timeout=True, inspect=_inspect(dests)))
+        with mock.patch.object(cand, "_unproved", mute):
+            with tempfile.TemporaryDirectory() as d:
+                completed = cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)),
+                    resource_profile=INERT_RESOURCE_PROFILE,
+                    transport=FakeTransport(timeout=True, inspect=_inspect(dests)))
         self.assertEqual(completed.returncode, 75)
         self.assertIsNone(getattr(completed, "unproved_reason", None))
 
-    def test_noop_source_control_keeps_lf_and_timeout(self):
+    def test_noop_loaded_copy_keeps_one_lf_and_timeout(self):
         src = Path(cand.__file__).read_text()
-        mutated = src.replace("does-not-occur", "still-does-not-occur")
-        self.assertEqual(src, mutated)
         dests = ("/input", "/vendor", "/tool", "/subject")
         with tempfile.TemporaryDirectory() as d:
+            module = _load_mutated(src, Path(d))
             pretty = common.encode_json(RICH_REPORT).decode("utf-8")
-            completed = cand.normalize_inner_event(
-                returncode=0, stdout=pretty, vectors=self._vectors(Path(d)))
-            timed = cand._run_sealed_candidate(
+            completed = module.normalize_inner_event(
+                returncode=0, stdout=pretty,
+                vectors=module.host_vectors_path(_mounts(Path(d))))
+            timed = module._run_sealed_candidate(
                 image_id=IMAGE, mounts=_mounts(Path(d)),
                 resource_profile=INERT_RESOURCE_PROFILE,
                 transport=FakeTransport(timeout=True, inspect=_inspect(dests)))
+        self.assertIsNot(module, cand)
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(getattr(timed, "unproved_reason", None), "timeout")
 

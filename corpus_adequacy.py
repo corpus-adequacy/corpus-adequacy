@@ -2077,10 +2077,11 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
             if baseline.raised:
                 kinds = sorted(set(baseline.raised.values()))
                 extra = ""
-                if kinds == ["unproved"] and baseline.detail in (
-                        "timeout", "output-cap", "inner-exit",
-                        "empty-or-missing", "malformed", "projection"):
-                    extra = " [%s]" % baseline.detail
+                if kinds == ["unproved"]:
+                    from aee_checker_sealed_common import sanitize_unproved_reason
+                    token = sanitize_unproved_reason(baseline.detail)
+                    if token is not None:
+                        extra = " [%s]" % token
                 tally["failures"].append("%s: the UNMUTATED binary failed (%s)%s on %s"
                                          % (group, ", ".join(kinds), extra,
                                             sorted(baseline.raised)))

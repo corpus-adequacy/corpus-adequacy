@@ -8,6 +8,7 @@ Does not run a real corpus/checker experiment.
 from __future__ import annotations
 
 import json
+import corpus_adequacy as ca
 import shlex
 import subprocess
 import sys
@@ -91,34 +92,32 @@ def _unproved(reason: str = "malformed") -> subprocess.CompletedProcess:
     return completed
 
 
-def inner_protocol_stdout(stdout):
-    """Accept one JSON object, with at most one final LF.
+INNER_STDOUT_OUTPUT_CAP = object()
 
-    Leading whitespace, CR, extra trailing whitespace, and a prefix
-    before the object are rejected. Internal pretty-print newlines are
-    allowed only when the value starts with '{' and ends as one object.
+
+def inner_protocol_stdout(stdout):
+    """Accept one JSON object that ends with exactly one LF.
+
+    CR, leading whitespace, extra trailing whitespace, a prefix before
+    the object, zero LFs, and more than one final LF are rejected.
+    Internal pretty-print newlines are allowed only when the value
+    starts with '{' and the whole value has exactly one final LF.
+    An over-cap payload is a distinguished output-cap outcome.
     """
     if type(stdout) is not str:
         return None
     if len(stdout.encode("utf-8")) > br.OUTPUT_CAP_BYTES:
-        return None
+        return INNER_STDOUT_OUTPUT_CAP
     if stdout == "":
         return None
     if "\r" in stdout:
         return None
-    if stdout.endswith("\n"):
-        if stdout.endswith("\n\n"):
-            return None
-        body = stdout[:-1]
-        if body.endswith((" ", "\t", "\n")):
-            return None
-    else:
-        body = stdout
-        if body.endswith((" ", "\t")):
-            return None
-    if body == "" or body[0] != "{":
+    if not stdout.endswith("\n") or stdout.endswith("\n\n"):
         return None
-    if body != body.lstrip(" \t\n"):
+    body = stdout[:-1]
+    if body.endswith((" ", "\t", "\n")):
+        return None
+    if body == "" or body[0] != "{":
         return None
     return body
 
@@ -168,6 +167,8 @@ def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.Complete
     if returncode not in COMPLETE_RETURNCODES:
         return _unproved("inner-exit")
     body = inner_protocol_stdout(stdout)
+    if body is INNER_STDOUT_OUTPUT_CAP:
+        return _unproved("output-cap")
     if body is None:
         if stdout == "" or stdout is None:
             return _unproved("empty-or-missing")
@@ -181,7 +182,7 @@ def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.Complete
     try:
         expected = sealed_adapter.expected_ids(vectors)
         projected = sealed_adapter.project(inner, expected)
-    except (PrepareError, KeyError, TypeError, ValueError, OSError):
+    except (PrepareError, ca.ManifestError, KeyError, TypeError, ValueError, OSError):
         return _unproved("projection")
     return subprocess.CompletedProcess(
         args=[],

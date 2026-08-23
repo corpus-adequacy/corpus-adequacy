@@ -213,5 +213,54 @@ class ClosedUnprovedVoidSuffix(unittest.TestCase):
                 for item in report["failures"]),
             report["failures"])
 
+    @unittest.skipIf(ca.fcntl is None, "process scoring requires an advisory lock")
+    def test_suffix_reason_allowlist_tracks_common_closed_set(self):
+        saved = common.CLOSED_UNPROVED_REASONS
+        common.CLOSED_UNPROVED_REASONS = tuple(
+            token for token in saved if token != "timeout")
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                (tmp / "check.py").write_text("print('x')\n", encoding="utf-8")
+                (tmp / "v1.json").write_text("{}\n", encoding="utf-8")
+                (tmp / "vectors.json").write_text(json.dumps({
+                    "vectors": [{"vector_id": "v1", "path": "v1.json"}],
+                }), encoding="utf-8")
+                raw = {
+                    "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+                    "implementation": "check.py",
+                    "implementation_sources": ["check.py"],
+                    "build": [],
+                    "entrypoint_command": [sys.executable, "check.py", "{vector}"],
+                    "outcome_from": ["ok"], "vectors": "vectors.json",
+                    "id_key": "vector_id", "vector_path_key": "path",
+                    "default_group": "g",
+                    "unproved_exit_codes": [75],
+                    "mutants": {"g": [
+                        {"label": "threshold",
+                         "anchor": "print('x')", "replacement": "print('y')"},
+                        {"label": "CONTROL", "control": True,
+                         "anchor": "print", "replacement": "print  # c"},
+                    ]},
+                }
+                manifest_path = tmp / "m.json"
+                manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+                loaded = ca.load_manifest(manifest_path)
+
+                def backend(manifest, vectors, rebuild=True):
+                    if not vectors:
+                        return ca._ProcessExecution(True, "built", {}, {}, {}, {})
+                    return ca._ProcessExecution(
+                        True, "timeout", {}, {}, {"<batch>": "unproved"}, {})
+
+                report = ca._run_process(
+                    loaded, manifest_path, execution_backend=backend,
+                    separate_build_phase=True)
+        finally:
+            common.CLOSED_UNPROVED_REASONS = saved
+        self.assertFalse(
+            any("[timeout]" in item for item in report["failures"]),
+            report["failures"])
+
 if __name__ == "__main__":
     unittest.main()
