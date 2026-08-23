@@ -1585,12 +1585,266 @@ def load_vector_document(m: dict) -> list:
     return selected
 
 
-def _run_process(m: dict, manifest_path: Path) -> dict:
+def _default_execution_backend(m: dict, vectors=None):
+    """Host `_build` plus the current process/batch child-outcome contract.
+
+    `vectors is None` is compile/build only, matching the unmutated tree gate.
+    A caller may compile or run elsewhere and still return
+    `(built, detail, (outcomes, diags, raised))`. The backend never scores,
+    never writes a denominator, and never emits a report.
+    """
+    built, detail = _build(m)
+    if not built or vectors is None:
+        return built, detail, ({}, {}, {})
+    return True, detail, _process_outcomes(m, vectors)
+
+
+def _new_process_tally() -> dict:
+    return {
+        "results": [],
+        "killed": 0,
+        "survived": 0,
+        "equivalent": 0,
+        "out_of_scope": 0,
+        "unproved": 0,
+        "silent": 0,
+        "known_holes": 0,
+        "control_statuses": [],
+        "failures": [],
+    }
+
+
+def _finalize_process_tally(tally: dict, m: dict, acknowledged: dict,
+                            declared_controls: int) -> dict:
+    """One process/batch score and failure closer. Backends do not call this."""
+    results = tally["results"]
+    failures = tally["failures"]
+    linger = {label_identity(r): r["verdict"] for r in results
+              if label_identity(r) in acknowledged and r["verdict"] != "known-hole"}
+    if linger:
+        failures.append("known_holes acknowledge rules that are no longer holes: %s. Remove "
+                        "them; an acknowledgement pointing at nothing hides the next regression"
+                        % sorted("%s (now %s)" % kv for kv in linger.items()))
+    control_status = _control_status(tally["control_statuses"], declared_controls)
+    killed = tally["killed"]
+    survived = tally["survived"]
+    silent = tally["silent"]
+    # `silent` sits in the denominator beside `survived` and NEVER in the
+    # numerator. A mutant the declared outcome channel could not see is a rule an
+    # implementer can delete while reproducing every pinned outcome, whatever the
+    # diagnostics did; counting it killed would inflate the score by exactly the
+    # rules the corpus fails to force.
+    denom = killed + survived + silent
+    # No denominator means no measurement. Printing 100% over zero is the same
+    # defect as excluding everything and printing 100%. An unmutated or control
+    # abnormality fail-closes the run: there is no adequacy score.
+    score = _score_or_none(None if denom == 0 else round(100.0 * killed / denom, 1),
+                           results, failures)
+    unproved = tally["unproved"]
+    if unproved:
+        failures.append("%d mutant(s) never ran, so this corpus was not measured against them"
+                        % unproved)
+    if survived:
+        failures.append("%d mutant(s) survived; the required score is 100%% of non-equivalent "
+                        "mutants" % survived)
+    if silent:
+        failures.append("%d mutant(s) were silent: no declared outcome moved, only a declared "
+                        "diagnostic. The rule is not forced by the outcomes this corpus pins, so "
+                        "it counts against the score; either write a vector that moves an outcome "
+                        "or declare the diagnostic channel part of the pinned surface" % silent)
+    if denom == 0 and (declared_controls == 0 or control_status == "killed"):
+        failures.append(null_result_reading(
+            tally["known_holes"], tally["equivalent"], tally["out_of_scope"]))
+    return {
+        "killed": killed,
+        "survived": survived,
+        "silent": silent,
+        "equivalent": tally["equivalent"],
+        "out_of_scope": tally["out_of_scope"],
+        "unproved": unproved,
+        "known_holes": tally["known_holes"],
+        "score": score,
+        "results": results,
+        "failures": failures,
+        "control_status": control_status,
+    }
+
+
+def _run_process(m: dict, manifest_path: Path, *, execution_backend=None) -> dict:
     """Mutate declared sources, rebuild, and run the corpus against the binary."""
     all_vectors = load_vector_document(m)
     if m["runner"] == "batch" and m["group_key"] is None:
         m["group_key"] = "_g"
-    failures: list[str] = []
+    backend = execution_backend or _default_execution_backend
+    tally = _new_process_tally()
+
+    def _run_mutation_step(group, mut, vectors, baseline, baseline_diag,
+                           m, acknowledged, backend, tally):
+        """One unique-anchor replacement, backend run, restore, and compare."""
+        scope = mut.get("scope", "declared")
+        sources = [_resolved_contained_source(sp, m["_repo_root"])
+                   for sp in m["_source_paths"]]
+        hits = [(sp, sp.read_text(encoding="utf-8").count(mut["anchor"]))
+                for sp in sources]
+        total = sum(n for _, n in hits)
+        if total == 0:
+            detail = "%s / %s: anchor not found in any declared source" % (
+                group, mut["label"])
+            if mut.get("control"):
+                _record_control(
+                    tally["results"], tally["control_statuses"],
+                    group, mut["label"], scope, detected=False,
+                    moved=0, error=detail)
+                tally["failures"].append(
+                    "control %r ended abnormally (%s); that is not a kill and "
+                    "this run has no adequacy score" % (mut["label"], detail))
+            else:
+                tally["failures"].append(detail)
+            return
+        if total > 1:
+            detail = (
+                "%s / %s: the anchor occurs %d times across the declared sources, so "
+                "the substitution would pick one arbitrarily. Make it unique"
+                % (group, mut["label"], total))
+            if mut.get("control"):
+                _record_control(
+                    tally["results"], tally["control_statuses"],
+                    group, mut["label"], scope, detected=False,
+                    moved=0, error=detail)
+                tally["failures"].append(
+                    "control %r ended abnormally (%s); that is not a kill and "
+                    "this run has no adequacy score" % (mut["label"], detail))
+            else:
+                tally["failures"].append(detail)
+            return
+
+        target = next(sp for sp, n in hits if n == 1)
+        target = _resolved_contained_source(target, m["_repo_root"])
+        original = target.read_text(encoding="utf-8")
+        target = _resolved_contained_source(target, m["_repo_root"])
+        target.write_text(original.replace(mut["anchor"], mut["replacement"], 1),
+                          encoding="utf-8")
+        try:
+            built, detail, (out, out_diag, raised) = backend(m, vectors)
+            if not built:
+                # Cursor's ruling on the design: rustc exit 1 yields no verdict, so
+                # the corpus never saw this mutant. Counting it killed would let a
+                # typo in the substitution print as "rule covered". Measure a
+                # load-bearing arm with a variant that COMPILES, or declare it
+                # equivalent.
+                if mut.get("control"):
+                    _record_control(
+                        tally["results"], tally["control_statuses"],
+                        group, mut["label"], scope, detected=False,
+                        moved=0, error=detail)
+                    tally["failures"].append(
+                        "control %r ended abnormally (%s); that is not a kill and "
+                        "this run has no adequacy score" % (mut["label"], detail))
+                    return
+                tally["results"].append({"group": group, "label": mut["label"],
+                                         "verdict": "unproved", "scope": scope, "moved": 0,
+                                         "how": "the mutant does not build, so the corpus was "
+                                                "never run against it: %s" % detail})
+                tally["unproved"] += 1
+                return
+        finally:
+            target = _resolved_contained_source(target, m["_repo_root"])
+            target.write_text(original, encoding="utf-8")
+
+        moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
+        # The silent class, adopted from the forcing gate in
+        # `astrogilda/aee-conformance` (see Related work): a mutant that
+        # moves no declared outcome but does move a declared diagnostic
+        # is a different finding from one nothing noticed at all. It is
+        # NOT a kill -- the corpus's own verdict channel did not see the
+        # rule go -- so it scores as a survivor, and it is named because
+        # the repair differs: a survivor needs a new vector, a silent one
+        # may only need the corpus to make its diagnostics normative.
+        moved_diag = ([vid for vid, val in out_diag.items()
+                       if baseline_diag.get(vid) != val]
+                      if m.get("diagnostic_from") is not None else [])
+        if mut.get("control"):
+            # Only a successfully parsed outcome change proves the control
+            # bites. An abnormal child is control-error, not a kill, and
+            # invalidates the run.
+            if raised:
+                how = ", ".join(sorted(set(raised.values())))
+                _record_control(
+                    tally["results"], tally["control_statuses"],
+                    group, mut["label"], scope, detected=False,
+                    moved=0, error=how)
+                tally["failures"].append(
+                    "control %r ended abnormally (%s); that is not a kill and "
+                    "this run has no adequacy score" % (mut["label"], how))
+                return
+            ok = bool(moved)
+            _record_control(
+                tally["results"], tally["control_statuses"],
+                group, mut["label"], scope, detected=ok, moved=len(moved))
+            if not ok:
+                tally["failures"].append(
+                    "control %r survived: the harness cannot detect a change on this "
+                    "path, so every other verdict in this run is meaningless"
+                    % mut["label"])
+            return
+        if any(kind == "unproved" for kind in raised.values()):
+            tally["results"].append({
+                "group": group, "label": mut["label"],
+                "verdict": "unproved", "scope": scope, "moved": 0,
+                "how": "the measurement did not complete (unproved), so the corpus "
+                       "was never shown this mutant and said nothing about this rule"})
+            tally["unproved"] += 1
+            return
+        if raised or moved:
+            how = (", ".join(sorted(set(raised.values()))) if raised
+                   else "%d vector(s) moved" % len(moved))
+            tally["results"].append({"group": group, "label": mut["label"], "verdict": "killed",
+                                     "scope": scope, "moved": len(moved), "how": how})
+            tally["killed"] += 1
+        # A diagnostic-only move never overrides a declared exclusion.
+        # `silent` says "the corpus claims this rule and its pinned
+        # outcomes cannot see it". An out-of-scope mutant is not making
+        # that claim, and an acknowledged hole has already made it and
+        # recorded the fact, so reclassifying either one scored a rule
+        # the author excluded and called a still-valid acknowledgement
+        # stale. Outcome movement is unaffected: it kills above, and the
+        # linger guard still retires an acknowledgement it kills.
+        elif scope == "out_of_scope":
+            tally["results"].append({"group": group, "label": mut["label"],
+                                     "verdict": "unexercised", "scope": scope, "moved": 0,
+                                     **_diagnostic_note(m, moved_diag),
+                                     "how": "out of scope: %s%s"
+                                            % (mut["reason"], _diagnostic_suffix(moved_diag))})
+            tally["out_of_scope"] += 1
+        elif label_identity(mut) in acknowledged:
+            ack = acknowledged[label_identity(mut)]
+            # A KNOWN HOLE is not a scope statement. The corpus does claim this
+            # rule, the rule is genuinely unexercised, and that fact is recorded
+            # against ONE digest rather than fixed today. It stays loud.
+            tally["results"].append({"group": group, "label": mut["label"],
+                                     "verdict": "known-hole", "scope": scope, "moved": 0,
+                                     **_diagnostic_note(m, moved_diag),
+                                     "how": "KNOWN HOLE against %s, recorded %s: %s%s"
+                                            % (m["_corpus_digest"][:19], ack["recorded"],
+                                               ack["reason"], _diagnostic_suffix(moved_diag))})
+            tally["known_holes"] += 1
+        elif moved_diag:
+            tally["results"].append({"group": group, "label": mut["label"], "verdict": "silent",
+                                     "scope": scope, "moved": 0,
+                                     "moved_diagnostic": len(moved_diag),
+                                     "how": "no vector's declared outcome distinguishes it, but "
+                                            "%d vector(s) moved on the declared diagnostic "
+                                            "channel. An implementation can delete this rule and "
+                                            "still reproduce every pinned outcome; only a consumer "
+                                            "comparing diagnostics would notice"
+                                            % len(moved_diag)})
+            tally["silent"] += 1
+        else:
+            tally["results"].append({"group": group, "label": mut["label"], "verdict": "survived",
+                                     "scope": scope, "moved": 0,
+                                     "how": "no vector distinguishes it. An implementation can "
+                                            "delete this rule and still reproduce the digest"})
+            tally["survived"] += 1
 
     # Manifest loading and execution can be separated by arbitrary caller work.
     # Re-resolve before touching git, capturing originals, or mutating a source.
@@ -1601,13 +1855,9 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
     # Pure corpus/manifest validation happens before acquiring a mutation lock.
     # A malformed vector must not leave a lock or captured source behind.
     groups_in_corpus = {_group_of(v, m) for v in all_vectors}
-    failures.extend(structural_failures(m, groups_in_corpus))
+    tally["failures"].extend(structural_failures(m, groups_in_corpus))
     acknowledged = _acknowledged_holes(m)
-    results, killed, survived, equivalent, out_of_scope, unproved = [], 0, 0, 0, 0, 0
-    control_statuses: list[str] = []
     declared_controls = _declared_control_count(m)
-    silent = 0
-    known_holes = 0
 
     # Taken BEFORE the isolated copy: a tree observed outside the lock can
     # change before materialize. Isolation copies working-tree bytes, so dirty
@@ -1641,7 +1891,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         raise
 
     try:
-        ok, detail = _build(m)
+        ok, detail, _unused = backend(m, None)
         if not ok:
             raise ManifestError("the UNMUTATED tree does not build: %s" % detail)
 
@@ -1649,13 +1899,17 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         for group in sorted(m["mutants"]):
             vectors = [v for v in all_vectors if _group_of(v, m) == group]
             if not vectors:
-                failures.append("%s: no vectors, so its mutants cannot be scored" % group)
+                tally["failures"].append("%s: no vectors, so its mutants cannot be scored" % group)
                 continue
-            base, base_diag, raised = _process_outcomes(m, vectors)
+            _ok, _detail, (base, base_diag, raised) = backend(m, vectors)
+            if not _ok:
+                tally["failures"].append("%s: the UNMUTATED binary failed (%s) on %s"
+                                         % (group, _detail, ["<build>"]))
+                continue
             if raised:
                 kinds = sorted(set(raised.values()))
-                failures.append("%s: the UNMUTATED binary failed (%s) on %s"
-                                % (group, ", ".join(kinds), sorted(raised)))
+                tally["failures"].append("%s: the UNMUTATED binary failed (%s) on %s"
+                                         % (group, ", ".join(kinds), sorted(raised)))
                 continue
             baselines[group] = (vectors, base, base_diag)
 
@@ -1672,7 +1926,7 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
             seen = m.get("_selector_keys_seen", {}).get(_selector, set())
             never_seen = [k for k in declared_keys if k not in seen]
             if never_seen and baselines:
-                failures.append(
+                tally["failures"].append(
                     "%s names %s, which the unmutated implementation never emits on any "
                     "vector. Those members compare None to None on every mutant, so they "
                     "discriminate nothing and this score is over-generous by whatever they "
@@ -1684,242 +1938,55 @@ def _run_process(m: dict, manifest_path: Path) -> dict:
         emitted_equivalents: set = set()
         for wave_index, wave in enumerate((controls, ordinary)):
             if wave_index == 1 and declared_controls and _control_status(
-                    control_statuses, declared_controls) != "killed":
+                    tally["control_statuses"], declared_controls) != "killed":
                 break
             for group, mut in wave:
                 if (wave_index == 1 and prev_ordinary is not None
                         and group != prev_ordinary):
-                    equivalent += _append_group_equivalents(
-                        results, m, prev_ordinary, baselines, emitted_equivalents)
+                    tally["equivalent"] += _append_group_equivalents(
+                        tally["results"], m, prev_ordinary, baselines, emitted_equivalents)
                 if wave_index == 1:
                     prev_ordinary = group
                 if group not in baselines:
                     continue
                 vectors, baseline, baseline_diag = baselines[group]
-                scope = mut.get("scope", "declared")
-                sources = [_resolved_contained_source(sp, m["_repo_root"])
-                           for sp in m["_source_paths"]]
-                hits = [(sp, sp.read_text(encoding="utf-8").count(mut["anchor"]))
-                        for sp in sources]
-                total = sum(n for _, n in hits)
-                if total == 0:
-                    detail = "%s / %s: anchor not found in any declared source" % (
-                        group, mut["label"])
-                    if mut.get("control"):
-                        _record_control(
-                            results, control_statuses,
-                            group, mut["label"], scope, detected=False,
-                            moved=0, error=detail)
-                        failures.append(
-                            "control %r ended abnormally (%s); that is not a kill and "
-                            "this run has no adequacy score" % (mut["label"], detail))
-                    else:
-                        failures.append(detail)
-                    continue
-                if total > 1:
-                    detail = (
-                        "%s / %s: the anchor occurs %d times across the declared sources, so "
-                        "the substitution would pick one arbitrarily. Make it unique"
-                        % (group, mut["label"], total))
-                    if mut.get("control"):
-                        _record_control(
-                            results, control_statuses,
-                            group, mut["label"], scope, detected=False,
-                            moved=0, error=detail)
-                        failures.append(
-                            "control %r ended abnormally (%s); that is not a kill and "
-                            "this run has no adequacy score" % (mut["label"], detail))
-                    else:
-                        failures.append(detail)
-                    continue
-
-                target = next(sp for sp, n in hits if n == 1)
-                target = _resolved_contained_source(target, m["_repo_root"])
-                original = target.read_text(encoding="utf-8")
-                target = _resolved_contained_source(target, m["_repo_root"])
-                target.write_text(original.replace(mut["anchor"], mut["replacement"], 1),
-                                  encoding="utf-8")
-                try:
-                    built, detail = _build(m)
-                    if not built:
-                        # Cursor's ruling on the design: rustc exit 1 yields no verdict, so
-                        # the corpus never saw this mutant. Counting it killed would let a
-                        # typo in the substitution print as "rule covered". Measure a
-                        # load-bearing arm with a variant that COMPILES, or declare it
-                        # equivalent.
-                        if mut.get("control"):
-                            _record_control(
-                                results, control_statuses,
-                                group, mut["label"], scope, detected=False,
-                                moved=0, error=detail)
-                            failures.append(
-                                "control %r ended abnormally (%s); that is not a kill and "
-                                "this run has no adequacy score" % (mut["label"], detail))
-                            continue
-                        results.append({"group": group, "label": mut["label"],
-                                        "verdict": "unproved", "scope": scope, "moved": 0,
-                                        "how": "the mutant does not build, so the corpus was "
-                                               "never run against it: %s" % detail})
-                        unproved += 1
-                        continue
-                    out, out_diag, raised = _process_outcomes(m, vectors)
-                finally:
-                    target = _resolved_contained_source(target, m["_repo_root"])
-                    target.write_text(original, encoding="utf-8")
-
-                moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
-                # The silent class, adopted from the forcing gate in
-                # `astrogilda/aee-conformance` (see Related work): a mutant that
-                # moves no declared outcome but does move a declared diagnostic
-                # is a different finding from one nothing noticed at all. It is
-                # NOT a kill -- the corpus's own verdict channel did not see the
-                # rule go -- so it scores as a survivor, and it is named because
-                # the repair differs: a survivor needs a new vector, a silent one
-                # may only need the corpus to make its diagnostics normative.
-                moved_diag = ([vid for vid, val in out_diag.items()
-                               if baseline_diag.get(vid) != val]
-                              if m.get("diagnostic_from") is not None else [])
-                if mut.get("control"):
-                    # Only a successfully parsed outcome change proves the control
-                    # bites. An abnormal child is control-error, not a kill, and
-                    # invalidates the run.
-                    if raised:
-                        how = ", ".join(sorted(set(raised.values())))
-                        _record_control(
-                            results, control_statuses,
-                            group, mut["label"], scope, detected=False,
-                            moved=0, error=how)
-                        failures.append(
-                            "control %r ended abnormally (%s); that is not a kill and "
-                            "this run has no adequacy score" % (mut["label"], how))
-                        continue
-                    ok = bool(moved)
-                    _record_control(
-                        results, control_statuses,
-                        group, mut["label"], scope, detected=ok, moved=len(moved))
-                    if not ok:
-                        failures.append(
-                            "control %r survived: the harness cannot detect a change on this "
-                            "path, so every other verdict in this run is meaningless"
-                            % mut["label"])
-                    continue
-                if any(kind == "unproved" for kind in raised.values()):
-                    results.append({
-                        "group": group, "label": mut["label"],
-                        "verdict": "unproved", "scope": scope, "moved": 0,
-                        "how": "the measurement did not complete (unproved), so the corpus "
-                               "was never shown this mutant and said nothing about this rule"})
-                    unproved += 1
-                    continue
-                if raised or moved:
-                    how = (", ".join(sorted(set(raised.values()))) if raised
-                           else "%d vector(s) moved" % len(moved))
-                    results.append({"group": group, "label": mut["label"], "verdict": "killed",
-                                    "scope": scope, "moved": len(moved), "how": how})
-                    killed += 1
-                # A diagnostic-only move never overrides a declared exclusion.
-                # `silent` says "the corpus claims this rule and its pinned
-                # outcomes cannot see it". An out-of-scope mutant is not making
-                # that claim, and an acknowledged hole has already made it and
-                # recorded the fact, so reclassifying either one scored a rule
-                # the author excluded and called a still-valid acknowledgement
-                # stale. Outcome movement is unaffected: it kills above, and the
-                # linger guard still retires an acknowledgement it kills.
-                elif scope == "out_of_scope":
-                    results.append({"group": group, "label": mut["label"],
-                                    "verdict": "unexercised", "scope": scope, "moved": 0,
-                                    **_diagnostic_note(m, moved_diag),
-                                    "how": "out of scope: %s%s"
-                                           % (mut["reason"], _diagnostic_suffix(moved_diag))})
-                    out_of_scope += 1
-                elif label_identity(mut) in acknowledged:
-                    ack = acknowledged[label_identity(mut)]
-                    # A KNOWN HOLE is not a scope statement. The corpus does claim this
-                    # rule, the rule is genuinely unexercised, and that fact is recorded
-                    # against ONE digest rather than fixed today. It stays loud.
-                    results.append({"group": group, "label": mut["label"],
-                                    "verdict": "known-hole", "scope": scope, "moved": 0,
-                                    **_diagnostic_note(m, moved_diag),
-                                    "how": "KNOWN HOLE against %s, recorded %s: %s%s"
-                                           % (m["_corpus_digest"][:19], ack["recorded"],
-                                              ack["reason"], _diagnostic_suffix(moved_diag))})
-                    known_holes += 1
-                elif moved_diag:
-                    results.append({"group": group, "label": mut["label"], "verdict": "silent",
-                                    "scope": scope, "moved": 0,
-                                    "moved_diagnostic": len(moved_diag),
-                                    "how": "no vector's declared outcome distinguishes it, but "
-                                           "%d vector(s) moved on the declared diagnostic "
-                                           "channel. An implementation can delete this rule and "
-                                           "still reproduce every pinned outcome; only a consumer "
-                                           "comparing diagnostics would notice"
-                                           % len(moved_diag)})
-                    silent += 1
-                else:
-                    results.append({"group": group, "label": mut["label"], "verdict": "survived",
-                                    "scope": scope, "moved": 0,
-                                    "how": "no vector distinguishes it. An implementation can "
-                                           "delete this rule and still reproduce the digest"})
-                    survived += 1
+                _run_mutation_step(
+                    group, mut, vectors, baseline, baseline_diag,
+                    m, acknowledged, backend, tally)
         if prev_ordinary is not None:
-            equivalent += _append_group_equivalents(
-                results, m, prev_ordinary, baselines, emitted_equivalents)
+            tally["equivalent"] += _append_group_equivalents(
+                tally["results"], m, prev_ordinary, baselines, emitted_equivalents)
         for group in sorted(m["mutants"]):
-            equivalent += _append_group_equivalents(
-                results, m, group, baselines, emitted_equivalents)
+            tally["equivalent"] += _append_group_equivalents(
+                tally["results"], m, group, baselines, emitted_equivalents)
     finally:
         try:
             if guard is not None:
                 guard.restore()
                 leaked = guard.verify_clean()
                 if leaked:
-                    failures.append("SOURCES NOT RESTORED: %s" % leaked)
+                    tally["failures"].append("SOURCES NOT RESTORED: %s" % leaked)
         finally:
             iso.cleanup()
             lock.__exit__()
 
-    # A stale acknowledgement is not only one whose rule became killed. Any verdict
-    # other than known-hole means the acknowledgement no longer describes anything,
-    # and a leftover that points at nothing is what hides the next regression.
-    linger = {label_identity(r): r["verdict"] for r in results
-              if label_identity(r) in acknowledged and r["verdict"] != "known-hole"}
-    if linger:
-        failures.append("known_holes acknowledge rules that are no longer holes: %s. Remove "
-                        "them; an acknowledgement pointing at nothing hides the next regression"
-                        % sorted("%s (now %s)" % kv for kv in linger.items()))
-    # `silent` sits in the denominator beside `survived` and NEVER in the
-    # numerator. A mutant the declared outcome channel could not see is a rule an
-    # implementer can delete while reproducing every pinned outcome, whatever the
-    # diagnostics did; counting it killed would inflate the score by exactly the
-    # rules the corpus fails to force.
-    control_status = _control_status(control_statuses, declared_controls)
-    denom = killed + survived + silent
-    # No denominator means no measurement. Printing 100% over zero is the same
-    # defect as excluding everything and printing 100%. An unmutated or control
-    # abnormality fail-closes the run: there is no adequacy score.
-    score = _score_or_none(None if denom == 0 else round(100.0 * killed / denom, 1),
-                           results, failures)
-    if unproved:
-        failures.append("%d mutant(s) never ran, so this corpus was not measured against them"
-                        % unproved)
-    if survived:
-        failures.append("%d mutant(s) survived; the required score is 100%% of non-equivalent "
-                        "mutants" % survived)
-    if silent:
-        failures.append("%d mutant(s) were silent: no declared outcome moved, only a declared "
-                        "diagnostic. The rule is not forced by the outcomes this corpus pins, so "
-                        "it counts against the score; either write a vector that moves an outcome "
-                        "or declare the diagnostic channel part of the pinned surface" % silent)
-    if denom == 0 and (declared_controls == 0 or control_status == "killed"):
-        failures.append(null_result_reading(known_holes, equivalent, out_of_scope))
-
+    final = _finalize_process_tally(tally, m, acknowledged, declared_controls)
     return _report_v0(
         manifest_path, m,
-        killed=killed, survived=survived, silent=silent, equivalent=equivalent,
-        out_of_scope=out_of_scope, unproved=unproved, known_holes=known_holes,
-        score=score, results=results, failures=failures,
-        control_status=control_status,
+        killed=final["killed"], survived=final["survived"], silent=final["silent"],
+        equivalent=final["equivalent"], out_of_scope=final["out_of_scope"],
+        unproved=final["unproved"], known_holes=final["known_holes"],
+        score=final["score"], results=final["results"], failures=final["failures"],
+        control_status=final["control_status"],
         originals_unverified_against_head=guard.unverified)
+
+
+# Importable alias of the one nested step body. Not a second implementation.
+_run_mutation_step = type(_run_process)(
+    next(c for c in _run_process.__code__.co_consts
+         if getattr(c, "co_name", None) == "_run_mutation_step"),
+    globals(),
+)
 
 
 def run(manifest_path: Path) -> dict:
