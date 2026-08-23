@@ -33,7 +33,10 @@ RUNS_ON = "${{ matrix.os }}"
 UNITTEST_RUN = (
     "python -W error::ResourceWarning -m unittest discover -s tests -v"
 )
-COMPILE_RUN = "python -m compileall -q -f -x 'fixtures' ."
+COMPILE_RUN = (
+    "python -m compileall -q -f "
+    "-x '^(?:\\.[/\\\\])?fixtures[/\\\\]' ."
+)
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_ON = {
     "pull_request": None,
@@ -316,6 +319,26 @@ class RepositoryCiContract(unittest.TestCase):
             command[0] = sys.executable
             clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
             self.assertEqual(clean.returncode, 0, clean.stderr)
+
+            ordinary = root / "ordinary"
+            ordinary.mkdir()
+            fixture_named_module = ordinary / "fixtures_runtime.py"
+            fixture_named_module.write_text("def broken(:\n", encoding="utf-8")
+            overbroad_name = subprocess.run(
+                command, cwd=root, capture_output=True, text=True
+            )
+            self.assertNotEqual(overbroad_name.returncode, 0)
+            fixture_named_module.write_text("VALUE = 1\n", encoding="utf-8")
+
+            not_fixtures = root / "notfixtures"
+            not_fixtures.mkdir()
+            misleading_dir = not_fixtures / "module.py"
+            misleading_dir.write_text("def broken(:\n", encoding="utf-8")
+            overbroad_dir = subprocess.run(
+                command, cwd=root, capture_output=True, text=True
+            )
+            self.assertNotEqual(overbroad_dir.returncode, 0)
+            misleading_dir.write_text("VALUE = 1\n", encoding="utf-8")
 
             original = future.stat()
             future.write_text("def broken(:\n", encoding="utf-8")

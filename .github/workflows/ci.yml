@@ -36,7 +36,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Syntax compile
         shell: bash
-        run: python -m compileall -q -f -x 'fixtures' .
+        run: python -m compileall -q -f -x '^(?:\.[/\\])?fixtures[/\\]' .
       - name: Test
         shell: bash
         run: python -W error::ResourceWarning -m unittest discover -s tests -v
