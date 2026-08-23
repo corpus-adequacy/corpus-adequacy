@@ -214,9 +214,9 @@ class ClosedUnprovedVoidSuffix(unittest.TestCase):
             report["failures"])
 
     @unittest.skipIf(ca.fcntl is None, "process scoring requires an advisory lock")
-    def test_suffix_reason_allowlist_tracks_common_closed_set(self):
-        saved = common.CLOSED_UNPROVED_REASONS
-        common.CLOSED_UNPROVED_REASONS = tuple(
+    def test_suffix_reason_allowlist_tracks_core_closed_set(self):
+        saved = ca.CLOSED_UNPROVED_REASONS
+        ca.CLOSED_UNPROVED_REASONS = tuple(
             token for token in saved if token != "timeout")
         try:
             with tempfile.TemporaryDirectory() as d:
@@ -257,7 +257,7 @@ class ClosedUnprovedVoidSuffix(unittest.TestCase):
                     loaded, manifest_path, execution_backend=backend,
                     separate_build_phase=True)
         finally:
-            common.CLOSED_UNPROVED_REASONS = saved
+            ca.CLOSED_UNPROVED_REASONS = saved
         self.assertFalse(
             any("[timeout]" in item for item in report["failures"]),
             report["failures"])

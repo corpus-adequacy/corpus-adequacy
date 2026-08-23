@@ -21,7 +21,6 @@ from aee_checker_sealed_common import (
     load_strict,
     preserve_cleanup_failure,
     require_resource_profile,
-    sanitize_unproved_reason,
 )
 from aee_checker_sealed_oci import (
     DEFAULT_MOUNT_SPEC,
@@ -83,7 +82,7 @@ COMPLETE_RETURNCODES = (0, 1)
 
 
 def _unproved(reason: str = "malformed") -> subprocess.CompletedProcess:
-    token = sanitize_unproved_reason(reason)
+    token = ca.sanitize_unproved_reason(reason)
     if token is None:
         token = "malformed"
     completed = subprocess.CompletedProcess(
