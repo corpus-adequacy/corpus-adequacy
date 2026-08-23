@@ -447,7 +447,10 @@ class ProcessMeasurement(unittest.TestCase):
             self.assertEqual(by[SAFE_GE]["verdict"], "control-killed")
             self.assertEqual(by[FRAC_FLOAT]["verdict"], "control-killed")
             self.assertEqual(by[INTEGRAL_FLOAT]["verdict"], "survived")
-            self.assertEqual(by[MASKED_BOUNDARY]["verdict"], "equivalent")
+            # Declared as an ordinary mutant by this test's own manifest, and the
+            # tool never infers equivalence, so survived is the correct runner
+            # behaviour here. The equivalence is declared in the real manifest.
+            self.assertEqual(by[MASKED_BOUNDARY]["verdict"], "survived")
             self.assertNotIn("equivalent", by[INTEGRAL_FLOAT])
             for name in SUITE_GATES:
                 self.assertNotIn(name, by)
@@ -512,10 +515,10 @@ class ClaimedReport(unittest.TestCase):
         self.assertEqual(doc["tool_content_sha256"], TOOL_CONTENT)
         self.assertEqual(doc["manifest_sha256"], "sha256:" + MANIFEST_SHA256)
         self.assertEqual(doc["killed"], 10)
-        self.assertEqual(doc["survived"], 2)
+        self.assertEqual(doc["survived"], 1)
         self.assertEqual(doc["declared_total"], 12)
         self.assertEqual(doc["silent"], 0)
-        self.assertEqual(doc["equivalent"], 0)
+        self.assertEqual(doc["equivalent"], 1)
         self.assertEqual(doc["unproved"], 0)
         self.assertFalse(doc["adequate"])
         self.assertEqual(doc["control_status"], "killed")
