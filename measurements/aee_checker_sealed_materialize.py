@@ -23,6 +23,7 @@ from aee_checker_sealed_common import (
     PrepareError,
     exact_object,
     load_strict,
+    preserve_cleanup_failure,
     verify_file_digest,
 )
 from aee_checker_sealed_oci import (
@@ -48,6 +49,15 @@ VENDOR_TOOLCHAIN_KEYS = (
     "cargo_V", "image_id", "index", "observation", "platform", "rustc_Vv",
 )
 COPY_CHUNK_BYTES = 65536
+
+
+def _unlink_preserving(dest: Path, primary: BaseException) -> None:
+    if not dest.exists():
+        return
+    try:
+        dest.unlink()
+    except OSError as exc:
+        preserve_cleanup_failure(primary, "download cleanup", exc)
 
 
 def require_vendor_outside(subject: Path, vendor: Path) -> None:
@@ -139,18 +149,20 @@ def download_bounded(
                     budget.charge(bytes=len(chunk))
                     written += len(chunk)
                     out.write(chunk)
-    except PrepareError:
-        if dest.exists():
-            dest.unlink()
+    except PrepareError as exc:
+        _unlink_preserving(dest, exc)
         raise
     except Exception as exc:
-        if dest.exists():
-            dest.unlink()
-        raise PrepareError("download failed") from exc
+        primary = PrepareError("download failed")
+        _unlink_preserving(dest, primary)
+        raise primary from exc
+    except BaseException as primary:
+        _unlink_preserving(dest, primary)
+        raise
     if written == 0:
-        if dest.exists():
-            dest.unlink()
-        raise PrepareError("download empty")
+        primary = PrepareError("download empty")
+        _unlink_preserving(dest, primary)
+        raise primary
     return dest
 
 
@@ -498,6 +510,7 @@ def materialize_pinned(pins: dict, dest: Path, *, template: Path, budget=None) -
 
 
 def _fsync_tree(root: Path) -> None:
+    """Best-effort flush only; no durability, crash, or power-loss guarantee."""
     root = Path(root)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         for name in filenames:
@@ -563,19 +576,27 @@ def _release_owned_lease(lease: Path, token: str) -> None:
 def commit_atomic_dest(state: dict) -> Path:
     dest = Path(state["dest"])
     staging = Path(state["staging"])
-    # Same-tool lease is the exclusion boundary. A foreign mkdir of dest is
-    # not ours: refuse, clean only staging+owned lease, never rmtree dest.
-    # stdlib has no portable exclusive directory rename; fail closed on
-    # EEXIST/ENOTEMPTY instead of replacing an existing destination.
+    # os.rename is deliberate: lease plus dest precheck is the exclusion boundary.
+    # POSIX may replace an empty target; Windows refuses an existing target.
+    # Residual TOCTOU is accepted. This makes no exclusive-create claim and never
+    # authorizes removing a foreign dest.
     if dest.exists():
-        abort_atomic_dest(state)
-        raise PrepareError("dest exists")
+        primary = PrepareError("dest exists")
+        try:
+            abort_atomic_dest(state)
+        except BaseException as exc:
+            preserve_cleanup_failure(primary, "atomic abort", exc)
+        raise primary
     _fsync_tree(staging)
     try:
         os.rename(str(staging), str(dest))
     except OSError as exc:
-        abort_atomic_dest(state)
-        raise PrepareError("dest exists") from exc
+        primary = PrepareError("dest exists")
+        try:
+            abort_atomic_dest(state)
+        except BaseException as cleanup_exc:
+            preserve_cleanup_failure(primary, "atomic abort", cleanup_exc)
+        raise primary from exc
     _release_owned_lease(state["lease"], state["token"])
     return dest
 

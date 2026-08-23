@@ -18,6 +18,7 @@ from aee_checker_sealed_common import (
     INERT_RESOURCE_PROFILE,
     PrepareError,
     load_strict,
+    preserve_cleanup_failure,
     require_resource_profile,
 )
 from aee_checker_sealed_oci import (
@@ -82,6 +83,29 @@ COMPLETE_RETURNCODES = (0, 1)
 def _unproved() -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=UNPROVED_EXIT, stdout="", stderr="")
 
+
+def _cleanup_candidate(transport, name: str,
+                       primary: BaseException | None) -> None:
+    remove_failure = None
+    try:
+        transport.remove(name)
+    except BaseException as exc:
+        remove_failure = exc
+        if primary is not None:
+            preserve_cleanup_failure(primary, "candidate remove", exc)
+    try:
+        transport.require_absent(name)
+    except BaseException as exc:
+        if primary is not None:
+            preserve_cleanup_failure(primary, "candidate absence proof", exc)
+        elif remove_failure is not None:
+            refusal = PrepareError("candidate remove failed")
+            preserve_cleanup_failure(refusal, "candidate absence proof", exc)
+            raise refusal from remove_failure
+        else:
+            raise PrepareError("candidate absence proof failed") from exc
+    if primary is None and remove_failure is not None:
+        raise PrepareError("candidate remove failed") from remove_failure
 
 
 def require_candidate_image(*, image_id: str, toolchain_image_id: str,
@@ -184,7 +208,6 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
         raise PrepareError("absence proof skipped")
     name = "%s%s" % (name_prefix, token_hex(4))
     completed = _unproved()
-    error = None
     try:
         argv = candidate_create_argv(
             image_id=image_id, name=name, mounts=mounts, sealed=sealed,
@@ -211,19 +234,10 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
         validate_inspect_contract(
             inspect, sealed=sealed, mount_spec=CANDIDATE_MOUNT_SPEC,
             resource_profile=profile)
-    except Exception as exc:
-        error = exc
-    finally:
-        try:
-            transport.remove(name)
-        except Exception:
-            pass
-        try:
-            transport.require_absent(name)
-        except PrepareError:
-            raise
-    if error is not None:
-        raise error
+    except BaseException as exc:
+        _cleanup_candidate(transport, name, exc)
+        raise
+    _cleanup_candidate(transport, name, None)
     return completed
 
 
