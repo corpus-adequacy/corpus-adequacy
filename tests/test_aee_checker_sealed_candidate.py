@@ -89,7 +89,8 @@ class FakeTransport:
     def __init__(
             self, *, returncode=0, stdout="", inspect=None,
             timeout=False, output_cap=False, skip_absent=False,
-            leave_present=False, fail_create=False):
+            leave_present=False, fail_create=False, create_error=None,
+            remove_error=None, absent_error=None):
         self.returncode = returncode
         self.stdout = stdout
         self.inspect_doc = inspect
@@ -98,6 +99,9 @@ class FakeTransport:
         self.skip_absent = skip_absent
         self.leave_present = leave_present
         self.fail_create = fail_create
+        self.create_error = create_error
+        self.remove_error = remove_error
+        self.absent_error = absent_error
         self.created = []
         self.removed = []
         self.absent_checked = []
@@ -105,6 +109,8 @@ class FakeTransport:
 
     def create(self, argv):
         self.created.append(list(argv))
+        if self.create_error is not None:
+            raise self.create_error
         if self.fail_create:
             raise PrepareError("partial create")
 
@@ -127,9 +133,13 @@ class FakeTransport:
 
     def remove(self, name):
         self.removed.append(name)
+        if self.remove_error is not None:
+            raise self.remove_error
 
     def require_absent(self, name):
         self.absent_checked.append(name)
+        if self.absent_error is not None:
+            raise self.absent_error
         if self.leave_present:
             raise PrepareError("container still present: %s" % name)
 
@@ -396,7 +406,79 @@ class SealedLifecycle(unittest.TestCase):
                 cand._run_sealed_candidate(
                     image_id=IMAGE, mounts=_mounts(Path(d)), transport=present,
                     resource_profile=INERT_RESOURCE_PROFILE)
-            self.assertIn("still present", str(ctx.exception))
+            self.assertEqual(str(ctx.exception), "partial create")
+            self.assertIn(
+                "still present", "\n".join(getattr(ctx.exception, "__notes__", ())))
+
+    def test_remove_failure_without_primary_is_chained_and_absence_still_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            underlying = OSError("remove refused")
+            transport = FakeTransport(
+                stdout=json.dumps(RICH_REPORT),
+                inspect=_inspect(("/input", "/vendor", "/tool", "/subject")),
+                remove_error=underlying,
+            )
+            with self.assertRaises(PrepareError) as ctx:
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
+        self.assertRegex(str(ctx.exception), r"remove|cleanup")
+        self.assertIs(ctx.exception.__cause__, underlying)
+        self.assertEqual(len(transport.absent_checked), 1)
+
+    def test_absence_failure_without_primary_is_chained(self):
+        with tempfile.TemporaryDirectory() as d:
+            underlying = OSError("absence unavailable")
+            transport = FakeTransport(
+                stdout=json.dumps(RICH_REPORT),
+                inspect=_inspect(("/input", "/vendor", "/tool", "/subject")),
+                absent_error=underlying,
+            )
+            with self.assertRaises(PrepareError) as ctx:
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
+        self.assertRegex(str(ctx.exception), r"absence")
+        self.assertIs(ctx.exception.__cause__, underlying)
+
+    def test_cleanup_failures_do_not_replace_prepare_primary(self):
+        with tempfile.TemporaryDirectory() as d:
+            primary = PrepareError("primary create refusal")
+            transport = FakeTransport(
+                create_error=primary,
+                remove_error=OSError("remove refused"),
+                absent_error=PrepareError("absence refused"),
+            )
+            with self.assertRaises(PrepareError) as ctx:
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
+        self.assertIs(ctx.exception, primary)
+        self.assertEqual(len(transport.absent_checked), 1)
+        notes = "\n".join(getattr(primary, "__notes__", ()))
+        self.assertIn("remove refused", notes)
+        self.assertIn("absence refused", notes)
+
+    def test_cleanup_failures_do_not_replace_baseexception_in_flight(self):
+        class FlightSignal(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as d:
+            primary = FlightSignal("stop now")
+            transport = FakeTransport(
+                create_error=primary,
+                remove_error=OSError("remove refused"),
+                absent_error=PrepareError("absence refused"),
+            )
+            with self.assertRaises(FlightSignal) as ctx:
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts=_mounts(Path(d)), transport=transport,
+                    resource_profile=INERT_RESOURCE_PROFILE)
+        self.assertIs(ctx.exception, primary)
+        self.assertEqual(len(transport.absent_checked), 1)
+        notes = "\n".join(getattr(primary, "__notes__", ()))
+        self.assertIn("remove refused", notes)
+        self.assertIn("absence refused", notes)
 
     def test_absence_proof_skipped_is_refused(self):
         with tempfile.TemporaryDirectory() as d:

@@ -83,6 +83,35 @@ def _unproved() -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=UNPROVED_EXIT, stdout="", stderr="")
 
 
+def _note_cleanup_failure(primary: BaseException, action: str,
+                          failure: BaseException) -> None:
+    primary.add_note("candidate %s failed: %s: %s" % (
+        action, type(failure).__name__, failure))
+
+
+def _cleanup_candidate(transport, name: str,
+                       primary: BaseException | None) -> None:
+    remove_failure = None
+    try:
+        transport.remove(name)
+    except BaseException as exc:
+        remove_failure = exc
+        if primary is not None:
+            _note_cleanup_failure(primary, "remove", exc)
+    try:
+        transport.require_absent(name)
+    except BaseException as exc:
+        if primary is not None:
+            _note_cleanup_failure(primary, "absence proof", exc)
+        elif remove_failure is not None:
+            refusal = PrepareError("candidate remove failed")
+            _note_cleanup_failure(refusal, "absence proof", exc)
+            raise refusal from remove_failure
+        else:
+            raise PrepareError("candidate absence proof failed") from exc
+    if primary is None and remove_failure is not None:
+        raise PrepareError("candidate remove failed") from remove_failure
+
 
 def require_candidate_image(*, image_id: str, toolchain_image_id: str,
                             probe_image_id: str) -> str:
@@ -211,17 +240,10 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
         validate_inspect_contract(
             inspect, sealed=sealed, mount_spec=CANDIDATE_MOUNT_SPEC,
             resource_profile=profile)
-    except Exception as exc:
+    except BaseException as exc:
         error = exc
     finally:
-        try:
-            transport.remove(name)
-        except Exception:
-            pass
-        try:
-            transport.require_absent(name)
-        except PrepareError:
-            raise
+        _cleanup_candidate(transport, name, error)
     if error is not None:
         raise error
     return completed

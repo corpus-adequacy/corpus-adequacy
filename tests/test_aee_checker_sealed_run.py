@@ -1020,6 +1020,38 @@ class ExecutionIdentityDirty(unittest.TestCase):
 
 
 class MaterializeBytes(unittest.TestCase):
+    def test_download_prepare_refusal_survives_unlink_failure(self):
+        class RefusingBudget:
+            ceilings = {"deadline_seconds": 1}
+
+            def charge(self, *, entries=0, bytes=0):
+                if bytes:
+                    raise primary
+
+            def check_deadline(self):
+                pass
+
+        primary = run.PrepareError("download byte refusal")
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "download"
+            with mock.patch.object(mat.urllib.request, "urlopen", return_value=io.BytesIO(b"x")), \
+                    mock.patch.object(Path, "unlink", side_effect=OSError("unlink refused")):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    mat.download_bounded("https://example.invalid/archive", dest,
+                                         budget=RefusingBudget())
+        self.assertIs(ctx.exception, primary)
+        self.assertIn("unlink refused", "\n".join(getattr(primary, "__notes__", ())))
+
+    def test_download_empty_refusal_survives_unlink_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "download"
+            with mock.patch.object(mat.urllib.request, "urlopen", return_value=io.BytesIO(b"")), \
+                    mock.patch.object(Path, "unlink", side_effect=OSError("unlink refused")):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    mat.download_bounded("https://example.invalid/archive", dest)
+        self.assertEqual(str(ctx.exception), "download empty")
+        self.assertIn("unlink refused", "\n".join(getattr(ctx.exception, "__notes__", ())))
+
     def test_empty_vendor_tree_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             vendor = Path(d) / "vendor"
@@ -1442,6 +1474,57 @@ class MaterializeBytes(unittest.TestCase):
             commit = inspect.getsource(run.commit_atomic_dest)
             self.assertNotIn("os.replace(", commit)
             self.assertIn("os.rename(", commit)
+
+    def test_dest_precheck_primary_survives_abort_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            state = run.begin_atomic_dest(dest)
+            dest.mkdir()
+            with mock.patch.object(
+                    mat, "abort_atomic_dest", side_effect=OSError("abort refused")):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    run.commit_atomic_dest(state)
+        self.assertEqual(str(ctx.exception), "dest exists")
+        self.assertIn("abort refused", "\n".join(getattr(ctx.exception, "__notes__", ())))
+
+    def test_rename_primary_survives_abort_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = run.begin_atomic_dest(Path(d) / "bundle")
+            rename_error = OSError("rename refused")
+            with mock.patch.object(mat.os, "rename", side_effect=rename_error), \
+                    mock.patch.object(
+                        mat, "abort_atomic_dest", side_effect=OSError("abort refused")):
+                with self.assertRaises(run.PrepareError) as ctx:
+                    run.commit_atomic_dest(state)
+        self.assertEqual(str(ctx.exception), "dest exists")
+        self.assertIs(ctx.exception.__cause__, rename_error)
+        self.assertIn("abort refused", "\n".join(getattr(ctx.exception, "__notes__", ())))
+
+    def test_fsync_failure_is_best_effort_and_commit_succeeds(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            state = run.begin_atomic_dest(dest)
+            (state["staging"] / "content").write_text("ready\n", encoding="utf-8")
+            with mock.patch.object(mat.os, "fsync", side_effect=OSError("fsync refused")):
+                committed = run.commit_atomic_dest(state)
+            self.assertEqual(committed, dest)
+            self.assertEqual((dest / "content").read_text(encoding="utf-8"), "ready\n")
+
+    def test_dest_precheck_wins_before_fsync(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "bundle"
+            state = run.begin_atomic_dest(dest)
+            dest.mkdir()
+            with mock.patch.object(
+                    mat, "_fsync_tree", side_effect=AssertionError("fsync ran")):
+                with self.assertRaisesRegex(run.PrepareError, "dest exists"):
+                    run.commit_atomic_dest(state)
+
+    def test_fsync_docstring_disclaims_durability_and_power_loss(self):
+        doc = (mat._fsync_tree.__doc__ or "").lower()
+        self.assertIn("no durability", doc)
+        self.assertIn("crash", doc)
+        self.assertIn("power-loss", doc)
 
     def test_mid_materialize_failure_leaves_no_consumable_final(self):
         with tempfile.TemporaryDirectory() as d:
