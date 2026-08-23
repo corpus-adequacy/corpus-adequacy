@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase C GO-RUN authorization for the frozen inverse-AEE experiment. Stdlib only.
 
-Binds exact prepare.v0 bytes. Does not run the checker. Public non-claims:
+Binds exact canonical PREPARE-v0 or PREPARE-v1 bytes. Does not run the checker. Public non-claims:
 not MC/DC, not atomic-subcondition adequacy, not complete mutation
 adequacy, not sandbox-efficacy, not certification, not ranking.
 """
@@ -261,12 +261,18 @@ def validate_authorize(authorize_raw: bytes, prepare_raw: bytes) -> dict:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 4 and argv[1] == "emit":
+        prep_raw = ca.read_bounded_regular_file(Path(argv[2]))
+        emit_authorize_v0(prep_raw, Path(argv[3]))
+        return 0
     if len(argv) >= 4 and argv[1] == "validate":
         auth_raw = ca.read_bounded_regular_file(Path(argv[2]))
         prep_raw = ca.read_bounded_regular_file(Path(argv[3]))
         validate_authorize(auth_raw, prep_raw)
         return 0
-    sys.stderr.write("usage: aee_checker_sealed_authorize.py validate <authorize.v0> <prepare.v0>\n")
+    sys.stderr.write(
+        "usage: aee_checker_sealed_authorize.py "
+        "emit <prepare> <authorize.v0> | validate <authorize.v0> <prepare>\n")
     return 2
 
 

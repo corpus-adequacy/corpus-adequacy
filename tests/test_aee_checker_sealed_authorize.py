@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase C GO-RUN authorization contract for the frozen inverse-AEE experiment. Standard library only.
 
-Binds exact prepare.v0 bytes. Does not run the checker, baseline, control,
+Binds exact canonical PREPARE-v0 or PREPARE-v1 bytes. Does not run the checker, baseline, control,
 or mutants. Does not emit report.v0. Public non-claims: not MC/DC, not
 atomic-subcondition adequacy, not complete mutation adequacy, not
 sandbox-efficacy, not certification, not ranking.
@@ -128,6 +128,31 @@ class ValidatorBites(unittest.TestCase):
 
 
 class CandidatePrepareAuthorization(unittest.TestCase):
+    def test_cli_emits_authorization_bound_to_exact_prepare_v1_bytes(self):
+        prepare_raw = _prepare_v1_raw()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepare_path = root / "prepare.v1.json"
+            authorize_path = root / "authorize.v0.json"
+            prepare_path.write_bytes(prepare_raw)
+
+            self.assertEqual(
+                auth.main([
+                    "aee_checker_sealed_authorize.py", "emit",
+                    str(prepare_path), str(authorize_path),
+                ]),
+                0,
+            )
+            authorize_raw = authorize_path.read_bytes()
+
+        doc = json.loads(authorize_raw)
+        self.assertEqual(set(doc), set(auth.AUTHORIZE_KEYS))
+        self.assertEqual(doc["prepare_schema"], run.PREPARE_V1_SCHEMA)
+        self.assertEqual(
+            doc["prepare_sha256"], hashlib.sha256(prepare_raw).hexdigest())
+        self.assertEqual(
+            auth.validate_authorize(authorize_raw, prepare_raw)["authorize"], doc)
+
     def test_authorize_v0_binds_exact_canonical_prepare_v1_bytes(self):
         prepare_raw = _prepare_v1_raw()
         with tempfile.TemporaryDirectory() as tmp:
