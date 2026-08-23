@@ -13,7 +13,12 @@ import sys
 from pathlib import Path
 from secrets import token_hex
 
-from aee_checker_sealed_common import PrepareError, load_strict
+from aee_checker_sealed_common import (
+    INERT_RESOURCE_PROFILE,
+    PrepareError,
+    load_strict,
+    require_resource_profile,
+)
 from aee_checker_sealed_oci import (
     DEFAULT_MOUNT_SPEC,
     docker_bounded,
@@ -55,6 +60,19 @@ def _unproved() -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=UNPROVED_EXIT, stdout="", stderr="")
 
 
+
+def require_candidate_image(*, image_id: str, toolchain_image_id: str,
+                            probe_image_id: str) -> str:
+    image_id = require_image_id(image_id)
+    toolchain_image_id = require_image_id(toolchain_image_id)
+    probe_image_id = require_image_id(probe_image_id)
+    if image_id == probe_image_id:
+        raise PrepareError("candidate cannot use inert probe image")
+    if image_id != toolchain_image_id:
+        raise PrepareError("candidate image must be toolchain.image_id")
+    return image_id
+
+
 def host_vectors_path(mounts: dict) -> str:
     return str(Path(mounts["input"]) / "vectors")
 
@@ -83,7 +101,7 @@ def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.Complete
 
 
 def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
-                          sealed: bool = True) -> list[str]:
+                          sealed: bool = True, resource_profile=None) -> list[str]:
     expected = {key for key, _destination in CANDIDATE_MOUNT_SPEC}
     extra = set(mounts) - expected
     if extra:
@@ -96,6 +114,7 @@ def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
         sealed=sealed,
         mount_spec=CANDIDATE_MOUNT_SPEC,
         entrypoint=CANDIDATE_ENTRYPOINT,
+        resource_profile=resource_profile,
     )
 
 
@@ -105,11 +124,13 @@ class _DockerTransport:
     def create(self, argv):
         docker_bounded(argv[1:])
 
-    def start(self, name):
+    def start(self, name, deadline_seconds):
+        if type(deadline_seconds) is not int or deadline_seconds <= 0:
+            raise PrepareError("candidate deadline")
         return br._run_capped(
             ["docker", "start", "-a", name],
             Path.cwd(),
-            60,
+            deadline_seconds,
         )
 
     def inspect(self, name):
@@ -125,8 +146,17 @@ class _DockerTransport:
 def run_sealed_candidate(*, image_id: str, mounts: dict,
                          name_prefix: str = "aee-cand-",
                          sealed: bool = True, transport=None,
+                         resource_profile=None,
+                         toolchain_image_id=None, probe_image_id=None,
                          ) -> subprocess.CompletedProcess:
-    require_image_id(image_id)
+    profile = require_resource_profile(resource_profile or INERT_RESOURCE_PROFILE)
+    if toolchain_image_id is not None or probe_image_id is not None:
+        image_id = require_candidate_image(
+            image_id=image_id,
+            toolchain_image_id=toolchain_image_id,
+            probe_image_id=probe_image_id)
+    else:
+        require_image_id(image_id)
     if transport is None:
         require_local_image(image_id)
         transport = _DockerTransport()
@@ -137,10 +167,11 @@ def run_sealed_candidate(*, image_id: str, mounts: dict,
     error = None
     try:
         argv = candidate_create_argv(
-            image_id=image_id, name=name, mounts=mounts, sealed=sealed)
+            image_id=image_id, name=name, mounts=mounts, sealed=sealed,
+            resource_profile=profile)
         transport.create(argv)
         try:
-            proc = transport.start(name)
+            proc = transport.start(name, profile["deadline_seconds"])
         except subprocess.TimeoutExpired:
             completed = _unproved()
         except br._OutputTooLarge:
@@ -158,7 +189,8 @@ def run_sealed_candidate(*, image_id: str, mounts: dict,
             )
         inspect = transport.inspect(name)
         validate_inspect_contract(
-            inspect, sealed=sealed, mount_spec=CANDIDATE_MOUNT_SPEC)
+            inspect, sealed=sealed, mount_spec=CANDIDATE_MOUNT_SPEC,
+            resource_profile=profile)
     except Exception as exc:
         error = exc
     finally:

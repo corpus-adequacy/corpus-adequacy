@@ -37,6 +37,68 @@ MATERIALIZE_CEILINGS = {
     "output_bytes": br.OUTPUT_CAP_BYTES,
 }
 
+RESOURCE_PROFILE_SCHEMA = "corpus-adequacy.aee-checker-sealed.resource-profile.v1"
+RESOURCE_PROFILE_KEYS = (
+    "schema", "work_bytes", "tmp_bytes", "work_inodes", "tmp_inodes",
+    "deadline_seconds", "output_bytes", "memory_bytes", "memory_swap_bytes", "pids",
+)
+
+
+def _resource_profile(*, work_bytes, tmp_bytes, work_inodes, tmp_inodes,
+                      deadline_seconds, output_bytes, memory_bytes,
+                      memory_swap_bytes, pids) -> dict:
+    return {
+        "schema": RESOURCE_PROFILE_SCHEMA,
+        "work_bytes": work_bytes,
+        "tmp_bytes": tmp_bytes,
+        "work_inodes": work_inodes,
+        "tmp_inodes": tmp_inodes,
+        "deadline_seconds": deadline_seconds,
+        "output_bytes": output_bytes,
+        "memory_bytes": memory_bytes,
+        "memory_swap_bytes": memory_swap_bytes,
+        "pids": pids,
+    }
+
+
+INERT_RESOURCE_PROFILE = _resource_profile(
+    work_bytes=TMPFS_BYTES,
+    tmp_bytes=TMPFS_BYTES,
+    work_inodes=TMPFS_INODES,
+    tmp_inodes=TMPFS_INODES,
+    deadline_seconds=DECLARED_CEILINGS["deadline_seconds"],
+    output_bytes=DECLARED_CEILINGS["output_bytes"],
+    memory_bytes=MEMORY_4G,
+    memory_swap_bytes=MEMORY_4G,
+    pids=512,
+)
+# Bounded fixture only. Not measured, not optimal, not an efficacy claim.
+CANDIDATE_RESOURCE_PROFILE = _resource_profile(
+    work_bytes=8 * 1024 * 1024,
+    tmp_bytes=2 * 1024 * 1024,
+    work_inodes=4096,
+    tmp_inodes=512,
+    deadline_seconds=30,
+    output_bytes=DECLARED_CEILINGS["output_bytes"],
+    memory_bytes=MEMORY_4G,
+    memory_swap_bytes=MEMORY_4G,
+    pids=512,
+)
+
+
+def require_resource_profile(profile) -> dict:
+    exact_object(profile, RESOURCE_PROFILE_KEYS, "resource profile")
+    if profile.get("schema") != RESOURCE_PROFILE_SCHEMA:
+        raise PrepareError("resource profile schema")
+    for key in RESOURCE_PROFILE_KEYS:
+        if key == "schema":
+            continue
+        value = profile[key]
+        if type(value) is not int or value <= 0:
+            raise PrepareError("resource profile %s" % key)
+    return dict(profile)
+
+
 
 class PrepareError(Exception):
     """PREPARE refused before a sealed measurement could start."""
