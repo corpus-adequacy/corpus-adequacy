@@ -5,32 +5,16 @@
   "corpus_digest": null,
   "declared_total": 12,
   "diagnostic_channel_declared": false,
-  "equivalent": 0,
+  "equivalent": 1,
   "failures": [
-    "2 mutant(s) survived; the required score is 100% of non-equivalent mutants"
+    "1 mutant(s) survived; the required score is 100% of non-equivalent mutants"
   ],
   "hole_ratio": 0.0,
   "killed": 10,
   "known_holes": 0,
   "manifest": "measurements/tersign-1cc5ea32/manifest.json",
-  "manifest_sha256": "sha256:9c4c9583ed7166cec9a26b24bc42ad5db32a4c744bce3d6b41128ff428a07487",
+  "manifest_sha256": "sha256:8303d97632acbd1dd5722a9f881b84b02f280e36250a37f234799434b9918fd1",
   "mutants": [
-    {
-      "group": "tersign",
-      "how": "no vector distinguishes it. An implementation can delete this rule and still reproduce the digest",
-      "label": "accept integer-valued floats and serialize them as integers",
-      "moved": 0,
-      "scope": "declared",
-      "verdict": "survived"
-    },
-    {
-      "group": "tersign",
-      "how": "1 vector(s) moved",
-      "label": "remove the greater-than 2^53-1 refusal",
-      "moved": 1,
-      "scope": "declared",
-      "verdict": "killed"
-    },
     {
       "group": "tersign",
       "how": "harness detects a change on this path",
@@ -46,6 +30,22 @@
       "moved": 1,
       "scope": "declared",
       "verdict": "control-killed"
+    },
+    {
+      "group": "tersign",
+      "how": "no vector distinguishes it. An implementation can delete this rule and still reproduce the digest",
+      "label": "accept integer-valued floats and serialize them as integers",
+      "moved": 0,
+      "scope": "declared",
+      "verdict": "survived"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "remove the greater-than 2^53-1 refusal",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
     },
     {
       "group": "tersign",
@@ -121,11 +121,10 @@
     },
     {
       "group": "tersign",
-      "how": "no vector distinguishes it. An implementation can delete this rule and still reproduce the digest",
+      "how": "Equivalent on the declared outcome_from projection. Reaching this guard requires covered to be a non-negative int and attested an int, so `attested <= 0 < covered` implies covered > 0 >= attested, which implies `covered > attested` on the very next line. Both branches return the same (verdict, reason) pair, reject/boundary_reject, differing only in the detail string, and tersign_checks.py projects verdict and reason without detail. No input that reaches this line can distinguish the two, so no vector can be asked for and the upstream corpus has no gap here: n26-coverage-claimed-over-empty-attestation pins the rule via the subsuming guard. The equivalence is relative to this projection, not absolute: widening outcome_from to carry detail would make this mutant distinguishable again.",
       "label": "boundary_binding skips empty-attested coverage refusal",
       "moved": 0,
-      "scope": "declared",
-      "verdict": "survived"
+      "verdict": "equivalent"
     }
   ],
   "originals_unverified_against_head": [],
@@ -133,13 +132,13 @@
   "runner": "process",
   "schema": "corpus-adequacy.report.v0",
   "score_means": "percent of author-declared in-scope rules killed; NOT percent of the rules the implementation actually has. Silent mutants count in the denominator and never the numerator. Without diagnostic_from the silent class is unreachable, so a zero there means it was not measured, not that none exist",
-  "score_percent": 83.3,
+  "score_percent": 90.9,
   "silent": 0,
-  "survived": 2,
-  "tool_commit": "a2f723fe5ae5036e97090b9691316e483c3f1acc",
-  "tool_content_sha256": "sha256:2580d5ee6353ba00dce4b8c6e355393b5457d92153b8da1f4ea9f4516e181bac",
+  "survived": 1,
+  "tool_commit": "a51fc94c501bddd79678382083a9677338c533e8",
+  "tool_content_sha256": "sha256:e903a76f0d27833df2fc9936d0c535b3cdabf273715371cb9ac71e5681900854",
   "tool_source_state": "exact",
-  "tool_version": "0.1.0",
+  "tool_version": "0.1.2",
   "unexercised_out_of_scope": 0,
   "unproved": 0
 }

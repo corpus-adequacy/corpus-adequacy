@@ -447,6 +447,9 @@ class ProcessMeasurement(unittest.TestCase):
             self.assertEqual(by[SAFE_GE]["verdict"], "control-killed")
             self.assertEqual(by[FRAC_FLOAT]["verdict"], "control-killed")
             self.assertEqual(by[INTEGRAL_FLOAT]["verdict"], "survived")
+            # Declared as an ordinary mutant by this test's own manifest, and the
+            # tool never infers equivalence, so survived is the correct runner
+            # behaviour here. The equivalence is declared in the real manifest.
             self.assertEqual(by[MASKED_BOUNDARY]["verdict"], "survived")
             self.assertNotIn("equivalent", by[INTEGRAL_FLOAT])
             for name in SUITE_GATES:
@@ -480,17 +483,17 @@ class ProcessMeasurement(unittest.TestCase):
 
 
 
-MEASURED_ON = "a2f723fe5ae5036e97090b9691316e483c3f1acc"
-RELEASED_TOOL_COMMIT = "fbcdcb7a496f98420232260411d1afad6777ec11"
+MEASURED_ON = "a51fc94c501bddd79678382083a9677338c533e8"
+RELEASED_TOOL_COMMIT = "a51fc94c501bddd79678382083a9677338c533e8"
 DURABLE = REPO_ROOT / "measurements" / "tersign-1cc5ea32"
 REPORT_PATH = DURABLE / "report.v0.json"
 PROVENANCE_PATH = DURABLE / "PROVENANCE.md"
-REPORT_SHA256 = "c65f8a6c6dcc4a56dea31e7fc0de241a8cbbdcf36cd4cf98c220d23a894fe5ae"
+REPORT_SHA256 = "d7c9039da10bd444a4861ef9d9d62565ab7bd4aa29186583335ac8c08dbc7f65"
 WRAPPER_SHA256 = "f1347dc0738404490139d7f41dc605f6cb7fa72c6083948c66c7008127b20644"
 ADAPTER_SHA256 = "ae8d69df38f16e24157b2de50522bfaae3e184a2524d5fb9b5cc92fc6acafaa1"
 VECTORS_SHA256 = "678315a30887a5b899e8cc0cc36c4c8e8361cc4a587c7ed839b4f51ef717475d"
-MANIFEST_SHA256 = "9c4c9583ed7166cec9a26b24bc42ad5db32a4c744bce3d6b41128ff428a07487"
-TOOL_CONTENT = "sha256:2580d5ee6353ba00dce4b8c6e355393b5457d92153b8da1f4ea9f4516e181bac"
+MANIFEST_SHA256 = "8303d97632acbd1dd5722a9f881b84b02f280e36250a37f234799434b9918fd1"
+TOOL_CONTENT = "sha256:e903a76f0d27833df2fc9936d0c535b3cdabf273715371cb9ac71e5681900854"
 
 
 class ClaimedReport(unittest.TestCase):
@@ -512,10 +515,10 @@ class ClaimedReport(unittest.TestCase):
         self.assertEqual(doc["tool_content_sha256"], TOOL_CONTENT)
         self.assertEqual(doc["manifest_sha256"], "sha256:" + MANIFEST_SHA256)
         self.assertEqual(doc["killed"], 10)
-        self.assertEqual(doc["survived"], 2)
+        self.assertEqual(doc["survived"], 1)
         self.assertEqual(doc["declared_total"], 12)
         self.assertEqual(doc["silent"], 0)
-        self.assertEqual(doc["equivalent"], 0)
+        self.assertEqual(doc["equivalent"], 1)
         self.assertEqual(doc["unproved"], 0)
         self.assertFalse(doc["adequate"])
         self.assertEqual(doc["control_status"], "killed")

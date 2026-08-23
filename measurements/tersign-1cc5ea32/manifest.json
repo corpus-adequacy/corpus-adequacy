@@ -9,6 +9,14 @@
     "tersign_checks.py",
     "{vector}"
   ],
+  "equivalent": {
+    "tersign": [
+      {
+        "label": "boundary_binding skips empty-attested coverage refusal",
+        "reason": "Equivalent on the declared outcome_from projection. Reaching this guard requires covered to be a non-negative int and attested an int, so `attested <= 0 < covered` implies covered > 0 >= attested, which implies `covered > attested` on the very next line. Both branches return the same (verdict, reason) pair, reject/boundary_reject, differing only in the detail string, and tersign_checks.py projects verdict and reason without detail. No input that reaches this line can distinguish the two, so no vector can be asked for and the upstream corpus has no gap here: n26-coverage-claimed-over-empty-attestation pins the rule via the subsuming guard. The equivalence is relative to this projection, not absolute: widening outcome_from to carry detail would make this mutant distinguishable again."
+      }
+    ]
+  },
   "id_key": "vector_id",
   "implementation": "tersign_checks.py",
   "implementation_sources": [
@@ -84,11 +92,6 @@
         "anchor": "\"decisionEvidenceDigest\"",
         "label": "decision_evidence_binding reads a different commitment field",
         "replacement": "\"decisionEvidenceDigestX\""
-      },
-      {
-        "anchor": "if attested <= 0 < covered:",
-        "label": "boundary_binding skips empty-attested coverage refusal",
-        "replacement": "if False and attested <= 0 < covered:"
       }
     ]
   },
