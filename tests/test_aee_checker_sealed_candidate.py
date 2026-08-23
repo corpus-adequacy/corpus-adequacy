@@ -676,8 +676,6 @@ class ClosedInnerProtocol(unittest.TestCase):
 
     def test_mutation_collapsing_parse_into_projection_turns_red(self):
         src = Path(cand.__file__).read_text()
-        needle = "return _unproved(\"malformed\")\n    try:\n        expected ="
-        # more reliable: merge the two try blocks by sending load_strict errors to projection
         collapsed = src.replace(
             """    try:
         inner = load_strict(body.encode("utf-8"))
