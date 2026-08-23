@@ -6,20 +6,23 @@
     "output_bytes": 4194304
   },
   "execution": {
-    "commit": "de8007a5129589b9d82cd45b1683b97c703925e0",
-    "content_sha256": "b88ce50391c0ab2a0b2f748f10d45c44bded3c687cba57f5dd635ef36542a106",
+    "commit": "251d884c6db78564532ee92dfd2061da35354497",
+    "content_sha256": "5e1b7ea72ba6b034eb9dcba9cf440c63c2500860647941382d151bc59e98d0ab",
     "paths": [
       "measurements/aee_checker_sealed_run.py",
       "measurements/aee_checker_sealed_common.py",
       "measurements/aee_checker_sealed_oci.py",
+      "measurements/aee_checker_sealed_candidate.py",
       "measurements/aee_checker_sealed_materialize.py",
+      "measurements/aee_checker_sealed_authorize.py",
+      "measurements/aee_checker_sealed_execute.py",
       "execution/aee-checker-sealed/Containerfile",
       "execution/aee-checker-sealed/probe.sh",
       "execution/aee-checker-sealed/cargo-config.toml"
     ]
   },
   "image": {
-    "id": "sha256:4a5b9b64cd5422ade9117b1f7cdca5a8fd9787a91c32a700626298bc424e8657",
+    "id": "sha256:b4418f4c91e6e1caac073db8bd80d53ba0a2b4e3204ef406d7785232ad354e27",
     "id_scope": "host-local",
     "kind": "inert-probe",
     "platform": "linux/arm64"
