@@ -36,7 +36,7 @@ class _OutputTooLarge(Exception):
     """A child exceeded OUTPUT_CAP_BYTES; its output is not materialized."""
 
 
-class _OutputDrainIncomplete(RuntimeError):
+class _OutputDrainIncomplete(OSError):
     """The child exited, but its captured output streams did not reach EOF."""
 
 

@@ -494,6 +494,9 @@ class ContinuousCap(_WithTestCap):
 class DescendantPipes(_WithTestCap):
     """Leader-exit must not lose the captured POSIX group."""
 
+    def test_drain_incomplete_is_an_io_failure_for_existing_callers(self):
+        self.assertTrue(issubclass(br._OutputDrainIncomplete, OSError))
+
     def test_descendant_holding_pipes_is_group_killed(self):
         if not POSIX:
             self.skipTest(
@@ -563,6 +566,10 @@ class DescendantPipes(_WithTestCap):
                     self.fail("bounded runner did not return within the outer bound")
                 self.assertEqual(supervisor.returncode, 0, stderr)
                 self.assertEqual(stdout.strip(), "drain-incomplete")
+                self.assertTrue(
+                    pid_path.exists() and pid_path.stat().st_size,
+                    "escaped descendant witness was never created",
+                )
             finally:
                 if pid_path.exists() and pid_path.stat().st_size:
                     escaped_pid = int(pid_path.read_text())
@@ -575,6 +582,7 @@ class DescendantPipes(_WithTestCap):
                 deadline = time.monotonic() + 2
                 while _pid_alive(escaped_pid) and time.monotonic() < deadline:
                     time.sleep(0.02)
+                self.assertFalse(_pid_alive(escaped_pid), "escaped descendant was not reaped")
 
 
 class Mutations(unittest.TestCase):
