@@ -347,6 +347,7 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
         self.assertIn("parse-error", readme)
         self.assertIn("incomplete", readme)
         self.assertIn("direct-child parse-error and incomplete are `unproved`", readme)
+        self.assertNotIn("this opt-in field does not reclassify them", readme)
         self.assertNotIn("parse-error or incomplete keeps its existing", readme)
         block = self.UNPROVED_0_1_2_BLOCK
         self.assertIn(block, changelog)
