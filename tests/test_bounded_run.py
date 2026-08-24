@@ -591,7 +591,8 @@ class DescendantPipes(_WithTestCap):
                     while _pid_alive(escaped_pid) and time.monotonic() < reap_deadline:
                         time.sleep(0.02)
                     self.assertFalse(
-                        _pid_alive(escaped_pid), "escaped descendant was not reaped"
+                        _pid_alive(escaped_pid),
+                        "escaped descendant remained alive after test cleanup",
                     )
                 try:
                     os.killpg(supervisor.pid, signal.SIGKILL)

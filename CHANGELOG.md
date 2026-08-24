@@ -8,8 +8,11 @@ bounded drain grace. An escaped descendant that retains pipe writers can no
 longer hang cleanup or leave a reader thread behind. This is a supervisor
 liveness refusal, classified as an incomplete measurement rather than a
 mutation kill; the module, process and batch runners share the same termination
-rule. It is not descendant containment or a sandbox claim. Windows remains
-direct-child-only.
+rule. Process and batch `parse-error`, `no-result`, and declared `unproved`
+failures therefore also match the module runner and remain unproved; timeout,
+output-cap, unexpected-exit, and signal remain termination kills after a
+completed baseline. It is not descendant containment or a sandbox claim.
+Windows remains direct-child-only.
 
 ## 0.1.2 — 2026-08-23
 
