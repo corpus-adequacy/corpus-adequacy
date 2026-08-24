@@ -62,8 +62,9 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
     charge-before-retain keeps combined retained bytes at most
     OUTPUT_CAP_BYTES. Crossing the cap kills the POSIX process group and
     raises _OutputTooLarge. In-flight read buffers may briefly hold
-    2 * READ_CHUNK_BYTES more. Timeout remains TimeoutExpired. No
-    temporary output files are used.
+    2 * READ_CHUNK_BYTES more. Timeout remains TimeoutExpired. A child that
+    exits while an escaped descendant retains the streams raises
+    _OutputDrainIncomplete. No temporary output files are used.
 
     Windows: process/batch already refuse where fcntl is missing, and this
     helper kills only the direct child. That is not a process-tree claim.

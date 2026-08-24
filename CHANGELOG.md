@@ -6,8 +6,10 @@ POSIX pipe readers now wait interruptibly and report `_OutputDrainIncomplete`
 when a leader exits without both captured streams reaching EOF inside the
 bounded drain grace. An escaped descendant that retains pipe writers can no
 longer hang cleanup or leave a reader thread behind. This is a supervisor
-liveness refusal, not descendant containment or a sandbox claim. Windows
-remains direct-child-only.
+liveness refusal, classified as an incomplete measurement rather than a
+mutation kill; the module, process and batch runners share the same termination
+rule. It is not descendant containment or a sandbox claim. Windows remains
+direct-child-only.
 
 ## 0.1.2 — 2026-08-23
 
