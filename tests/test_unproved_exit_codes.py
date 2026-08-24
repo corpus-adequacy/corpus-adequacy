@@ -346,7 +346,8 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
             "On process and batch, a declared `unproved_exit_codes`", readme)
         self.assertIn("parse-error", readme)
         self.assertIn("incomplete", readme)
-        self.assertIn("existing", readme)
+        self.assertIn("direct-child parse-error and incomplete are `unproved`", readme)
+        self.assertNotIn("parse-error or incomplete keeps its existing", readme)
         block = self.UNPROVED_0_1_2_BLOCK
         self.assertIn(block, changelog)
         inverted = block.replace(
