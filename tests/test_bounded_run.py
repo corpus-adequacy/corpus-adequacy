@@ -54,6 +54,17 @@ for _ in range(200):
     time.sleep(0.01)
 os._exit(0)
 """
+ESCAPED_DESCENDANT = """\
+import os, sys, time
+from pathlib import Path
+pid_path = Path(sys.argv[1])
+if os.fork() == 0:
+    os.setsid()
+    pid_path.write_text(str(os.getpid()))
+    time.sleep(30)
+    os._exit(0)
+os._exit(0)
+"""
 
 
 class _CountPipe:
@@ -63,6 +74,11 @@ class _CountPipe:
 
     def read(self, n=-1):
         data = self._raw.read(n)
+        self._counter[0] += len(data)
+        return data
+
+    def read1(self, n=-1):
+        data = self._raw.read1(n)
         self._counter[0] += len(data)
         return data
 
@@ -387,12 +403,12 @@ class ContinuousCap(_WithTestCap):
         self.assertEqual(done.stderr, "hello-err\n")
 
     def test_fast_sub_cap_payload_is_byte_exact_on_both_streams(self):
-        # Small chunks force many loop turns. A stop.set() on clean exit
-        # then drops whatever is still sitting in the pipes.
+        # Keep both readers behind the leader-exit observation. A stop.set()
+        # on clean exit then permits one read but drops the remaining bytes.
         chunk = mock.patch.object(br, "READ_CHUNK_BYTES", 256)
         chunk.start()
         self.addCleanup(chunk.stop)
-        n = 20 * 1024
+        n = 4 * 1024
         body = (
             "import sys\n"
             "sys.stdout.buffer.write(b'O' * %d)\n"
@@ -404,18 +420,47 @@ class ContinuousCap(_WithTestCap):
 
         def spy(*args, **kwargs):
             proc = real(*args, **kwargs)
+            allow_read = threading.Event()
+            leader_observed = threading.Event()
 
-            class _YieldPipe(_CountPipe):
+            def release_readers_after_leader_exit():
+                if leader_observed.is_set():
+                    return
+                leader_observed.set()
+                threading.Timer(0.1, allow_read.set).start()
+
+            real_poll = proc.poll
+            real_wait = proc.wait
+
+            def coordinated_poll():
+                returncode = real_poll()
+                if returncode is not None:
+                    release_readers_after_leader_exit()
+                return returncode
+
+            def coordinated_wait(*wait_args, **wait_kwargs):
+                returncode = real_wait(*wait_args, **wait_kwargs)
+                if returncode is not None:
+                    release_readers_after_leader_exit()
+                return returncode
+
+            class _GatedPipe(_CountPipe):
                 def read(self, size=-1):
-                    data = super().read(size)
-                    if data:
-                        time.sleep(0.01)
-                    return data
+                    if not allow_read.wait(timeout=2):
+                        raise RuntimeError("leader exit was not observed")
+                    return super().read(size)
+
+                def read1(self, size=-1):
+                    if not allow_read.wait(timeout=2):
+                        raise RuntimeError("leader exit was not observed")
+                    return super().read1(size)
 
             if proc.stdout is not None:
-                proc.stdout = _YieldPipe(proc.stdout, pulled)
+                proc.stdout = _GatedPipe(proc.stdout, pulled)
             if proc.stderr is not None:
-                proc.stderr = _YieldPipe(proc.stderr, pulled)
+                proc.stderr = _GatedPipe(proc.stderr, pulled)
+            proc.poll = coordinated_poll
+            proc.wait = coordinated_wait
             return proc
 
         popen = mock.patch.object(subprocess, "Popen", side_effect=spy)
@@ -469,6 +514,67 @@ class DescendantPipes(_WithTestCap):
             finally:
                 if pid_path.exists() and pid_path.stat().st_size:
                     _reap_pid(int(pid_path.read_text()))
+
+    @unittest.skipUnless(POSIX, "requires POSIX fork and setsid")
+    def test_escaped_descendant_yields_a_bounded_named_drain_failure(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            pid_path = tmp / "escaped.pid"
+            candidate = _probe(tmp, ESCAPED_DESCENDANT, str(pid_path))
+            worker = tmp / "worker.py"
+            worker.write_text(
+                "import sys\n"
+                "import threading\n"
+                "from pathlib import Path\n"
+                f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
+                "import bounded_run as br\n"
+                "br.READER_JOIN_TIMEOUT_SECONDS = 0.25\n"
+                "try:\n"
+                "    br._run_capped(sys.argv[1:], Path.cwd(), 2)\n"
+                "except br._OutputDrainIncomplete:\n"
+                "    alive = [t.name for t in threading.enumerate() "
+                "if t.name.startswith('bounded-run-')]\n"
+                "    if alive:\n"
+                "        print('reader-leak:' + ','.join(sorted(alive)))\n"
+                "        raise SystemExit(5)\n"
+                "    print('drain-incomplete')\n"
+                "    raise SystemExit(0)\n"
+                "except BaseException as exc:\n"
+                "    print(type(exc).__name__)\n"
+                "    raise SystemExit(3)\n"
+                "raise SystemExit(4)\n",
+                encoding="utf-8",
+            )
+            supervisor = subprocess.Popen(
+                [sys.executable, str(worker), *candidate],
+                cwd=tmp,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            escaped_pid = None
+            try:
+                try:
+                    stdout, stderr = supervisor.communicate(timeout=4)
+                except subprocess.TimeoutExpired:
+                    os.killpg(supervisor.pid, signal.SIGKILL)
+                    supervisor.communicate(timeout=2)
+                    self.fail("bounded runner did not return within the outer bound")
+                self.assertEqual(supervisor.returncode, 0, stderr)
+                self.assertEqual(stdout.strip(), "drain-incomplete")
+            finally:
+                if pid_path.exists() and pid_path.stat().st_size:
+                    escaped_pid = int(pid_path.read_text())
+                    _reap_pid(escaped_pid)
+                try:
+                    os.killpg(supervisor.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            if escaped_pid is not None:
+                deadline = time.monotonic() + 2
+                while _pid_alive(escaped_pid) and time.monotonic() < deadline:
+                    time.sleep(0.02)
 
 
 class Mutations(unittest.TestCase):

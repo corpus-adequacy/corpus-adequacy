@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+POSIX pipe readers now wait interruptibly and report `_OutputDrainIncomplete`
+when a leader exits without both captured streams reaching EOF inside the
+bounded drain grace. An escaped descendant that retains pipe writers can no
+longer hang cleanup or leave a reader thread behind. This is a supervisor
+liveness refusal, not descendant containment or a sandbox claim. Windows
+remains direct-child-only.
+
 ## 0.1.2 — 2026-08-23
 
 Instrument and publication changes since 0.1.1, covering first-parent
