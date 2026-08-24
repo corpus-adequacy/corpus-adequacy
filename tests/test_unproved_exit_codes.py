@@ -309,11 +309,13 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
         self.assertIn("unproved_exit_codes", src)
         self.assertLess(src.index("unproved_exit_codes"), src.index("json.loads"))
 
-    def test_mutation_unproved_must_not_sit_under_raised_or_moved(self):
-        src = inspect.getsource(ca._run_mutation_step)
-        needle = 'any(kind == "unproved" for kind in raised.values())'
-        self.assertIn(needle, src)
-        self.assertLess(src.index(needle), src.index("if raised or moved"))
+    def test_only_observed_child_termination_can_be_a_mutation_kill(self):
+        for kind in ("timeout", "output-cap", "unexpected-exit", "signal"):
+            with self.subTest(kind=kind):
+                self.assertTrue(ca._child_failure_is_termination(kind))
+        for kind in ("unproved", "incomplete", "no-result", "parse-error"):
+            with self.subTest(kind=kind):
+                self.assertFalse(ca._child_failure_is_termination(kind))
 
     UNPROVED_0_1_2_BLOCK = (
         "Opt-in `unproved_exit_codes` beside `accepted_exit_codes` (default `[]`,\n"
@@ -344,7 +346,9 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
             "On process and batch, a declared `unproved_exit_codes`", readme)
         self.assertIn("parse-error", readme)
         self.assertIn("incomplete", readme)
-        self.assertIn("existing", readme)
+        self.assertIn("direct-child parse-error and incomplete are `unproved`", readme)
+        self.assertNotIn("this opt-in field does not reclassify them", readme)
+        self.assertNotIn("parse-error or incomplete keeps its existing", readme)
         block = self.UNPROVED_0_1_2_BLOCK
         self.assertIn(block, changelog)
         inverted = block.replace(

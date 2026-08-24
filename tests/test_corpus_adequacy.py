@@ -4133,6 +4133,23 @@ class SharedMutationStep(unittest.TestCase):
         self.assertNotIn("threshold", [item["label"] for item in report["mutants"]])
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_process_and_batch_incomplete_drain_is_unproved_not_killed(self):
+        for factory in (BatchRunner()._corpus, _process_kill_manifest):
+            name = factory.__name__ if hasattr(factory, "__name__") else factory
+            with self.subTest(factory=name), tempfile.TemporaryDirectory() as d:
+                path = factory(Path(d))
+                child = _NthChild(
+                    3, exc=br._OutputDrainIncomplete("captured streams stayed open")
+                )
+                with mock.patch.object(ca, "_run_capped", child):
+                    report = ca.run(path)
+            row = next(item for item in report["mutants"] if item["label"] == "threshold")
+            self.assertEqual(row["verdict"], "unproved")
+            self.assertIn("incomplete", row["how"])
+            self.assertEqual((report["killed"], report["unproved"]), (0, 1))
+            self.assertFalse(report["adequate"])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_parity_source_restored_after_process_and_batch(self):
         for factory in (BatchRunner()._corpus, _process_kill_manifest):
             name = factory.__name__ if hasattr(factory, "__name__") else factory

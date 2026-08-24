@@ -1102,6 +1102,12 @@ MODULE_CHILD_SCHEMA = "corpus-adequacy.module-child.v0"
 # unproved mutant already fails the run.
 TERMINATED_KINDS = frozenset({"timeout", "output-cap", "unexpected-exit", "signal"})
 
+
+def _child_failure_is_termination(kind: str) -> bool:
+    """Whether a completed baseline makes this child failure a mutation kill."""
+    return kind in TERMINATED_KINDS
+
+
 _ModuleRun = namedtuple(
     "_ModuleRun", "outcomes raised unsupported load_error entrypoint_missing abnormal")
 
@@ -1949,12 +1955,16 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
                 "path, so every other verdict in this run is meaningless"
                 % mut["label"])
         return
-    if any(kind == "unproved" for kind in raised.values()):
+    unmeasured = sorted({
+        kind for kind in raised.values() if not _child_failure_is_termination(kind)
+    })
+    if unmeasured:
+        how = ", ".join(unmeasured)
         tally["results"].append({
             "group": group, "label": mut["label"],
             "verdict": "unproved", "scope": scope, "moved": 0,
-            "how": "the measurement did not complete (unproved), so the corpus "
-                   "was never shown this mutant and said nothing about this rule"})
+            "how": "the measurement did not complete (%s), so the corpus "
+                   "was never shown this mutant and said nothing about this rule" % how})
         tally["unproved"] += 1
         return
     if raised or moved:
@@ -2269,7 +2279,7 @@ def run(manifest_path: Path) -> dict:
                             "control %r ended abnormally (%s); that is not a kill and "
                             "this run has no adequacy score" % (mut["label"], kind))
                         continue
-                    if kind in TERMINATED_KINDS:
+                    if _child_failure_is_termination(kind):
                         # Observed termination: the unmutated run completed on these
                         # same vectors and this one did not.
                         results.append({"group": group, "label": mut["label"],
