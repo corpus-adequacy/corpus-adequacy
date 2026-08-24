@@ -58,10 +58,13 @@ ESCAPED_DESCENDANT = """\
 import os, sys, time
 from pathlib import Path
 pid_path = Path(sys.argv[1])
+stop_path = Path(sys.argv[2])
 if os.fork() == 0:
     os.setsid()
     pid_path.write_text(str(os.getpid()))
-    time.sleep(30)
+    deadline = time.monotonic() + 30
+    while not stop_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
     os._exit(0)
 os._exit(0)
 """
@@ -523,7 +526,10 @@ class DescendantPipes(_WithTestCap):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             pid_path = tmp / "escaped.pid"
-            candidate = _probe(tmp, ESCAPED_DESCENDANT, str(pid_path))
+            stop_path = tmp / "escaped.stop"
+            candidate = _probe(
+                tmp, ESCAPED_DESCENDANT, str(pid_path), str(stop_path)
+            )
             worker = tmp / "worker.py"
             worker.write_text(
                 "import sys\n"
@@ -571,18 +577,26 @@ class DescendantPipes(_WithTestCap):
                     "escaped descendant witness was never created",
                 )
             finally:
+                stop_path.touch()
+                witness_deadline = time.monotonic() + 2
+                while (
+                    (not pid_path.exists() or not pid_path.stat().st_size)
+                    and time.monotonic() < witness_deadline
+                ):
+                    time.sleep(0.02)
                 if pid_path.exists() and pid_path.stat().st_size:
                     escaped_pid = int(pid_path.read_text())
                     _reap_pid(escaped_pid)
+                    reap_deadline = time.monotonic() + 2
+                    while _pid_alive(escaped_pid) and time.monotonic() < reap_deadline:
+                        time.sleep(0.02)
+                    self.assertFalse(
+                        _pid_alive(escaped_pid), "escaped descendant was not reaped"
+                    )
                 try:
                     os.killpg(supervisor.pid, signal.SIGKILL)
                 except OSError:
                     pass
-            if escaped_pid is not None:
-                deadline = time.monotonic() + 2
-                while _pid_alive(escaped_pid) and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                self.assertFalse(_pid_alive(escaped_pid), "escaped descendant was not reaped")
 
 
 class Mutations(unittest.TestCase):
