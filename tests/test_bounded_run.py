@@ -60,12 +60,17 @@ from pathlib import Path
 pid_path = Path(sys.argv[1])
 stop_path = Path(sys.argv[2])
 if os.fork() == 0:
+    time.sleep(0.25)
     os.setsid()
     pid_path.write_text(str(os.getpid()))
     deadline = time.monotonic() + 30
     while not stop_path.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     os._exit(0)
+for _ in range(200):
+    if pid_path.exists() and pid_path.stat().st_size:
+        break
+    time.sleep(0.01)
 os._exit(0)
 """
 
