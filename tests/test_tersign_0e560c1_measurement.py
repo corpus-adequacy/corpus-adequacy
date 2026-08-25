@@ -6,13 +6,16 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from unittest import mock
+
+import corpus_adequacy as ca
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OLD = REPO_ROOT / "measurements" / "tersign-1cc5ea32"
@@ -36,23 +39,32 @@ REPORT_SHA256 = "6b8a49ce5f63c2b5a38a6b336a601b5ef7feabe6611c2e44bf5d481702e1f2e
 SOURCE_SHA256 = "b9799f2205e4cc051a00bc1daa28f73cc255dff919469f1c036e1385822edd67"
 TOOL_CONTENT_SHA256 = "7a0f37f6c9f93daf88f96efc1f58f1f6f75264d150ab6eb72a0765d67c99037e"
 PUBLICATION_SOURCE_COMMIT = "aa2ef19efaa8f6140f7a1766553768984b60e5aa"
+PROCESS_LOCK_SKIP = "process/batch scoring requires an advisory lock"
 
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _canonical_tree_entry(relative: PurePath, data: bytes) -> bytes:
+    relative_bytes = relative.as_posix().encode("utf-8")
+    return b"".join((
+        len(relative_bytes).to_bytes(4, "big"),
+        relative_bytes,
+        len(data).to_bytes(8, "big"),
+        data,
+    ))
+
+
 def _tree_digest(root: Path) -> str:
+    entries = []
+    for path in root.rglob("*"):
+        if path.is_file():
+            relative = path.relative_to(root)
+            entries.append((relative.as_posix(), _canonical_tree_entry(relative, path.read_bytes())))
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        data = path.read_bytes()
-        digest.update(len(relative).to_bytes(4, "big"))
-        digest.update(relative)
-        digest.update(len(data).to_bytes(8, "big"))
-        digest.update(data)
+    for _relative, entry in sorted(entries):
+        digest.update(entry)
     return digest.hexdigest()
 
 
@@ -68,8 +80,22 @@ def _evaluate(case: Path) -> dict:
 
 
 class ProducerInputs(unittest.TestCase):
+    def test_tree_entry_paths_are_platform_independent(self):
+        data = b"exact fixture bytes\r\n"
+        posix = _canonical_tree_entry(PurePosixPath("cases/p25.json"), data)
+        windows = _canonical_tree_entry(PureWindowsPath(r"cases\p25.json"), data)
+        self.assertEqual(windows, posix)
+        self.assertEqual(hashlib.sha256(windows).digest(), hashlib.sha256(posix).digest())
+
     def test_historical_measurement_tree_is_immutable(self):
         self.assertEqual(_tree_digest(OLD), OLD_TREE_DIGEST)
+
+    def test_no_lock_simulation_skips_only_the_process_scoring_test(self):
+        with mock.patch.object(ca, "fcntl", None):
+            namespace = runpy.run_path(str(Path(__file__)), run_name="tersign_no_lock_sim")
+        method = namespace["RecordedMeasurement"].test_token_pair_bites_through_the_production_runner
+        self.assertTrue(getattr(method, "__unittest_skip__", False))
+        self.assertEqual(getattr(method, "__unittest_skip_why__", ""), PROCESS_LOCK_SKIP)
 
     def test_new_pinned_implementation_and_adapter_outputs_exist(self):
         self.assertEqual(_sha(NEW / "verify.py"), PIN_VERIFY)
@@ -165,6 +191,7 @@ class RecordedMeasurement(unittest.TestCase):
         self.assertGreater(integral[0]["moved"], 0)
         self.assertNotEqual(integral[0]["verdict"], "equivalent")
 
+    @unittest.skipIf(ca.fcntl is None, PROCESS_LOCK_SKIP)
     def test_token_pair_bites_through_the_production_runner(self):
         manifest = _read_json(NEW / "manifest.json")
         controls = [row for row in manifest["mutants"]["tersign"] if row.get("control")]
