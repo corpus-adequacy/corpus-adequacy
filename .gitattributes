@@ -1,5 +1,6 @@
 LICENSE text eol=lf
 fixtures/tersign-evidence-record-1cc5ea32/** text eol=lf
+tests/fixtures/tersign-evidence-record-0e560c1/** text eol=lf
 fixtures/tersign-verify-1cc5ea32/** text eol=lf
 measurements/tersign-1cc5ea32/** text eol=lf
 fixtures/algovoi-jcs-edge-aa53149c/** text eol=lf

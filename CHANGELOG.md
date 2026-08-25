@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+The Tersign evidence-record adapter now selects from one closed table containing
+the historical `1cc5ea32` pin and the `0e560c1` pin. Git sources require exact
+commit, manifest, vectors-tree, and vector-files identities; non-Git sources
+require a unique exact manifest and vector-files digest identity. Vector case
+bytes, including nested `payload_text`, are copied without normalization. This
+is adapter support only, not a measurement, score, publication, upstream
+endorsement, or correctness claim.
+
 POSIX pipe readers now wait interruptibly and report `_OutputDrainIncomplete`
 when a leader exits without both captured streams reaching EOF inside the
 bounded drain grace. An escaped descendant that retains pipe writers can no

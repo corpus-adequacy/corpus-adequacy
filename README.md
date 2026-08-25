@@ -46,9 +46,14 @@ not a missing field and not a new survivors key.
 python3 adapters/tersign_evidence_record.py <tersign-checkout> <empty-dest>
 ```
 
-The Tersign adapter copies one pinned evidence-record source
-(`1cc5ea32b3da4f195b55782c8a3573d8564673a7`) into files the existing process
-runner can consume. It does not import `verify.py`. Kind is not an outcome.
+The Tersign adapter copies either of two explicit pinned evidence-record sources
+(`1cc5ea32b3da4f195b55782c8a3573d8564673a7` or
+`0e560c1ad47f08177042c62754ebe6e0b482ad9a`) into files the existing process
+runner can consume. Git checkouts require an exact commit, manifest digest,
+vectors tree, and vector-files digest; non-Git copies require a unique exact
+manifest and vector-files digest identity. Unknown or mixed identities fail
+closed. It does not import
+`verify.py`, and copied vector bytes are not normalized. Kind is not an outcome.
 `source.json` records the pin and the source-gate results; it is not a
 `survivors.v0` document and does not score the suite. This is not authenticity,
 endorsement, completeness, a Tersign partnership, or a certification.

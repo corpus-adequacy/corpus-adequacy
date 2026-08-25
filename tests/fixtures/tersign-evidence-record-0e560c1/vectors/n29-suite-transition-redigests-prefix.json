@@ -1,0 +1,33 @@
+{
+  "id": "n29-suite-transition-redigests-prefix",
+  "kind": "boundary_binding",
+  "expect": "reject",
+  "reason": "boundary_reject",
+  "description": "The retroactive-re-digest class. The same transition event names the same three records \u2014 but the digest it binds is computed under the SUCCESSOR suite (sha3-256 over the identical canonical bytes). That is precisely the value a verifier arrives at if it helpfully re-hashes history under the new algorithm at a transition, which is what makes this vector discriminating rather than trivially wrong: an engine with that bug AGREES with the claimed digest and accepts. The binding to the bytes as originally committed is broken \u2014 any re-forged prefix that digests correctly under the new suite could stand in for the history \u2014 so prefix preservation across a transition means the prior suite's digest remains the binding, and this rejects.",
+  "input": {
+    "prefix": [
+      {
+        "event": "record",
+        "seq": 1
+      },
+      {
+        "event": "record",
+        "seq": 2
+      },
+      {
+        "event": "record",
+        "seq": 3
+      }
+    ],
+    "boundary_event": {
+      "event": "digest_suite_transition",
+      "ruleVersion": "suite-transition-v1",
+      "fromSuite": "keccak256-jcs",
+      "toSuite": "sha3-256-jcs",
+      "prefixDigest": "0x3afdd2170ef2c67f4a9663e1b3379a2fce008018713eab4bbf4b1ca889b309c8",
+      "position": 3,
+      "attestedPrefixLength": 3
+    },
+    "covered_through": 3
+  }
+}

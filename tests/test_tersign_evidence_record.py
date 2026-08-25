@@ -28,6 +28,11 @@ import tersign_evidence_record as ter  # noqa: E402
 ADAPTER = REPO_ROOT / "adapters" / "tersign_evidence_record.py"
 
 FIXTURE = REPO_ROOT / "fixtures" / "tersign-evidence-record-1cc5ea32"
+NEW_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "tersign-evidence-record-0e560c1"
+NEW_COMMIT = "0e560c1ad47f08177042c62754ebe6e0b482ad9a"
+NEW_MANIFEST_SHA256 = "40abdf703b3b731c685142aa24a2561f1cc4679a013d51fdcb9764a1658819c6"
+NEW_VECTORS_TREE = "fecf642073dd6b971aebba52bb67153efb1a1dfe"
+NEW_VECTORS_FILES_SHA256 = "f4244e4bbcb86126f70cd4750d0a6ce8c729a0ef9baca428fdea9929dc97afd3"
 N11 = "n11-integer-beyond-ijson-range"
 N10 = "n10-float-in-digest-domain"
 P12 = "p12-ijson-integer-boundary"
@@ -39,11 +44,159 @@ def _copy_source(tmp: Path) -> Path:
     return dest
 
 
+def _copy_new_source(tmp: Path) -> Path:
+    dest = tmp / "src"
+    shutil.copytree(NEW_FIXTURE, dest)
+    return dest
+
+
 def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        data = path.read_bytes()
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
+
+
 class SourceParity(unittest.TestCase):
+    def test_exact_new_upstream_pin_adapts(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = _copy_new_source(tmp)
+            dest = tmp / "out"
+            dest.mkdir()
+            with mock.patch.object(
+                    ter, "_git_ids", return_value=(NEW_COMMIT, NEW_VECTORS_TREE)):
+                ter.adapt(src, dest)
+            source = _read_json(dest / "source.json")
+            self.assertEqual(source["commit"], NEW_COMMIT)
+            self.assertEqual(source["vectors_tree"], NEW_VECTORS_TREE)
+
+    def test_non_git_new_fixture_requires_exact_digest_and_files_identity(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = _copy_new_source(tmp)
+            dest = tmp / "out"
+            dest.mkdir()
+            ter.adapt(src, dest)
+            source = _read_json(dest / "source.json")
+            self.assertEqual(source["manifest_sha256"], NEW_MANIFEST_SHA256)
+            self.assertEqual(source["counts"], {"vectors": 60, "valid": 25, "reject": 35})
+
+            changed_root = tmp / "changed"
+            changed_root.mkdir()
+            changed = _copy_new_source(changed_root)
+            p25 = changed / "vectors" / "p25-integer-token-in-text.json"
+            p25.write_bytes(p25.read_bytes().replace(b'{\\"amount\\": 2}', b'{\\"amount\\":2}'))
+            refused = tmp / "refused"
+            refused.mkdir()
+            with self.assertRaisesRegex(ter.AdapterError, r"digest|identity|pin"):
+                ter.adapt(changed, refused)
+            self.assertEqual(list(refused.iterdir()), [])
+
+    def test_unknown_and_mixed_git_identities_fail_closed(self):
+        identities = (
+            ("f" * 40, NEW_VECTORS_TREE),
+            (ter.PIN_COMMIT, NEW_VECTORS_TREE),
+            (NEW_COMMIT, ter.PIN_VECTORS_TREE),
+        )
+        for commit, tree in identities:
+            with self.subTest(commit=commit, tree=tree):
+                with tempfile.TemporaryDirectory() as d:
+                    tmp = Path(d)
+                    src = _copy_new_source(tmp)
+                    dest = tmp / "out"
+                    dest.mkdir()
+                    with mock.patch.object(ter, "_git_ids", return_value=(commit, tree)):
+                        with self.assertRaisesRegex(
+                                ter.AdapterError,
+                                "source manifest/vector body digest identity "
+                                "does not match any allowed pin"):
+                            ter.adapt(src, dest)
+                    self.assertEqual(list(dest.iterdir()), [])
+
+    def test_payload_text_pair_is_preserved_as_distinct_exact_strings(self):
+        expected = {
+            "p25-integer-token-in-text": '{"amount": 2}',
+            "n35-integer-valued-float-token": '{"amount": 2.0}',
+        }
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = _copy_new_source(tmp)
+            dest = tmp / "out"
+            dest.mkdir()
+            ter.adapt(src, dest)
+            for vector_id, payload_text in expected.items():
+                source_case = src / "vectors" / (vector_id + ".json")
+                emitted_case = dest / "cases" / (vector_id + ".json")
+                self.assertEqual(emitted_case.read_bytes(), source_case.read_bytes())
+                self.assertEqual(_read_json(emitted_case)["input"]["payload_text"], payload_text)
+
+    def test_historical_output_bytes_are_unchanged(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "out"
+            dest.mkdir()
+            ter.adapt(FIXTURE, dest)
+            self.assertEqual(
+                hashlib.sha256((dest / "vectors.json").read_bytes()).hexdigest(),
+                "678315a30887a5b899e8cc0cc36c4c8e8361cc4a587c7ed839b4f51ef717475d",
+            )
+            self.assertEqual(
+                hashlib.sha256((dest / "source.json").read_bytes()).hexdigest(),
+                "bf7094942d119fc5b57c917423c5fb7b6de110c26589690a800fa448db441cf2",
+            )
+            self.assertEqual(
+                _tree_digest(dest),
+                "a3029ef1daeed991a8ca3fc87cb7bf6e685174e5611c957c451c1f54649998dd",
+            )
+
+    def test_profile_table_is_closed_to_exactly_two_pins(self):
+        self.assertEqual(
+            {profile.commit for profile in ter.PIN_PROFILES},
+            {ter.PIN_COMMIT, NEW_COMMIT},
+        )
+        self.assertEqual(len(ter.PIN_PROFILES), 2)
+        new_profile = next(
+            profile for profile in ter.PIN_PROFILES if profile.commit == NEW_COMMIT)
+        self.assertEqual(new_profile.counts, (60, 25, 35))
+        self.assertEqual(new_profile.vectors_files_sha256, NEW_VECTORS_FILES_SHA256)
+        self.assertEqual(new_profile.kinds, ter.PINNED_KINDS)
+        self.assertEqual(new_profile.reasons, ter.PINNED_REASONS)
+
+    def test_new_counts_and_closures_are_profile_authoritative(self):
+        new_profile = next(
+            profile for profile in ter.PIN_PROFILES if profile.commit == NEW_COMMIT)
+        mutations = (
+            new_profile._replace(counts=(59, 25, 34)),
+            new_profile._replace(kinds=new_profile.kinds - {"canonical_bytes"}),
+            new_profile._replace(reasons=new_profile.reasons - {"number_domain_reject"}),
+        )
+        for mutated_profile in mutations:
+            with self.subTest(profile=mutated_profile):
+                with tempfile.TemporaryDirectory() as d:
+                    tmp = Path(d)
+                    src = _copy_new_source(tmp)
+                    dest = tmp / "out"
+                    dest.mkdir()
+                    profiles = tuple(
+                        mutated_profile if profile.commit == NEW_COMMIT else profile
+                        for profile in ter.PIN_PROFILES
+                    )
+                    with mock.patch.object(ter, "PIN_PROFILES", profiles):
+                        with self.assertRaises(ter.AdapterError):
+                            ter.adapt(src, dest)
+                    self.assertEqual(list(dest.iterdir()), [])
+
     def test_n11_body_reason_drift_refuses_before_output(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)

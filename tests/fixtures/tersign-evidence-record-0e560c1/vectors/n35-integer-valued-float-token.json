@@ -1,0 +1,11 @@
+{
+  "id": "n35-integer-valued-float-token",
+  "kind": "canonical_bytes",
+  "expect": "reject",
+  "reason": "number_domain_reject",
+  "description": "A number token with a fraction part whose VALUE is an integer: {\"amount\": 2.0}. The digest-domain boundary is the token class, not the value \u2014 JSON.parse collapses 2.0 to 2, so an engine reading parsed values sees a valid integer while an engine preserving float-ness rejects, and the two sign different verdicts over identical wire bytes. Rejecting the token class is the only deterministic cross-language rule. Kills the mutant that accepts integer-valued floats (survivor of the pre-p25 corpus, @Rul1an issue #4); the shipped Python engine already rejected, the shipped TS engine accepted until this pin.",
+  "input": {
+    "payload_text": "{\"amount\": 2.0}",
+    "claimed_canonical": "{\"amount\":2}"
+  }
+}

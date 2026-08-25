@@ -1,0 +1,49 @@
+{
+  "id": "n34-witnessed-inclusion-not-completeness",
+  "kind": "chain_set",
+  "expect": "reject",
+  "reason": "completeness_reject",
+  "description": "Rejecting twin of p24: seq 2 is absent from the presented set while the witness block carries a seven-cosignature checkpoint and inclusion proofs for seq 1, 2 AND 3 \u2014 a leaf index offered in place of the record that is not presented. A leaf index is a claim that something was included; it is not the record, and the evaluator cannot recompute a link over a leaf index. The log proves what it holds existed and that its own history is consistent; it cannot make a record the issuer did not present part of the set. An evaluator MUST reject on the gap (`missing seq [2] under committed head`) exactly as it would without the witness block \u2014 an engine that counted witnessed inclusions as presence, or read a cosigned checkpoint as a completeness attestation, accepts this vector and is wrong. No-omission requires a non-party attestation over the sequence itself, made when the records were issued; cosigners of a log the issuer writes to are not that party.",
+  "input": {
+    "head": {
+      "seq": 3,
+      "digest": "0xdb17ed57683dea4c9ff668a1e769503e933fcc4e133ea0a823f7ddfc7b6106cd"
+    },
+    "records": [
+      {
+        "seq": 1,
+        "artifact_digest": "0x4672842890404de85d907f76149e3edb90687d233ad7efbaabf887f888053ef4",
+        "prev_digest": null,
+        "link": "0xf34b26b3f8a9ab82f55baa26c92201624f09195ec0074fcc2af3e58c61b13079"
+      },
+      {
+        "seq": 3,
+        "artifact_digest": "0xdb17ed57683dea4c9ff668a1e769503e933fcc4e133ea0a823f7ddfc7b6106cd",
+        "prev_digest": "0x5a811da59710bb115a7744189a9732f27883180f5821caa7a99979bc33257c29",
+        "link": "0x657fcd8b25c7e8f9fa0b2f50b7f18e67781d9837014605e2ae6668ac95804f15"
+      }
+    ],
+    "witness": {
+      "checkpoint": {
+        "origin": "example.org/log",
+        "tree_size": 7574,
+        "cosignatures": 7,
+        "quorum": 4
+      },
+      "inclusion": [
+        {
+          "seq": 1,
+          "leaf_index": 7011
+        },
+        {
+          "seq": 2,
+          "leaf_index": 7012
+        },
+        {
+          "seq": 3,
+          "leaf_index": 7013
+        }
+      ]
+    }
+  }
+}

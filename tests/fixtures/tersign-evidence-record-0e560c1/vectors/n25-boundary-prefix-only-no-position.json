@@ -1,0 +1,28 @@
+{
+  "id": "n25-boundary-prefix-only-no-position",
+  "kind": "boundary_binding",
+  "expect": "reject",
+  "reason": "boundary_reject",
+  "description": "The fabricated-boundary class. The event names the prefix it extends TRUTHFULLY \u2014 the digest recomputes \u2014 but binds nothing about its own position in that prefix's continuation. Two conflicting continuations of the same prefix can therefore both name it truthfully, and a verifier accepts either without being able to say which the deployment committed to; an event appended later claiming an earlier effective point is indistinguishable from one that was always there. Demonstrated against a live implementation and reproduced four independent ways in modelcontextprotocol/modelcontextprotocol#3004 (2026-08-08/09), where @Tetsurohhori then made the binding retrospective and @navigatorbuilds restated the rule normatively.",
+  "input": {
+    "prefix": [
+      {
+        "event": "record",
+        "seq": 1
+      },
+      {
+        "event": "record",
+        "seq": 2
+      },
+      {
+        "event": "record",
+        "seq": 3
+      }
+    ],
+    "boundary_event": {
+      "event": "witness_ref_introduced",
+      "ruleVersion": "witness-ref-v1",
+      "prefixDigest": "0x359d141c2ce3530ee54762bc13d9a51676cdec13becc24deddc45fb536bbd086"
+    }
+  }
+}

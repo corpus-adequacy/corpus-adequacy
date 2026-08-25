@@ -1,0 +1,354 @@
+{
+  "suite": "evidence-record-conformance",
+  "version": "0.4.0",
+  "layer": "evidence-record",
+  "profile": "structural (stdlib): digests, canonical bytes, chain arithmetic, sequence closure, declared-claim evaluation. Counter-signature recovery over the links (secp256k1 personal_sign) is the crypto profile, outside the stdlib core \u2014 a structurally complete set recomputed wholesale by one forging party passes the structural predicate; the counter-signatures are what prevent that in production.",
+  "canonicalization": "RFC 8785 (JCS); vector domain is I-JSON with integer numerics (|n| <= 2^53-1); non-integer JSON number TOKENS rejected (number_domain_reject) \u2014 the boundary is the token class, so a fraction or exponent form rejects even when integer-valued (2.0, 1e2; p25/n35); duplicate object names rejected",
+  "content_address": "keccak256(utf8(canonical(payload)))",
+  "chain_link": "keccak256(artifact_digest || prev_digest || seq_uint64_be) \u2014 wire form of a genesis predecessor is null; 32 zero bytes is the hashing-time substitution for null",
+  "chain_set": "records chain raw artifact digests via prev pointers (genesis prev = null); head.digest equals the final record's artifact digest; completeness = every seq 1..head.seq present; where a record presents a link, it must recompute as keccak256(artifact || prev || seq_be8)",
+  "anchor_relation": "anchored_digest = sha256(subject_digest_bytes)",
+  "offer_binding": "receipt.offerDigest = keccak256(utf8(canonical(offer))); a receipt that commits to no offer digest cannot bind terms and fails closed",
+  "decision_evidence_binding": "within this suite, record.decisionEvidenceDigest = keccak256(utf8(canonical(decision_evidence))); a record presented as authority-decision evidence must bind the exact object. This instantiates the general match/missing/mismatch binding property and does not prescribe a digest, canonicalization, or field location for AUEC, MCP, or another protocol; producer truth and decision semantics remain out of scope",
+  "identifier_normalization": "two identity syntaxes, both evaluated by every criterion that compares identity (pinned by one accepting vector each under the per-kind two-sided gate): 0x-addresses compare after strip + lowercase; scheme-qualified identifiers (lowercase alnum scheme, one colon, printable non-space ASCII path) compare after strip, case-significant; digests compare after strip + lowercase; identifiers that do not parse after normalization fail closed",
+  "witnessed_inclusion": "witness material (a cosigned checkpoint, inclusion proofs) presented beside a chain set is permitted and NOT load-bearing for completeness: it evidences existence and the log's consistency, never no-omission; a set with a gap rejects on the gap regardless of how many parties cosigned the log (p24/n34). Completeness requires a non-party attestation over the sequence itself, made at issuance",
+  "commitment_derivation": "an independence claim reaches exactly as far as the record's DERIVED commitments, never a declared list (n22-n24): `settlement` when settlement_result.success is true and transaction is a non-empty string; `network` when settlement_result.network is a non-empty string; `delivery` when keccak256(utf8(deliverable_bytes)) == deliverable_digest. A record presenting none of these fields has no evaluable commitments (a scoped claim rejects as unevaluable); a record presenting them and committing to none has an EMPTY commitment set (a scoped claim rejects as overreach). Who delivered is not read by the derivation \u2014 position is the independence axis, decided before scope is",
+  "field_naming": "harness-level input keys are snake_case (settlement_result, deliverable_bytes, decision_evidence, boundary_event); a key that quotes a protocol's own field keeps that protocol's wire spelling wherever it sits (payTo, resourceUrl, offerDigest, decisionEvidenceDigest). Contributed vectors follow the same two rules; the suite does not rename a protocol's fields to match its own, and does not camelCase its own",
+  "vectors": [
+    {
+      "file": "p1-live-genesis-receipt.json",
+      "kind": "digest_recompute",
+      "expect": "valid"
+    },
+    {
+      "file": "p2-canonical-key-order.json",
+      "kind": "canonical_bytes",
+      "expect": "valid"
+    },
+    {
+      "file": "p3-integer-key-utf16-order.json",
+      "kind": "digest_recompute",
+      "expect": "valid"
+    },
+    {
+      "file": "p4-chain-link-genesis.json",
+      "kind": "chain_link",
+      "expect": "valid"
+    },
+    {
+      "file": "p5-live-bitcoin-anchor.json",
+      "kind": "anchor_relation",
+      "expect": "valid"
+    },
+    {
+      "file": "p6-chain-set-complete.json",
+      "kind": "chain_set",
+      "expect": "valid"
+    },
+    {
+      "file": "p7-phase-consistent.json",
+      "kind": "phase_claim",
+      "expect": "valid"
+    },
+    {
+      "file": "p8-non-party-attestation.json",
+      "kind": "independence_claim",
+      "expect": "valid"
+    },
+    {
+      "file": "p9-no-independence-claim.json",
+      "kind": "independence_claim",
+      "expect": "valid"
+    },
+    {
+      "file": "n1-value-drift.json",
+      "kind": "digest_recompute",
+      "expect": "reject",
+      "reason": "recompute_mismatch"
+    },
+    {
+      "file": "n2-hoisted-integer-keys.json",
+      "kind": "canonical_bytes",
+      "expect": "reject",
+      "reason": "canonicalization_reject"
+    },
+    {
+      "file": "n3-chain-link-wrong-prev.json",
+      "kind": "chain_link",
+      "expect": "reject",
+      "reason": "continuity_reject"
+    },
+    {
+      "file": "n4-omitted-record.json",
+      "kind": "chain_set",
+      "expect": "reject",
+      "reason": "completeness_reject"
+    },
+    {
+      "file": "n5-truncated-anchor.json",
+      "kind": "anchor_relation",
+      "expect": "reject",
+      "reason": "existence_reject"
+    },
+    {
+      "file": "n6-phase-confusion.json",
+      "kind": "phase_claim",
+      "expect": "reject",
+      "reason": "phase_reject"
+    },
+    {
+      "file": "n7-issuer-only-independence.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "p10-claim-set-independent.json",
+      "kind": "independence_claim",
+      "expect": "valid"
+    },
+    {
+      "file": "p11-claim-set-silence-only.json",
+      "kind": "independence_claim",
+      "expect": "valid"
+    },
+    {
+      "file": "n8-unrecognized-independence-claim.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "p12-ijson-integer-boundary.json",
+      "kind": "digest_recompute",
+      "expect": "valid"
+    },
+    {
+      "file": "p13-decimal-string-beside-integer.json",
+      "kind": "digest_recompute",
+      "expect": "valid"
+    },
+    {
+      "file": "n10-float-in-digest-domain.json",
+      "kind": "canonical_bytes",
+      "expect": "reject",
+      "reason": "number_domain_reject"
+    },
+    {
+      "file": "n11-integer-beyond-ijson-range.json",
+      "kind": "digest_recompute",
+      "expect": "reject",
+      "reason": "number_domain_reject"
+    },
+    {
+      "file": "p14-supplementary-plane-key-order.json",
+      "kind": "digest_recompute",
+      "expect": "valid"
+    },
+    {
+      "file": "n12-codepoint-key-order.json",
+      "kind": "canonical_bytes",
+      "expect": "reject",
+      "reason": "canonicalization_reject"
+    },
+    {
+      "file": "n13-party-alias-whitespace.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "n14-unparseable-attestor.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "n15-claim-without-attestations.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "n16-attestation-not-an-object.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "n17-renumbered-omission.json",
+      "kind": "chain_set",
+      "expect": "reject",
+      "reason": "continuity_reject"
+    },
+    {
+      "file": "n18-unrecognized-phase.json",
+      "kind": "phase_claim",
+      "expect": "reject",
+      "reason": "phase_reject"
+    },
+    {
+      "file": "p16-independence-scope-committed.json",
+      "kind": "independence_claim",
+      "expect": "valid"
+    },
+    {
+      "file": "n20-independence-scope-uncommitted.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "p17-independence-scope-derived-settlement.json",
+      "kind": "independence_claim",
+      "expect": "valid"
+    },
+    {
+      "file": "n21-independence-scope-empty-settlement.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "n22-independence-scope-declared-override.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "n23-independence-scope-null-declared.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "n24-independence-scope-declared-no-scope.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "p22-delivery-commitment-recomputed.json",
+      "kind": "independence_claim",
+      "expect": "valid"
+    },
+    {
+      "file": "n32-delivery-self-attested.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "p23-delivery-independence-within-commitment.json",
+      "kind": "independence_claim",
+      "expect": "valid"
+    },
+    {
+      "file": "n33-delivery-substitution-scope-overreach.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "p24-witnessed-complete-set.json",
+      "kind": "chain_set",
+      "expect": "valid"
+    },
+    {
+      "file": "n34-witnessed-inclusion-not-completeness.json",
+      "kind": "chain_set",
+      "expect": "reject",
+      "reason": "completeness_reject"
+    },
+    {
+      "file": "p18-boundary-binds-prefix-and-position.json",
+      "kind": "boundary_binding",
+      "expect": "valid"
+    },
+    {
+      "file": "n25-boundary-prefix-only-no-position.json",
+      "kind": "boundary_binding",
+      "expect": "reject",
+      "reason": "boundary_reject"
+    },
+    {
+      "file": "n26-coverage-claimed-over-empty-attestation.json",
+      "kind": "boundary_binding",
+      "expect": "reject",
+      "reason": "boundary_reject"
+    },
+    {
+      "file": "p19-authority-reduction-bound.json",
+      "kind": "decision_evidence_binding",
+      "expect": "valid"
+    },
+    {
+      "file": "n27-authority-reduction-unbound.json",
+      "kind": "decision_evidence_binding",
+      "expect": "reject",
+      "reason": "binding_reject"
+    },
+    {
+      "file": "n28-authority-reduction-substitution.json",
+      "kind": "decision_evidence_binding",
+      "expect": "reject",
+      "reason": "binding_reject"
+    },
+    {
+      "file": "p20-suite-transition-preserves-prefix.json",
+      "kind": "boundary_binding",
+      "expect": "valid"
+    },
+    {
+      "file": "n29-suite-transition-redigests-prefix.json",
+      "kind": "boundary_binding",
+      "expect": "reject",
+      "reason": "boundary_reject"
+    },
+    {
+      "file": "p21-independence-urn-identities.json",
+      "kind": "independence_claim",
+      "expect": "valid"
+    },
+    {
+      "file": "n30-independence-urn-self-attested.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "n31-independence-urn-alias-trailing-slash.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "p15-offer-binding.json",
+      "kind": "offer_binding",
+      "expect": "valid"
+    },
+    {
+      "file": "n19-offer-substitution.json",
+      "kind": "offer_binding",
+      "expect": "reject",
+      "reason": "binding_reject"
+    },
+    {
+      "file": "n9-unrecognized-member-in-claim-set.json",
+      "kind": "independence_claim",
+      "expect": "reject",
+      "reason": "independence_reject"
+    },
+    {
+      "file": "p25-integer-token-in-text.json",
+      "kind": "canonical_bytes",
+      "expect": "valid"
+    },
+    {
+      "file": "n35-integer-valued-float-token.json",
+      "kind": "canonical_bytes",
+      "expect": "reject",
+      "reason": "number_domain_reject"
+    }
+  ]
+}

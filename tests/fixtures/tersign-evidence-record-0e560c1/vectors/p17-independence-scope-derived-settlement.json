@@ -1,0 +1,31 @@
+{
+  "id": "p17-independence-scope-derived-settlement",
+  "kind": "independence_claim",
+  "expect": "valid",
+  "description": "Accepting twin of n21: independence claimed over 'settlement', where the commitments are DERIVED from the settlement result rather than declared by it. The result claims success and carries a resolvable transaction reference, so settlement is genuinely among the record's commitments and a non-party attestation may reach it.",
+  "input": {
+    "claimed": "independent",
+    "covers": [
+      "settlement"
+    ],
+    "settlement_result": {
+      "success": true,
+      "transaction": "0x9e1f4c2a8b7d6e5f0a3c1b8d7e6f5a4c3b2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f",
+      "network": "eip155:8453"
+    },
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6",
+        "role": "counter-signing ledger"
+      }
+    ]
+  }
+}

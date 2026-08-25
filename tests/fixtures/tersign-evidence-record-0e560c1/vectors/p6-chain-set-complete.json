@@ -1,0 +1,32 @@
+{
+  "id": "p6-chain-set-complete",
+  "kind": "chain_set",
+  "expect": "valid",
+  "description": "A complete per-seller set: every sequence number 1..head present, prev pointers continuous, per-record links recompute (link = keccak256(artifact || prev || seq_be8), prev = previous artifact digest \u2014 the production form each counter-signature covers), head digest matches the final record.",
+  "input": {
+    "head": {
+      "seq": 3,
+      "digest": "0xdb17ed57683dea4c9ff668a1e769503e933fcc4e133ea0a823f7ddfc7b6106cd"
+    },
+    "records": [
+      {
+        "seq": 1,
+        "artifact_digest": "0x4672842890404de85d907f76149e3edb90687d233ad7efbaabf887f888053ef4",
+        "prev_digest": null,
+        "link": "0xf34b26b3f8a9ab82f55baa26c92201624f09195ec0074fcc2af3e58c61b13079"
+      },
+      {
+        "seq": 2,
+        "artifact_digest": "0x5a811da59710bb115a7744189a9732f27883180f5821caa7a99979bc33257c29",
+        "prev_digest": "0x4672842890404de85d907f76149e3edb90687d233ad7efbaabf887f888053ef4",
+        "link": "0x24504b4a1fb4eedda727a2c08e05826d7b441d127457cbe9c16245d8a5eb9694"
+      },
+      {
+        "seq": 3,
+        "artifact_digest": "0xdb17ed57683dea4c9ff668a1e769503e933fcc4e133ea0a823f7ddfc7b6106cd",
+        "prev_digest": "0x5a811da59710bb115a7744189a9732f27883180f5821caa7a99979bc33257c29",
+        "link": "0x657fcd8b25c7e8f9fa0b2f50b7f18e67781d9837014605e2ae6668ac95804f15"
+      }
+    ]
+  }
+}

@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -43,15 +44,59 @@ PINNED_REASONS = frozenset({
     "independence_reject", "number_domain_reject", "phase_reject",
     "recompute_mismatch",
 })
-MANIFEST_KEYS = frozenset({
+OLD_MANIFEST_KEYS = frozenset({
     "anchor_relation", "canonicalization", "chain_link", "chain_set",
     "content_address", "decision_evidence_binding", "identifier_normalization",
     "layer", "offer_binding", "profile", "suite", "vectors", "version",
+})
+NEW_MANIFEST_KEYS = OLD_MANIFEST_KEYS | frozenset({
+    "commitment_derivation", "field_naming", "witnessed_inclusion",
 })
 BODY_KEYS = frozenset({
     "id", "kind", "expect", "input", "description", "reason", "provenance",
 })
 VECTORS_DIGEST_TAG = b"tersign-evidence-record.vectors.v0\n"
+
+
+class PinProfile(NamedTuple):
+    repository: str
+    commit: str
+    manifest_sha256: str
+    vectors_tree: str
+    vectors_files_sha256: str
+    license: str
+    manifest_keys: frozenset[str]
+    kinds: frozenset[str]
+    reasons: frozenset[str]
+    counts: tuple[int, int, int]
+
+
+PIN_PROFILES = (
+    PinProfile(
+        repository=PIN_REPOSITORY,
+        commit=PIN_COMMIT,
+        manifest_sha256=PIN_MANIFEST_SHA256,
+        vectors_tree=PIN_VECTORS_TREE,
+        vectors_files_sha256=PIN_VECTORS_FILES_SHA256,
+        license=PIN_LICENSE,
+        manifest_keys=OLD_MANIFEST_KEYS,
+        kinds=PINNED_KINDS,
+        reasons=PINNED_REASONS,
+        counts=(54, 22, 32),
+    ),
+    PinProfile(
+        repository="tersignhq/evidence-record-conformance",
+        commit="0e560c1ad47f08177042c62754ebe6e0b482ad9a",
+        manifest_sha256="40abdf703b3b731c685142aa24a2561f1cc4679a013d51fdcb9764a1658819c6",
+        vectors_tree="fecf642073dd6b971aebba52bb67153efb1a1dfe",
+        vectors_files_sha256="f4244e4bbcb86126f70cd4750d0a6ce8c729a0ef9baca428fdea9929dc97afd3",
+        license="Apache-2.0",
+        manifest_keys=NEW_MANIFEST_KEYS,
+        kinds=PINNED_KINDS,
+        reasons=PINNED_REASONS,
+        counts=(60, 25, 35),
+    ),
+)
 
 
 class AdapterError(Exception):
@@ -157,7 +202,7 @@ def _require_empty_dest(dest: Path) -> None:
         raise AdapterError("destination is not empty: %s" % dest)
 
 
-def _entry_reason(entry: dict, where: str) -> str | None:
+def _entry_reason(entry: dict, where: str, profile: PinProfile) -> str | None:
     expect = entry.get("expect")
     if expect not in ("valid", "reject"):
         raise AdapterError("%s expect must be valid or reject" % where)
@@ -167,7 +212,7 @@ def _entry_reason(entry: dict, where: str) -> str | None:
         allowed.add("reason")
         if "reason" not in entry:
             raise AdapterError("%s reject is missing reason" % where)
-        if entry["reason"] not in PINNED_REASONS:
+        if entry["reason"] not in profile.reasons:
             raise AdapterError("%s has unknown reason %r" % (where, entry["reason"]))
         extra = keys - allowed
         if extra:
@@ -181,6 +226,33 @@ def _entry_reason(entry: dict, where: str) -> str | None:
     return None
 
 
+def _select_profile(
+        commit: str | None,
+        tree: str | None,
+        manifest_sha256: str,
+        vectors_files_sha256: str) -> PinProfile:
+    if (commit is None) != (tree is None):
+        raise AdapterError("incomplete Git source identity")
+    if commit is None:
+        matches = [
+            profile for profile in PIN_PROFILES
+            if profile.manifest_sha256 == manifest_sha256
+            and profile.vectors_files_sha256 == vectors_files_sha256
+        ]
+    else:
+        matches = [
+            profile for profile in PIN_PROFILES
+            if profile.commit == commit
+            and profile.manifest_sha256 == manifest_sha256
+            and profile.vectors_tree == tree
+            and profile.vectors_files_sha256 == vectors_files_sha256
+        ]
+    if len(matches) != 1:
+        raise AdapterError(
+            "source manifest/vector body digest identity does not match any allowed pin")
+    return matches[0]
+
+
 def adapt(source: Path, dest: Path) -> None:
     source = Path(source)
     dest = Path(dest)
@@ -188,27 +260,12 @@ def adapt(source: Path, dest: Path) -> None:
     manifest_raw, manifest = _load_json(source / "MANIFEST.json")
     if not isinstance(manifest, dict):
         raise AdapterError("MANIFEST.json must be an object")
-    extra_top = set(manifest) - MANIFEST_KEYS
-    if extra_top:
-        raise AdapterError("MANIFEST.json has unknown fields %s" % sorted(extra_top))
-    if _hex_digest(manifest_raw) != PIN_MANIFEST_SHA256:
-        raise AdapterError("manifest digest does not match the pin")
-    commit, tree = _git_ids(source)
-    if commit is not None and commit != PIN_COMMIT:
-        raise AdapterError("source commit %s does not match the pin" % commit)
-    if tree is not None and tree != PIN_VECTORS_TREE:
-        raise AdapterError("vectors tree %s does not match the pin" % tree)
     if "vectors" not in manifest or not isinstance(manifest["vectors"], list):
         raise AdapterError("MANIFEST.json vectors must be an array")
     vectors_dir = source / "vectors"
     on_disk = set(_scandir_regular_names(vectors_dir))
     collected: list[tuple[str, bytes]] = []
-    rows = []
-    seen_ids: set[str] = set()
     seen_files: set[str] = set()
-    kinds = {}
-    reasons = set()
-    valid = reject = 0
     for i, entry in enumerate(manifest["vectors"]):
         where = "MANIFEST.json vectors[%d]" % i
         if not isinstance(entry, dict):
@@ -219,12 +276,37 @@ def adapt(source: Path, dest: Path) -> None:
         seen_files.add(filename)
         if filename not in on_disk:
             raise AdapterError("missing vector file %s" % filename)
+        collected.append((filename, _load_bytes(vectors_dir / filename)))
+    extra_files = sorted(on_disk - seen_files)
+    if extra_files:
+        raise AdapterError("unlisted files under vectors/: %s" % extra_files)
+    commit, tree = _git_ids(source)
+    profile = _select_profile(
+        commit,
+        tree,
+        _hex_digest(manifest_raw),
+        _vectors_files_digest(sorted(collected)),
+    )
+    extra_top = set(manifest) - profile.manifest_keys
+    if extra_top:
+        raise AdapterError("MANIFEST.json has unknown fields %s" % sorted(extra_top))
+
+    rows = []
+    seen_ids: set[str] = set()
+    kinds = {}
+    reasons = set()
+    valid = reject = 0
+    for i, (entry, collected_file) in enumerate(zip(manifest["vectors"], collected)):
+        where = "MANIFEST.json vectors[%d]" % i
+        filename, body_raw = collected_file
         kind = entry.get("kind")
-        if kind not in PINNED_KINDS:
+        if kind not in profile.kinds:
             raise AdapterError("%s has unknown kind %r" % (where, kind))
-        reason = _entry_reason(entry, where)
-        body_path = vectors_dir / filename
-        body_raw, body = _load_json(body_path)
+        reason = _entry_reason(entry, where, profile)
+        try:
+            body = ca._parse_projection_json(body_raw)
+        except (ca.ManifestError, json.JSONDecodeError) as exc:
+            raise _wrap(exc) from exc
         if not isinstance(body, dict):
             raise AdapterError("%s body must be an object" % filename)
         extra_body = set(body) - BODY_KEYS
@@ -251,7 +333,6 @@ def adapt(source: Path, dest: Path) -> None:
             reject += 1
             reasons.add(reason)
         kinds.setdefault(kind, set()).add(entry["expect"])
-        collected.append((filename, body_raw))
         rows.append({
             "authored_kind": kind,
             "expected_reason": reason,
@@ -259,32 +340,34 @@ def adapt(source: Path, dest: Path) -> None:
             "vector_id": vector_id,
             "vector_path": "cases/%s.json" % vector_id,
         })
-    extra_files = sorted(on_disk - seen_files)
-    if extra_files:
-        raise AdapterError("unlisted files under vectors/: %s" % extra_files)
-    if len(rows) != 54 or valid != 22 or reject != 32:
-        raise AdapterError("observed counts %d/%d/%d do not match 54/22/32"
-                           % (len(rows), valid, reject))
-    if set(kinds) != PINNED_KINDS:
+    expected_vectors, expected_valid, expected_reject = profile.counts
+    if (len(rows), valid, reject) != profile.counts:
+        raise AdapterError(
+            "observed counts %d/%d/%d do not match %d/%d/%d"
+            % (len(rows), valid, reject,
+               expected_vectors, expected_valid, expected_reject))
+    if set(kinds) != profile.kinds:
         raise AdapterError("kind closure does not match the pin")
-    if reasons != PINNED_REASONS:
+    if reasons != profile.reasons:
         raise AdapterError("reason closure does not match the pin")
     one_sided = sorted(k for k, vs in kinds.items() if vs != {"valid", "reject"})
     if one_sided:
         raise AdapterError("kinds missing both verdicts: %s" % one_sided)
-    if _vectors_files_digest(sorted(collected)) != PIN_VECTORS_FILES_SHA256:
-        raise AdapterError("vectors file digest does not match the pin")
     rows.sort(key=lambda row: row["vector_id"])
     source_doc = {
         "schema": SOURCE_SCHEMA,
-        "repository": PIN_REPOSITORY,
-        "commit": PIN_COMMIT,
-        "manifest_sha256": PIN_MANIFEST_SHA256,
-        "vectors_tree": PIN_VECTORS_TREE,
-        "license": PIN_LICENSE,
-        "counts": {"vectors": 54, "valid": 22, "reject": 32},
-        "kinds": sorted(PINNED_KINDS),
-        "reasons": sorted(PINNED_REASONS),
+        "repository": profile.repository,
+        "commit": profile.commit,
+        "manifest_sha256": profile.manifest_sha256,
+        "vectors_tree": profile.vectors_tree,
+        "license": profile.license,
+        "counts": {
+            "vectors": expected_vectors,
+            "valid": expected_valid,
+            "reject": expected_reject,
+        },
+        "kinds": sorted(profile.kinds),
+        "reasons": sorted(profile.reasons),
         "source_validation": {
             "body_manifest_agreement": True,
             "closures_match_pin": True,

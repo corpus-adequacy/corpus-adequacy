@@ -1,0 +1,23 @@
+{
+  "id": "p9-no-independence-claim",
+  "kind": "independence_claim",
+  "expect": "valid",
+  "description": "A record that claims nothing about independence, attested only by parties. Silence is a valid state: the criterion disqualifies unsupported CLAIMS, so a verifier that rejects every party-attested record regardless of what it claims fails this vector.",
+  "input": {
+    "claimed": "none",
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x3333333333333333333333333333333333333333",
+        "role": "payee"
+      }
+    ]
+  }
+}
