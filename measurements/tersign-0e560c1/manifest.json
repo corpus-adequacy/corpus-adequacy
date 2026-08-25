@@ -1,0 +1,107 @@
+{
+  "accepted_exit_codes": [
+    0
+  ],
+  "build": [],
+  "default_group": "tersign",
+  "entrypoint_command": [
+    "python3",
+    "tersign_checks.py",
+    "{vector}"
+  ],
+  "equivalent": {
+    "tersign": [
+      {
+        "label": "boundary_binding skips empty-attested coverage refusal",
+        "reason": "Equivalent on the declared outcome_from projection. Reaching this guard requires covered to be a non-negative int and attested an int, so `attested <= 0 < covered` implies covered > 0 >= attested, which implies `covered > attested` on the very next line. Both branches return the same (verdict, reason) pair, reject/boundary_reject, differing only in the detail string, and tersign_checks.py projects verdict and reason without detail. No input that reaches this line can distinguish the two, so no vector can be asked for and the upstream corpus has no gap here: n26-coverage-claimed-over-empty-attestation pins the rule via the subsuming guard. The equivalence is relative to this projection, not absolute: widening outcome_from to carry detail would make this mutant distinguishable again."
+      }
+    ]
+  },
+  "id_key": "vector_id",
+  "implementation": "tersign_checks.py",
+  "implementation_sources": [
+    "tersign_checks.py",
+    "verify.py",
+    "keccak.py"
+  ],
+  "mutants": {
+    "tersign": [
+      {
+        "anchor": "if isinstance(value, float):\n        raise ValueError(\"non-integer JSON number in the digest domain\")",
+        "label": "accept integer-valued floats and serialize them as integers",
+        "replacement": "if isinstance(value, float):\n        if value.is_integer():\n            return canonical(int(value))\n        raise ValueError(\"non-integer JSON number in the digest domain\")"
+      },
+      {
+        "anchor": "if abs(value) > 2**53 - 1:",
+        "label": "remove the greater-than 2^53-1 refusal",
+        "replacement": "if False:"
+      },
+      {
+        "anchor": "abs(value) > 2**53 - 1",
+        "control": true,
+        "label": "CONTROL tighten the safe-integer bound to greater-than-or-equal",
+        "replacement": "abs(value) >= 2**53 - 1"
+      },
+      {
+        "anchor": "raise ValueError(\"non-integer JSON number in the digest domain\")",
+        "control": true,
+        "label": "CONTROL permit ordinary fractional floats through canonicalization",
+        "replacement": "return json.dumps(value)"
+      },
+      {
+        "anchor": "if got != expected:\n        return \"reject\", \"recompute_mismatch\"",
+        "label": "digest_recompute accepts a mismatched expected digest",
+        "replacement": "if False:\n        return \"reject\", \"recompute_mismatch\""
+      },
+      {
+        "anchor": "if got != inp[\"claimed_canonical\"]:",
+        "label": "canonical_bytes accepts non-canonical claimed bytes",
+        "replacement": "if False and got != inp[\"claimed_canonical\"]:"
+      },
+      {
+        "anchor": "if got != expected:\n        return \"reject\", \"continuity_reject\", f\"recomputed link {got}\"",
+        "label": "chain_link accepts a recomputed link mismatch",
+        "replacement": "if False:\n        return \"reject\", \"continuity_reject\", f\"recomputed link {got}\""
+      },
+      {
+        "anchor": "if seqs != expected:",
+        "label": "chain_set skips committed-sequence completeness",
+        "replacement": "if False and seqs != expected:"
+      },
+      {
+        "anchor": "if got != anchored:",
+        "label": "anchor_relation accepts a subject/anchor digest mismatch",
+        "replacement": "if False and got != anchored:"
+      },
+      {
+        "anchor": "if phase != presented:",
+        "label": "phase_claim accepts a phase/presented mismatch",
+        "replacement": "if False and phase != presented:"
+      },
+      {
+        "anchor": "if not outside:",
+        "label": "independence_claim accepts party-only attestation",
+        "replacement": "if False and not outside:"
+      },
+      {
+        "anchor": "\"offerDigest\"",
+        "label": "offer_binding reads a different commitment field",
+        "replacement": "\"offerDigestX\""
+      },
+      {
+        "anchor": "\"decisionEvidenceDigest\"",
+        "label": "decision_evidence_binding reads a different commitment field",
+        "replacement": "\"decisionEvidenceDigestX\""
+      }
+    ]
+  },
+  "outcome_from": [
+    "verdict",
+    "reason"
+  ],
+  "repo_root": ".",
+  "runner": "process",
+  "schema": "corpus-adequacy.manifest.v0",
+  "vector_path_key": "vector_path",
+  "vectors": "vectors.json"
+}

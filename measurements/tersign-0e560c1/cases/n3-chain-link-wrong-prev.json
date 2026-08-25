@@ -1,0 +1,13 @@
+{
+  "id": "n3-chain-link-wrong-prev",
+  "kind": "chain_link",
+  "expect": "reject",
+  "reason": "continuity_reject",
+  "description": "Link claimed against the wrong predecessor (self-referential prev). Must reject: the link digest binds the true prev.",
+  "input": {
+    "artifact_digest": "0xe5874f1ffe87f0a6dd9eb157730f67b86ee4538b125fe30fcc4e165213dd3fc4",
+    "prev_digest": "0xe5874f1ffe87f0a6dd9eb157730f67b86ee4538b125fe30fcc4e165213dd3fc4",
+    "seq": 1,
+    "expected_link": "0x837c2d85db422b59f89527ef33bfe862af7230895635b63141b09cde169187a5"
+  }
+}

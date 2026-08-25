@@ -1,0 +1,32 @@
+{
+  "id": "n21-independence-scope-empty-settlement",
+  "kind": "independence_claim",
+  "expect": "reject",
+  "reason": "independence_reject",
+  "description": "Rejecting twin of p17, and the reason commitments must be DERIVED rather than declared. x402 v2 \u00a75.3.2 defines the empty string as what `transaction` carries when settlement failed, while the type only requires a string \u2014 so `success: true` with `transaction: \"\"` is well formed and commits to no settlement anyone can resolve. A declared commitment list would let such a record assert the very scope the commitment-scope rule exists to bound, making the rule vacuous exactly where it matters. Deriving the commitments off the result rejects it without resolving anything on-chain. Reported by @Rul1an (issue #4).",
+  "input": {
+    "claimed": "independent",
+    "covers": [
+      "settlement"
+    ],
+    "settlement_result": {
+      "success": true,
+      "transaction": "",
+      "network": "eip155:8453"
+    },
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6",
+        "role": "counter-signing ledger"
+      }
+    ]
+  }
+}

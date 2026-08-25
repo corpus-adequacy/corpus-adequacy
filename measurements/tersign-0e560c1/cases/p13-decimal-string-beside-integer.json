@@ -1,0 +1,15 @@
+{
+  "id": "p13-decimal-string-beside-integer",
+  "kind": "digest_recompute",
+  "expect": "valid",
+  "description": "Pinned in lockstep with the compliance-fields extension (x402-foundation/x402#2853, Numbers): a fractional amount as a decimal STRING with a trailing zero, beside an exact integer \u2014 the only two value forms the record domain admits. A pipeline that coerces the numeric-looking string through a number type re-emits 1.1 (dropping the trailing zero) and fails the digest; the exact integer serializes identically everywhere. Digest cross-checked on two unrelated stacks before pinning.",
+  "input": {
+    "payload": {
+      "tax": {
+        "amount": "1.10"
+      },
+      "issuedAt": 1735689600
+    },
+    "expected_digest": "0x81086b5801b1bfd992e4d1e929f54907e0d3be0e8ede94f1da1a954b4e78b250"
+  }
+}

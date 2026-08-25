@@ -1,0 +1,15 @@
+{
+  "id": "n6-phase-confusion",
+  "kind": "phase_claim",
+  "expect": "reject",
+  "reason": "phase_reject",
+  "description": "A funding-phase record presented as delivery evidence. Economic phases must not collapse: a receipt for one phase MUST NOT verify as evidence of a later one.",
+  "input": {
+    "record": {
+      "economic_phase": "funding",
+      "amount": "10",
+      "asset": "USDC"
+    },
+    "presented_as": "delivery"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "p2-canonical-key-order",
+  "kind": "canonical_bytes",
+  "expect": "valid",
+  "description": "Frozen cross-implementation pin: canonical form of {b:'x',a:1}.",
+  "input": {
+    "payload": {
+      "b": "x",
+      "a": 1
+    },
+    "claimed_canonical": "{\"a\":1,\"b\":\"x\"}"
+  }
+}

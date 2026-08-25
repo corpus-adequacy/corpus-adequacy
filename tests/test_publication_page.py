@@ -545,11 +545,16 @@ class PublicationPage(unittest.TestCase):
         rc = rpp.main(["--root", str(REPO_ROOT), "--out", str(site), "--check"])
         self.assertEqual(rc, 0)
 
-    def test_live_repo_discovers_exactly_one_tersign_card(self):
+    def test_live_repo_renders_every_indexed_measurement_once(self):
         page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
-        self.assertEqual(page.count('class="card"'), 2)
+        _index_bytes, entries = rpp.load_publication_index(REPO_ROOT)
         results = page[page.find("<h2>Committed records</h2>") :]
-        self.assertIn("tersign-1cc5ea32", results)
+        rendered_ids = re.findall(
+            r'<li class="card">\s*<h3>[^<]+</h3>\s*'
+            r'<p>corpus id <span class="mono">([^<]+)</span></p>',
+            results,
+        )
+        self.assertEqual(rendered_ids, [entry["id"] for entry in entries])
         self.assertNotIn("void run attempt", results.lower())
         self.assertIn(REPORT_SHA256, page)
         self.assertIn("void run attempt", page.lower())
@@ -957,10 +962,13 @@ class FirstRunOrientation(unittest.TestCase):
     def test_live_overview_has_first_run_orientation(self):
         source_commit = "f" * 40
         page = rpp.render_html(REPO_ROOT, source_commit=source_commit)
-        doc = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
+        _index_bytes, entries = rpp.load_publication_index(REPO_ROOT)
+        directory = entries[-1]["id"]
+        report_path = REPO_ROOT / "measurements" / directory / "report.v0.json"
+        doc = json.loads(report_path.read_text(encoding="utf-8"))
         self._assert_orientation(
             page,
-            "tersign-1cc5ea32",
+            directory,
             source_commit,
             doc["tool_commit"],
             doc["tool_content_sha256"],
@@ -969,7 +977,10 @@ class FirstRunOrientation(unittest.TestCase):
 
     def test_extracted_first_run_route_runs_from_empty_tempdir(self):
         page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
-        _assert_survivors_v0(_run_extracted_script(_first_run_script(page)))
+        script = _first_run_script(page)
+        _index_bytes, entries = rpp.load_publication_index(REPO_ROOT)
+        self.assertEqual(script.splitlines()[2], _inspect_command(entries[-1]["id"]))
+        _assert_survivors_v0(_run_extracted_script(script))
 
     def test_fixture_overview_binds_listed_report_inspect_path(self):
         source_commit = "a" * 40

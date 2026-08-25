@@ -4,6 +4,11 @@
       "id": "tersign-1cc5ea32",
       "report_sha256": "d7c9039da10bd444a4861ef9d9d62565ab7bd4aa29186583335ac8c08dbc7f65",
       "source_sha256": "bf7094942d119fc5b57c917423c5fb7b6de110c26589690a800fa448db441cf2"
+    },
+    {
+      "id": "tersign-0e560c1",
+      "report_sha256": "6b8a49ce5f63c2b5a38a6b336a601b5ef7feabe6611c2e44bf5d481702e1f2ee",
+      "source_sha256": "b9799f2205e4cc051a00bc1daa28f73cc255dff919469f1c036e1385822edd67"
     }
   ],
   "schema": "corpus-adequacy.publication-index.v0"
