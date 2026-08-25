@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="projection-digest" content="7342ddf31e740bec3d194606533072fabdacd9a376b7133460a80ed9aacf9a26">
+<meta name="projection-digest" content="3642b57a3c84ef3d06118306af62c3060814ea6c04d1bf04382a7a50b317dd44">
 <meta name="source-commit" content="aa2ef19efaa8f6140f7a1766553768984b60e5aa">
 <title>Published corpus-adequacy records</title>
 <style>
@@ -43,7 +43,6 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 <p>Obtain the tagged tool, then inspect. The inspect line reads existing report bytes and does not measure.</p>
 <pre><code>git clone --depth 1 --branch v0.1.2 https://github.com/corpus-adequacy/corpus-adequacy.git
 cd corpus-adequacy
-python3 corpus_adequacy.py --survivors measurements/tersign-1cc5ea32/report.v0.json --json
 python3 corpus_adequacy.py --survivors measurements/tersign-0e560c1/report.v0.json --json</code></pre>
 <p>The card below keeps the measurement command. exit 1 with --json is a completed inadequate measurement with declared survivors, not a crash; exit 2 is refusal.</p>
 <p>report tool_commit <span class="mono">a51fc94c501bddd79678382083a9677338c533e8</span></p>

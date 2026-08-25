@@ -690,8 +690,11 @@ def _clone_command() -> str:
 
 
 def _first_run_route(records: list[dict]) -> str:
-    lines = [_clone_command(), "cd corpus-adequacy"]
-    lines.extend(_inspect_command(record) for record in records)
+    lines = [
+        _clone_command(),
+        "cd corpus-adequacy",
+        _inspect_command(records[-1]),
+    ]
     return "\n".join(lines)
 
 
