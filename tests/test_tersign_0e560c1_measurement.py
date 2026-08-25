@@ -6,8 +6,10 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -21,11 +23,17 @@ CANONICAL_WRAPPER = REPO_ROOT / "measurements" / "tersign_checks.py"
 PIN_COMMIT = "0e560c1ad47f08177042c62754ebe6e0b482ad9a"
 PIN_MANIFEST = "40abdf703b3b731c685142aa24a2561f1cc4679a013d51fdcb9764a1658819c6"
 PIN_VECTORS_TREE = "fecf642073dd6b971aebba52bb67153efb1a1dfe"
+PIN_ROOT_TREE = "54314f6a4dc513b9356624f1f6d14e5228c1ad64"
+PIN_VECTOR_FILES = "f4244e4bbcb86126f70cd4750d0a6ce8c729a0ef9baca428fdea9929dc97afd3"
 PIN_VERIFY = "8041a3cb678e8777f6565551da2b258558030b31ee0e80bf1bb1a0bf49cb5f2e"
 PIN_KECCAK = "f541c8a43a288f61a147dd43accea048eb9f55a095ca3b9dbf3f88341d469190"
 PIN_LICENSE = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 OLD_TREE_DIGEST = "e375d1f197b375db950220c432ebc2a93a56c71038fd838751bbce998964adee"
 INTEGRAL_FLOAT = "accept integer-valued floats and serialize them as integers"
+PRODUCER_COMMIT = "b6f4e3fde79637bc809407bf8efd4c813dfe0959"
+REPORT_SHA256 = "6b8a49ce5f63c2b5a38a6b336a601b5ef7feabe6611c2e44bf5d481702e1f2ee"
+SOURCE_SHA256 = "b9799f2205e4cc051a00bc1daa28f73cc255dff919469f1c036e1385822edd67"
+TOOL_CONTENT_SHA256 = "7a0f37f6c9f93daf88f96efc1f58f1f6f75264d150ab6eb72a0765d67c99037e"
 
 
 def _sha(path: Path) -> str:
@@ -136,6 +144,96 @@ class ProducerInputs(unittest.TestCase):
             self.assertEqual(case.read_bytes(), upstream.read_bytes())
             self.assertEqual(_read_json(case)["input"]["payload_text"], payload_text)
 
+
+class RecordedMeasurement(unittest.TestCase):
+    def test_report_closes_over_clean_producer_commit_and_inputs(self):
+        report = _read_json(NEW / "report.v0.json")
+        self.assertEqual(_sha(NEW / "report.v0.json"), REPORT_SHA256)
+        self.assertEqual(report["tool_commit"], PRODUCER_COMMIT)
+        self.assertEqual(report["tool_source_state"], "exact")
+        self.assertEqual(report["tool_content_sha256"], "sha256:" + TOOL_CONTENT_SHA256)
+        self.assertEqual(report["manifest_sha256"], "sha256:" + _sha(NEW / "manifest.json"))
+        self.assertEqual(report["control_status"], "killed")
+        self.assertEqual(
+            [row["verdict"] for row in report["mutants"][:2]],
+            ["control-killed", "control-killed"],
+        )
+        integral = [row for row in report["mutants"] if row["label"] == INTEGRAL_FLOAT]
+        self.assertEqual(len(integral), 1)
+        self.assertGreater(integral[0]["moved"], 0)
+        self.assertNotEqual(integral[0]["verdict"], "equivalent")
+
+    def test_token_pair_bites_through_the_production_runner(self):
+        manifest = _read_json(NEW / "manifest.json")
+        controls = [row for row in manifest["mutants"]["tersign"] if row.get("control")]
+        integral = next(
+            row for row in manifest["mutants"]["tersign"]
+            if row["label"] == INTEGRAL_FLOAT
+        )
+        vector_ids = (
+            "p12-ijson-integer-boundary",
+            "p25-integer-token-in-text",
+            "n35-integer-valued-float-token",
+        )
+        vectors = _read_json(NEW / "vectors.json")
+        vectors["vectors"] = [
+            row for row in vectors["vectors"] if row["vector_id"] in vector_ids
+        ]
+        manifest["mutants"]["tersign"] = [integral, *controls]
+        manifest["equivalent"] = {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cases").mkdir()
+            for name in ("tersign_checks.py", "verify.py", "keccak.py"):
+                shutil.copy2(NEW / name, root / name)
+            for vector_id in vector_ids:
+                shutil.copy2(NEW / "cases" / (vector_id + ".json"), root / "cases")
+            (root / "vectors.json").write_text(
+                json.dumps(vectors, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            (root / "manifest.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            proc = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "corpus_adequacy.py"),
+                 str(root / "manifest.json"), "--json"],
+                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=60,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        report = json.loads(proc.stdout)
+        self.assertEqual(report["control_status"], "killed")
+        self.assertEqual(
+            [row["verdict"] for row in report["mutants"][:2]],
+            ["control-killed", "control-killed"],
+        )
+        integral_row = next(
+            row for row in report["mutants"] if row["label"] == INTEGRAL_FLOAT
+        )
+        self.assertEqual(integral_row["verdict"], "killed")
+        self.assertEqual(integral_row["moved"], 1)
+
+    def test_provenance_records_exact_identities_and_nonclaims(self):
+        text = (NEW / "PROVENANCE.md").read_text(encoding="utf-8")
+        for identity in (
+            PRODUCER_COMMIT,
+            REPORT_SHA256,
+            SOURCE_SHA256,
+            TOOL_CONTENT_SHA256,
+            PIN_COMMIT,
+            PIN_MANIFEST,
+            PIN_VECTORS_TREE,
+            PIN_ROOT_TREE,
+            PIN_VECTOR_FILES,
+            PIN_VERIFY,
+            PIN_KECCAK,
+        ):
+            self.assertIn(identity, text)
+        self.assertIn("## Non-claims", text)
+        self.assertIn("not upstream correctness", text)
+        self.assertIn("not certification", text)
+        self.assertIn("not endorsement", text)
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

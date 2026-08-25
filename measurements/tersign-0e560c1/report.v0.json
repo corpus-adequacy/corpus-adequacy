@@ -1,0 +1,142 @@
+{
+  "acknowledged_digests": 0,
+  "adequate": true,
+  "control_status": "killed",
+  "corpus_digest": null,
+  "declared_total": 12,
+  "diagnostic_channel_declared": false,
+  "equivalent": 1,
+  "failures": [],
+  "hole_ratio": 0.0,
+  "killed": 11,
+  "known_holes": 0,
+  "manifest": "measurements/tersign-0e560c1/manifest.json",
+  "manifest_sha256": "sha256:8303d97632acbd1dd5722a9f881b84b02f280e36250a37f234799434b9918fd1",
+  "mutants": [
+    {
+      "group": "tersign",
+      "how": "harness detects a change on this path",
+      "label": "CONTROL tighten the safe-integer bound to greater-than-or-equal",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "control-killed"
+    },
+    {
+      "group": "tersign",
+      "how": "harness detects a change on this path",
+      "label": "CONTROL permit ordinary fractional floats through canonicalization",
+      "moved": 2,
+      "scope": "declared",
+      "verdict": "control-killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "accept integer-valued floats and serialize them as integers",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "remove the greater-than 2^53-1 refusal",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "digest_recompute accepts a mismatched expected digest",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "2 vector(s) moved",
+      "label": "canonical_bytes accepts non-canonical claimed bytes",
+      "moved": 2,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "chain_link accepts a recomputed link mismatch",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "2 vector(s) moved",
+      "label": "chain_set skips committed-sequence completeness",
+      "moved": 2,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "anchor_relation accepts a subject/anchor digest mismatch",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "phase_claim accepts a phase/presented mismatch",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "5 vector(s) moved",
+      "label": "independence_claim accepts party-only attestation",
+      "moved": 5,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "offer_binding reads a different commitment field",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "1 vector(s) moved",
+      "label": "decision_evidence_binding reads a different commitment field",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "killed"
+    },
+    {
+      "group": "tersign",
+      "how": "Equivalent on the declared outcome_from projection. Reaching this guard requires covered to be a non-negative int and attested an int, so `attested <= 0 < covered` implies covered > 0 >= attested, which implies `covered > attested` on the very next line. Both branches return the same (verdict, reason) pair, reject/boundary_reject, differing only in the detail string, and tersign_checks.py projects verdict and reason without detail. No input that reaches this line can distinguish the two, so no vector can be asked for and the upstream corpus has no gap here: n26-coverage-claimed-over-empty-attestation pins the rule via the subsuming guard. The equivalence is relative to this projection, not absolute: widening outcome_from to carry detail would make this mutant distinguishable again.",
+      "label": "boundary_binding skips empty-attested coverage refusal",
+      "moved": 0,
+      "verdict": "equivalent"
+    }
+  ],
+  "originals_unverified_against_head": [],
+  "out_of_scope_ratio": 0.0,
+  "runner": "process",
+  "schema": "corpus-adequacy.report.v0",
+  "score_means": "percent of author-declared in-scope rules killed; NOT percent of the rules the implementation actually has. Silent mutants count in the denominator and never the numerator. Without diagnostic_from the silent class is unreachable, so a zero there means it was not measured, not that none exist",
+  "score_percent": 100.0,
+  "silent": 0,
+  "survived": 0,
+  "tool_commit": "b6f4e3fde79637bc809407bf8efd4c813dfe0959",
+  "tool_content_sha256": "sha256:7a0f37f6c9f93daf88f96efc1f58f1f6f75264d150ab6eb72a0765d67c99037e",
+  "tool_source_state": "exact",
+  "tool_version": "0.1.2",
+  "unexercised_out_of_scope": 0,
+  "unproved": 0
+}
