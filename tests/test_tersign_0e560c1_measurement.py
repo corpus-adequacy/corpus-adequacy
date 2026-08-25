@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from unittest import mock
 
 import corpus_adequacy as ca
@@ -32,7 +32,7 @@ PIN_VECTOR_FILES = "f4244e4bbcb86126f70cd4750d0a6ce8c729a0ef9baca428fdea9929dc97
 PIN_VERIFY = "8041a3cb678e8777f6565551da2b258558030b31ee0e80bf1bb1a0bf49cb5f2e"
 PIN_KECCAK = "f541c8a43a288f61a147dd43accea048eb9f55a095ca3b9dbf3f88341d469190"
 PIN_LICENSE = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
-OLD_TREE_DIGEST = "e375d1f197b375db950220c432ebc2a93a56c71038fd838751bbce998964adee"
+OLD_TREE_OBJECT = "b94750be6ccee527bf5ae3fe0343506ec21a55ef"
 INTEGRAL_FLOAT = "accept integer-valued floats and serialize them as integers"
 PRODUCER_COMMIT = "b6f4e3fde79637bc809407bf8efd4c813dfe0959"
 REPORT_SHA256 = "6b8a49ce5f63c2b5a38a6b336a601b5ef7feabe6611c2e44bf5d481702e1f2ee"
@@ -46,26 +46,15 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _canonical_tree_entry(relative: PurePath, data: bytes) -> bytes:
-    relative_bytes = relative.as_posix().encode("utf-8")
-    return b"".join((
-        len(relative_bytes).to_bytes(4, "big"),
-        relative_bytes,
-        len(data).to_bytes(8, "big"),
-        data,
-    ))
-
-
-def _tree_digest(root: Path) -> str:
-    entries = []
-    for path in root.rglob("*"):
-        if path.is_file():
-            relative = path.relative_to(root)
-            entries.append((relative.as_posix(), _canonical_tree_entry(relative, path.read_bytes())))
-    digest = hashlib.sha256()
-    for _relative, entry in sorted(entries):
-        digest.update(entry)
-    return digest.hexdigest()
+def _git_tree_object(relative: str) -> str:
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD:" + relative],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    return proc.stdout.strip()
 
 
 def _read_json(path: Path):
@@ -80,15 +69,28 @@ def _evaluate(case: Path) -> dict:
 
 
 class ProducerInputs(unittest.TestCase):
-    def test_tree_entry_paths_are_platform_independent(self):
-        data = b"exact fixture bytes\r\n"
-        posix = _canonical_tree_entry(PurePosixPath("cases/p25.json"), data)
-        windows = _canonical_tree_entry(PureWindowsPath(r"cases\p25.json"), data)
-        self.assertEqual(windows, posix)
-        self.assertEqual(hashlib.sha256(windows).digest(), hashlib.sha256(posix).digest())
-
     def test_historical_measurement_tree_is_immutable(self):
-        self.assertEqual(_tree_digest(OLD), OLD_TREE_DIGEST)
+        self.assertEqual(
+            _git_tree_object("measurements/tersign-1cc5ea32"),
+            OLD_TREE_OBJECT,
+        )
+
+    def test_historical_identity_reads_the_committed_tree_not_checkout_bytes(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=OLD_TREE_OBJECT + "\n", stderr=""
+        )
+        with mock.patch.object(subprocess, "run", return_value=completed) as run:
+            self.assertEqual(
+                _git_tree_object("measurements/tersign-1cc5ea32"),
+                OLD_TREE_OBJECT,
+            )
+        run.assert_called_once_with(
+            ["git", "rev-parse", "HEAD:measurements/tersign-1cc5ea32"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            check=True,
+            text=True,
+        )
 
     def test_no_lock_simulation_skips_only_the_process_scoring_test(self):
         with mock.patch.object(ca, "fcntl", None):
