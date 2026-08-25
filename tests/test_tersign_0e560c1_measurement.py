@@ -19,6 +19,7 @@ OLD = REPO_ROOT / "measurements" / "tersign-1cc5ea32"
 NEW = REPO_ROOT / "measurements" / "tersign-0e560c1"
 UPSTREAM_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "tersign-evidence-record-0e560c1"
 CANONICAL_WRAPPER = REPO_ROOT / "measurements" / "tersign_checks.py"
+PUBLICATION_INDEX = REPO_ROOT / "publications" / "index.v0.json"
 
 PIN_COMMIT = "0e560c1ad47f08177042c62754ebe6e0b482ad9a"
 PIN_MANIFEST = "40abdf703b3b731c685142aa24a2561f1cc4679a013d51fdcb9764a1658819c6"
@@ -34,6 +35,7 @@ PRODUCER_COMMIT = "b6f4e3fde79637bc809407bf8efd4c813dfe0959"
 REPORT_SHA256 = "6b8a49ce5f63c2b5a38a6b336a601b5ef7feabe6611c2e44bf5d481702e1f2ee"
 SOURCE_SHA256 = "b9799f2205e4cc051a00bc1daa28f73cc255dff919469f1c036e1385822edd67"
 TOOL_CONTENT_SHA256 = "7a0f37f6c9f93daf88f96efc1f58f1f6f75264d150ab6eb72a0765d67c99037e"
+PUBLICATION_SOURCE_COMMIT = "aa2ef19efaa8f6140f7a1766553768984b60e5aa"
 
 
 def _sha(path: Path) -> str:
@@ -234,6 +236,31 @@ class RecordedMeasurement(unittest.TestCase):
         self.assertIn("not upstream correctness", text)
         self.assertIn("not certification", text)
         self.assertIn("not endorsement", text)
+
+
+class PublishedMeasurement(unittest.TestCase):
+    def test_index_and_generated_site_bind_commit_b(self):
+        index = _read_json(PUBLICATION_INDEX)
+        matches = [row for row in index["records"] if row["id"] == "tersign-0e560c1"]
+        self.assertEqual(
+            matches,
+            [{
+                "id": "tersign-0e560c1",
+                "report_sha256": REPORT_SHA256,
+                "source_sha256": SOURCE_SHA256,
+            }],
+        )
+        page = (REPO_ROOT / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertIn(
+            '<meta name="source-commit" content="' + PUBLICATION_SOURCE_COMMIT + '">',
+            page,
+        )
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "render_publication_page.py"),
+             "--root", str(REPO_ROOT), "--out", "site/index.html", "--check"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
