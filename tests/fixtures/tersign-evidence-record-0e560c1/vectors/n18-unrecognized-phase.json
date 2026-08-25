@@ -1,0 +1,15 @@
+{
+  "id": "n18-unrecognized-phase",
+  "kind": "phase_claim",
+  "expect": "reject",
+  "reason": "phase_reject",
+  "description": "A phase token outside the declared vocabulary ('settled_and_delivered'), presented as delivery evidence. An uninterpretable phase must not verify as ANY phase \u2014 the same fail-closed rule the independence criterion applies to claims it cannot read.",
+  "input": {
+    "record": {
+      "economic_phase": "settled_and_delivered",
+      "amount": "10",
+      "asset": "USDC"
+    },
+    "presented_as": "delivery"
+  }
+}

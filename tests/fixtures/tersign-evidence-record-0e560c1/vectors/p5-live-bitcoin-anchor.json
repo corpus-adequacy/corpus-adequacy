@@ -1,0 +1,16 @@
+{
+  "id": "p5-live-bitcoin-anchor",
+  "kind": "anchor_relation",
+  "expect": "valid",
+  "description": "Live production anchor: anchoredDigest = SHA-256(subjectDigest bytes). The subject is a counter-signed ledger chain head; the .ots proof for the anchoredDigest is confirmed in Bitcoin block 958163 and verifies with stock OpenTimestamps tooling.",
+  "input": {
+    "subject_digest": "0xb2c5d2bd28ff65e13c1549a718a4c447916d5277ce046b2061ed63749ff287d9",
+    "anchored_digest": "0xcf48bed1712f5b7df2a309fb52cb2b3d51ab1a04730e3b115cd3db79c96c9b1a"
+  },
+  "provenance": {
+    "anchors": "curl https://tersign.ai/v1/anchors",
+    "proof": "curl -O https://tersign.ai/v1/anchors/ledger:0xb2c5d2bd28ff65e13c1549a718a4c447916d5277ce046b2061ed63749ff287d9/proof.ots",
+    "verify": "ots verify -d cf48bed1712f5b7df2a309fb52cb2b3d51ab1a04730e3b115cd3db79c96c9b1a proof.ots",
+    "bitcoin_block": 958163
+  }
+}

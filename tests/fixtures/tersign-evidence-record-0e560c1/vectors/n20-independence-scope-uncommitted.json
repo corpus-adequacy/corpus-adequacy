@@ -1,0 +1,32 @@
+{
+  "id": "n20-independence-scope-uncommitted",
+  "kind": "independence_claim",
+  "expect": "reject",
+  "reason": "independence_reject",
+  "description": "Rejecting twin of p16: independence claimed as covering 'delivery' while the record's derived commitments are 'settlement' and 'network' \u2014 a resolvable settlement, and nothing about delivered bytes. However independent the attestor, the attestation covered the committed facts and nothing else \u2014 an evaluator MUST NOT read the claim past the commitment. The genuinely non-party attestation is what makes this vector discriminating: only the scope overreach can produce the reject. Rebuilt on a settlement result rather than a declared list (@Rul1an, issue #4, second report) so the reject stays an overreach reject, not an unevaluable-input one.",
+  "input": {
+    "claimed": "independent",
+    "covers": [
+      "delivery"
+    ],
+    "settlement_result": {
+      "success": true,
+      "transaction": "0x4b8a1d6e2f9c0a7b5d3e8f1a6c4b2d0e9f7a5c3b1d8e6f4a2c0b9d7e5f3a1c8b",
+      "network": "eip155:8453"
+    },
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6",
+        "role": "counter-signing ledger"
+      }
+    ]
+  }
+}

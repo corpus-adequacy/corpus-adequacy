@@ -1,0 +1,10 @@
+{
+  "id": "p25-integer-token-in-text",
+  "kind": "canonical_bytes",
+  "expect": "valid",
+  "description": "Accepting twin of n35, and the accepting pin of the payload_text pathway itself: the same wire bytes with a plain integer token. {\"amount\": 2} parses to an integer in every language, canonicalizes to {\"amount\":2}, and is valid. An engine that unconditionally rejects the raw-text pathway fails here, per the two-sided gate.",
+  "input": {
+    "payload_text": "{\"amount\": 2}",
+    "claimed_canonical": "{\"amount\":2}"
+  }
+}

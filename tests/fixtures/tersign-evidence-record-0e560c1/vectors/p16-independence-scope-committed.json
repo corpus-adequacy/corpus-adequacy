@@ -1,0 +1,32 @@
+{
+  "id": "p16-independence-scope-committed",
+  "kind": "independence_claim",
+  "expect": "valid",
+  "description": "Accepting twin of n20: independence claimed over both facts the record commits to \u2014 the commitments DERIVED from a settlement result whose success carries a resolvable transaction reference ('settlement') and a non-empty network ('network'). The commitment-scope rule (proposed in x402-foundation/x402#2887, 2026-07-27; normative in the compliance-fields extension): an independence claim reaches exactly as far as the record's commitments. Rebuilt on a settlement result rather than a declared list when the declared path was removed \u2014 a declared list was the very assertion the rule exists to bound (@Rul1an, issue #4, second report).",
+  "input": {
+    "claimed": "independent",
+    "covers": [
+      "settlement",
+      "network"
+    ],
+    "settlement_result": {
+      "success": true,
+      "transaction": "0x4b8a1d6e2f9c0a7b5d3e8f1a6c4b2d0e9f7a5c3b1d8e6f4a2c0b9d7e5f3a1c8b",
+      "network": "eip155:8453"
+    },
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6",
+        "role": "counter-signing ledger"
+      }
+    ]
+  }
+}

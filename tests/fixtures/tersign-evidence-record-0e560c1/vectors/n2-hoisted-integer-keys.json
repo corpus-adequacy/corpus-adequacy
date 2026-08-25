@@ -1,0 +1,15 @@
+{
+  "id": "n2-hoisted-integer-keys",
+  "kind": "canonical_bytes",
+  "expect": "reject",
+  "reason": "canonicalization_reject",
+  "description": "The adversarial twin of p3: canonical bytes claimed in NUMERIC key order ('1','2','10') \u2014 the exact output of a sort-then-stringify implementation whose engine hoists integer-like keys. Must reject.",
+  "input": {
+    "payload": {
+      "10": "a",
+      "2": "b",
+      "1": "c"
+    },
+    "claimed_canonical": "{\"1\":\"c\",\"2\":\"b\",\"10\":\"a\"}"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "id": "n28-authority-reduction-substitution",
+  "kind": "decision_evidence_binding",
+  "expect": "reject",
+  "reason": "binding_reject",
+  "description": "Substitution case: the record commits to authority reduction A while reduction B, carrying a different host limit, delta and policy version, is presented.",
+  "input": {
+    "record": {
+      "outcome": "allowed",
+      "decisionEvidenceDigest": "0x68b2b24ff10af252ca43df157efcf23d05098d8deafa0bb22126bee8c6c2f097"
+    },
+    "decision_evidence": {
+      "requested": {
+        "capabilities": [
+          "read"
+        ],
+        "budgets": {
+          "nodes": "10"
+        }
+      },
+      "hostAllowed": {
+        "capabilities": [
+          "read"
+        ],
+        "budgets": {
+          "nodes": "5"
+        }
+      },
+      "effective": {
+        "capabilities": [
+          "read"
+        ],
+        "budgets": {
+          "nodes": "5"
+        }
+      },
+      "delta": {
+        "removed": {},
+        "reducedBudgets": {
+          "nodes": {
+            "requested": "10",
+            "effective": "5"
+          }
+        }
+      },
+      "policy": {
+        "id": "host-default",
+        "version": "2"
+      }
+    }
+  }
+}

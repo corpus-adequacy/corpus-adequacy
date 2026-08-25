@@ -1,0 +1,25 @@
+{
+  "id": "p11-claim-set-silence-only",
+  "kind": "independence_claim",
+  "expect": "valid",
+  "description": "Accepting twin of n9: a claim SET whose only member asserts nothing about independence, attested only by parties. Silence in set form is a valid state, exactly as p9 pins it for the scalar form. A list branch that drops the silence filter rejects this record and still passes every other vector.",
+  "input": {
+    "claimed": [
+      "issuer_attested"
+    ],
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x3333333333333333333333333333333333333333",
+        "role": "payee"
+      }
+    ]
+  }
+}

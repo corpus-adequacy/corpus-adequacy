@@ -1,0 +1,30 @@
+{
+  "id": "p18-boundary-binds-prefix-and-position",
+  "kind": "boundary_binding",
+  "expect": "valid",
+  "description": "Accepting twin: a boundary event that changes a stream's verification parameters binds BOTH the canonical digest of the prefix it extends and its own position in that prefix's continuation, and the coverage it claims is within the prefix its attestation actually reaches. A verifier holding only the stream can check every one of those.",
+  "input": {
+    "prefix": [
+      {
+        "event": "record",
+        "seq": 1
+      },
+      {
+        "event": "record",
+        "seq": 2
+      },
+      {
+        "event": "record",
+        "seq": 3
+      }
+    ],
+    "boundary_event": {
+      "event": "witness_ref_introduced",
+      "ruleVersion": "witness-ref-v1",
+      "prefixDigest": "0x359d141c2ce3530ee54762bc13d9a51676cdec13becc24deddc45fb536bbd086",
+      "position": 3,
+      "attestedPrefixLength": 3
+    },
+    "covered_through": 3
+  }
+}

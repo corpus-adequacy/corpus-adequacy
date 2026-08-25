@@ -1,0 +1,25 @@
+{
+  "id": "n4-omitted-record",
+  "kind": "chain_set",
+  "expect": "reject",
+  "reason": "completeness_reject",
+  "description": "Head commits seq 3; presented set silently omits seq 2. THE completeness class: an issuer-attested sequence alone cannot prove no-omission \u2014 the committed head makes the gap arithmetically visible.",
+  "input": {
+    "head": {
+      "seq": 3,
+      "digest": "0xdb17ed57683dea4c9ff668a1e769503e933fcc4e133ea0a823f7ddfc7b6106cd"
+    },
+    "records": [
+      {
+        "seq": 1,
+        "artifact_digest": "0x4672842890404de85d907f76149e3edb90687d233ad7efbaabf887f888053ef4",
+        "prev_digest": null
+      },
+      {
+        "seq": 3,
+        "artifact_digest": "0xdb17ed57683dea4c9ff668a1e769503e933fcc4e133ea0a823f7ddfc7b6106cd",
+        "prev_digest": "0x5a811da59710bb115a7744189a9732f27883180f5821caa7a99979bc33257c29"
+      }
+    ]
+  }
+}

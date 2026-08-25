@@ -1,0 +1,17 @@
+{
+  "id": "n16-attestation-not-an-object",
+  "kind": "independence_claim",
+  "expect": "reject",
+  "reason": "independence_reject",
+  "description": "An attestation presented as a bare string rather than an object naming its attestor. Not an evaluable attestation shape \u2014 the previous implementation raised TypeError on it, producing no verdict; a conformant verifier returns a reject.",
+  "input": {
+    "claimed": "independent",
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6"
+    ]
+  }
+}
