@@ -147,6 +147,13 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _git_show(commit: str, relative_path: str) -> bytes:
+    shown = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "show", "%s:%s" % (commit, relative_path)],
+        capture_output=True, check=True, timeout=10)
+    return shown.stdout
+
+
 def _load_wrapper():
     import importlib.util
     sys.path.insert(0, str(VERIFY_FIXTURE.parent))
@@ -534,11 +541,7 @@ class ClaimedReport(unittest.TestCase):
     def test_released_tool_content_matches_the_measured_report(self):
         sources = []
         for rel in ca.TOOL_SOURCE_PATHS:
-            shown = subprocess.run(
-                ["git", "-C", str(REPO_ROOT), "show",
-                 "%s:%s" % (RELEASED_TOOL_COMMIT, rel)],
-                capture_output=True, check=True, timeout=10)
-            sources.append((rel, shown.stdout))
+            sources.append((rel, _git_show(RELEASED_TOOL_COMMIT, rel)))
         digest = ca._tool_content_digest(sources)
         self.assertEqual(digest, TOOL_CONTENT)
         self.assertEqual(
@@ -550,7 +553,9 @@ class ClaimedReport(unittest.TestCase):
         self.assertEqual(_sha(WRAPPER), WRAPPER_SHA256)
         self.assertEqual(_sha(DURABLE / "tersign_checks.py"), WRAPPER_SHA256)
         self.assertEqual(
-            _sha(REPO_ROOT / "adapters" / "tersign_evidence_record.py"),
+            hashlib.sha256(_git_show(
+                RELEASED_TOOL_COMMIT,
+                "adapters/tersign_evidence_record.py")).hexdigest(),
             ADAPTER_SHA256,
         )
         self.assertEqual(_sha(DURABLE / "vectors.json"), VECTORS_SHA256)
