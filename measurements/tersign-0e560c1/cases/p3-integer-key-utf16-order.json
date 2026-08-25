@@ -1,0 +1,14 @@
+{
+  "id": "p3-integer-key-utf16-order",
+  "kind": "digest_recompute",
+  "expect": "valid",
+  "description": "Frozen pin for the integer-like-key class: RFC 8785 orders '1' < '10' < '2' by UTF-16 code units. JS engines hoist such keys into numeric order on object rebuild; a suite without this vector cannot catch that class.",
+  "input": {
+    "payload": {
+      "10": "a",
+      "2": "b",
+      "1": "c"
+    },
+    "expected_digest": "0x426b770f81b8ad5e307bcfb767deb02f8d32cd340d81a946be88bb184857e81b"
+  }
+}

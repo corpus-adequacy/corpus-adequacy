@@ -1,0 +1,33 @@
+{
+  "id": "n23-independence-scope-null-declared",
+  "kind": "independence_claim",
+  "expect": "reject",
+  "reason": "independence_reject",
+  "description": "The engine-fork input, pinned: a resolvable settlement result with `record_commits` present as an explicit JSON null. Python's `is None` read the null as absence and derived (valid); the TS cross-check's `=== undefined` read it as a declaration and rejected \u2014 two implementations of one criterion, two verdicts, invisible to a manifest-oracle cross-check because no vector carried a null. An explicit null is a declaration that evaluates to nothing, which fails closed for the same reason an unrecognized claim string does (design rule 3, issue #1). Both engines now guard on key PRESENCE \u2014 `in`, identical semantics in both languages \u2014 so this fork is unrepresentable rather than merely untested. Reported by @Rul1an (issue #4, second report).",
+  "input": {
+    "claimed": "independent",
+    "covers": [
+      "settlement"
+    ],
+    "settlement_result": {
+      "success": true,
+      "transaction": "0x9e1f4c2a8b7d6e5f0a3c1b8d7e6f5a4c3b2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f",
+      "network": "eip155:8453"
+    },
+    "record_commits": null,
+    "parties": [
+      "0x2222222222222222222222222222222222222222",
+      "0x3333333333333333333333333333333333333333"
+    ],
+    "attestations": [
+      {
+        "by": "0x2222222222222222222222222222222222222222",
+        "role": "payer"
+      },
+      {
+        "by": "0x9d38BA84730271eb27Ac9bD4Bd2620c08dB4FDa6",
+        "role": "counter-signing ledger"
+      }
+    ]
+  }
+}

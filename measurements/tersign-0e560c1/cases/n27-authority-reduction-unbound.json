@@ -1,0 +1,51 @@
+{
+  "id": "n27-authority-reduction-unbound",
+  "kind": "decision_evidence_binding",
+  "expect": "reject",
+  "reason": "binding_reject",
+  "description": "CG-DELTA-LOSS-01, unbound case: the protected record carries no decision-evidence digest, so the presented authority reduction is not structurally bound to it and must reject. This vector tests only the missing-commitment branch; p19/n28 execute the distinct A/B substitution contrast.",
+  "input": {
+    "record": {
+      "outcome": "allowed"
+    },
+    "decision_evidence": {
+      "requested": {
+        "capabilities": [
+          "read"
+        ],
+        "budgets": {
+          "nodes": "10"
+        }
+      },
+      "hostAllowed": {
+        "capabilities": [
+          "read"
+        ],
+        "budgets": {
+          "nodes": "5"
+        }
+      },
+      "effective": {
+        "capabilities": [
+          "read"
+        ],
+        "budgets": {
+          "nodes": "5"
+        }
+      },
+      "delta": {
+        "removed": {},
+        "reducedBudgets": {
+          "nodes": {
+            "requested": "10",
+            "effective": "5"
+          }
+        }
+      },
+      "policy": {
+        "id": "host-default",
+        "version": "2"
+      }
+    }
+  }
+}

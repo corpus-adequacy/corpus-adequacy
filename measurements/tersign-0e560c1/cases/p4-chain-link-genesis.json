@@ -1,0 +1,12 @@
+{
+  "id": "p4-chain-link-genesis",
+  "kind": "chain_link",
+  "expect": "valid",
+  "description": "Chain-link digest binds artifact + prev (genesis = 32 zero bytes) + big-endian 8-byte sequence number. Pinned cross-implementation (Python here, TypeScript reference).",
+  "input": {
+    "artifact_digest": "0xe5874f1ffe87f0a6dd9eb157730f67b86ee4538b125fe30fcc4e165213dd3fc4",
+    "prev_digest": null,
+    "seq": 1,
+    "expected_link": "0x837c2d85db422b59f89527ef33bfe862af7230895635b63141b09cde169187a5"
+  }
+}
