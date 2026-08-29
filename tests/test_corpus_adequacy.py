@@ -2728,6 +2728,8 @@ _TEST_PRODUCER_VERDICTS = (
     "survived",
     "control-killed",
     "control-SURVIVED",
+    "control-unchanged",
+    "control-MOVED",
     "control-error",
 )
 _TEST_MD_OPTIONAL = frozenset({"unexercised", "known-hole"})
@@ -4326,6 +4328,43 @@ class SurvivorConsumerClosedSet(unittest.TestCase):
                     row[key] = [] if key == "raised" else (
                         0 if key in ("moved", "moved_diagnostic") else "x")
                     self._refuse_row_extra(row)
+
+    def test_inert_control_verdicts_are_independent_closed_shape_cells(self):
+        verdicts = frozenset({"control-unchanged", "control-MOVED"})
+        self.assertLessEqual(verdicts, frozenset(_TEST_PRODUCER_VERDICTS))
+        for verdict in verdicts:
+            with self.subTest(verdict=verdict):
+                self.assertEqual(_test_row_optional(verdict), frozenset())
+                self.assertLessEqual(
+                    {"moved_diagnostic", "raised"}, _test_row_forbidden(verdict))
+
+    def test_inert_control_rows_parse_without_becoming_survivor_findings(self):
+        report = producer_shaped_report(
+            control_status="moved",
+            score_percent=None,
+            adequate=False,
+            failures=["inert control moved; no adequacy score"],
+            mutants=[
+                producer_shaped_row(
+                    "control-unchanged", "INERT unchanged", moved=0),
+                producer_shaped_row(
+                    "control-MOVED", "INERT moved", moved=1),
+            ],
+        )
+
+        projected = ca.survivor_findings(report)
+
+        self.assertEqual(projected, {
+            "schema": ca.SURVIVORS_SCHEMA,
+            "source_schema": ca.REPORT_SCHEMA,
+            "manifest_sha256": report["manifest_sha256"],
+            "survived": 0,
+            "silent": 0,
+            "finding_count": 0,
+            "findings": [],
+        })
+        self.assertNotIn("score_percent", projected)
+        self.assertNotIn("control_status", projected)
 
     def test_process_missing_originals_unverified_is_refused_through_report_missing_route(self):
         doc = producer_shaped_report(runner="process")
