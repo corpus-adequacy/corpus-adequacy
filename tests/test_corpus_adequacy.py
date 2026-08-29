@@ -3909,6 +3909,29 @@ class SurvivorConsumerClosedSet(unittest.TestCase):
     def _valid_doc(self):
         return json.loads(self.VALID_REPORT.read_text(encoding="utf-8"))
 
+    def _producer_required_top_level_keys(self, doc):
+        """Keys this decoded valid document must keep.
+
+        `schema` is owned by the report.v0 identity gate, not the missing-key
+        route. The runner-specific field stays optional.
+        """
+        return frozenset(doc) - frozenset({
+            "schema", "originals_unverified_against_head"})
+
+    def _verdict_row_shapes(self, doc):
+        """One producer row per distinct verdict in the decoded valid document."""
+        shapes = {}
+        for row in doc["mutants"]:
+            shapes.setdefault(row["verdict"], dict(row))
+        return shapes
+
+    def _producer_required_row_keys(self, row):
+        """Required keys for this row shape. Verdict-optional fields stay optional."""
+        optional = {"moved_diagnostic", "raised"}
+        if row["verdict"] == "equivalent":
+            optional.add("scope")
+        return frozenset(row) - optional
+
     def _project_cli(self, doc):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "report.json"
@@ -3958,21 +3981,41 @@ class SurvivorConsumerClosedSet(unittest.TestCase):
 
     def test_top_level_missing_key_is_refused_through_report_missing_route(self):
         doc = self._valid_doc()
-        del doc["mutants"]
-        with self.assertRaises(ca.ManifestError) as cm:
-            ca.survivor_findings(doc)
-        self._assert_route(
-            str(cm.exception), self.REPORT_MISSING,
-            self.REPORT_EXTRA, self.MUTANT_EXTRA, self.MUTANT_MISSING)
+        required = self._producer_required_top_level_keys(doc)
+        self.assertTrue(
+            {"tool_content_sha256", "manifest_sha256", "score_means", "mutants"}
+            <= required)
+        for key in sorted(required):
+            mutant = self._valid_doc()
+            del mutant[key]
+            with self.subTest(key=key):
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.survivor_findings(mutant)
+                self._assert_route(
+                    str(cm.exception), self.REPORT_MISSING,
+                    self.REPORT_EXTRA, self.MUTANT_EXTRA, self.MUTANT_MISSING)
+        optional = self._valid_doc()
+        del optional["originals_unverified_against_head"]
+        self.assertEqual(
+            ca.survivor_findings(optional)["schema"], ca.SURVIVORS_SCHEMA)
 
     def test_mutant_row_missing_key_is_refused_through_mutant_missing_route(self):
-        doc = self._valid_doc()
-        del doc["mutants"][0]["label"]
-        with self.assertRaises(ca.ManifestError) as cm:
-            ca.survivor_findings(doc)
-        self._assert_route(
-            str(cm.exception), self.MUTANT_MISSING,
-            self.MUTANT_EXTRA, self.REPORT_EXTRA, self.REPORT_MISSING)
+        shapes = self._verdict_row_shapes(self._valid_doc())
+        self.assertTrue(shapes)
+        for verdict, proto in shapes.items():
+            required = self._producer_required_row_keys(proto)
+            self.assertIn("moved", required)
+            for key in sorted(required):
+                mutant = self._valid_doc()
+                target = next(
+                    row for row in mutant["mutants"] if row["verdict"] == verdict)
+                del target[key]
+                with self.subTest(verdict=verdict, key=key):
+                    with self.assertRaises(ca.ManifestError) as cm:
+                        ca.survivor_findings(mutant)
+                    self._assert_route(
+                        str(cm.exception), self.MUTANT_MISSING,
+                        self.MUTANT_EXTRA, self.REPORT_EXTRA, self.REPORT_MISSING)
 
     def test_valid_report_v0_production_bytes_are_unchanged(self):
         raw = self.VALID_REPORT.read_bytes()

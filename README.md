@@ -42,9 +42,10 @@ A digest-matched anchor that is empty after control stripping is an
 intentional omission: no `anchor_excerpt` and no `anchor_omitted`. That is
 not a missing field and not a new survivors key.
 `--survivors` requires the exact `report.v0` key set at the document and
-mutant-row boundary, including the runner-specific field when the report
-names `process` or `batch`. Unknown keys and missing required keys fail
-closed on distinct routes. This is a consumer closed-set, not a
+mutant-row boundary. Required keys are the producer set; the runner-specific
+field is allowed when the report names `process` or `batch` and stays
+optional where the producer omits it. Unknown keys and missing required
+keys fail closed on distinct routes. This is a consumer closed-set, not a
 `report.v1` and not a change to production `report.v0` or `survivors.v0`
 bytes.
 

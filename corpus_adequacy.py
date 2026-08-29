@@ -528,6 +528,14 @@ def _runner_specific_report_key(runner):
     return None
 
 
+def _report_v0_optional_keys(runner):
+    """Producer omits the runner-specific field on purpose (e.g. module reports)."""
+    extra = _runner_specific_report_key(runner)
+    if extra is None:
+        return frozenset()
+    return frozenset({extra})
+
+
 def _report_v0_allowed_keys(runner):
     """Closed consumer set from one producer-shaped decoded document."""
     sample = {
@@ -565,6 +573,21 @@ def _report_v0_allowed_keys(runner):
     return frozenset(sample)
 
 
+def _report_v0_required_keys(runner):
+    """Producer-required top-level keys. Derived from the allowed set, not recopied."""
+    return _report_v0_allowed_keys(runner) - _report_v0_optional_keys(runner)
+
+
+def _mutant_row_optional_keys(verdict):
+    """Fields the producer omits on purpose for some verdicts."""
+    optional = {"moved_diagnostic"}
+    if verdict == "killed":
+        optional.add("raised")
+    if verdict == "equivalent":
+        optional.add("scope")
+    return frozenset(optional)
+
+
 def _mutant_row_allowed_keys(verdict):
     """Closed mutant-row set, including verdict-dependent optional fields."""
     sample = {
@@ -579,6 +602,11 @@ def _mutant_row_allowed_keys(verdict):
     if verdict == "killed":
         sample["raised"] = []
     return frozenset(sample)
+
+
+def _mutant_row_required_keys(verdict):
+    """Producer-required row keys. Derived from the allowed set, not recopied."""
+    return _mutant_row_allowed_keys(verdict) - _mutant_row_optional_keys(verdict)
 
 
 def _require_closed_keys(obj, required, allowed, *, missing_token, extra_token):
@@ -600,7 +628,7 @@ def _require_report_rows(report) -> list:
             % (REPORT_SCHEMA, report.get("schema") if isinstance(report, dict) else type(report).__name__))
     runner = report.get("runner") if isinstance(report.get("runner"), str) else ""
     _require_closed_keys(
-        report, {"mutants"}, _report_v0_allowed_keys(runner),
+        report, _report_v0_required_keys(runner), _report_v0_allowed_keys(runner),
         missing_token=REPORT_MISSING_KEY, extra_token=REPORT_EXTRA_KEY)
     mutants = report.get("mutants")
     if not isinstance(mutants, list):
@@ -610,7 +638,7 @@ def _require_report_rows(report) -> list:
             raise ManifestError("report.mutants[%d] must be an object" % i)
         verdict = row.get("verdict") if isinstance(row.get("verdict"), str) else ""
         _require_closed_keys(
-            row, {"group", "label", "verdict"}, _mutant_row_allowed_keys(verdict),
+            row, _mutant_row_required_keys(verdict), _mutant_row_allowed_keys(verdict),
             missing_token=MUTANT_MISSING_KEY, extra_token=MUTANT_EXTRA_KEY)
         for key in ("group", "label", "verdict"):
             val = row.get(key)
