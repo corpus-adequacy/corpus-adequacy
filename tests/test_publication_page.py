@@ -149,7 +149,7 @@ class PublicationPage(unittest.TestCase):
                         with self.assertRaises(rpp.PublicationError):
                             _render(root)
 
-    def test_diagnostic_channel_is_exact_bool_or_absent(self):
+    def test_diagnostic_channel_is_exact_bool(self):
         fixture = FIXTURES / "survived-silent" / "report.v0.json"
         base = json.loads(fixture.read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as d:
@@ -172,8 +172,10 @@ class PublicationPage(unittest.TestCase):
             del mutated["diagnostic_channel_declared"]
             report.write_text(json.dumps(mutated, indent=2, sort_keys=True) + "\n")
             _write_index(root)
-            page = _render(root)
-            self.assertIn('aria-label="diagnostic_channel_declared not declared"', page)
+            with self.assertRaises(rpp.PublicationError) as cm:
+                _render(root)
+            self.assertIn("report missing key", str(cm.exception))
+            self.assertIn("diagnostic_channel_declared", str(cm.exception))
             for value in ("false", 1, None):
                 with self.subTest(refused=value):
                     mutated = dict(base)

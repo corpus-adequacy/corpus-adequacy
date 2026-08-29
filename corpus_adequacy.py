@@ -515,18 +515,148 @@ def _apply_anchor(finding: dict, manifest_obj: dict) -> None:
     # missing field and not a new survivors key.
 
 
+REPORT_MISSING_KEY = "report missing key"
+REPORT_EXTRA_KEY = "report extra key"
+MUTANT_MISSING_KEY = "mutant missing key"
+MUTANT_EXTRA_KEY = "mutant extra key"
+
+
+def _runner_specific_report_key(runner):
+    """The one process/batch-only report.v0 field. Derived once."""
+    if runner in ("process", "batch"):
+        return "originals_unverified_against_head"
+    return None
+
+
+def _report_v0_document(manifest_path: Path, m: dict, *,
+                        killed: int, survived: int, silent: int, equivalent: int,
+                        out_of_scope: int, unproved: int, known_holes: int,
+                        score, results: list, failures: list,
+                        control_status: str = "absent-or-invalid",
+                        originals_unverified_against_head=None) -> dict:
+    """The one report.v0 document. Consumer keys are derived from this function.
+
+    Process and batch always emit `originals_unverified_against_head` (`[]`
+    when the caller supplies nothing). Module never emits it.
+    Identity keys are present so `_with_tool_identity` only overwrites values.
+    """
+    denom = killed + survived + silent
+    report = {
+        "schema": REPORT_SCHEMA,
+        "manifest": str(manifest_path),
+        "manifest_sha256": m.get("_manifest_sha256"),
+        "runner": m["runner"],
+        "control_status": control_status,
+        "killed": killed,
+        "survived": survived,
+        "silent": silent,
+        "diagnostic_channel_declared": m.get("diagnostic_from") is not None,
+        "known_holes": known_holes,
+        "corpus_digest": m.get("_corpus_digest"),
+        "acknowledged_digests": len(m.get("known_holes", {})),
+        "hole_ratio": None if denom == 0 else round(known_holes / denom, 2),
+        "equivalent": equivalent,
+        "unexercised_out_of_scope": out_of_scope,
+        "unproved": unproved,
+        "declared_total": (killed + survived + silent + equivalent + out_of_scope
+                           + unproved + known_holes),
+        "out_of_scope_ratio": None if denom == 0 else round(out_of_scope / denom, 2),
+        "score_percent": score,
+        "score_means": SCORE_MEANS,
+        "mutants": results,
+        "failures": failures,
+        "adequate": not failures,
+        "tool_version": None,
+        "tool_commit": None,
+        "tool_source_state": None,
+        "tool_content_sha256": None,
+    }
+    extra = _runner_specific_report_key(m["runner"])
+    if extra is not None:
+        report[extra] = (
+            [] if originals_unverified_against_head is None
+            else originals_unverified_against_head)
+    return report
+
+
+def _report_v0_keys(runner):
+    """Closed top-level set from one produced document, not a second key table."""
+    m = {"runner": runner, "known_holes": {}, "_corpus_digest": None,
+         "_manifest_sha256": None}
+    return frozenset(_report_v0_document(
+        Path("m.json"), m,
+        killed=0, survived=0, silent=0, equivalent=0, out_of_scope=0,
+        unproved=0, known_holes=0, score=None, results=[], failures=[]))
+
+
+def _report_v0_required_keys(runner):
+    return _report_v0_keys(runner)
+
+
+def _report_v0_allowed_keys(runner):
+    return _report_v0_keys(runner)
+
+
+_MUTANT_ROW_BASE_KEYS = frozenset({"group", "label", "verdict", "moved", "how"})
+_DIAGNOSTIC_OPTIONAL_VERDICTS = frozenset({"unexercised", "known-hole"})
+
+
+def _mutant_row_optional_keys(verdict):
+    """Fields the producer writes only for some verdicts."""
+    optional = set()
+    if verdict == "killed":
+        optional.add("raised")
+    if verdict in _DIAGNOSTIC_OPTIONAL_VERDICTS:
+        optional.add("moved_diagnostic")
+    return frozenset(optional)
+
+
+def _mutant_row_required_keys(verdict):
+    """Producer-required row keys for one verdict."""
+    required = set(_MUTANT_ROW_BASE_KEYS)
+    if verdict != "equivalent":
+        required.add("scope")
+    if verdict == "silent":
+        required.add("moved_diagnostic")
+    return frozenset(required)
+
+
+def _mutant_row_allowed_keys(verdict):
+    """Closed mutant-row set: required plus verdict-optional producer fields."""
+    return _mutant_row_required_keys(verdict) | _mutant_row_optional_keys(verdict)
+
+
+def _require_closed_keys(obj, required, allowed, *, missing_token, extra_token):
+    """One missing-vs-extra comparison. Distinct tokens; no shared substring."""
+    present = set(obj)
+    missing = required - present
+    extra = present - allowed
+    if missing:
+        raise ManifestError("%s %s" % (missing_token, sorted(missing)[0]))
+    if extra:
+        raise ManifestError("%s %s" % (extra_token, sorted(extra)[0]))
+
+
 def _require_report_rows(report) -> list:
     """Refuse hostile report shapes before they become KeyError or []."""
     if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
         raise ManifestError(
             "survivors input must be %s, got %r"
             % (REPORT_SCHEMA, report.get("schema") if isinstance(report, dict) else type(report).__name__))
+    runner = report.get("runner") if isinstance(report.get("runner"), str) else ""
+    _require_closed_keys(
+        report, _report_v0_required_keys(runner), _report_v0_allowed_keys(runner),
+        missing_token=REPORT_MISSING_KEY, extra_token=REPORT_EXTRA_KEY)
     mutants = report.get("mutants")
     if not isinstance(mutants, list):
         raise ManifestError("report.mutants must be a list")
     for i, row in enumerate(mutants):
         if not isinstance(row, dict):
             raise ManifestError("report.mutants[%d] must be an object" % i)
+        verdict = row.get("verdict") if isinstance(row.get("verdict"), str) else ""
+        _require_closed_keys(
+            row, _mutant_row_required_keys(verdict), _mutant_row_allowed_keys(verdict),
+            missing_token=MUTANT_MISSING_KEY, extra_token=MUTANT_EXTRA_KEY)
         for key in ("group", "label", "verdict"):
             val = row.get(key)
             if not isinstance(val, str) or not val:
@@ -735,42 +865,17 @@ def _report_v0(manifest_path: Path, m: dict, *,
     `load_manifest` defaults it to `module`, so it is always populated, and a
     caller that cannot supply it cannot supply the wrong one either.
 
-    `originals_unverified_against_head` is a named optional rather than a
-    generic extras mapping: process and batch own that field, module has no
-    such guard, and a mapping splatted into this dictionary could overwrite a
-    common field instead of adding a runner-specific one. It is included only
-    when supplied, so its absence stays absence rather than a fake `None`.
+    Process and batch always emit `originals_unverified_against_head`. Module
+    never does. The document itself is built by `_report_v0_document`; this
+    wrapper only stamps tool identity.
     """
-    denom = killed + survived + silent
-    report = {
-        "schema": REPORT_SCHEMA,
-        "manifest": str(manifest_path),
-        "manifest_sha256": m.get("_manifest_sha256"),
-        "runner": m["runner"],
-        "control_status": control_status,
-        "killed": killed,
-        "survived": survived,
-        "silent": silent,
-        "diagnostic_channel_declared": m.get("diagnostic_from") is not None,
-        "known_holes": known_holes,
-        "corpus_digest": m.get("_corpus_digest"),
-        "acknowledged_digests": len(m.get("known_holes", {})),
-        "hole_ratio": None if denom == 0 else round(known_holes / denom, 2),
-        "equivalent": equivalent,
-        "unexercised_out_of_scope": out_of_scope,
-        "unproved": unproved,
-        "declared_total": (killed + survived + silent + equivalent + out_of_scope
-                           + unproved + known_holes),
-        "out_of_scope_ratio": None if denom == 0 else round(out_of_scope / denom, 2),
-        "score_percent": score,
-        "score_means": SCORE_MEANS,
-        "mutants": results,
-        "failures": failures,
-        "adequate": not failures,
-    }
-    if originals_unverified_against_head is not None:
-        report["originals_unverified_against_head"] = originals_unverified_against_head
-    return _with_tool_identity(report)
+    return _with_tool_identity(_report_v0_document(
+        manifest_path, m,
+        killed=killed, survived=survived, silent=silent, equivalent=equivalent,
+        out_of_scope=out_of_scope, unproved=unproved, known_holes=known_holes,
+        score=score, results=results, failures=failures,
+        control_status=control_status,
+        originals_unverified_against_head=originals_unverified_against_head))
 
 
 def format_tool_identity(identity: dict | None = None) -> str:

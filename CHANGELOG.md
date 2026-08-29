@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+`--survivors` now refuses unknown top-level and mutant-row keys on a
+decoded `report.v0` document through one shared closed-set helper, with
+distinct missing-key and extra-key routes. Required keys come from the
+same producer document factory that emits `report.v0`.
+`originals_unverified_against_head` is required on `process` and `batch`
+and forbidden on `module`. Mutant rows are closed per producer verdict
+(`scope` required except `equivalent`; `raised` only on `killed`;
+`moved_diagnostic` required on `silent`, optional on
+`unexercised`/`known-hole`, forbidden otherwise). Tests pin that
+verdict-shape independently of production helpers. Valid `report.v0` and
+`survivors.v0` production bytes are unchanged. This is a consumer
+closed-set, not a score, adequacy, ranking, or `report.v1`.
+
 The Tersign evidence-record adapter now selects from one closed table containing
 the historical `1cc5ea32` pin and the `0e560c1` pin. Git sources require exact
 commit, manifest, vectors-tree, and vector-files identities; non-Git sources

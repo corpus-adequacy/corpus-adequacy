@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 import render_publication_page as rpp  # noqa: E402
+from test_corpus_adequacy import producer_shaped_report  # noqa: E402
 from test_publication_page import (  # noqa: E402
     INDEX_SCHEMA,
     VALID,
@@ -107,10 +108,26 @@ def _canonical_attempt() -> dict:
     return json.loads(LIVE_ATTEMPT.read_text(encoding="utf-8"))
 
 
+def _void_producer_shaped_process_report() -> dict:
+    """Void-shaped process document with the producer-required process field.
+
+    The on-disk void fixture is still the typed #80 discriminator. This
+    overlay keeps that shape and adds `originals_unverified_against_head`
+    through the producer helper so a routing mutation can reach the
+    standard renderer instead of dying at the closed-set gate.
+    """
+    void = json.loads(VOID_REPORT.read_text(encoding="utf-8"))
+    return producer_shaped_report(**void)
+
+
 def _void_measurement_tree(tmpdir: Path) -> Path:
     staged = tmpdir / "staged" / "void-run-attempt"
     staged.mkdir(parents=True)
-    shutil.copy2(VOID_REPORT, staged / "report.v0.json")
+    (staged / "report.v0.json").write_text(
+        json.dumps(_void_producer_shaped_process_report(), indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
     shutil.copy2(VALID / "source.json", staged / "source.json")
     return _write_tree(tmpdir, [staged / "report.v0.json"], dummy_manifest=False)
 

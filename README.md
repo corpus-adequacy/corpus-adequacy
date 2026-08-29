@@ -41,6 +41,16 @@ invents compared or unmoved vector IDs.
 A digest-matched anchor that is empty after control stripping is an
 intentional omission: no `anchor_excerpt` and no `anchor_omitted`. That is
 not a missing field and not a new survivors key.
+`--survivors` requires the exact `report.v0` key set at the document and
+mutant-row boundary. Required keys are the producer set.
+`originals_unverified_against_head` is required on `process` and `batch`
+and forbidden on `module`. Mutant-row keys are closed per producer
+verdict: `scope` is required except on `equivalent`, `raised` is optional
+only on `killed`, and `moved_diagnostic` is required on `silent`,
+optional on `unexercised`/`known-hole`, and forbidden otherwise. Unknown
+keys and missing required keys fail closed on distinct routes. This is a
+consumer closed-set, not a `report.v1` and not a change to production
+`report.v0` or `survivors.v0` bytes.
 
 ```
 python3 adapters/tersign_evidence_record.py <tersign-checkout> <empty-dest>
@@ -333,10 +343,11 @@ otherwise unmeasured control therefore yields `absent-or-invalid` instead of a
 partial `killed`. The existing structural guard still makes that report
 inadequate.
 
-`originals_unverified_against_head` is the one exception and stays specific to
-`process` and `batch`: those runners guard a working tree, the module runner has
-no such guard, and a field present-but-meaningless everywhere would be worse than
-an absent one.
+`originals_unverified_against_head` is required on `process` and `batch`
+and forbidden on `module`: those runners guard a working tree and always
+emit the field (`[]` when nothing is unverified). The module runner has
+no such guard, and a field present-but-meaningless there would be worse
+than an absent one.
 
 The module runner refuses `diagnostic_from`, so its `silent` is always `0` and
 its `diagnostic_channel_declared` always `false`. Both are reported rather than
