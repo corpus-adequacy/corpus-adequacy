@@ -297,8 +297,6 @@ def _require_displayed_parity(doc: dict, mutants: list) -> None:
 
 
 def _diagnostic_channel_declared(doc: dict) -> bool:
-    if "diagnostic_channel_declared" not in doc:
-        return False
     value = doc["diagnostic_channel_declared"]
     if type(value) is not bool:
         raise PublicationError(

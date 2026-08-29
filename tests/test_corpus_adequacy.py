@@ -2587,6 +2587,49 @@ REQUIRED_REPORT_KEYS = frozenset({
 
 PROCESS_ONLY_REPORT_KEYS = frozenset({"originals_unverified_against_head"})
 
+# Independent of production helpers. A widened `_mutant_row_optional_keys`
+# must not keep these cells green.
+_TEST_ROW_BASE = frozenset({"group", "label", "verdict", "moved", "how"})
+_TEST_PRODUCER_VERDICTS = (
+    "equivalent",
+    "unproved",
+    "killed",
+    "unexercised",
+    "known-hole",
+    "silent",
+    "survived",
+    "control-killed",
+    "control-SURVIVED",
+    "control-error",
+)
+_TEST_MD_OPTIONAL = frozenset({"unexercised", "known-hole"})
+_TEST_MD_REQUIRED = frozenset({"silent"})
+_TEST_RAISED_OPTIONAL = frozenset({"killed"})
+
+
+def _test_row_required(verdict):
+    required = set(_TEST_ROW_BASE)
+    if verdict != "equivalent":
+        required.add("scope")
+    if verdict in _TEST_MD_REQUIRED:
+        required.add("moved_diagnostic")
+    return frozenset(required)
+
+
+def _test_row_optional(verdict):
+    optional = set()
+    if verdict in _TEST_RAISED_OPTIONAL:
+        optional.add("raised")
+    if verdict in _TEST_MD_OPTIONAL:
+        optional.add("moved_diagnostic")
+    return frozenset(optional)
+
+
+def _test_row_forbidden(verdict):
+    return (
+        _TEST_ROW_BASE | {"scope", "raised", "moved_diagnostic"}
+    ) - _test_row_required(verdict) - _test_row_optional(verdict)
+
 
 def producer_shaped_report(runner="process", **over):
     """One complete producer-shaped report.v0 document for tests.
@@ -2786,10 +2829,12 @@ class ReportProjectorIsPlatformIndependent(unittest.TestCase):
             self.assertIn(key, rep)
             self.assertEqual(rep[key], value)
 
-    def test_the_process_only_field_is_included_only_when_supplied(self):
+    def test_the_process_only_field_is_always_on_process_and_never_on_module(self):
         self.assertNotIn("originals_unverified_against_head", self._project("module"))
-        rep = self._project("process", originals_unverified_against_head=True)
-        self.assertIs(rep["originals_unverified_against_head"], True)
+        self.assertEqual(self._project("process")["originals_unverified_against_head"], [])
+        self.assertEqual(self._project("batch")["originals_unverified_against_head"], [])
+        supplied = self._project("process", originals_unverified_against_head=True)
+        self.assertIs(supplied["originals_unverified_against_head"], True)
 
     def test_the_derived_numbers_share_one_denominator(self):
         rep = self._project("process", killed=1, silent=1, known_holes=1, out_of_scope=1)
@@ -3132,7 +3177,7 @@ class SurvivorFindings(unittest.TestCase):
             "encode_report_v0":
                 "36f8d4604ee5e3050975196c857ae95e225d19d49ab12e9a3a77efa61289c2d4",
             "_report_v0":
-                "9e0f0fe2df144ed74e11f36da1ef3b3d53d7a85df09819bbb543a3e96618963f",
+                "fdcbea01ffc70c4c8508388326fce2b0829f3b5f81ab0984b9191d87e81dee1a",
         })
 
     def test_survivors_encoder_has_one_pinned_utf8_wire_form(self):
@@ -3950,10 +3995,9 @@ class SurvivorConsumerClosedSet(unittest.TestCase):
         """Keys this decoded valid document must keep.
 
         `schema` is owned by the report.v0 identity gate, not the missing-key
-        route. The runner-specific field stays optional.
+        route. Process/batch `originals_unverified_against_head` is required.
         """
-        return frozenset(doc) - frozenset({
-            "schema", "originals_unverified_against_head"})
+        return frozenset(doc) - frozenset({"schema"})
 
     def _verdict_row_shapes(self, doc):
         """One producer row per distinct verdict in the decoded valid document."""
@@ -4031,10 +4075,6 @@ class SurvivorConsumerClosedSet(unittest.TestCase):
                 self._assert_route(
                     str(cm.exception), self.REPORT_MISSING,
                     self.REPORT_EXTRA, self.MUTANT_EXTRA, self.MUTANT_MISSING)
-        optional = self._valid_doc()
-        del optional["originals_unverified_against_head"]
-        self.assertEqual(
-            ca.survivor_findings(optional)["schema"], ca.SURVIVORS_SCHEMA)
 
     def test_mutant_row_missing_key_is_refused_through_mutant_missing_route(self):
         shapes = self._verdict_row_shapes(self._valid_doc())
@@ -4125,35 +4165,87 @@ class SurvivorConsumerClosedSet(unittest.TestCase):
         self._refuse_row_missing(row)
 
     def test_every_producer_verdict_accepts_its_legal_shapes(self):
-        for verdict in ca.PRODUCER_ROW_VERDICTS:
+        for verdict in _TEST_PRODUCER_VERDICTS:
             with self.subTest(verdict=verdict, shape="required"):
                 row = producer_shaped_row(verdict, "legal")
                 self.assertEqual(
                     ca.survivor_findings(self._closed_report(row))["schema"],
                     ca.SURVIVORS_SCHEMA)
-            for key in sorted(ca._mutant_row_optional_keys(verdict)):
+            for key in sorted(_test_row_optional(verdict)):
                 with self.subTest(verdict=verdict, shape="optional-" + key):
                     row = producer_shaped_row(verdict, "legal")
                     row[key] = [] if key == "raised" else 1
                     self.assertEqual(
                         ca.survivor_findings(self._closed_report(row))["schema"],
                         ca.SURVIVORS_SCHEMA)
+            for key in sorted(_test_row_required(verdict)):
+                with self.subTest(verdict=verdict, shape="missing-" + key):
+                    row = producer_shaped_row(verdict, "legal")
+                    del row[key]
+                    self._refuse_row_missing(row)
 
     def test_every_producer_verdict_refuses_forbidden_fields(self):
-        forbidden_by_verdict = {
-            verdict: (
-                (set(ca._MUTANT_ROW_BASE_KEYS) | {"scope", "raised", "moved_diagnostic"})
-                - ca._mutant_row_required_keys(verdict)
-                - ca._mutant_row_optional_keys(verdict)
-            )
-            for verdict in ca.PRODUCER_ROW_VERDICTS
-        }
-        for verdict, forbidden in forbidden_by_verdict.items():
-            for key in sorted(forbidden):
+        for verdict in _TEST_PRODUCER_VERDICTS:
+            for key in sorted(_test_row_forbidden(verdict)):
                 with self.subTest(verdict=verdict, key=key):
                     row = producer_shaped_row(verdict, "illegal")
-                    row[key] = [] if key == "raised" else (0 if key in ("moved", "moved_diagnostic") else "x")
+                    row[key] = [] if key == "raised" else (
+                        0 if key in ("moved", "moved_diagnostic") else "x")
                     self._refuse_row_extra(row)
+
+    def test_process_missing_originals_unverified_is_refused_through_report_missing_route(self):
+        doc = producer_shaped_report(runner="process")
+        del doc["originals_unverified_against_head"]
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(doc)
+        self._assert_route(
+            str(cm.exception), self.REPORT_MISSING,
+            self.REPORT_EXTRA, self.MUTANT_EXTRA, self.MUTANT_MISSING)
+
+    def test_batch_missing_originals_unverified_is_refused_through_report_missing_route(self):
+        doc = producer_shaped_report(runner="batch")
+        del doc["originals_unverified_against_head"]
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(doc)
+        self._assert_route(
+            str(cm.exception), self.REPORT_MISSING,
+            self.REPORT_EXTRA, self.MUTANT_EXTRA, self.MUTANT_MISSING)
+
+    def test_module_originals_unverified_is_refused_through_report_extra_route(self):
+        doc = producer_shaped_report(runner="module")
+        doc["originals_unverified_against_head"] = []
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(doc)
+        self._assert_route(
+            str(cm.exception), self.REPORT_EXTRA,
+            self.REPORT_MISSING, self.MUTANT_EXTRA, self.MUTANT_MISSING)
+
+    def test_consumer_only_top_level_injected_key_is_refused_through_report_extra_route(self):
+        doc = producer_shaped_report(runner="process")
+        doc["consumer_closed_set"] = True
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(doc)
+        self._assert_route(
+            str(cm.exception), self.REPORT_EXTRA,
+            self.REPORT_MISSING, self.MUTANT_EXTRA, self.MUTANT_MISSING)
+
+    def test_moved_diagnostic_widening_on_non_diagnostic_verdicts_is_refused(self):
+        for verdict in (
+            "survived", "unproved", "control-SURVIVED", "control-error",
+        ):
+            with self.subTest(verdict=verdict):
+                row = producer_shaped_row(verdict, "wide")
+                row["moved_diagnostic"] = 1
+                self._refuse_row_extra(row)
+
+    def test_raised_widening_on_non_killed_verdicts_is_refused(self):
+        for verdict in _TEST_PRODUCER_VERDICTS:
+            if verdict in _TEST_RAISED_OPTIONAL:
+                continue
+            with self.subTest(verdict=verdict):
+                row = producer_shaped_row(verdict, "wide")
+                row["raised"] = []
+                self._refuse_row_extra(row)
 
 
 # ---------------------------------------------------------------------------
