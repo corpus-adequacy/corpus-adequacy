@@ -44,10 +44,13 @@ not a missing field and not a new survivors key.
 `--survivors` requires the exact `report.v0` key set at the document and
 mutant-row boundary. Required keys are the producer set; the runner-specific
 field is allowed when the report names `process` or `batch` and stays
-optional where the producer omits it. Unknown keys and missing required
-keys fail closed on distinct routes. This is a consumer closed-set, not a
-`report.v1` and not a change to production `report.v0` or `survivors.v0`
-bytes.
+optional where the producer omits it. Mutant-row keys are closed per
+producer verdict: `scope` is required except on `equivalent`, `raised` is
+optional only on `killed`, and `moved_diagnostic` is required on `silent`,
+optional on `unexercised`/`known-hole`, and forbidden otherwise. Unknown
+keys and missing required keys fail closed on distinct routes. This is a
+consumer closed-set, not a `report.v1` and not a change to production
+`report.v0` or `survivors.v0` bytes.
 
 ```
 python3 adapters/tersign_evidence_record.py <tersign-checkout> <empty-dest>

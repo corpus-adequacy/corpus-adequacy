@@ -2641,6 +2641,8 @@ def producer_shaped_row(verdict, label, group="g", **extra):
     }
     if verdict != "equivalent":
         row["scope"] = extra.pop("scope", "declared")
+    if verdict == "silent":
+        row["moved_diagnostic"] = extra.pop("moved_diagnostic", 0)
     row.update(extra)
     return row
 
@@ -4074,6 +4076,84 @@ class SurvivorConsumerClosedSet(unittest.TestCase):
         self._assert_route(
             str(cm.exception), self.REPORT_MISSING,
             self.REPORT_EXTRA, self.MUTANT_EXTRA, self.MUTANT_MISSING)
+
+    def _closed_report(self, row):
+        return producer_shaped_report(mutants=[row])
+
+    def _refuse_row_extra(self, row):
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(self._closed_report(row))
+        self._assert_route(
+            str(cm.exception), self.MUTANT_EXTRA,
+            self.MUTANT_MISSING, self.REPORT_EXTRA, self.REPORT_MISSING)
+
+    def _refuse_row_missing(self, row):
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(self._closed_report(row))
+        self._assert_route(
+            str(cm.exception), self.MUTANT_MISSING,
+            self.MUTANT_EXTRA, self.REPORT_EXTRA, self.REPORT_MISSING)
+
+    def test_equivalent_scope_is_refused_through_mutant_extra_route(self):
+        row = producer_shaped_row("equivalent", "eq")
+        row["scope"] = "declared"
+        self._refuse_row_extra(row)
+
+    def test_equivalent_moved_diagnostic_is_refused_through_mutant_extra_route(self):
+        row = producer_shaped_row("equivalent", "eq")
+        row["moved_diagnostic"] = 1
+        self._refuse_row_extra(row)
+
+    def test_control_killed_moved_diagnostic_is_refused_through_mutant_extra_route(self):
+        row = producer_shaped_row("control-killed", "ctl")
+        row["moved_diagnostic"] = 1
+        self._refuse_row_extra(row)
+
+    def test_killed_moved_diagnostic_is_refused_through_mutant_extra_route(self):
+        row = producer_shaped_row("killed", "k")
+        row["moved_diagnostic"] = 1
+        self._refuse_row_extra(row)
+
+    def test_silent_missing_moved_diagnostic_is_refused_through_mutant_missing_route(self):
+        row = producer_shaped_row("silent", "s")
+        row.pop("moved_diagnostic", None)
+        self._refuse_row_missing(row)
+
+    def test_survived_missing_scope_is_refused_through_mutant_missing_route(self):
+        row = producer_shaped_row("survived", "s")
+        del row["scope"]
+        self._refuse_row_missing(row)
+
+    def test_every_producer_verdict_accepts_its_legal_shapes(self):
+        for verdict in ca.PRODUCER_ROW_VERDICTS:
+            with self.subTest(verdict=verdict, shape="required"):
+                row = producer_shaped_row(verdict, "legal")
+                self.assertEqual(
+                    ca.survivor_findings(self._closed_report(row))["schema"],
+                    ca.SURVIVORS_SCHEMA)
+            for key in sorted(ca._mutant_row_optional_keys(verdict)):
+                with self.subTest(verdict=verdict, shape="optional-" + key):
+                    row = producer_shaped_row(verdict, "legal")
+                    row[key] = [] if key == "raised" else 1
+                    self.assertEqual(
+                        ca.survivor_findings(self._closed_report(row))["schema"],
+                        ca.SURVIVORS_SCHEMA)
+
+    def test_every_producer_verdict_refuses_forbidden_fields(self):
+        forbidden_by_verdict = {
+            verdict: (
+                (set(ca._MUTANT_ROW_BASE_KEYS) | {"scope", "raised", "moved_diagnostic"})
+                - ca._mutant_row_required_keys(verdict)
+                - ca._mutant_row_optional_keys(verdict)
+            )
+            for verdict in ca.PRODUCER_ROW_VERDICTS
+        }
+        for verdict, forbidden in forbidden_by_verdict.items():
+            for key in sorted(forbidden):
+                with self.subTest(verdict=verdict, key=key):
+                    row = producer_shaped_row(verdict, "illegal")
+                    row[key] = [] if key == "raised" else (0 if key in ("moved", "moved_diagnostic") else "x")
+                    self._refuse_row_extra(row)
 
 
 # ---------------------------------------------------------------------------

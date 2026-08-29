@@ -578,35 +578,47 @@ def _report_v0_required_keys(runner):
     return _report_v0_allowed_keys(runner) - _report_v0_optional_keys(runner)
 
 
+# Producer mutant-row verdicts. Spellings come from `_control_result` and
+# the ordinary row constructors; this is not a new vocabulary.
+PRODUCER_ROW_VERDICTS = (
+    "equivalent",
+    "unproved",
+    "killed",
+    "unexercised",
+    "known-hole",
+    "silent",
+    "survived",
+    "control-killed",
+    "control-SURVIVED",
+    "control-error",
+)
+_MUTANT_ROW_BASE_KEYS = frozenset({"group", "label", "verdict", "moved", "how"})
+_DIAGNOSTIC_OPTIONAL_VERDICTS = frozenset({"unexercised", "known-hole"})
+
+
 def _mutant_row_optional_keys(verdict):
-    """Fields the producer omits on purpose for some verdicts."""
-    optional = {"moved_diagnostic"}
+    """Fields the producer writes only for some verdicts."""
+    optional = set()
     if verdict == "killed":
         optional.add("raised")
-    if verdict == "equivalent":
-        optional.add("scope")
+    if verdict in _DIAGNOSTIC_OPTIONAL_VERDICTS:
+        optional.add("moved_diagnostic")
     return frozenset(optional)
 
 
-def _mutant_row_allowed_keys(verdict):
-    """Closed mutant-row set, including verdict-dependent optional fields."""
-    sample = {
-        "group": "",
-        "label": "",
-        "verdict": verdict,
-        "moved": 0,
-        "how": "",
-        "scope": "",
-        "moved_diagnostic": 0,
-    }
-    if verdict == "killed":
-        sample["raised"] = []
-    return frozenset(sample)
-
-
 def _mutant_row_required_keys(verdict):
-    """Producer-required row keys. Derived from the allowed set, not recopied."""
-    return _mutant_row_allowed_keys(verdict) - _mutant_row_optional_keys(verdict)
+    """Producer-required row keys for one verdict."""
+    required = set(_MUTANT_ROW_BASE_KEYS)
+    if verdict != "equivalent":
+        required.add("scope")
+    if verdict == "silent":
+        required.add("moved_diagnostic")
+    return frozenset(required)
+
+
+def _mutant_row_allowed_keys(verdict):
+    """Closed mutant-row set: required plus verdict-optional producer fields."""
+    return _mutant_row_required_keys(verdict) | _mutant_row_optional_keys(verdict)
 
 
 def _require_closed_keys(obj, required, allowed, *, missing_token, extra_token):
