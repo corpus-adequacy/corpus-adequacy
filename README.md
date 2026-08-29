@@ -184,11 +184,15 @@ exclusions, and what the percentage is a percentage of.
   repeated name could otherwise excuse two rules. A label may be acknowledged
   at most once for each corpus digest. Labels are non-empty strings and remain
   exact, case-sensitive identities; the tool does not normalize them.
-- **At least one control.** All-survivors because a corpus is weak and
-  all-survivors because nothing was measured print identically. A control is a
-  mutation on the same path that MUST be killed; it is excluded from the score,
-  and a control that survives fails the run with every other verdict declared
-  meaningless.
+- **At least one positive control.** All-survivors because a corpus is weak and
+  all-survivors because nothing was measured print identically. A legacy control,
+  or one declaring `"control_polarity": "positive"`, MUST move and be killed.
+  An optional `"control_polarity": "inert"` control MUST leave pinned outcomes
+  unchanged. A moved inert control invalidates the run and emits no score; an
+  absent or non-unique inert anchor is `control-error`, not evidence of unchanged
+  behavior. Both polarities are excluded from the denominator, and an inert-only
+  manifest does not satisfy the positive-control requirement. `control_polarity`
+  is refused without `"control": true`; inertness is explicit, never inferred.
 - **A group present in the corpus with no declared mutants is a hard failure** —
   the check may not silently cover less than its name claims.
 - **Manifest containers have one declared JSON kind.** `mutants`, `equivalent`,
@@ -333,15 +337,17 @@ key order changes the digest because it changes the governed input bytes.
 This provides content addressing and an integrity check. It is not a signature,
 an authenticity claim, or proof that the manifest declared every rule.
 
-`control_status` directly reports `killed`, `survived`, `error`, or
+`control_status` directly reports `killed`, `survived`, `moved`, `error`, or
 `absent-or-invalid`; a consumer does not reconstruct it from mutant rows. The
 same producer rule emits each control row and its status. With multiple controls,
 `error` takes precedence over `absent-or-invalid`, which takes precedence over
-`survived`, which takes precedence over `killed`. The aggregate compares the
-number of observed controls with the number declared; a stale, unloadable or
-otherwise unmeasured control therefore yields `absent-or-invalid` instead of a
-partial `killed`. The existing structural guard still makes that report
-inadequate.
+`survived`, then `moved`, then `killed`. A healthy inert control reuses the healthy
+aggregate `killed` token and emits a `control-unchanged` row; a moved inert control
+emits `control-MOVED`. The aggregate compares the number of observed controls with
+the number declared; a stale, unloadable or otherwise unmeasured control therefore
+yields `absent-or-invalid` instead of a partial `killed`. The existing structural
+guard still makes that report inadequate. `report.v0` gains no field and manifests
+without an inert control retain their existing report behavior and bytes.
 
 `originals_unverified_against_head` is required on `process` and `batch`
 and forbidden on `module`: those runners guard a working tree and always
@@ -398,10 +404,13 @@ sites it finds are *rules*; declaration cannot know what the author forgot.
 **Where each is stronger.** His taxonomy is finer on the observation axis: KILLED,
 SILENT, DEAD and INCONCLUSIVE, with `unkillable` and `masked` annotations. The
 `silent` verdict here is his SILENT, adopted with the name kept. This tool is
-stronger on ground truth: it requires **at least one control mutant** and voids
-the entire run if one survives, which the forcing gate has no counterpart for.
+stronger on ground truth: it requires **at least one positive control mutant** and
+voids the entire run if one survives, which the forcing gate has no counterpart for.
 All-survivors because a corpus is weak and all-survivors because nothing was
-measured print identically, and only a control separates them.
+measured print identically, and only a positive control separates them. An inert
+control adds the inverse metamorphic check: a declared semantically neutral
+transformation must not move the pinned outcomes. It does not prove semantic
+discrimination, infer equivalence, or replace a positive control.
 
 ## Trust boundary
 

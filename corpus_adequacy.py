@@ -744,12 +744,20 @@ def encode_survivors_v0(doc: dict) -> bytes:
             "survivors projection contains text that cannot be encoded as valid UTF-8") from None
 
 
-def _control_result(group: str, label: str, scope: str, *,
-                    detected: bool, moved: int, error=None):
-    """Produce one control row and its direct summary from the same rule."""
+def _control_result(group: str, label: str, scope: str, *, polarity: str,
+                    changed: bool, moved: int, error=None):
+    """Map one declared polarity and observation to its row and direct status."""
     if error is not None:
         status, verdict, how = "error", "control-error", str(error)
-    elif detected:
+    elif polarity == "inert" and changed:
+        status, verdict, how = (
+            "moved", "control-MOVED",
+            "pinned outcomes moved under a declared inert transformation")
+    elif polarity == "inert":
+        status, verdict, how = (
+            "killed", "control-unchanged",
+            "pinned outcomes stayed unchanged under a declared inert transformation")
+    elif changed:
         status, verdict, how = (
             "killed", "control-killed", "harness detects a change on this path")
     else:
@@ -760,12 +768,20 @@ def _control_result(group: str, label: str, scope: str, *,
 
 
 def _record_control(results: list, statuses: list[str], group: str, label: str,
-                    scope: str, *, detected: bool, moved: int, error=None) -> None:
+                    scope: str, *, polarity: str, changed: bool, moved: int,
+                    error=None) -> str:
     """Record the row and direct status together so neither path can omit one."""
     row, status = _control_result(
-        group, label, scope, detected=detected, moved=moved, error=error)
+        group, label, scope, polarity=polarity, changed=changed,
+        moved=moved, error=error)
     results.append(row)
     statuses.append(status)
+    return status
+
+
+def _control_polarity(mut: dict) -> str:
+    """Return the validated polarity; legacy controls are positive."""
+    return mut.get("control_polarity", "positive")
 
 
 def _declared_control_count(m: dict) -> int:
@@ -834,8 +850,8 @@ def _append_group_equivalents(results: list, m: dict, group: str,
 def _control_status(statuses: list[str], declared_count: int) -> str:
     """Summarise all declared controls without asking a consumer to scan rows.
 
-    Error outranks an incomplete observation, which outranks survived, which
-    outranks killed. A missing row means a declared control was stale,
+    Error outranks an incomplete observation, which outranks survived, moved,
+    and killed. A missing row means a declared control was stale,
     unloadable or otherwise unmeasured, so a partial set cannot report killed.
     """
     if "error" in statuses:
@@ -844,6 +860,8 @@ def _control_status(statuses: list[str], declared_count: int) -> str:
         return "absent-or-invalid"
     if "survived" in statuses:
         return "survived"
+    if "moved" in statuses:
+        return "moved"
     return "killed"
 
 
@@ -1124,6 +1142,15 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
                 _req(e, key, "mutants[%s][%d]" % (group, i))
             e.setdefault("scope", "declared")
             e.setdefault("control", False)
+            if "control_polarity" in e and e["control"] is not True:
+                raise ManifestError(
+                    "mutants[%s][%d] %r: control_polarity requires control: true"
+                    % (group, i, e["label"]))
+            if ("control_polarity" in e
+                    and e["control_polarity"] not in ("positive", "inert")):
+                raise ManifestError(
+                    "mutants[%s][%d] %r: control_polarity must be positive or inert"
+                    % (group, i, e["label"]))
             if e["control"] and e["scope"] != "declared":
                 raise ManifestError("mutants[%s][%d] %r: a control cannot be out_of_scope"
                                     % (group, i, e["label"]))
@@ -1958,7 +1985,7 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
         if mut.get("control"):
             _record_control(
                 tally["results"], tally["control_statuses"],
-                group, mut["label"], scope, detected=False,
+                group, mut["label"], scope, polarity=_control_polarity(mut), changed=False,
                 moved=0, error=detail)
             tally["failures"].append(
                 "control %r ended abnormally (%s); that is not a kill and "
@@ -1974,7 +2001,7 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
         if mut.get("control"):
             _record_control(
                 tally["results"], tally["control_statuses"],
-                group, mut["label"], scope, detected=False,
+                group, mut["label"], scope, polarity=_control_polarity(mut), changed=False,
                 moved=0, error=detail)
             tally["failures"].append(
                 "control %r ended abnormally (%s); that is not a kill and "
@@ -2004,7 +2031,8 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
             if mut.get("control"):
                 _record_control(
                     tally["results"], tally["control_statuses"],
-                    group, mut["label"], scope, detected=False,
+                    group, mut["label"], scope,
+                    polarity=_control_polarity(mut), changed=False,
                     moved=0, error=execution.detail)
                 tally["failures"].append(
                     "control %r ended abnormally (%s); that is not a kill and "
@@ -2044,20 +2072,27 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
             how = ", ".join(sorted(set(raised.values())))
             _record_control(
                 tally["results"], tally["control_statuses"],
-                group, mut["label"], scope, detected=False,
+                group, mut["label"], scope,
+                polarity=_control_polarity(mut), changed=False,
                 moved=0, error=how)
             tally["failures"].append(
                 "control %r ended abnormally (%s); that is not a kill and "
                 "this run has no adequacy score" % (mut["label"], how))
             return
-        ok = bool(moved)
-        _record_control(
+        changed = bool(moved)
+        status = _record_control(
             tally["results"], tally["control_statuses"],
-            group, mut["label"], scope, detected=ok, moved=len(moved))
-        if not ok:
+            group, mut["label"], scope, polarity=_control_polarity(mut),
+            changed=changed, moved=len(moved))
+        if status == "survived":
             tally["failures"].append(
                 "control %r survived: the harness cannot detect a change on this "
                 "path, so every other verdict in this run is meaningless"
+                % mut["label"])
+        elif status == "moved":
+            tally["failures"].append(
+                "inert control %r moved: pinned outcomes changed under a declared "
+                "inert transformation, so this run has no adequacy score"
                 % mut["label"])
         return
     unmeasured = sorted({
@@ -2342,17 +2377,27 @@ def run(manifest_path: Path) -> dict:
             for idx, mut in enumerate(m["mutants"][group]):
                 occurrences = source.count(mut["anchor"])
                 if occurrences == 0:
-                    failures.append(
+                    detail = (
                         "%s / %s: anchor not found in %s. The rule was renamed or removed and the "
                         "mutant is measuring nothing" % (group, mut["label"], m["implementation"]))
+                    failures.append(detail)
+                    if mut.get("control") and _control_polarity(mut) == "inert":
+                        _record_control(
+                            results, control_statuses, group, mut["label"], "declared",
+                            polarity="inert", changed=False, moved=0, error=detail)
                     continue
                 if occurrences > 1:
                     # Substituting the first of several is a coin flip about which rule is being
                     # measured, and a mangled substitution is then scored as a kill.
-                    failures.append(
+                    detail = (
                         "%s / %s: the anchor occurs %d times in %s, so the substitution would pick "
                         "one arbitrarily and any breakage would be scored as a kill. Make the "
                         "anchor unique" % (group, mut["label"], occurrences, m["implementation"]))
+                    failures.append(detail)
+                    if mut.get("control") and _control_polarity(mut) == "inert":
+                        _record_control(
+                            results, control_statuses, group, mut["label"], "declared",
+                            polarity="inert", changed=False, moved=0, error=detail)
                     continue
                 scope = mut.get("scope", "declared")
                 mutated = source.replace(mut["anchor"], mut["replacement"], 1)
@@ -2365,6 +2410,14 @@ def run(manifest_path: Path) -> dict:
                     # rules out treating a Rust build failure as a kill; measure a
                     # load-bearing rule with a variant that RUNS, or declare it equivalent.
                     detail = res.load_error or ("no entrypoint %r" % m["entrypoint"])
+                    if mut.get("control") and _control_polarity(mut) == "inert":
+                        _record_control(
+                            results, control_statuses, group, mut["label"], scope,
+                            polarity="inert", changed=False, moved=0, error=detail)
+                        failures.append(
+                            "control %r ended abnormally (%s); that is not a kill and "
+                            "this run has no adequacy score" % (mut["label"], detail))
+                        continue
                     results.append({"group": group, "label": mut["label"],
                                     "verdict": "unproved", "scope": scope, "moved": 0,
                                     "how": "the mutant does not load, so the corpus never "
@@ -2378,7 +2431,8 @@ def run(manifest_path: Path) -> dict:
                         # its child dying is not a kill. It leaves the run with no score.
                         _record_control(
                             results, control_statuses,
-                            group, mut["label"], scope, detected=False,
+                            group, mut["label"], scope,
+                            polarity=_control_polarity(mut), changed=False,
                             moved=0, error=kind)
                         failures.append(
                             "control %r ended abnormally (%s); that is not a kill and "
@@ -2403,14 +2457,20 @@ def run(manifest_path: Path) -> dict:
                 raised = list(res.raised)
                 moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
                 if mut.get("control"):
-                    ok = bool(raised or moved)
-                    _record_control(
+                    changed = bool(raised or moved)
+                    status = _record_control(
                         results, control_statuses,
-                        group, mut["label"], scope, detected=ok, moved=len(moved))
-                    if not ok:
+                        group, mut["label"], scope, polarity=_control_polarity(mut),
+                        changed=changed, moved=len(moved))
+                    if status == "survived":
                         failures.append(
                             "control %r survived: the harness cannot detect a change on this "
                             "path, so every other verdict in this run is meaningless"
+                            % mut["label"])
+                    elif status == "moved":
+                        failures.append(
+                            "inert control %r moved: pinned outcomes changed under a declared "
+                            "inert transformation, so this run has no adequacy score"
                             % mut["label"])
                     continue
                 if raised:
@@ -2520,7 +2580,7 @@ def _score_or_none(score, results: list, failures: list):
     the other. That is the defect structural_failures already describes one
     level up, in the arithmetic instead of in the guards.
     """
-    if (any(r.get("verdict") == "control-error" for r in results)
+    if (any(r.get("verdict") in ("control-error", "control-MOVED") for r in results)
             or any("UNMUTATED" in f for f in failures)):
         return None
     return score
@@ -2549,7 +2609,8 @@ def structural_failures(m: dict, groups_in_corpus: set) -> list:
     stale = sorted(set(m["mutants"]) - groups_in_corpus)
     if stale:
         failures.append("mutants declared for groups not in the corpus: %s" % stale)
-    if not any(mut.get("control") for muts in m["mutants"].values() for mut in muts):
+    if not any(mut.get("control") and _control_polarity(mut) == "positive"
+               for muts in m["mutants"].values() for mut in muts):
         failures.append("no control mutant declared. Without one, a run of all-survivors "
                         "cannot be told apart from a harness that detects nothing")
     acknowledged = _acknowledged_holes(m)
