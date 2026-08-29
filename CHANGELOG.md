@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+Controls may now explicitly declare `control_polarity: inert`; legacy controls
+remain positive. A moved inert control reports `control-MOVED`, gives aggregate
+`control_status: moved`, invalidates the run, and emits no score. An unchanged
+inert control reports `control-unchanged` while reusing the healthy aggregate
+`killed` token. Missing or non-unique inert anchors are `control-error`, and an
+inert-only manifest does not satisfy the positive-control requirement.
+`control_polarity` is refused without `control: true`. Module, process, and batch
+share the polarity rule and precedence `error` > `absent-or-invalid` > `survived`
+> `moved` > `killed`. Controls remain outside the denominator; `report.v0` gains
+no field, and manifests without inert controls retain existing report bytes. This
+is a declared metamorphic check, not inferred equivalence, a score, or `report.v1`.
+
 `--survivors` now refuses unknown top-level and mutant-row keys on a
 decoded `report.v0` document through one shared closed-set helper, with
 distinct missing-key and extra-key routes. Required keys come from the

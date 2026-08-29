@@ -152,6 +152,50 @@ class Scoring(unittest.TestCase):
 class ControlMutants(unittest.TestCase):
     """A control proves the harness detects anything. It is never scored."""
 
+    def test_byte_pinning_moved_inert_control_invalidates_the_score(self):
+        byte_pinned = '''
+import hashlib
+from pathlib import Path
+
+INERT_LABEL = "original"
+
+def evaluate(group, inputs):
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+'''
+        inert = {
+            "label": "unused label is semantically inert",
+            "control": True,
+            "control_polarity": "inert",
+            "anchor": 'INERT_LABEL = "original"',
+            "replacement": 'INERT_LABEL = "renamed"',
+        }
+        positive = {
+            "label": "positive control",
+            "control": True,
+            "anchor": "def evaluate(group, inputs):",
+            "replacement": 'def evaluate(group, inputs):\n    return "MOVED"',
+        }
+        ordinary = {
+            "label": "ordinary rule",
+            "anchor": "return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()",
+            "replacement": 'return "ordinary mutant"',
+        }
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _manifest(
+                tmp, {"a": [ordinary, positive, inert]}, control=False)
+            (tmp / "impl.py").write_text(byte_pinned)
+            report = ca.run(path)
+
+        self.assertEqual(report["control_status"], "moved")
+        self.assertIsNone(report["score_percent"])
+        self.assertFalse(report["adequate"])
+        self.assertEqual(
+            next(row for row in report["mutants"] if row["label"] == inert["label"])[
+                "verdict"],
+            "control-MOVED",
+        )
+
     def test_a_killed_control_does_not_inflate_the_score(self):
         ctrl = dict(KILLABLE, label="CONTROL reachability", control=True)
         with tempfile.TemporaryDirectory() as d:
@@ -178,6 +222,90 @@ class ControlMutants(unittest.TestCase):
             with self.assertRaises(ca.ManifestError) as cm:
                 ca.load_manifest(p)
         self.assertIn("control cannot be out_of_scope", str(cm.exception))
+
+    def test_unchanged_inert_control_keeps_a_discriminating_run_scored(self):
+        inert = {
+            "label": "unused label stays inert",
+            "control": True,
+            "control_polarity": "inert",
+            "anchor": 'return "ok"',
+            "replacement": 'value = "unused"\n    return "ok"',
+        }
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_manifest(
+                Path(d), {"a": [KILLABLE, dict(CONTROL, label="positive control"), inert]},
+                control=False))
+
+        self.assertTrue(report["adequate"], report["failures"])
+        self.assertEqual(report["score_percent"], 100.0)
+        self.assertEqual(report["control_status"], "killed")
+        self.assertEqual(
+            next(row for row in report["mutants"] if row["label"] == inert["label"])[
+                "verdict"],
+            "control-unchanged",
+        )
+
+    def test_inert_only_does_not_satisfy_the_positive_control_requirement(self):
+        inert = {
+            "label": "only inert control",
+            "control": True,
+            "control_polarity": "inert",
+            "anchor": 'return "ok"',
+            "replacement": 'value = "unused"\n    return "ok"',
+        }
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_manifest(
+                Path(d), {"a": [KILLABLE, inert]}, control=False))
+
+        self.assertFalse(report["adequate"])
+        self.assertTrue(
+            any("no control mutant declared" in failure for failure in report["failures"]),
+            report["failures"],
+        )
+
+    def test_control_polarity_requires_a_control_and_a_known_value(self):
+        cases = (
+            (dict(KILLABLE, control_polarity="inert"), "requires control: true"),
+            (dict(KILLABLE, control=True, control_polarity="unknown"),
+             "control_polarity must be positive or inert"),
+            (dict(KILLABLE, control=True, control_polarity=None),
+             "control_polarity must be positive or inert"),
+        )
+        for mutant, expected in cases:
+            with self.subTest(mutant=mutant), tempfile.TemporaryDirectory() as d:
+                path = _manifest(Path(d), {"a": [mutant]}, control=False)
+                with self.assertRaises(ca.ManifestError) as cm:
+                    ca.load_manifest(path)
+            self.assertIn(expected, str(cm.exception))
+
+    def test_missing_or_nonunique_inert_anchor_is_control_error(self):
+        inert = {
+            "label": "invalid inert anchor",
+            "control": True,
+            "control_polarity": "inert",
+            "replacement": 'value = "unused"',
+        }
+        for anchor in ("not present", "return"):
+            with self.subTest(anchor=anchor), tempfile.TemporaryDirectory() as d:
+                path = _manifest(
+                    Path(d), {"a": [KILLABLE, dict(inert, anchor=anchor)]})
+                report = ca.run(path)
+            row = next(
+                item for item in report["mutants"] if item["label"] == inert["label"])
+            self.assertEqual(row["verdict"], "control-error")
+            self.assertEqual(report["control_status"], "error")
+            self.assertIsNone(report["score_percent"])
+
+    def test_report_bytes_without_inert_control_ignore_an_unused_source_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _manifest(tmp, {"a": [KILLABLE]})
+            before = ca.encode_report_v0(ca.run(path))
+            with (tmp / "impl.py").open("a", encoding="utf-8") as stream:
+                stream.write("\nUNUSED_NOOP = True\n")
+            after = ca.encode_report_v0(ca.run(path))
+
+        self.assertEqual(after, before)
 
 
 class KnownHoles(unittest.TestCase):
@@ -1954,14 +2082,14 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
     def test_observed_termination_of_a_mutant_child_is_a_named_kill(self):
         for kind, kw in TERMINATED:
             with self.subTest(kind=kind):
-                rep = self._run(2, kw)
+                rep = self._run(3, kw)
                 v = _verdict(rep, "scored")
                 self.assertEqual((v["verdict"], v["how"], v["moved"]), ("killed", kind, 0))
 
     def test_a_failed_measurement_is_unproved_and_never_a_kill(self):
         for kind, kw in UNMEASURED:
             with self.subTest(kind=kind):
-                rep = self._run(2, kw)
+                rep = self._run(3, kw)
                 v = _verdict(rep, "scored")
                 self.assertEqual(v["verdict"], "unproved")
                 self.assertIn(kind, v["how"])
@@ -1976,7 +2104,7 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
                               "outcomes": {"0": "rejected", "1": "ok"},
                               "raised": [], "unsupported": [],
                               "load_error": None, "entrypoint_missing": False})
-        rep = self._run(2, dict(returncode=7, stdout=payload))
+        rep = self._run(3, dict(returncode=7, stdout=payload))
         v = _verdict(rep, "scored")
         self.assertEqual((v["verdict"], v["how"]), ("killed", "unexpected-exit"))
 
@@ -1987,7 +2115,7 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
                               "outcomes": {"0": "rejected"}, "raised": [],
                               "unsupported": [], "load_error": None,
                               "entrypoint_missing": False})
-        rep = self._run(2, dict(returncode=0, stdout=partial))
+        rep = self._run(3, dict(returncode=0, stdout=partial))
         v = _verdict(rep, "scored")
         self.assertEqual(v["verdict"], "unproved")
         self.assertIn("parse-error", v["how"])
@@ -2006,7 +2134,7 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
     def test_a_dead_control_child_invalidates_the_run(self):
         for kind, kw in TERMINATED + UNMEASURED:
             with self.subTest(kind=kind):
-                rep = self._run(3, kw)
+                rep = self._run(2, kw)
                 self.assertIsNone(rep["score_percent"])
                 self.assertFalse(rep["adequate"])
                 self.assertEqual(_verdict(rep, "CONTROL [a]")["verdict"], "control-error")
@@ -2600,6 +2728,8 @@ _TEST_PRODUCER_VERDICTS = (
     "survived",
     "control-killed",
     "control-SURVIVED",
+    "control-unchanged",
+    "control-MOVED",
     "control-error",
 )
 _TEST_MD_OPTIONAL = frozenset({"unexercised", "known-hole"})
@@ -2943,15 +3073,17 @@ class ProducerOwnedControlStatus(unittest.TestCase):
 
     def test_control_rule_keeps_direct_status_and_row_verdict_in_parity(self):
         cases = (
-            (True, None, "killed", "control-killed"),
-            (False, None, "survived", "control-SURVIVED"),
-            (False, "unexpected-exit", "error", "control-error"),
+            ("positive", True, None, "killed", "control-killed"),
+            ("positive", False, None, "survived", "control-SURVIVED"),
+            ("inert", False, None, "killed", "control-unchanged"),
+            ("inert", True, None, "moved", "control-MOVED"),
+            ("inert", False, "unexpected-exit", "error", "control-error"),
         )
-        for detected, error, status, verdict in cases:
+        for polarity, changed, error, status, verdict in cases:
             with self.subTest(status=status):
                 row, direct = ca._control_result(
-                    "g", "CONTROL", "declared", detected=detected,
-                    moved=1 if detected else 0, error=error,
+                    "g", "CONTROL", "declared", polarity=polarity,
+                    changed=changed, moved=1 if changed else 0, error=error,
                 )
                 self.assertEqual(direct, status)
                 self.assertEqual(row["verdict"], verdict)
@@ -2987,6 +3119,10 @@ class ProducerOwnedControlStatus(unittest.TestCase):
             (["killed"], 2, "absent-or-invalid"),
             (["survived"], 2, "absent-or-invalid"),
             (["killed", "survived"], 2, "survived"),
+            (["killed", "moved"], 2, "moved"),
+            (["killed", "moved", "survived"], 3, "survived"),
+            (["killed", "moved", "error"], 3, "error"),
+            (["moved"], 2, "absent-or-invalid"),
             (["killed", "error"], 2, "error"),
             (["error"], 2, "error"),
             (["killed", "killed"], 2, "killed"),
@@ -4193,6 +4329,43 @@ class SurvivorConsumerClosedSet(unittest.TestCase):
                         0 if key in ("moved", "moved_diagnostic") else "x")
                     self._refuse_row_extra(row)
 
+    def test_inert_control_verdicts_are_independent_closed_shape_cells(self):
+        verdicts = frozenset({"control-unchanged", "control-MOVED"})
+        self.assertLessEqual(verdicts, frozenset(_TEST_PRODUCER_VERDICTS))
+        for verdict in verdicts:
+            with self.subTest(verdict=verdict):
+                self.assertEqual(_test_row_optional(verdict), frozenset())
+                self.assertLessEqual(
+                    {"moved_diagnostic", "raised"}, _test_row_forbidden(verdict))
+
+    def test_inert_control_rows_parse_without_becoming_survivor_findings(self):
+        report = producer_shaped_report(
+            control_status="moved",
+            score_percent=None,
+            adequate=False,
+            failures=["inert control moved; no adequacy score"],
+            mutants=[
+                producer_shaped_row(
+                    "control-unchanged", "INERT unchanged", moved=0),
+                producer_shaped_row(
+                    "control-MOVED", "INERT moved", moved=1),
+            ],
+        )
+
+        projected = ca.survivor_findings(report)
+
+        self.assertEqual(projected, {
+            "schema": ca.SURVIVORS_SCHEMA,
+            "source_schema": ca.REPORT_SCHEMA,
+            "manifest_sha256": report["manifest_sha256"],
+            "survived": 0,
+            "silent": 0,
+            "finding_count": 0,
+            "findings": [],
+        })
+        self.assertNotIn("score_percent", projected)
+        self.assertNotIn("control_status", projected)
+
     def test_process_missing_originals_unverified_is_refused_through_report_missing_route(self):
         doc = producer_shaped_report(runner="process")
         del doc["originals_unverified_against_head"]
@@ -4367,6 +4540,182 @@ def _two_source_noop_process_manifest(tmp: Path, *, with_control: bool) -> Path:
     raw["mutants"] = {"g": mutants}
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
+
+
+class InertControlRunnerParity(unittest.TestCase):
+    """Module, process, and batch apply the same inert-control polarity."""
+
+    ORDINARY = "ordinary declared first"
+    POSITIVE = "positive control"
+    INERT = "inert control"
+
+    def _barrier_mutants(self, *, group: str, inert_replacement: str) -> dict:
+        return {group: [
+            {"label": self.ORDINARY,
+             "anchor": 'ORDINARY_MARKER = "original"',
+             "replacement": 'ORDINARY_MARKER = "renamed"'},
+            {"label": self.POSITIVE, "control": True,
+             "anchor": 'POSITIVE_MARKER = "original"',
+             "replacement": 'POSITIVE_MARKER = "renamed"'},
+            {"label": self.INERT, "control": True, "control_polarity": "inert",
+             "anchor": 'INERT_MARKER = "original"',
+             "replacement": inert_replacement},
+        ]}
+
+    def _barrier_module(self, tmp: Path, *, inert_replacement: str) -> Path:
+        (tmp / "impl.py").write_text('''
+import hashlib
+from pathlib import Path
+
+ORDINARY_MARKER = "original"
+POSITIVE_MARKER = "original"
+INERT_MARKER = "original"
+
+def evaluate(group, inputs):
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+''', encoding="utf-8")
+        (tmp / "vectors.json").write_text(json.dumps(VECTORS), encoding="utf-8")
+        path = tmp / "m.json"
+        path.write_text(json.dumps({
+            "schema": ca.SCHEMA,
+            "implementation": "impl.py",
+            "entrypoint": "evaluate",
+            "vectors": "vectors.json",
+            "group_key": "axis",
+            "id_key": "vector_id",
+            "inputs_key": "inputs",
+            "mutants": self._barrier_mutants(
+                group="a", inert_replacement=inert_replacement),
+        }), encoding="utf-8")
+        return path
+
+    def _barrier_process_or_batch(
+            self, tmp: Path, runner: str, *, inert_replacement: str) -> Path:
+        (tmp / "check.py").write_text('''
+import hashlib
+import json
+from pathlib import Path
+
+ORDINARY_MARKER = "original"
+POSITIVE_MARKER = "original"
+INERT_MARKER = "original"
+
+print(json.dumps({"digest": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}))
+''', encoding="utf-8")
+        if runner == "process":
+            (tmp / "vec.json").write_text("{}\n", encoding="utf-8")
+            vectors = {"vectors": [{"vector_id": "v1", "path": "vec.json"}]}
+            command = [_batch_python(), "check.py", "{vector}"]
+        else:
+            vectors = {"cases": [{"id": "c1"}]}
+            command = [_batch_python(), "check.py", "vectors.json"]
+        (tmp / "vectors.json").write_text(json.dumps(vectors), encoding="utf-8")
+        manifest = {
+            "schema": ca.SCHEMA,
+            "runner": runner,
+            "repo_root": ".",
+            "implementation_sources": ["check.py"],
+            "entrypoint_command": command,
+            "outcome_from": ["digest"],
+            "vectors": "vectors.json",
+            "id_key": "vector_id",
+            "default_group": "g",
+            "mutants": self._barrier_mutants(
+                group="g", inert_replacement=inert_replacement),
+        }
+        if runner == "process":
+            manifest.update({
+                "implementation": "check.py",
+                "build": [],
+                "vector_path_key": "path",
+            })
+        path = tmp / "m.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    def _barrier_factories(self, inert_replacement: str):
+        return (
+            ("module", lambda tmp: self._barrier_module(
+                tmp, inert_replacement=inert_replacement)),
+            ("process", lambda tmp: self._barrier_process_or_batch(
+                tmp, "process", inert_replacement=inert_replacement)),
+            ("batch", lambda tmp: self._barrier_process_or_batch(
+                tmp, "batch", inert_replacement=inert_replacement)),
+        )
+
+    def _assert_control_barrier(self, report: dict, *, status: str, verdict: str) -> None:
+        self.assertEqual(report["control_status"], status)
+        self.assertEqual(report["killed"], 0)
+        self.assertIsNone(report["score_percent"])
+        self.assertNotIn(self.ORDINARY, [row["label"] for row in report["mutants"]])
+        inert = next(row for row in report["mutants"] if row["label"] == self.INERT)
+        self.assertEqual(inert["verdict"], verdict)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_moved_inert_control_barrier_omits_earlier_declared_ordinary_on_every_runner(self):
+        for runner, factory in self._barrier_factories('INERT_MARKER = "renamed"'):
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as d:
+                report = ca.run(factory(Path(d)))
+                self._assert_control_barrier(
+                    report, status="moved", verdict="control-MOVED")
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_abnormal_inert_control_barrier_omits_earlier_declared_ordinary_on_every_runner(self):
+        for runner, factory in self._barrier_factories("raise SystemExit(9)"):
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as d:
+                report = ca.run(factory(Path(d)))
+                self._assert_control_barrier(
+                    report, status="error", verdict="control-error")
+
+    def _module(self, tmp: Path) -> Path:
+        inert = {
+            "label": "INERT",
+            "control": True,
+            "control_polarity": "inert",
+            "anchor": 'INERT_MARKER = "original"',
+            "replacement": 'INERT_MARKER = "renamed"',
+        }
+        path = _manifest(
+            tmp, {"a": [KILLABLE, dict(CONTROL, label="positive control"), inert]},
+            control=False)
+        (tmp / "impl.py").write_text(
+            'INERT_MARKER = "original"\n' + IMPL, encoding="utf-8")
+        return path
+
+    def _process_or_batch(self, tmp: Path, runner: str) -> Path:
+        path = (_process_kill_manifest(tmp) if runner == "process"
+                else BatchRunner()._corpus(tmp))
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        source = tmp / raw["implementation_sources"][0]
+        source.write_text(
+            source.read_text(encoding="utf-8") + 'INERT_MARKER = "original"\n',
+            encoding="utf-8",
+        )
+        raw["mutants"]["g"].append({
+            "label": "INERT",
+            "control": True,
+            "control_polarity": "inert",
+            "anchor": 'INERT_MARKER = "original"',
+            "replacement": 'INERT_MARKER = "renamed"',
+        })
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        return path
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_unchanged_inert_control_has_one_result_on_every_runner(self):
+        factories = (
+            ("module", self._module),
+            ("process", lambda tmp: self._process_or_batch(tmp, "process")),
+            ("batch", lambda tmp: self._process_or_batch(tmp, "batch")),
+        )
+        for runner, factory in factories:
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as d:
+                report = ca.run(factory(Path(d)))
+            inert = next(row for row in report["mutants"] if row["label"] == "INERT")
+            self.assertEqual(inert["verdict"], "control-unchanged")
+            self.assertEqual(report["control_status"], "killed")
+            self.assertEqual(report["score_percent"], 100.0)
+            self.assertTrue(report["adequate"], report["failures"])
 
 
 class SharedMutationStep(unittest.TestCase):

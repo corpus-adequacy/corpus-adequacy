@@ -744,12 +744,20 @@ def encode_survivors_v0(doc: dict) -> bytes:
             "survivors projection contains text that cannot be encoded as valid UTF-8") from None
 
 
-def _control_result(group: str, label: str, scope: str, *,
-                    detected: bool, moved: int, error=None):
-    """Produce one control row and its direct summary from the same rule."""
+def _control_result(group: str, label: str, scope: str, *, polarity: str,
+                    changed: bool, moved: int, error=None):
+    """Map one declared polarity and observation to its row and direct status."""
     if error is not None:
         status, verdict, how = "error", "control-error", str(error)
-    elif detected:
+    elif polarity == "inert" and changed:
+        status, verdict, how = (
+            "moved", "control-MOVED",
+            "pinned outcomes moved under a declared inert transformation")
+    elif polarity == "inert":
+        status, verdict, how = (
+            "killed", "control-unchanged",
+            "pinned outcomes stayed unchanged under a declared inert transformation")
+    elif changed:
         status, verdict, how = (
             "killed", "control-killed", "harness detects a change on this path")
     else:
@@ -760,12 +768,20 @@ def _control_result(group: str, label: str, scope: str, *,
 
 
 def _record_control(results: list, statuses: list[str], group: str, label: str,
-                    scope: str, *, detected: bool, moved: int, error=None) -> None:
+                    scope: str, *, polarity: str, changed: bool, moved: int,
+                    error=None) -> str:
     """Record the row and direct status together so neither path can omit one."""
     row, status = _control_result(
-        group, label, scope, detected=detected, moved=moved, error=error)
+        group, label, scope, polarity=polarity, changed=changed,
+        moved=moved, error=error)
     results.append(row)
     statuses.append(status)
+    return status
+
+
+def _control_polarity(mut: dict) -> str:
+    """Return the validated polarity; legacy controls are positive."""
+    return mut.get("control_polarity", "positive")
 
 
 def _declared_control_count(m: dict) -> int:
@@ -834,8 +850,8 @@ def _append_group_equivalents(results: list, m: dict, group: str,
 def _control_status(statuses: list[str], declared_count: int) -> str:
     """Summarise all declared controls without asking a consumer to scan rows.
 
-    Error outranks an incomplete observation, which outranks survived, which
-    outranks killed. A missing row means a declared control was stale,
+    Error outranks an incomplete observation, which outranks survived, moved,
+    and killed. A missing row means a declared control was stale,
     unloadable or otherwise unmeasured, so a partial set cannot report killed.
     """
     if "error" in statuses:
@@ -844,7 +860,14 @@ def _control_status(statuses: list[str], declared_count: int) -> str:
         return "absent-or-invalid"
     if "survived" in statuses:
         return "survived"
+    if "moved" in statuses:
+        return "moved"
     return "killed"
+
+
+def _control_barrier_allows_ordinary(statuses: list[str], declared_count: int) -> bool:
+    """Allow ordinary evidence only after every declared control was killed."""
+    return declared_count == 0 or _control_status(statuses, declared_count) == "killed"
 
 
 def _report_v0(manifest_path: Path, m: dict, *,
@@ -1124,6 +1147,15 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
                 _req(e, key, "mutants[%s][%d]" % (group, i))
             e.setdefault("scope", "declared")
             e.setdefault("control", False)
+            if "control_polarity" in e and e["control"] is not True:
+                raise ManifestError(
+                    "mutants[%s][%d] %r: control_polarity requires control: true"
+                    % (group, i, e["label"]))
+            if ("control_polarity" in e
+                    and e["control_polarity"] not in ("positive", "inert")):
+                raise ManifestError(
+                    "mutants[%s][%d] %r: control_polarity must be positive or inert"
+                    % (group, i, e["label"]))
             if e["control"] and e["scope"] != "declared":
                 raise ManifestError("mutants[%s][%d] %r: a control cannot be out_of_scope"
                                     % (group, i, e["label"]))
@@ -1958,7 +1990,7 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
         if mut.get("control"):
             _record_control(
                 tally["results"], tally["control_statuses"],
-                group, mut["label"], scope, detected=False,
+                group, mut["label"], scope, polarity=_control_polarity(mut), changed=False,
                 moved=0, error=detail)
             tally["failures"].append(
                 "control %r ended abnormally (%s); that is not a kill and "
@@ -1974,7 +2006,7 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
         if mut.get("control"):
             _record_control(
                 tally["results"], tally["control_statuses"],
-                group, mut["label"], scope, detected=False,
+                group, mut["label"], scope, polarity=_control_polarity(mut), changed=False,
                 moved=0, error=detail)
             tally["failures"].append(
                 "control %r ended abnormally (%s); that is not a kill and "
@@ -2004,7 +2036,8 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
             if mut.get("control"):
                 _record_control(
                     tally["results"], tally["control_statuses"],
-                    group, mut["label"], scope, detected=False,
+                    group, mut["label"], scope,
+                    polarity=_control_polarity(mut), changed=False,
                     moved=0, error=execution.detail)
                 tally["failures"].append(
                     "control %r ended abnormally (%s); that is not a kill and "
@@ -2044,20 +2077,27 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
             how = ", ".join(sorted(set(raised.values())))
             _record_control(
                 tally["results"], tally["control_statuses"],
-                group, mut["label"], scope, detected=False,
+                group, mut["label"], scope,
+                polarity=_control_polarity(mut), changed=False,
                 moved=0, error=how)
             tally["failures"].append(
                 "control %r ended abnormally (%s); that is not a kill and "
                 "this run has no adequacy score" % (mut["label"], how))
             return
-        ok = bool(moved)
-        _record_control(
+        changed = bool(moved)
+        status = _record_control(
             tally["results"], tally["control_statuses"],
-            group, mut["label"], scope, detected=ok, moved=len(moved))
-        if not ok:
+            group, mut["label"], scope, polarity=_control_polarity(mut),
+            changed=changed, moved=len(moved))
+        if status == "survived":
             tally["failures"].append(
                 "control %r survived: the harness cannot detect a change on this "
                 "path, so every other verdict in this run is meaningless"
+                % mut["label"])
+        elif status == "moved":
+            tally["failures"].append(
+                "inert control %r moved: pinned outcomes changed under a declared "
+                "inert transformation, so this run has no adequacy score"
                 % mut["label"])
         return
     unmeasured = sorted({
@@ -2245,8 +2285,8 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
         entered_ordinary = False
         for group, mut in ordered_mutants:
             if not mut.get("control") and not entered_ordinary:
-                if declared_controls and _control_status(
-                        tally["control_statuses"], declared_controls) != "killed":
+                if not _control_barrier_allows_ordinary(
+                        tally["control_statuses"], declared_controls):
                     break
                 entered_ordinary = True
             if entered_ordinary and prev_ordinary is not None and group != prev_ordinary:
@@ -2310,6 +2350,7 @@ def run(manifest_path: Path) -> dict:
     unproved = known_holes = 0
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
+        baselines = {}
         for group in sorted(m["mutants"]):
             vectors = [v for v in all_vectors if _group_of(v, m) == group]
             if not vectors:
@@ -2337,125 +2378,171 @@ def run(manifest_path: Path) -> dict:
                 failures.append("%s: the UNMUTATED implementation raised on %s"
                                 % (group, base.raised))
                 continue
-            baseline = base.outcomes
+            baselines[group] = (vectors, base.outcomes)
 
-            for idx, mut in enumerate(m["mutants"][group]):
-                occurrences = source.count(mut["anchor"])
-                if occurrences == 0:
+        entered_ordinary = False
+        for idx, (group, mut) in enumerate(ordered_declared_mutants(m["mutants"])):
+            if not mut.get("control") and not entered_ordinary:
+                if not _control_barrier_allows_ordinary(
+                        control_statuses, declared_controls):
+                    break
+                entered_ordinary = True
+            if group not in baselines:
+                continue
+            vectors, baseline = baselines[group]
+            occurrences = source.count(mut["anchor"])
+            if occurrences == 0:
+                detail = (
+                    "%s / %s: anchor not found in %s. The rule was renamed or removed and the "
+                    "mutant is measuring nothing" % (group, mut["label"], m["implementation"]))
+                failures.append(detail)
+                if mut.get("control") and _control_polarity(mut) == "inert":
+                    _record_control(
+                        results, control_statuses, group, mut["label"], "declared",
+                        polarity="inert", changed=False, moved=0, error=detail)
+                continue
+            if occurrences > 1:
+                # Substituting the first of several is a coin flip about which rule is being
+                # measured, and a mangled substitution is then scored as a kill.
+                detail = (
+                    "%s / %s: the anchor occurs %d times in %s, so the substitution would pick "
+                    "one arbitrarily and any breakage would be scored as a kill. Make the "
+                    "anchor unique" % (group, mut["label"], occurrences, m["implementation"]))
+                failures.append(detail)
+                if mut.get("control") and _control_polarity(mut) == "inert":
+                    _record_control(
+                        results, control_statuses, group, mut["label"], "declared",
+                        polarity="inert", changed=False, moved=0, error=detail)
+                continue
+            scope = mut.get("scope", "declared")
+            mutated = source.replace(mut["anchor"], mut["replacement"], 1)
+            res = _module_outcomes(m, mutated,
+                                   "%s_%d" % (group.replace("-", "_"), idx), vectors, tmp)
+            if res.load_error or res.entrypoint_missing:
+                # A mutant that never loaded was never shown to the corpus, so the
+                # corpus said nothing about it. Counting that as a kill lets a typo
+                # in the substitution print as "rule covered". The same argument
+                # rules out treating a Rust build failure as a kill; measure a
+                # load-bearing rule with a variant that RUNS, or declare it equivalent.
+                detail = res.load_error or ("no entrypoint %r" % m["entrypoint"])
+                if mut.get("control") and _control_polarity(mut) == "inert":
+                    _record_control(
+                        results, control_statuses, group, mut["label"], scope,
+                        polarity="inert", changed=False, moved=0, error=detail)
                     failures.append(
-                        "%s / %s: anchor not found in %s. The rule was renamed or removed and the "
-                        "mutant is measuring nothing" % (group, mut["label"], m["implementation"]))
+                        "control %r ended abnormally (%s); that is not a kill and "
+                        "this run has no adequacy score" % (mut["label"], detail))
                     continue
-                if occurrences > 1:
-                    # Substituting the first of several is a coin flip about which rule is being
-                    # measured, and a mangled substitution is then scored as a kill.
-                    failures.append(
-                        "%s / %s: the anchor occurs %d times in %s, so the substitution would pick "
-                        "one arbitrarily and any breakage would be scored as a kill. Make the "
-                        "anchor unique" % (group, mut["label"], occurrences, m["implementation"]))
-                    continue
-                scope = mut.get("scope", "declared")
-                mutated = source.replace(mut["anchor"], mut["replacement"], 1)
-                res = _module_outcomes(m, mutated,
-                                       "%s_%d" % (group.replace("-", "_"), idx), vectors, tmp)
-                if res.load_error or res.entrypoint_missing:
-                    # A mutant that never loaded was never shown to the corpus, so the
-                    # corpus said nothing about it. Counting that as a kill lets a typo
-                    # in the substitution print as "rule covered". The same argument
-                    # rules out treating a Rust build failure as a kill; measure a
-                    # load-bearing rule with a variant that RUNS, or declare it equivalent.
-                    detail = res.load_error or ("no entrypoint %r" % m["entrypoint"])
-                    results.append({"group": group, "label": mut["label"],
-                                    "verdict": "unproved", "scope": scope, "moved": 0,
-                                    "how": "the mutant does not load, so the corpus never "
-                                           "saw it and said nothing about this rule: %s" % detail})
-                    unproved += 1
-                    continue
-                if res.abnormal or res.unsupported:
-                    kind = res.abnormal or "unsupported-outcome"
-                    if mut.get("control"):
-                        # The control is what proves the harness detects anything, so
-                        # its child dying is not a kill. It leaves the run with no score.
-                        _record_control(
-                            results, control_statuses,
-                            group, mut["label"], scope, detected=False,
-                            moved=0, error=kind)
-                        failures.append(
-                            "control %r ended abnormally (%s); that is not a kill and "
-                            "this run has no adequacy score" % (mut["label"], kind))
-                        continue
-                    if _child_failure_is_termination(kind):
-                        # Observed termination: the unmutated run completed on these
-                        # same vectors and this one did not.
-                        results.append({"group": group, "label": mut["label"],
-                                        "verdict": "killed", "scope": scope, "moved": 0,
-                                        "how": kind})
-                        killed += 1
-                        continue
-                    results.append({
-                        "group": group, "label": mut["label"], "verdict": "unproved",
-                        "scope": scope, "moved": 0,
-                        "how": "the measurement did not complete (%s), so the corpus was "
-                               "never shown this mutant and said nothing about this rule" % kind})
-                    unproved += 1
-                    continue
-                out = res.outcomes
-                raised = list(res.raised)
-                moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
+                results.append({"group": group, "label": mut["label"],
+                                "verdict": "unproved", "scope": scope, "moved": 0,
+                                "how": "the mutant does not load, so the corpus never "
+                                       "saw it and said nothing about this rule: %s" % detail})
+                unproved += 1
+                continue
+            if res.abnormal or res.unsupported:
+                kind = res.abnormal or "unsupported-outcome"
                 if mut.get("control"):
-                    ok = bool(raised or moved)
+                    # The control is what proves the harness detects anything, so
+                    # its child dying is not a kill. It leaves the run with no score.
                     _record_control(
                         results, control_statuses,
-                        group, mut["label"], scope, detected=ok, moved=len(moved))
-                    if not ok:
-                        failures.append(
-                            "control %r survived: the harness cannot detect a change on this "
-                            "path, so every other verdict in this run is meaningless"
-                            % mut["label"])
+                        group, mut["label"], scope,
+                        polarity=_control_polarity(mut), changed=False,
+                        moved=0, error=kind)
+                    failures.append(
+                        "control %r ended abnormally (%s); that is not a kill and "
+                        "this run has no adequacy score" % (mut["label"], kind))
                     continue
-                if raised:
-                    results.append({"group": group, "label": mut["label"], "verdict": "killed",
-                                    "scope": scope, "how": "raises on %d vector(s)" % len(raised),
-                                    "moved": len(moved), "raised": raised})
-                    killed += 1
-                elif moved:
-                    results.append({"group": group, "label": mut["label"], "verdict": "killed",
-                                    "scope": scope, "how": "%d vector(s) moved" % len(moved),
-                                    "moved": len(moved)})
-                    killed += 1
-                elif scope == "out_of_scope":
-                    # Declared by the manifest as a rule this corpus does not claim to cover.
-                    # Reported every run, never scored: adequacy is relative to declared scope,
-                    # and scoring a rule nobody claimed manufactures a hole that is not one.
-                    results.append({
-                        "group": group, "label": mut["label"], "verdict": "unexercised",
-                        "scope": scope, "moved": 0,
-                        # Print the stated reason, exactly as a declared equivalent does.
-                        # "each with a stated reason" without showing one is an assertion.
-                        "how": "out of scope: %s" % mut["reason"]})
-                    out_of_scope += 1
-                elif label_identity(mut) in acknowledged:
-                    ack = acknowledged[label_identity(mut)]
+                if _child_failure_is_termination(kind):
+                    # Observed termination: the unmutated run completed on these
+                    # same vectors and this one did not.
                     results.append({"group": group, "label": mut["label"],
-                                    "verdict": "known-hole", "scope": scope, "moved": 0,
-                                    "how": "KNOWN HOLE against %s, recorded %s: %s"
-                                           % (str(m["_corpus_digest"])[:19], ack["recorded"],
-                                              ack["reason"])})
-                    known_holes += 1
-                else:
-                    results.append({
-                        "group": group, "label": mut["label"], "verdict": "survived",
-                        "scope": scope, "moved": 0,
-                        "how": "no vector distinguishes it. An implementation can delete this rule, "
-                               "reproduce the pinned digest, and be indistinguishable from a "
-                               "conforming one. The corpus needs a vector where this rule, and only "
-                               "this rule, decides the outcome"})
-                    survived += 1
+                                    "verdict": "killed", "scope": scope, "moved": 0,
+                                    "how": kind})
+                    killed += 1
+                    continue
+                results.append({
+                    "group": group, "label": mut["label"], "verdict": "unproved",
+                    "scope": scope, "moved": 0,
+                    "how": "the measurement did not complete (%s), so the corpus was "
+                           "never shown this mutant and said nothing about this rule" % kind})
+                unproved += 1
+                continue
+            out = res.outcomes
+            raised = list(res.raised)
+            moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
+            if mut.get("control"):
+                changed = bool(raised or moved)
+                status = _record_control(
+                    results, control_statuses,
+                    group, mut["label"], scope, polarity=_control_polarity(mut),
+                    changed=changed, moved=len(moved))
+                if status == "survived":
+                    failures.append(
+                        "control %r survived: the harness cannot detect a change on this "
+                        "path, so every other verdict in this run is meaningless"
+                        % mut["label"])
+                elif status == "moved":
+                    failures.append(
+                        "inert control %r moved: pinned outcomes changed under a declared "
+                        "inert transformation, so this run has no adequacy score"
+                        % mut["label"])
+                continue
+            if raised:
+                results.append({"group": group, "label": mut["label"], "verdict": "killed",
+                                "scope": scope, "how": "raises on %d vector(s)" % len(raised),
+                                "moved": len(moved), "raised": raised})
+                killed += 1
+            elif moved:
+                results.append({"group": group, "label": mut["label"], "verdict": "killed",
+                                "scope": scope, "how": "%d vector(s) moved" % len(moved),
+                                "moved": len(moved)})
+                killed += 1
+            elif scope == "out_of_scope":
+                # Declared by the manifest as a rule this corpus does not claim to cover.
+                # Reported every run, never scored: adequacy is relative to declared scope,
+                # and scoring a rule nobody claimed manufactures a hole that is not one.
+                results.append({
+                    "group": group, "label": mut["label"], "verdict": "unexercised",
+                    "scope": scope, "moved": 0,
+                    # Print the stated reason, exactly as a declared equivalent does.
+                    # "each with a stated reason" without showing one is an assertion.
+                    "how": "out of scope: %s" % mut["reason"]})
+                out_of_scope += 1
+            elif label_identity(mut) in acknowledged:
+                ack = acknowledged[label_identity(mut)]
+                results.append({"group": group, "label": mut["label"],
+                                "verdict": "known-hole", "scope": scope, "moved": 0,
+                                "how": "KNOWN HOLE against %s, recorded %s: %s"
+                                       % (str(m["_corpus_digest"])[:19], ack["recorded"],
+                                          ack["reason"])})
+                known_holes += 1
+            else:
+                results.append({
+                    "group": group, "label": mut["label"], "verdict": "survived",
+                    "scope": scope, "moved": 0,
+                    "how": "no vector distinguishes it. An implementation can delete this rule, "
+                           "reproduce the pinned digest, and be indistinguishable from a "
+                           "conforming one. The corpus needs a vector where this rule, and only "
+                           "this rule, decides the outcome"})
+                survived += 1
 
+        for group in sorted(m["mutants"]):
+            if group not in baselines:
+                continue
             for eq in m["equivalent"].get(group, []):
                 results.append({"group": group, "label": eq["label"], "verdict": "equivalent",
                                 "how": eq["reason"], "moved": 0})
                 equivalent += 1
+
+        # Execution is control-first, but report.v0 retains declaration order.
+        declared_order = [
+            (group, label_identity(entry))
+            for group in sorted(m["mutants"])
+            for entry in m["mutants"][group] + m["equivalent"].get(group, [])
+        ]
+        order_index = {identity: idx for idx, identity in enumerate(declared_order)}
+        results.sort(key=lambda row: order_index[(row["group"], label_identity(row))])
 
     linger = {label_identity(r): r["verdict"] for r in results
               if label_identity(r) in acknowledged and r["verdict"] != "known-hole"}
@@ -2520,7 +2607,7 @@ def _score_or_none(score, results: list, failures: list):
     the other. That is the defect structural_failures already describes one
     level up, in the arithmetic instead of in the guards.
     """
-    if (any(r.get("verdict") == "control-error" for r in results)
+    if (any(r.get("verdict") in ("control-error", "control-MOVED") for r in results)
             or any("UNMUTATED" in f for f in failures)):
         return None
     return score
@@ -2549,7 +2636,8 @@ def structural_failures(m: dict, groups_in_corpus: set) -> list:
     stale = sorted(set(m["mutants"]) - groups_in_corpus)
     if stale:
         failures.append("mutants declared for groups not in the corpus: %s" % stale)
-    if not any(mut.get("control") for muts in m["mutants"].values() for mut in muts):
+    if not any(mut.get("control") and _control_polarity(mut) == "positive"
+               for muts in m["mutants"].values() for mut in muts):
         failures.append("no control mutant declared. Without one, a run of all-survivors "
                         "cannot be told apart from a harness that detects nothing")
     acknowledged = _acknowledged_holes(m)
