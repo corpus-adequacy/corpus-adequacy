@@ -3891,6 +3891,99 @@ class SurvivorFindings(unittest.TestCase):
                     self.assertEqual(rows[0]["vector_id"], "v1")
 
 
+class SurvivorConsumerClosedSet(unittest.TestCase):
+    """Issue #96: --survivors refuses unknown keys at report and mutant-row depth."""
+
+    REPORT_EXTRA = "report extra key"
+    REPORT_MISSING = "report missing key"
+    MUTANT_EXTRA = "mutant extra key"
+    MUTANT_MISSING = "mutant missing key"
+    VALID_REPORT = (
+        Path(__file__).resolve().parent / "fixtures" / "publication"
+        / "valid-tersign" / "report.v0.json")
+    VALID_REPORT_SHA256 = (
+        "c65f8a6c6dcc4a56dea31e7fc0de241a8cbbdcf36cd4cf98c220d23a894fe5ae")
+    VALID_SURVIVORS_SHA256 = (
+        "caf3c2345a229d9f76367753ed7e856627fdd8f55aa00e6fbfad2ee502f9e9bb")
+
+    def _valid_doc(self):
+        return json.loads(self.VALID_REPORT.read_text(encoding="utf-8"))
+
+    def _project_cli(self, doc):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "report.json"
+            path.write_bytes(ca.encode_report_v0(doc))
+            return subprocess.run(
+                [sys.executable, str(ca.__file__), "--survivors", str(path), "--json"],
+                capture_output=True, timeout=30)
+
+    def _assert_route(self, text, route, *forbidden):
+        self.assertIn(route, text)
+        for token in forbidden:
+            self.assertNotIn(token, text)
+
+    def test_top_level_extra_key_is_refused_through_report_extra_route(self):
+        doc = self._valid_doc()
+        doc["published_url"] = "https://example.invalid/report"
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(doc)
+        self._assert_route(
+            str(cm.exception), self.REPORT_EXTRA,
+            self.REPORT_MISSING, self.MUTANT_EXTRA, self.MUTANT_MISSING)
+        proc = self._project_cli(doc)
+        self.assertEqual(proc.returncode, 2)
+        combined = (proc.stderr + proc.stdout).decode("utf-8")
+        self._assert_route(
+            combined, self.REPORT_EXTRA,
+            self.REPORT_MISSING, self.MUTANT_EXTRA, self.MUTANT_MISSING)
+        self.assertNotIn("Traceback", combined)
+        self.assertNotIn(ca.SURVIVORS_SCHEMA, proc.stdout.decode("utf-8"))
+
+    def test_mutant_row_extra_key_is_refused_through_mutant_extra_route(self):
+        doc = self._valid_doc()
+        doc["mutants"][0]["published_url"] = "https://example.invalid/row"
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(doc)
+        self._assert_route(
+            str(cm.exception), self.MUTANT_EXTRA,
+            self.MUTANT_MISSING, self.REPORT_EXTRA, self.REPORT_MISSING)
+        proc = self._project_cli(doc)
+        self.assertEqual(proc.returncode, 2)
+        combined = (proc.stderr + proc.stdout).decode("utf-8")
+        self._assert_route(
+            combined, self.MUTANT_EXTRA,
+            self.MUTANT_MISSING, self.REPORT_EXTRA, self.REPORT_MISSING)
+        self.assertNotIn("Traceback", combined)
+        self.assertNotIn(ca.SURVIVORS_SCHEMA, proc.stdout.decode("utf-8"))
+
+    def test_top_level_missing_key_is_refused_through_report_missing_route(self):
+        doc = self._valid_doc()
+        del doc["mutants"]
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(doc)
+        self._assert_route(
+            str(cm.exception), self.REPORT_MISSING,
+            self.REPORT_EXTRA, self.MUTANT_EXTRA, self.MUTANT_MISSING)
+
+    def test_mutant_row_missing_key_is_refused_through_mutant_missing_route(self):
+        doc = self._valid_doc()
+        del doc["mutants"][0]["label"]
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(doc)
+        self._assert_route(
+            str(cm.exception), self.MUTANT_MISSING,
+            self.MUTANT_EXTRA, self.REPORT_EXTRA, self.REPORT_MISSING)
+
+    def test_valid_report_v0_production_bytes_are_unchanged(self):
+        raw = self.VALID_REPORT.read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), self.VALID_REPORT_SHA256)
+        self.assertEqual(ca.encode_report_v0(json.loads(raw)), raw)
+
+    def test_valid_survivors_v0_production_bytes_are_unchanged(self):
+        encoded = ca.encode_survivors_v0(ca.survivor_findings(self._valid_doc()))
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(), self.VALID_SURVIVORS_SHA256)
+
+
 # ---------------------------------------------------------------------------
 # #66: one process/batch mutation step, one backend seam, one tally closer
 # ---------------------------------------------------------------------------

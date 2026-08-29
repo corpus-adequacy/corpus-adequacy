@@ -515,18 +515,103 @@ def _apply_anchor(finding: dict, manifest_obj: dict) -> None:
     # missing field and not a new survivors key.
 
 
+REPORT_MISSING_KEY = "report missing key"
+REPORT_EXTRA_KEY = "report extra key"
+MUTANT_MISSING_KEY = "mutant missing key"
+MUTANT_EXTRA_KEY = "mutant extra key"
+
+
+def _runner_specific_report_key(runner):
+    """The one process/batch-only report.v0 field. Derived once."""
+    if runner in ("process", "batch"):
+        return "originals_unverified_against_head"
+    return None
+
+
+def _report_v0_allowed_keys(runner):
+    """Closed consumer set from one producer-shaped decoded document."""
+    sample = {
+        "schema": REPORT_SCHEMA,
+        "manifest": "",
+        "manifest_sha256": None,
+        "runner": runner,
+        "control_status": "absent-or-invalid",
+        "killed": 0,
+        "survived": 0,
+        "silent": 0,
+        "diagnostic_channel_declared": False,
+        "known_holes": 0,
+        "corpus_digest": None,
+        "acknowledged_digests": 0,
+        "hole_ratio": None,
+        "equivalent": 0,
+        "unexercised_out_of_scope": 0,
+        "unproved": 0,
+        "declared_total": 0,
+        "out_of_scope_ratio": None,
+        "score_percent": None,
+        "score_means": None,
+        "mutants": [],
+        "failures": [],
+        "adequate": True,
+        "tool_version": None,
+        "tool_commit": None,
+        "tool_source_state": None,
+        "tool_content_sha256": None,
+    }
+    extra = _runner_specific_report_key(runner)
+    if extra is not None:
+        sample[extra] = []
+    return frozenset(sample)
+
+
+def _mutant_row_allowed_keys(verdict):
+    """Closed mutant-row set, including verdict-dependent optional fields."""
+    sample = {
+        "group": "",
+        "label": "",
+        "verdict": verdict,
+        "moved": 0,
+        "how": "",
+        "scope": "",
+        "moved_diagnostic": 0,
+    }
+    if verdict == "killed":
+        sample["raised"] = []
+    return frozenset(sample)
+
+
+def _require_closed_keys(obj, required, allowed, *, missing_token, extra_token):
+    """One missing-vs-extra comparison. Distinct tokens; no shared substring."""
+    present = set(obj)
+    missing = required - present
+    extra = present - allowed
+    if missing:
+        raise ManifestError("%s %s" % (missing_token, sorted(missing)[0]))
+    if extra:
+        raise ManifestError("%s %s" % (extra_token, sorted(extra)[0]))
+
+
 def _require_report_rows(report) -> list:
     """Refuse hostile report shapes before they become KeyError or []."""
     if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
         raise ManifestError(
             "survivors input must be %s, got %r"
             % (REPORT_SCHEMA, report.get("schema") if isinstance(report, dict) else type(report).__name__))
+    runner = report.get("runner") if isinstance(report.get("runner"), str) else ""
+    _require_closed_keys(
+        report, {"mutants"}, _report_v0_allowed_keys(runner),
+        missing_token=REPORT_MISSING_KEY, extra_token=REPORT_EXTRA_KEY)
     mutants = report.get("mutants")
     if not isinstance(mutants, list):
         raise ManifestError("report.mutants must be a list")
     for i, row in enumerate(mutants):
         if not isinstance(row, dict):
             raise ManifestError("report.mutants[%d] must be an object" % i)
+        verdict = row.get("verdict") if isinstance(row.get("verdict"), str) else ""
+        _require_closed_keys(
+            row, {"group", "label", "verdict"}, _mutant_row_allowed_keys(verdict),
+            missing_token=MUTANT_MISSING_KEY, extra_token=MUTANT_EXTRA_KEY)
         for key in ("group", "label", "verdict"):
             val = row.get(key)
             if not isinstance(val, str) or not val:
