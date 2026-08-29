@@ -2082,14 +2082,14 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
     def test_observed_termination_of_a_mutant_child_is_a_named_kill(self):
         for kind, kw in TERMINATED:
             with self.subTest(kind=kind):
-                rep = self._run(2, kw)
+                rep = self._run(3, kw)
                 v = _verdict(rep, "scored")
                 self.assertEqual((v["verdict"], v["how"], v["moved"]), ("killed", kind, 0))
 
     def test_a_failed_measurement_is_unproved_and_never_a_kill(self):
         for kind, kw in UNMEASURED:
             with self.subTest(kind=kind):
-                rep = self._run(2, kw)
+                rep = self._run(3, kw)
                 v = _verdict(rep, "scored")
                 self.assertEqual(v["verdict"], "unproved")
                 self.assertIn(kind, v["how"])
@@ -2104,7 +2104,7 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
                               "outcomes": {"0": "rejected", "1": "ok"},
                               "raised": [], "unsupported": [],
                               "load_error": None, "entrypoint_missing": False})
-        rep = self._run(2, dict(returncode=7, stdout=payload))
+        rep = self._run(3, dict(returncode=7, stdout=payload))
         v = _verdict(rep, "scored")
         self.assertEqual((v["verdict"], v["how"]), ("killed", "unexpected-exit"))
 
@@ -2115,7 +2115,7 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
                               "outcomes": {"0": "rejected"}, "raised": [],
                               "unsupported": [], "load_error": None,
                               "entrypoint_missing": False})
-        rep = self._run(2, dict(returncode=0, stdout=partial))
+        rep = self._run(3, dict(returncode=0, stdout=partial))
         v = _verdict(rep, "scored")
         self.assertEqual(v["verdict"], "unproved")
         self.assertIn("parse-error", v["how"])
@@ -2134,7 +2134,7 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
     def test_a_dead_control_child_invalidates_the_run(self):
         for kind, kw in TERMINATED + UNMEASURED:
             with self.subTest(kind=kind):
-                rep = self._run(3, kw)
+                rep = self._run(2, kw)
                 self.assertIsNone(rep["score_percent"])
                 self.assertFalse(rep["adequate"])
                 self.assertEqual(_verdict(rep, "CONTROL [a]")["verdict"], "control-error")
@@ -4544,6 +4544,128 @@ def _two_source_noop_process_manifest(tmp: Path, *, with_control: bool) -> Path:
 
 class InertControlRunnerParity(unittest.TestCase):
     """Module, process, and batch apply the same inert-control polarity."""
+
+    ORDINARY = "ordinary declared first"
+    POSITIVE = "positive control"
+    INERT = "inert control"
+
+    def _barrier_mutants(self, *, group: str, inert_replacement: str) -> dict:
+        return {group: [
+            {"label": self.ORDINARY,
+             "anchor": 'ORDINARY_MARKER = "original"',
+             "replacement": 'ORDINARY_MARKER = "renamed"'},
+            {"label": self.POSITIVE, "control": True,
+             "anchor": 'POSITIVE_MARKER = "original"',
+             "replacement": 'POSITIVE_MARKER = "renamed"'},
+            {"label": self.INERT, "control": True, "control_polarity": "inert",
+             "anchor": 'INERT_MARKER = "original"',
+             "replacement": inert_replacement},
+        ]}
+
+    def _barrier_module(self, tmp: Path, *, inert_replacement: str) -> Path:
+        (tmp / "impl.py").write_text('''
+import hashlib
+from pathlib import Path
+
+ORDINARY_MARKER = "original"
+POSITIVE_MARKER = "original"
+INERT_MARKER = "original"
+
+def evaluate(group, inputs):
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+''', encoding="utf-8")
+        (tmp / "vectors.json").write_text(json.dumps(VECTORS), encoding="utf-8")
+        path = tmp / "m.json"
+        path.write_text(json.dumps({
+            "schema": ca.SCHEMA,
+            "implementation": "impl.py",
+            "entrypoint": "evaluate",
+            "vectors": "vectors.json",
+            "group_key": "axis",
+            "id_key": "vector_id",
+            "inputs_key": "inputs",
+            "mutants": self._barrier_mutants(
+                group="a", inert_replacement=inert_replacement),
+        }), encoding="utf-8")
+        return path
+
+    def _barrier_process_or_batch(
+            self, tmp: Path, runner: str, *, inert_replacement: str) -> Path:
+        (tmp / "check.py").write_text('''
+import hashlib
+import json
+from pathlib import Path
+
+ORDINARY_MARKER = "original"
+POSITIVE_MARKER = "original"
+INERT_MARKER = "original"
+
+print(json.dumps({"digest": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}))
+''', encoding="utf-8")
+        if runner == "process":
+            (tmp / "vec.json").write_text("{}\n", encoding="utf-8")
+            vectors = {"vectors": [{"vector_id": "v1", "path": "vec.json"}]}
+            command = [_batch_python(), "check.py", "{vector}"]
+        else:
+            vectors = {"cases": [{"id": "c1"}]}
+            command = [_batch_python(), "check.py", "vectors.json"]
+        (tmp / "vectors.json").write_text(json.dumps(vectors), encoding="utf-8")
+        manifest = {
+            "schema": ca.SCHEMA,
+            "runner": runner,
+            "repo_root": ".",
+            "implementation_sources": ["check.py"],
+            "entrypoint_command": command,
+            "outcome_from": ["digest"],
+            "vectors": "vectors.json",
+            "id_key": "vector_id",
+            "default_group": "g",
+            "mutants": self._barrier_mutants(
+                group="g", inert_replacement=inert_replacement),
+        }
+        if runner == "process":
+            manifest.update({
+                "implementation": "check.py",
+                "build": [],
+                "vector_path_key": "path",
+            })
+        path = tmp / "m.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    def _barrier_factories(self, inert_replacement: str):
+        return (
+            ("module", lambda tmp: self._barrier_module(
+                tmp, inert_replacement=inert_replacement)),
+            ("process", lambda tmp: self._barrier_process_or_batch(
+                tmp, "process", inert_replacement=inert_replacement)),
+            ("batch", lambda tmp: self._barrier_process_or_batch(
+                tmp, "batch", inert_replacement=inert_replacement)),
+        )
+
+    def _assert_control_barrier(self, report: dict, *, status: str, verdict: str) -> None:
+        self.assertEqual(report["control_status"], status)
+        self.assertEqual(report["killed"], 0)
+        self.assertIsNone(report["score_percent"])
+        self.assertNotIn(self.ORDINARY, [row["label"] for row in report["mutants"]])
+        inert = next(row for row in report["mutants"] if row["label"] == self.INERT)
+        self.assertEqual(inert["verdict"], verdict)
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_moved_inert_control_barrier_omits_earlier_declared_ordinary_on_every_runner(self):
+        for runner, factory in self._barrier_factories('INERT_MARKER = "renamed"'):
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as d:
+                report = ca.run(factory(Path(d)))
+                self._assert_control_barrier(
+                    report, status="moved", verdict="control-MOVED")
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_abnormal_inert_control_barrier_omits_earlier_declared_ordinary_on_every_runner(self):
+        for runner, factory in self._barrier_factories("raise SystemExit(9)"):
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as d:
+                report = ca.run(factory(Path(d)))
+                self._assert_control_barrier(
+                    report, status="error", verdict="control-error")
 
     def _module(self, tmp: Path) -> Path:
         inert = {
