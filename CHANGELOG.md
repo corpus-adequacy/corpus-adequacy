@@ -6,9 +6,11 @@
 decoded `report.v0` document through one shared closed-set helper, with
 distinct missing-key and extra-key routes. Required keys are the exact
 producer set; the process/batch-only field is derived once from the
-report's `runner` and stays optional where the producer omits it. Valid
-`report.v0` and `survivors.v0` production bytes are unchanged. This is a
-consumer closed-set, not a score, adequacy, ranking, or `report.v1`.
+report's `runner` and stays optional where the producer omits it. Tests
+and fixtures that exercise that consumer now start from a complete
+producer-shaped document. Valid `report.v0` and `survivors.v0` production
+bytes are unchanged. This is a consumer closed-set, not a score,
+adequacy, ranking, or `report.v1`.
 
 The Tersign evidence-record adapter now selects from one closed table containing
 the historical `1cc5ea32` pin and the `0e560c1` pin. Git sources require exact

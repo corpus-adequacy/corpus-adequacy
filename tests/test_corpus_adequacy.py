@@ -2588,6 +2588,63 @@ REQUIRED_REPORT_KEYS = frozenset({
 PROCESS_ONLY_REPORT_KEYS = frozenset({"originals_unverified_against_head"})
 
 
+def producer_shaped_report(runner="process", **over):
+    """One complete producer-shaped report.v0 document for tests.
+
+    Overlay a single intended malformation after calling this. Do not start
+    from a partial dict and treat it as valid.
+    """
+    report = {
+        "schema": ca.REPORT_SCHEMA,
+        "manifest": "m.json",
+        "manifest_sha256": "sha256:" + "0" * 64,
+        "runner": runner,
+        "control_status": "absent-or-invalid",
+        "killed": 0,
+        "survived": 0,
+        "silent": 0,
+        "diagnostic_channel_declared": False,
+        "known_holes": 0,
+        "corpus_digest": None,
+        "acknowledged_digests": 0,
+        "hole_ratio": None,
+        "equivalent": 0,
+        "unexercised_out_of_scope": 0,
+        "unproved": 0,
+        "declared_total": 0,
+        "out_of_scope_ratio": None,
+        "score_percent": None,
+        "score_means": ca.SCORE_MEANS,
+        "mutants": [],
+        "failures": [],
+        "adequate": True,
+        "tool_version": ca.VERSION,
+        "tool_commit": None,
+        "tool_source_state": "unresolved",
+        "tool_content_sha256": None,
+    }
+    extra = ca._runner_specific_report_key(runner)
+    if extra is not None:
+        report[extra] = []
+    report.update(over)
+    return report
+
+
+def producer_shaped_row(verdict, label, group="g", **extra):
+    """One producer-shaped mutant row. Verdict-optional fields stay optional."""
+    row = {
+        "group": group,
+        "label": label,
+        "verdict": verdict,
+        "moved": extra.pop("moved", 0),
+        "how": extra.pop("how", ""),
+    }
+    if verdict != "equivalent":
+        row["scope"] = extra.pop("scope", "declared")
+    row.update(extra)
+    return row
+
+
 class ReportShapeParityAcrossRunners(unittest.TestCase):
     """Every runner returns the same required keys, and names itself."""
 
@@ -2928,36 +2985,22 @@ class SurvivorFindings(unittest.TestCase):
     """Issue #27: project survived and silent rows as bound rule findings."""
 
     def test_one_survived_and_one_silent_bind_two_findings(self):
-        report = {
-            "schema": ca.REPORT_SCHEMA,
-            "manifest_sha256": "sha256:" + "0" * 64,
-            "mutants": [
-                {
-                    "group": "axis-a",
-                    "label": "rejects bad input",
-                    "verdict": "survived",
-                    "scope": "declared",
-                    "moved": 0,
-                    "how": "no vector distinguishes it",
-                },
-                {
-                    "group": "axis-b",
-                    "label": "diagnostic-only rule",
-                    "verdict": "silent",
-                    "scope": "declared",
-                    "moved": 0,
-                    "moved_diagnostic": 2,
-                    "how": "no vector's declared outcome distinguishes it",
-                },
+        report = producer_shaped_report(
+            mutants=[
+                producer_shaped_row(
+                    "survived", "rejects bad input", group="axis-a",
+                    how="no vector distinguishes it"),
+                producer_shaped_row(
+                    "silent", "diagnostic-only rule", group="axis-b",
+                    moved_diagnostic=2,
+                    how="no vector's declared outcome distinguishes it"),
             ],
-            "failures": [
+            failures=[
                 "1 mutant(s) survived; the required score is 100% of non-equivalent mutants",
                 "1 mutant(s) were silent: no declared outcome moved",
             ],
-            "survived": 1,
-            "silent": 1,
-            "killed": 0,
-        }
+            survived=1, silent=1, killed=0,
+        )
         projected = ca.survivor_findings(report)
         self.assertEqual(projected["schema"], "corpus-adequacy.survivors.v0")
         findings = projected["findings"]
@@ -2990,24 +3033,16 @@ class SurvivorFindings(unittest.TestCase):
         self.assertNotEqual(survived["obligation"], silent["obligation"])
 
     def _row(self, verdict, label, group="g", **extra):
-        row = {"group": group, "label": label, "verdict": verdict, "moved": 0}
-        row.update(extra)
-        return row
+        return producer_shaped_row(verdict, label, group=group, **extra)
 
     def _report(self, mutants, **extra):
-        report = {
-            "schema": ca.REPORT_SCHEMA,
-            "manifest_sha256": extra.pop("manifest_sha256", "sha256:" + "0" * 64),
-            "mutants": mutants,
-            "failures": extra.pop("failures", []),
-            "survived": extra.pop(
-                "survived", sum(1 for row in mutants if row.get("verdict") == "survived")),
-            "silent": extra.pop(
-                "silent", sum(1 for row in mutants if row.get("verdict") == "silent")),
-            "killed": extra.pop("killed", 0),
-        }
-        report.update(extra)
-        return report
+        extra.setdefault(
+            "survived", sum(1 for row in mutants if row.get("verdict") == "survived"))
+        extra.setdefault(
+            "silent", sum(1 for row in mutants if row.get("verdict") == "silent"))
+        extra.setdefault("killed", extra.get("killed", 0))
+        extra.setdefault("failures", extra.get("failures", []))
+        return producer_shaped_report(mutants=mutants, **extra)
 
     def test_killed_and_excluded_verdicts_are_not_findings(self):
         report = self._report([
@@ -4025,6 +4060,20 @@ class SurvivorConsumerClosedSet(unittest.TestCase):
     def test_valid_survivors_v0_production_bytes_are_unchanged(self):
         encoded = ca.encode_survivors_v0(ca.survivor_findings(self._valid_doc()))
         self.assertEqual(hashlib.sha256(encoded).hexdigest(), self.VALID_SURVIVORS_SHA256)
+
+    def test_partial_report_missing_producer_keys_is_refused(self):
+        """A stale partial document is not a valid report.v0."""
+        partial = {
+            "schema": ca.REPORT_SCHEMA,
+            "runner": "process",
+            "manifest_sha256": "sha256:" + "0" * 64,
+            "mutants": [producer_shaped_row("survived", "only")],
+        }
+        with self.assertRaises(ca.ManifestError) as cm:
+            ca.survivor_findings(partial)
+        self._assert_route(
+            str(cm.exception), self.REPORT_MISSING,
+            self.REPORT_EXTRA, self.MUTANT_EXTRA, self.MUTANT_MISSING)
 
 
 # ---------------------------------------------------------------------------

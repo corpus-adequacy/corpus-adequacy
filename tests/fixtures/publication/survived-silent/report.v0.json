@@ -1,9 +1,19 @@
 {
+  "acknowledged_digests": 0,
   "adequate": false,
   "control_status": "killed",
+  "corpus_digest": null,
   "declared_total": 3,
   "diagnostic_channel_declared": true,
+  "equivalent": 0,
+  "failures": [
+    "1 mutant(s) survived; the required score is 100% of non-equivalent mutants",
+    "1 mutant(s) were silent: no declared outcome moved, only a declared diagnostic. The rule is not forced by the outcomes this corpus pins, so it counts against the score; either write a vector that moves an outcome or declare the diagnostic channel part of the pinned surface"
+  ],
+  "hole_ratio": 0.0,
   "killed": 1,
+  "known_holes": 0,
+  "manifest": "measurements/survived-silent/manifest.json",
   "manifest_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "mutants": [
     {
@@ -40,9 +50,18 @@
       "verdict": "control-killed"
     }
   ],
+  "originals_unverified_against_head": [],
+  "out_of_scope_ratio": 0.0,
   "runner": "process",
   "schema": "corpus-adequacy.report.v0",
+  "score_means": "percent of author-declared in-scope rules killed; NOT percent of the rules the implementation actually has. Silent mutants count in the denominator and never the numerator. Without diagnostic_from the silent class is unreachable, so a zero there means it was not measured, not that none exist",
+  "score_percent": 33.3,
   "silent": 1,
   "survived": 1,
+  "tool_commit": null,
+  "tool_content_sha256": null,
+  "tool_source_state": "unresolved",
+  "tool_version": "0.1.2",
+  "unexercised_out_of_scope": 0,
   "unproved": 0
 }
