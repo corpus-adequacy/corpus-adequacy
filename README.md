@@ -412,6 +412,8 @@ control adds the inverse metamorphic check: a declared semantically neutral
 transformation must not move the pinned outcomes. It does not prove semantic
 discrimination, infer equivalence, or replace a positive control.
 
+With [Maaz Ahmed](https://github.com/MaazAhmed47)’s permission, a private candidate workflow was exercised against four owner-confirmed effective-permission rules at [Interlock](https://getinterlock.dev) snapshot bec2e8f0aa8c6c962333947a5b673182eab9e99e. Maaz confirmed the factual rule mapping and required this interpretation boundary: ‘distinguished’ means only that the named mutation changed the declared projection for the fixed private probe set. No Interlock source, mutations, per-rule results, denominator, score, or product-wide claim is published. This is not an audit, endorsement, or partnership.
+
 ## Trust boundary
 
 A manifest is executable trusted input: an author declaration, not independent evidence. 100% is 100% of what that author declared. Do not run a manifest you do not trust. A third-party manifest is not independent evidence merely because it was written elsewhere.
