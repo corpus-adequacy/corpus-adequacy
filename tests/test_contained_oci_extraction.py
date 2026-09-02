@@ -195,9 +195,9 @@ class SharedEnvelopeOwnership(unittest.TestCase):
             ({"Running": True}, 1),
             ({"Error": "failed to start container"}, 1),
             ({"ExitCode": 0}, 1),
-            ({"ExitCode": "1"}, 1),
+            ({"ExitCode": True}, 1),
             ([], 1),
-            ({}, "1"),
+            ({}, True),
         )
         for state_over, process_returncode in cases:
             with self.subTest(
