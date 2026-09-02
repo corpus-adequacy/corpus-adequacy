@@ -365,6 +365,26 @@ class SharedEnvelopeOwnership(unittest.TestCase):
                             transport=MissingProcess(state_over),
                         )
 
+    def test_lifecycle_outcome_rejects_unknown_or_contradictory_shapes(self):
+        contained = self._contained_oci()
+        observed = _inspect_fixture(contained)
+        process = subprocess.CompletedProcess([], 0, "", "")
+
+        cases = (
+            (None, process),
+            ("unknown", process),
+            ("timeout", process),
+            ("output-cap", process),
+        )
+        for outcome, returned_process in cases:
+            with self.subTest(outcome=outcome):
+                with self.assertRaises(contained.ContainerSetupError):
+                    contained.require_observed_start(
+                        observed,
+                        outcome,
+                        returned_process,
+                    )
+
     def test_only_the_bounded_output_exception_classifies_output_cap(self):
         contained = self._contained_oci()
 
@@ -508,47 +528,72 @@ class SharedEnvelopeOwnership(unittest.TestCase):
             "platform": "linux/amd64",
             "rustc_Vv": "rustc %s" % materialize.RUSTC_RELEASE,
         }
+        for phase in ("create", "start", "exec", "copy"):
+            with self.subTest(phase=phase):
+                with tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    subject = root / "subject"
+                    vendor = root / "vendor"
+                    subject.mkdir()
+                    primary = contained.PrepareError("%s failed" % phase)
+
+                    def bounded(args, **_kwargs):
+                        if args[0] == phase and phase in ("create", "start"):
+                            raise primary
+                        return b""
+
+                    def run_capped(_args, **_kwargs):
+                        if phase == "exec":
+                            raise primary
+                        return mock.Mock(returncode=0, stdout="ok", stderr="")
+
+                    def docker_ok(args, **_kwargs):
+                        if args[0] == "rm":
+                            raise contained.PrepareError("remove failed")
+                        if args[0] == "exec" and phase == "copy":
+                            raise primary
+                        return mock.Mock(returncode=0, stdout="ok", stderr="")
+
+                    with mock.patch.object(
+                            materialize, "docker_bounded", side_effect=bounded), \
+                            mock.patch.object(
+                                materialize,
+                                "docker_run_capped",
+                                side_effect=run_capped,
+                            ), \
+                            mock.patch.object(
+                                materialize, "docker_ok", side_effect=docker_ok), \
+                            mock.patch.object(
+                                materialize,
+                                "require_container_absent",
+                                side_effect=contained.PrepareError("absence failed"),
+                            ):
+                        try:
+                            materialize.vendor_locked(
+                                subject,
+                                vendor,
+                                toolchain=toolchain,
+                            )
+                        except contained.PrepareError as actual:
+                            self.assertIs(actual, primary)
+                        else:
+                            self.fail("%s failure did not propagate" % phase)
+                    failures = getattr(primary, "cleanup_failures", ())
+                    self.assertEqual(
+                        [action for action, _failure in failures],
+                        ["vendor remove", "vendor absence proof"],
+                    )
+
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             subject = root / "subject"
             vendor = root / "vendor"
             subject.mkdir()
-            primary = contained.PrepareError("start failed")
-
-            def primary_bounded(args, **_kwargs):
-                if args[0] == "start":
-                    raise primary
-                return b""
 
             def cleanup_refusal(args, **_kwargs):
                 if args[0] == "rm":
                     raise contained.PrepareError("remove failed")
                 return mock.Mock(returncode=0, stdout="ok", stderr="")
-
-            with mock.patch.object(
-                    materialize, "docker_bounded", side_effect=primary_bounded), \
-                    mock.patch.object(
-                        materialize, "docker_ok", side_effect=cleanup_refusal), \
-                    mock.patch.object(
-                        materialize,
-                        "require_container_absent",
-                        side_effect=contained.PrepareError("absence failed"),
-                    ):
-                try:
-                    materialize.vendor_locked(
-                        subject,
-                        vendor,
-                        toolchain=toolchain,
-                    )
-                except contained.PrepareError as actual:
-                    self.assertIs(actual, primary)
-                else:
-                    self.fail("primary failure did not propagate")
-            failures = getattr(primary, "cleanup_failures", ())
-            self.assertEqual(
-                [action for action, _failure in failures],
-                ["vendor remove", "vendor absence proof"],
-            )
 
             with mock.patch.object(
                     materialize, "docker_bounded", return_value=b""), \
