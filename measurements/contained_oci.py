@@ -471,7 +471,7 @@ class DockerTransport:
         require_container_absent(name)
 
 
-def require_observed_start(inspect, process) -> None:
+def require_observed_start(inspect, outcome: str, process) -> None:
     """Prove Docker started the container before classifying its outcome."""
     state = inspect.get("State") if type(inspect) is dict else None
     if (type(state) is not dict or
@@ -479,11 +479,14 @@ def require_observed_start(inspect, process) -> None:
             type(state.get("ExitCode")) is not int):
         raise ContainerSetupError("container start state was not proved")
     status, running = state.get("Status"), state.get("Running")
-    if process is None:
+    if outcome in ("timeout", "output-cap"):
+        if process is not None:
+            raise ContainerSetupError("container start state was not proved")
         if (status, running) not in (("running", True), ("exited", False)):
             raise ContainerSetupError("container start state was not proved")
         return
-    if (status != "exited" or running is not False or
+    if (outcome != "completed" or status != "exited" or
+            running is not False or
             type(getattr(process, "returncode", None)) is not int or
             state["ExitCode"] != process.returncode):
         raise ContainerSetupError("container start state was not proved")
@@ -502,7 +505,7 @@ def run_contained(
     if getattr(transport, "skip_absent", False):
         raise PrepareError("absence proof skipped")
     name = "%s%s" % (name_prefix, token_hex(4))
-    state = "completed"
+    state = None
     process = None
     try:
         argv = docker_create_argv(
@@ -518,17 +521,13 @@ def run_contained(
         transport.create(argv)
         try:
             process = transport.start(name, profile["deadline_seconds"])
+            state = "completed"
         except subprocess.TimeoutExpired:
             state = "timeout"
         except br._OutputTooLarge:
             state = "output-cap"
-        except Exception as exc:
-            if str(exc) == "output_cap":
-                state = "output-cap"
-            else:
-                raise
         observed = transport.inspect(name)
-        require_observed_start(observed, process)
+        require_observed_start(observed, state, process)
         envelope = validate_inspect_contract(
             observed,
             sealed=sealed,

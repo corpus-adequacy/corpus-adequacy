@@ -98,7 +98,7 @@ def _inspect(dests, *, exit_code=0):
 class FakeTransport:
     def __init__(
             self, *, returncode=0, stdout="", inspect=None,
-            timeout=False, output_cap=False, output_too_large=False,
+            timeout=False, output_too_large=False,
             skip_absent=False,
             leave_present=False, fail_create=False, create_error=None,
             remove_error=None, absent_error=None):
@@ -106,7 +106,6 @@ class FakeTransport:
         self.stdout = stdout
         self.inspect_doc = inspect
         self.timeout = timeout
-        self.output_cap = output_cap
         self.output_too_large = output_too_large
         self.skip_absent = skip_absent
         self.leave_present = leave_present
@@ -133,8 +132,6 @@ class FakeTransport:
             raise subprocess.TimeoutExpired(["docker", "start", "-a", name], 1)
         if self.output_too_large:
             raise br._OutputTooLarge()
-        if self.output_cap:
-            raise Exception("output_cap")
         return subprocess.CompletedProcess(
             ["docker", "start", "-a", name],
             self.returncode,
@@ -914,7 +911,10 @@ class ClosedInnerProtocol(unittest.TestCase):
             completed = cand._run_sealed_candidate(
                 image_id=IMAGE, mounts=_mounts(Path(d)),
                 resource_profile=INERT_RESOURCE_PROFILE,
-                transport=FakeTransport(output_cap=True, inspect=_inspect(dests)))
+                transport=FakeTransport(
+                    output_too_large=True,
+                    inspect=_inspect(dests),
+                ))
         self.assertEqual(completed.returncode, 75)
         self.assertEqual(getattr(completed, "unproved_reason", None), "output-cap")
 

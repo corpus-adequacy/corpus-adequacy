@@ -13,6 +13,7 @@ from contained_oci import (
     PrepareError,
     _require_mount_spec,
     classify_inspect_status,
+    cleanup_container,
     container_exists,
     docker_bounded,
     docker_create_argv,

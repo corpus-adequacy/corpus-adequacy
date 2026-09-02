@@ -1426,7 +1426,11 @@ class MaterializeBytes(unittest.TestCase):
         self.assertIn('["exec", name, "cargo", "vendor"', vendor)
         self.assertLess(vendor.index("host_bind_owner"), vendor.index("vendor_create_argv"))
         self.assertLess(vendor.index("cargo\", \"vendor\""), vendor.index("copy_tmpfs_argv"))
-        self.assertLess(vendor.index("copy_tmpfs_argv"), vendor.index("rm"))
+        self.assertLess(
+            vendor.index("copy_tmpfs_argv"),
+            vendor.rindex("cleanup_container"),
+        )
+        self.assertIn("_VendorCleanupTransport", vendor)
         self.assertNotIn("chown", vendor)
         self.assertNotIn("reclaim_bind_owner", vendor)
         self.assertNotIn("stat\", \"-c\"", vendor)
@@ -1446,7 +1450,10 @@ class MaterializeBytes(unittest.TestCase):
         self.assertNotIn("docker\", \"cp\"", copy)
         self.assertNotIn("stat\", \"-c\"", copy)
         self.assertIn("pull_rust_image", materialize)
-        self.assertIn("require_container_absent", vendor)
+        self.assertIn(
+            "require_container_absent",
+            inspect.getsource(mat._VendorCleanupTransport),
+        )
         live = inspect.getsource(
             LiveInertProbes.test_prepare_emits_artifact_without_subject_binary_or_outcomes)
         self.assertNotIn("skipTest", live)

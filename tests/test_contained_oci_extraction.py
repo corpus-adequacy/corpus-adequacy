@@ -316,6 +316,94 @@ class SharedEnvelopeOwnership(unittest.TestCase):
             )
         self.assertEqual(result["state"], "timeout")
 
+    def test_completed_start_requires_a_real_process_result(self):
+        contained = self._contained_oci()
+
+        class MissingProcess:
+            skip_absent = False
+
+            def create(self, _argv):
+                pass
+
+            def start(self, _name, _deadline):
+                return None
+
+            def inspect(self, _name):
+                return _inspect_fixture(
+                    contained,
+                    state_over={"Status": "running", "Running": True},
+                )
+
+            def remove(self, _name):
+                pass
+
+            def require_absent(self, _name):
+                pass
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            mounts = {}
+            for key, _destination in contained.DEFAULT_MOUNT_SPEC:
+                path = root / key
+                path.mkdir()
+                mounts[key] = path
+            with self.assertRaises(contained.ContainerSetupError):
+                contained.run_contained(
+                    image_id="sha256:" + ("ab" * 32),
+                    mounts=mounts,
+                    command=["ok"],
+                    entrypoint="/probe",
+                    mount_spec=contained.DEFAULT_MOUNT_SPEC,
+                    resource_profile=contained.INERT_RESOURCE_PROFILE,
+                    sealed=True,
+                    name_prefix="probe-",
+                    transport=MissingProcess(),
+                )
+
+    def test_only_the_bounded_output_exception_classifies_output_cap(self):
+        contained = self._contained_oci()
+
+        class MisnamedFailure:
+            skip_absent = False
+
+            def create(self, _argv):
+                pass
+
+            def start(self, _name, _deadline):
+                raise contained.ContainerSetupError("output_cap")
+
+            def inspect(self, _name):
+                raise AssertionError("inspect must not run")
+
+            def remove(self, _name):
+                pass
+
+            def require_absent(self, _name):
+                pass
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            mounts = {}
+            for key, _destination in contained.DEFAULT_MOUNT_SPEC:
+                path = root / key
+                path.mkdir()
+                mounts[key] = path
+            with self.assertRaisesRegex(
+                contained.ContainerSetupError,
+                "output_cap",
+            ):
+                contained.run_contained(
+                    image_id="sha256:" + ("ab" * 32),
+                    mounts=mounts,
+                    command=["output"],
+                    entrypoint="/probe",
+                    mount_spec=contained.DEFAULT_MOUNT_SPEC,
+                    resource_profile=contained.INERT_RESOURCE_PROFILE,
+                    sealed=True,
+                    name_prefix="probe-",
+                    transport=MisnamedFailure(),
+                )
+
     def test_materialize_docker_phases_share_missing_executable_mapping(self):
         contained = self._contained_oci()
         missing = FileNotFoundError("docker")
@@ -353,6 +441,131 @@ class SharedEnvelopeOwnership(unittest.TestCase):
                             vendor,
                             toolchain=toolchain,
                         )
+
+    def test_materialize_partial_create_still_cleans_and_proves_absence(self):
+        contained = self._contained_oci()
+        primary = contained.PrepareError("partial create")
+        events = []
+
+        def bounded(args, **_kwargs):
+            events.append(tuple(args))
+            if args[0] == "create":
+                raise primary
+            return b""
+
+        def absent(name):
+            events.append(("absent", name))
+
+        def ok(args, **_kwargs):
+            events.append(tuple(args))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        toolchain = {
+            "cargo_V": "cargo %s" % materialize.RUSTC_RELEASE,
+            "image_id": "sha256:" + ("cd" * 32),
+            "index": materialize.RUST_IMAGE,
+            "observation": "vendor-image; checker was not run",
+            "platform": "linux/amd64",
+            "rustc_Vv": "rustc %s" % materialize.RUSTC_RELEASE,
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            subject = root / "subject"
+            vendor = root / "vendor"
+            subject.mkdir()
+            with mock.patch.object(materialize, "docker_bounded", side_effect=bounded), \
+                    mock.patch.object(materialize, "docker_ok", side_effect=ok), \
+                    mock.patch.object(
+                        materialize,
+                        "require_container_absent",
+                        side_effect=absent,
+                    ):
+                try:
+                    materialize.vendor_locked(
+                        subject,
+                        vendor,
+                        toolchain=toolchain,
+                    )
+                except contained.PrepareError as actual:
+                    self.assertIs(actual, primary)
+                else:
+                    self.fail("partial create did not propagate")
+        self.assertTrue(any(args[0] == "rm" for args in events))
+        self.assertTrue(any(args[0] == "absent" for args in events))
+
+    def test_materialize_cleanup_preserves_primary_and_names_cleanup_only(self):
+        contained = self._contained_oci()
+        toolchain = {
+            "cargo_V": "cargo %s" % materialize.RUSTC_RELEASE,
+            "image_id": "sha256:" + ("cd" * 32),
+            "index": materialize.RUST_IMAGE,
+            "observation": "vendor-image; checker was not run",
+            "platform": "linux/amd64",
+            "rustc_Vv": "rustc %s" % materialize.RUSTC_RELEASE,
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            subject = root / "subject"
+            vendor = root / "vendor"
+            subject.mkdir()
+            primary = contained.PrepareError("start failed")
+
+            def primary_bounded(args, **_kwargs):
+                if args[0] == "start":
+                    raise primary
+                return b""
+
+            def cleanup_refusal(args, **_kwargs):
+                if args[0] == "rm":
+                    raise contained.PrepareError("remove failed")
+                return mock.Mock(returncode=0, stdout="ok", stderr="")
+
+            with mock.patch.object(
+                    materialize, "docker_bounded", side_effect=primary_bounded), \
+                    mock.patch.object(
+                        materialize, "docker_ok", side_effect=cleanup_refusal), \
+                    mock.patch.object(
+                        materialize,
+                        "require_container_absent",
+                        side_effect=contained.PrepareError("absence failed"),
+                    ):
+                try:
+                    materialize.vendor_locked(
+                        subject,
+                        vendor,
+                        toolchain=toolchain,
+                    )
+                except contained.PrepareError as actual:
+                    self.assertIs(actual, primary)
+                else:
+                    self.fail("primary failure did not propagate")
+            failures = getattr(primary, "cleanup_failures", ())
+            self.assertEqual(
+                [action for action, _failure in failures],
+                ["vendor remove", "vendor absence proof"],
+            )
+
+            with mock.patch.object(
+                    materialize, "docker_bounded", return_value=b""), \
+                    mock.patch.object(
+                        materialize,
+                        "docker_run_capped",
+                        return_value=mock.Mock(
+                            returncode=0,
+                            stdout="ok",
+                            stderr="",
+                        ),
+                    ), \
+                    mock.patch.object(
+                        materialize, "docker_ok", side_effect=cleanup_refusal), \
+                    mock.patch.object(
+                        materialize, "require_container_absent", return_value=None):
+                with self.assertRaises(contained.ContainerCleanupError):
+                    materialize.vendor_locked(
+                        subject,
+                        vendor,
+                        toolchain=toolchain,
+                    )
 
     def test_cleanup_failure_has_a_named_cleanup_type(self):
         contained = self._contained_oci()

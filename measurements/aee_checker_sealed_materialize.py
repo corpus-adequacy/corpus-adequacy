@@ -26,6 +26,7 @@ from aee_checker_sealed_common import (
     verify_file_digest,
 )
 from aee_checker_sealed_oci import (
+    cleanup_container,
     docker_bounded,
     docker_ok,
     docker_run_capped,
@@ -441,6 +442,14 @@ def copy_tmpfs_as_bind_owner(name: str, dest: Path) -> None:
     docker_ok(copy_tmpfs_argv(name, host_bind_owner(dest)))
 
 
+class _VendorCleanupTransport:
+    def remove(self, name: str) -> None:
+        docker_ok(["rm", "-f", name])
+
+    def require_absent(self, name: str) -> None:
+        require_container_absent(name)
+
+
 def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -> dict:
     require_vendor_outside(subject, vendor)
     vendor = Path(vendor)
@@ -451,11 +460,10 @@ def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -
         toolchain = pull_rust_image(budget=budget)
     require_vendor_toolchain(toolchain)
     name = "aee-vendor-%s" % token_hex(4)
-    created = False
+    cleanup = _VendorCleanupTransport()
     try:
         docker_bounded(vendor_create_argv(
             name=name, subject=subject, vendor=vendor, budget=budget)[1:])
-        created = True
         docker_bounded(["start", name])
         proc = docker_run_capped(
             ["exec", name, "cargo", "vendor", "--locked", "/vendor"],
@@ -464,14 +472,10 @@ def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -
         if proc.returncode != 0:
             raise PrepareError("cargo vendor --locked failed")
         docker_ok(copy_tmpfs_argv(name, owner))
-    finally:
-        if created:
-            try:
-                docker_ok(["rm", "-f", name])
-            except PrepareError as exc:
-                require_container_absent(name)
-                raise PrepareError("container remove failed") from exc
-    require_container_absent(name)
+    except BaseException as exc:
+        cleanup_container(cleanup, name, exc, "vendor")
+        raise
+    cleanup_container(cleanup, name, None, "vendor")
     charge_existing_tree(vendor, budget)
     digest = tree_sha256(vendor)
     if digest == EMPTY_SHA256:
