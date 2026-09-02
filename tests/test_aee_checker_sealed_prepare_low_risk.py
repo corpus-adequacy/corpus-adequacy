@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
 import aee_checker_sealed_materialize as mat  # noqa: E402
 import aee_checker_sealed_oci as oci  # noqa: E402
+import contained_oci as contained  # noqa: E402
 from aee_checker_sealed_common import (  # noqa: E402
     MATERIALIZE_CEILINGS,
     MaterializeBudget,
@@ -155,14 +156,14 @@ class DockerOkReturncode(unittest.TestCase):
     def test_nonzero_completed_process_is_prepare_error(self):
         failed = subprocess.CompletedProcess(
             args=["docker", "info"], returncode=1, stdout="", stderr="denied")
-        with mock.patch.object(oci.br, "_run_capped", return_value=failed):
+        with mock.patch.object(contained.br, "_run_capped", return_value=failed):
             with self.assertRaises(PrepareError):
                 oci.docker_ok(["info"])
 
     def test_rc0_positive_control(self):
         ok = subprocess.CompletedProcess(
             args=["docker", "info"], returncode=0, stdout="ok", stderr="")
-        with mock.patch.object(oci.br, "_run_capped", return_value=ok):
+        with mock.patch.object(contained.br, "_run_capped", return_value=ok):
             proc = oci.docker_ok(["info"])
         self.assertIs(proc, ok)
 
@@ -238,7 +239,7 @@ class ScratchMutations(unittest.TestCase):
         self.assertIn(CHUNK_256K, sizes)
 
     def test_ignoring_docker_returncode_turns_red(self):
-        source = (REPO_ROOT / "measurements" / "aee_checker_sealed_oci.py").read_text(
+        source = (REPO_ROOT / "measurements" / "contained_oci.py").read_text(
             encoding="utf-8")
         mutated = source.replace("if proc.returncode != 0:\n", "if False and proc.returncode != 0:\n")
         self.assertNotEqual(mutated, source)
@@ -307,7 +308,7 @@ class ScratchMutations(unittest.TestCase):
     def test_noop_scratch_copy_stays_green(self):
         mat_src = (REPO_ROOT / "measurements" / "aee_checker_sealed_materialize.py").read_text(
             encoding="utf-8")
-        oci_src = (REPO_ROOT / "measurements" / "aee_checker_sealed_oci.py").read_text(
+        oci_src = (REPO_ROOT / "measurements" / "contained_oci.py").read_text(
             encoding="utf-8")
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)

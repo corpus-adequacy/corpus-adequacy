@@ -21,6 +21,7 @@ import aee_checker_sealed as sealed_adapter  # noqa: E402
 import aee_checker_sealed_candidate as cand  # noqa: E402
 import aee_checker_sealed_common as common  # noqa: E402
 import bounded_run as br  # noqa: E402
+import contained_oci as contained  # noqa: E402
 import aee_checker_sealed_materialize as mat  # noqa: E402
 import aee_checker_sealed_oci as oci  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
@@ -155,6 +156,15 @@ def _load_mutated(text: str, tmp: Path):
     path = tmp / "mut_candidate.py"
     path.write_text(text)
     spec = importlib.util.spec_from_file_location("mut_candidate", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_contained_mutation(text: str, tmp: Path):
+    path = tmp / "mut_contained_oci.py"
+    path.write_text(text)
+    spec = importlib.util.spec_from_file_location("mut_contained_oci", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -760,19 +770,20 @@ class ClosedInnerProtocol(unittest.TestCase):
         self.assertEqual(getattr(completed, "unproved_reason", None), "output-cap")
 
     def test_mutation_dropping_output_too_large_arm_raises(self):
-        src = Path(cand.__file__).read_text()
+        src = Path(contained.__file__).read_text()
         guard = self._two_line_guard(src, "        except br._OutputTooLarge:")
         mutated = src.replace(guard, "")
         self.assertNotEqual(src, mutated)
         dests = ("/input", "/vendor", "/tool", "/subject")
         with tempfile.TemporaryDirectory() as d:
-            module = _load_mutated(mutated, Path(d))
-            with self.assertRaises(br._OutputTooLarge):
-                module._run_sealed_candidate(
-                    image_id=IMAGE, mounts=_mounts(Path(d)),
-                    resource_profile=INERT_RESOURCE_PROFILE,
-                    transport=FakeTransport(
-                        output_too_large=True, inspect=_inspect(dests)))
+            module = _load_contained_mutation(mutated, Path(d))
+            with mock.patch.object(cand, "contained", module):
+                with self.assertRaises(br._OutputTooLarge):
+                    cand._run_sealed_candidate(
+                        image_id=IMAGE, mounts=_mounts(Path(d)),
+                        resource_profile=INERT_RESOURCE_PROFILE,
+                        transport=FakeTransport(
+                            output_too_large=True, inspect=_inspect(dests)))
 
     def test_crlf_and_extra_trailing_space_are_malformed(self):
         with tempfile.TemporaryDirectory() as d:

@@ -72,6 +72,7 @@ AEE_LF_ATTRS = (
     "adapters/aee_checker_sealed.py text eol=lf",
     "measurements/aee-checker-25b9dfa/** text eol=lf",
     "measurements/aee_checker_sealed_common.py text eol=lf",
+    "measurements/contained_oci.py text eol=lf",
     "measurements/aee_checker_sealed_materialize.py text eol=lf",
     "measurements/aee_checker_sealed_oci.py text eol=lf",
     "measurements/aee_checker_sealed_candidate.py text eol=lf",
@@ -94,6 +95,7 @@ AEE_LF_PATHS = (
     "measurements/aee-checker-25b9dfa/pins.json",
     "measurements/aee-checker-25b9dfa/sites.json",
     "measurements/aee_checker_sealed_common.py",
+    "measurements/contained_oci.py",
     "measurements/aee_checker_sealed_materialize.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_candidate.py",
@@ -116,6 +118,7 @@ REQUIRED_EXECUTION_PATHS = (
     "measurements/aee-checker-25b9dfa/manifest.json",
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
+    "measurements/contained_oci.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_candidate.py",
     "measurements/aee_checker_sealed_materialize.py",
@@ -141,6 +144,7 @@ def _traceback_frames(exc: BaseException) -> list[str]:
 PHASE_B_PY = (
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
+    "measurements/contained_oci.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_materialize.py",
 )
@@ -991,7 +995,7 @@ class InspectContract(unittest.TestCase):
             run.classify_inspect_status(0, "", "")
         with self.assertRaises(run.PrepareError):
             run.parse_inspect_payload(b"not-json")
-        src = (REPO_ROOT / "measurements" / "aee_checker_sealed_oci.py").read_text(
+        src = (REPO_ROOT / "measurements" / "contained_oci.py").read_text(
             encoding="utf-8")
         self.assertNotIn("except PrepareError:\n        return False", src)
 
@@ -1016,17 +1020,18 @@ class ExecutionIdentityDirty(unittest.TestCase):
     def test_execution_inventory_is_complete_and_omission_mutation_bites(self):
         self.assertEqual(run.EXECUTION_PATHS, REQUIRED_EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_common.py", run.EXECUTION_PATHS)
+        self.assertIn("measurements/contained_oci.py", run.EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_oci.py", run.EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_materialize.py", run.EXECUTION_PATHS)
         self.assertIn("execution/aee-checker-sealed/cargo-config.toml", run.EXECUTION_PATHS)
         with tempfile.TemporaryDirectory() as d:
             root = _committed_execution_root(Path(d))
-            target = root / "measurements" / "aee_checker_sealed_common.py"
+            target = root / "measurements" / "contained_oci.py"
             target.write_bytes(target.read_bytes() + b"# dirty\n")
             with self.assertRaises(run.PrepareError) as ctx:
                 run.execution_identity(root)
             self.assertRegex(str(ctx.exception).lower(), r"dirty|untracked|head")
-            missing = [p for p in REQUIRED_EXECUTION_PATHS if "common.py" not in p]
+            missing = [p for p in REQUIRED_EXECUTION_PATHS if "contained_oci.py" not in p]
             self.assertNotEqual(missing, list(REQUIRED_EXECUTION_PATHS))
 
 
