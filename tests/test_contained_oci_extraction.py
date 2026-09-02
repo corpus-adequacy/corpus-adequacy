@@ -159,21 +159,30 @@ class SharedEnvelopeOwnership(unittest.TestCase):
         class FailedStart:
             skip_absent = False
 
-            def __init__(self, state_over):
+            def __init__(self, state_over, process_returncode=1):
                 self.state_over = state_over
+                self.process_returncode = process_returncode
 
             def create(self, _argv):
                 pass
 
             def start(self, _name, _deadline):
-                return subprocess.CompletedProcess([], 1, "", "")
+                return subprocess.CompletedProcess(
+                    [], self.process_returncode, "", "")
 
             def inspect(self, _name):
-                return _inspect_fixture(
+                inspect = _inspect_fixture(
                     contained,
                     process_returncode=1,
-                    state_over=self.state_over,
+                    state_over=(
+                        self.state_over
+                        if isinstance(self.state_over, dict)
+                        else None
+                    ),
                 )
+                if not isinstance(self.state_over, dict):
+                    inspect["State"] = self.state_over
+                return inspect
 
             def remove(self, _name):
                 pass
@@ -182,13 +191,19 @@ class SharedEnvelopeOwnership(unittest.TestCase):
                 pass
 
         cases = (
-            {"Status": "created"},
-            {"Running": True},
-            {"Error": "failed to start container"},
-            {"ExitCode": 0},
+            ({"Status": "created"}, 1),
+            ({"Running": True}, 1),
+            ({"Error": "failed to start container"}, 1),
+            ({"ExitCode": 0}, 1),
+            ({"ExitCode": "1"}, 1),
+            ([], 1),
+            ({}, "1"),
         )
-        for state_over in cases:
-            with self.subTest(state_over=state_over):
+        for state_over, process_returncode in cases:
+            with self.subTest(
+                state_over=state_over,
+                process_returncode=process_returncode,
+            ):
                 with tempfile.TemporaryDirectory() as raw:
                     root = Path(raw)
                     mounts = {}
@@ -206,7 +221,10 @@ class SharedEnvelopeOwnership(unittest.TestCase):
                             resource_profile=contained.INERT_RESOURCE_PROFILE,
                             sealed=True,
                             name_prefix="probe-",
-                            transport=FailedStart(state_over),
+                            transport=FailedStart(
+                                state_over,
+                                process_returncode=process_returncode,
+                            ),
                         )
 
     def test_cleanup_failure_has_a_named_cleanup_type(self):
