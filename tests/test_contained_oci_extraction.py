@@ -322,6 +322,9 @@ class SharedEnvelopeOwnership(unittest.TestCase):
         class MissingProcess:
             skip_absent = False
 
+            def __init__(self, state_over):
+                self.state_over = state_over
+
             def create(self, _argv):
                 pass
 
@@ -331,7 +334,7 @@ class SharedEnvelopeOwnership(unittest.TestCase):
             def inspect(self, _name):
                 return _inspect_fixture(
                     contained,
-                    state_over={"Status": "running", "Running": True},
+                    state_over=self.state_over,
                 )
 
             def remove(self, _name):
@@ -340,25 +343,27 @@ class SharedEnvelopeOwnership(unittest.TestCase):
             def require_absent(self, _name):
                 pass
 
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            mounts = {}
-            for key, _destination in contained.DEFAULT_MOUNT_SPEC:
-                path = root / key
-                path.mkdir()
-                mounts[key] = path
-            with self.assertRaises(contained.ContainerSetupError):
-                contained.run_contained(
-                    image_id="sha256:" + ("ab" * 32),
-                    mounts=mounts,
-                    command=["ok"],
-                    entrypoint="/probe",
-                    mount_spec=contained.DEFAULT_MOUNT_SPEC,
-                    resource_profile=contained.INERT_RESOURCE_PROFILE,
-                    sealed=True,
-                    name_prefix="probe-",
-                    transport=MissingProcess(),
-                )
+        for state_over in ({}, {"Status": "running", "Running": True}):
+            with self.subTest(state_over=state_over):
+                with tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    mounts = {}
+                    for key, _destination in contained.DEFAULT_MOUNT_SPEC:
+                        path = root / key
+                        path.mkdir()
+                        mounts[key] = path
+                    with self.assertRaises(contained.ContainerSetupError):
+                        contained.run_contained(
+                            image_id="sha256:" + ("ab" * 32),
+                            mounts=mounts,
+                            command=["ok"],
+                            entrypoint="/probe",
+                            mount_spec=contained.DEFAULT_MOUNT_SPEC,
+                            resource_profile=contained.INERT_RESOURCE_PROFILE,
+                            sealed=True,
+                            name_prefix="probe-",
+                            transport=MissingProcess(state_over),
+                        )
 
     def test_only_the_bounded_output_exception_classifies_output_cap(self):
         contained = self._contained_oci()
