@@ -21,6 +21,7 @@ import aee_checker_sealed as sealed_adapter  # noqa: E402
 import aee_checker_sealed_candidate as cand  # noqa: E402
 import aee_checker_sealed_common as common  # noqa: E402
 import bounded_run as br  # noqa: E402
+import contained_oci as contained  # noqa: E402
 import aee_checker_sealed_materialize as mat  # noqa: E402
 import aee_checker_sealed_oci as oci  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
@@ -65,7 +66,7 @@ def _classify(completed):
     )
 
 
-def _inspect(dests):
+def _inspect(dests, *, exit_code=0):
     return {
         "HostConfig": {
             "ReadonlyRootfs": True,
@@ -85,13 +86,19 @@ def _inspect(dests):
             {"Type": "bind", "Destination": dest, "RW": False}
             for dest in dests
         ],
+        "State": {
+            "Error": "",
+            "ExitCode": exit_code,
+            "Running": False,
+            "Status": "exited",
+        },
     }
 
 
 class FakeTransport:
     def __init__(
             self, *, returncode=0, stdout="", inspect=None,
-            timeout=False, output_cap=False, output_too_large=False,
+            timeout=False, output_too_large=False,
             skip_absent=False,
             leave_present=False, fail_create=False, create_error=None,
             remove_error=None, absent_error=None):
@@ -99,7 +106,6 @@ class FakeTransport:
         self.stdout = stdout
         self.inspect_doc = inspect
         self.timeout = timeout
-        self.output_cap = output_cap
         self.output_too_large = output_too_large
         self.skip_absent = skip_absent
         self.leave_present = leave_present
@@ -126,8 +132,6 @@ class FakeTransport:
             raise subprocess.TimeoutExpired(["docker", "start", "-a", name], 1)
         if self.output_too_large:
             raise br._OutputTooLarge()
-        if self.output_cap:
-            raise Exception("output_cap")
         return subprocess.CompletedProcess(
             ["docker", "start", "-a", name],
             self.returncode,
@@ -155,6 +159,15 @@ def _load_mutated(text: str, tmp: Path):
     path = tmp / "mut_candidate.py"
     path.write_text(text)
     spec = importlib.util.spec_from_file_location("mut_candidate", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_contained_mutation(text: str, tmp: Path):
+    path = tmp / "mut_contained_oci.py"
+    path.write_text(text)
+    spec = importlib.util.spec_from_file_location("mut_contained_oci", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -393,7 +406,8 @@ class SealedLifecycle(unittest.TestCase):
                 image_id=IMAGE, mounts=mounts, transport=transport,
                 resource_profile=INERT_RESOURCE_PROFILE)
             self.assertEqual(len(transport.removed), 1)
-            broken = FakeTransport(returncode=2, stdout="fail", inspect=_inspect(dests))
+            broken = FakeTransport(
+                returncode=2, stdout="fail", inspect=_inspect(dests, exit_code=2))
             cand._run_sealed_candidate(
                 image_id=IMAGE, mounts=mounts, transport=broken,
                 resource_profile=INERT_RESOURCE_PROFILE)
@@ -760,19 +774,20 @@ class ClosedInnerProtocol(unittest.TestCase):
         self.assertEqual(getattr(completed, "unproved_reason", None), "output-cap")
 
     def test_mutation_dropping_output_too_large_arm_raises(self):
-        src = Path(cand.__file__).read_text()
+        src = Path(contained.__file__).read_text()
         guard = self._two_line_guard(src, "        except br._OutputTooLarge:")
         mutated = src.replace(guard, "")
         self.assertNotEqual(src, mutated)
         dests = ("/input", "/vendor", "/tool", "/subject")
         with tempfile.TemporaryDirectory() as d:
-            module = _load_mutated(mutated, Path(d))
-            with self.assertRaises(br._OutputTooLarge):
-                module._run_sealed_candidate(
-                    image_id=IMAGE, mounts=_mounts(Path(d)),
-                    resource_profile=INERT_RESOURCE_PROFILE,
-                    transport=FakeTransport(
-                        output_too_large=True, inspect=_inspect(dests)))
+            module = _load_contained_mutation(mutated, Path(d))
+            with mock.patch.object(cand, "contained", module):
+                with self.assertRaises(br._OutputTooLarge):
+                    cand._run_sealed_candidate(
+                        image_id=IMAGE, mounts=_mounts(Path(d)),
+                        resource_profile=INERT_RESOURCE_PROFILE,
+                        transport=FakeTransport(
+                            output_too_large=True, inspect=_inspect(dests)))
 
     def test_crlf_and_extra_trailing_space_are_malformed(self):
         with tempfile.TemporaryDirectory() as d:
@@ -896,7 +911,10 @@ class ClosedInnerProtocol(unittest.TestCase):
             completed = cand._run_sealed_candidate(
                 image_id=IMAGE, mounts=_mounts(Path(d)),
                 resource_profile=INERT_RESOURCE_PROFILE,
-                transport=FakeTransport(output_cap=True, inspect=_inspect(dests)))
+                transport=FakeTransport(
+                    output_too_large=True,
+                    inspect=_inspect(dests),
+                ))
         self.assertEqual(completed.returncode, 75)
         self.assertEqual(getattr(completed, "unproved_reason", None), "output-cap")
 

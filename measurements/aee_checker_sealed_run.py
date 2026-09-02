@@ -131,6 +131,7 @@ EXECUTION_PATHS = (
     "measurements/aee-checker-25b9dfa/manifest.json",
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
+    "measurements/contained_oci.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_candidate.py",
     "measurements/aee_checker_sealed_materialize.py",

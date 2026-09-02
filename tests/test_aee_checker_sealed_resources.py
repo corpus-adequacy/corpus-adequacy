@@ -70,6 +70,12 @@ def _inspect(dests, *, profile):
             {"Type": "bind", "Destination": dest, "RW": False}
             for dest in dests
         ],
+        "State": {
+            "Error": "",
+            "ExitCode": 0,
+            "Running": False,
+            "Status": "exited",
+        },
     }
 
 
@@ -532,20 +538,20 @@ class ExecutionIdentity(unittest.TestCase):
         listed = set(run.EXECUTION_PATHS)
         for rel in (
                 "measurements/aee_checker_sealed_common.py",
+                "measurements/contained_oci.py",
                 "measurements/aee_checker_sealed_oci.py",
                 "measurements/aee_checker_sealed_candidate.py",
                 "measurements/aee_checker_sealed_run.py"):
             self.assertIn(rel, listed)
         stray = REPO_ROOT / "measurements" / "aee_checker_sealed_resources.py"
         self.assertFalse(stray.exists())
-        common_src = (REPO_ROOT / "measurements" / "aee_checker_sealed_common.py").read_text(
+        common_src = (REPO_ROOT / "measurements" / "contained_oci.py").read_text(
             encoding="utf-8")
         self.assertIn("CANDIDATE_RESOURCE_PROFILE", common_src)
         self.assertIn("require_resource_profile", common_src)
 
     def test_mutation_omits_new_runtime_path_from_execution_identity(self):
-        self.assertIn(
-            "measurements/aee_checker_sealed_common.py", run.EXECUTION_PATHS)
+        self.assertIn("measurements/contained_oci.py", run.EXECUTION_PATHS)
         self.assertIn("require_resource_profile", common.__dict__)
 
 

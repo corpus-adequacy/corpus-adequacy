@@ -31,6 +31,7 @@ import aee_checker_sealed_materialize as mat  # noqa: E402
 import aee_checker_sealed_oci as oci  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
 import bounded_run as br  # noqa: E402
+import contained_oci as contained  # noqa: E402
 
 PREREG = REPO_ROOT / "measurements" / "aee-checker-25b9dfa"
 ADAPTER = REPO_ROOT / "adapters" / "aee_checker_sealed.py"
@@ -72,6 +73,7 @@ AEE_LF_ATTRS = (
     "adapters/aee_checker_sealed.py text eol=lf",
     "measurements/aee-checker-25b9dfa/** text eol=lf",
     "measurements/aee_checker_sealed_common.py text eol=lf",
+    "measurements/contained_oci.py text eol=lf",
     "measurements/aee_checker_sealed_materialize.py text eol=lf",
     "measurements/aee_checker_sealed_oci.py text eol=lf",
     "measurements/aee_checker_sealed_candidate.py text eol=lf",
@@ -94,6 +96,7 @@ AEE_LF_PATHS = (
     "measurements/aee-checker-25b9dfa/pins.json",
     "measurements/aee-checker-25b9dfa/sites.json",
     "measurements/aee_checker_sealed_common.py",
+    "measurements/contained_oci.py",
     "measurements/aee_checker_sealed_materialize.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_candidate.py",
@@ -116,6 +119,7 @@ REQUIRED_EXECUTION_PATHS = (
     "measurements/aee-checker-25b9dfa/manifest.json",
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
+    "measurements/contained_oci.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_candidate.py",
     "measurements/aee_checker_sealed_materialize.py",
@@ -141,6 +145,7 @@ def _traceback_frames(exc: BaseException) -> list[str]:
 PHASE_B_PY = (
     "measurements/aee_checker_sealed_run.py",
     "measurements/aee_checker_sealed_common.py",
+    "measurements/contained_oci.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_materialize.py",
 )
@@ -991,7 +996,7 @@ class InspectContract(unittest.TestCase):
             run.classify_inspect_status(0, "", "")
         with self.assertRaises(run.PrepareError):
             run.parse_inspect_payload(b"not-json")
-        src = (REPO_ROOT / "measurements" / "aee_checker_sealed_oci.py").read_text(
+        src = (REPO_ROOT / "measurements" / "contained_oci.py").read_text(
             encoding="utf-8")
         self.assertNotIn("except PrepareError:\n        return False", src)
 
@@ -1016,17 +1021,18 @@ class ExecutionIdentityDirty(unittest.TestCase):
     def test_execution_inventory_is_complete_and_omission_mutation_bites(self):
         self.assertEqual(run.EXECUTION_PATHS, REQUIRED_EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_common.py", run.EXECUTION_PATHS)
+        self.assertIn("measurements/contained_oci.py", run.EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_oci.py", run.EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_materialize.py", run.EXECUTION_PATHS)
         self.assertIn("execution/aee-checker-sealed/cargo-config.toml", run.EXECUTION_PATHS)
         with tempfile.TemporaryDirectory() as d:
             root = _committed_execution_root(Path(d))
-            target = root / "measurements" / "aee_checker_sealed_common.py"
+            target = root / "measurements" / "contained_oci.py"
             target.write_bytes(target.read_bytes() + b"# dirty\n")
             with self.assertRaises(run.PrepareError) as ctx:
                 run.execution_identity(root)
             self.assertRegex(str(ctx.exception).lower(), r"dirty|untracked|head")
-            missing = [p for p in REQUIRED_EXECUTION_PATHS if "common.py" not in p]
+            missing = [p for p in REQUIRED_EXECUTION_PATHS if "contained_oci.py" not in p]
             self.assertNotEqual(missing, list(REQUIRED_EXECUTION_PATHS))
 
 
@@ -1416,10 +1422,15 @@ class MaterializeBytes(unittest.TestCase):
         self.assertNotIn('docker_bounded(["image", "inspect", RUST_IMAGE])', vendor)
         self.assertIn('["start", name]', vendor)
         self.assertNotIn("start\", \"-a\"", vendor)
-        self.assertIn("docker\", \"exec\"", vendor)
+        self.assertIn("docker_run_capped", vendor)
+        self.assertIn('["exec", name, "cargo", "vendor"', vendor)
         self.assertLess(vendor.index("host_bind_owner"), vendor.index("vendor_create_argv"))
         self.assertLess(vendor.index("cargo\", \"vendor\""), vendor.index("copy_tmpfs_argv"))
-        self.assertLess(vendor.index("copy_tmpfs_argv"), vendor.index("rm"))
+        self.assertLess(
+            vendor.index("copy_tmpfs_argv"),
+            vendor.rindex("cleanup_container"),
+        )
+        self.assertIn("_VendorCleanupTransport", vendor)
         self.assertNotIn("chown", vendor)
         self.assertNotIn("reclaim_bind_owner", vendor)
         self.assertNotIn("stat\", \"-c\"", vendor)
@@ -1439,7 +1450,10 @@ class MaterializeBytes(unittest.TestCase):
         self.assertNotIn("docker\", \"cp\"", copy)
         self.assertNotIn("stat\", \"-c\"", copy)
         self.assertIn("pull_rust_image", materialize)
-        self.assertIn("require_container_absent", vendor)
+        self.assertIn(
+            "require_container_absent",
+            inspect.getsource(mat._VendorCleanupTransport),
+        )
         live = inspect.getsource(
             LiveInertProbes.test_prepare_emits_artifact_without_subject_binary_or_outcomes)
         self.assertNotIn("skipTest", live)
@@ -1671,11 +1685,12 @@ class MaterializeBytes(unittest.TestCase):
         self.assertNotIn("claim_exclusive_dest", src)
         self.assertIn("state[\"staging\"]", src)
         ready = inspect.getsource(run.require_docker_ready)
+        launch = inspect.getsource(contained.docker_run_capped)
         self.assertIn("docker", ready)
         self.assertIn("info", ready)
         self.assertIn("ServerVersion", ready)
-        self.assertIn("FileNotFoundError", ready)
-        self.assertIn("DockerUnavailable", ready)
+        self.assertIn("FileNotFoundError", launch)
+        self.assertIn("DockerUnavailable", launch)
         self.assertNotIn("shutil.which", ready)
         self.assertNotIn("shutil.which", inspect.getsource(_docker_ready))
         self.assertIn("require_docker_ready", inspect.getsource(_docker_ready))
@@ -1800,10 +1815,7 @@ class MaterializeBytes(unittest.TestCase):
         mutated = src.replace("except subprocess.TimeoutExpired as exc:", "except ZeroDivisionError as exc:")
         self.assertNotEqual(src, mutated)
         ns = {
-            "br": br,
-            "Path": Path,
-            "FileNotFoundError": FileNotFoundError,
-            "DockerUnavailable": run.DockerUnavailable,
+            "docker_run_capped": contained.docker_run_capped,
             "PrepareError": run.PrepareError,
             "subprocess": subprocess,
         }
@@ -1815,10 +1827,7 @@ class MaterializeBytes(unittest.TestCase):
     def test_noop_loaded_copy_keeps_timeout_mapping(self):
         src = inspect.getsource(run.require_docker_ready)
         ns = {
-            "br": br,
-            "Path": Path,
-            "FileNotFoundError": FileNotFoundError,
-            "DockerUnavailable": run.DockerUnavailable,
+            "docker_run_capped": contained.docker_run_capped,
             "PrepareError": run.PrepareError,
             "subprocess": subprocess,
         }

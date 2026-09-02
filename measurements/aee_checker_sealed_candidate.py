@@ -13,7 +13,6 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from secrets import token_hex
 
 from aee_checker_sealed_common import (
     INERT_RESOURCE_PROFILE,
@@ -34,6 +33,7 @@ from aee_checker_sealed_oci import (
 )
 from aee_checker_sealed_run import load_prepare_v1
 import bounded_run as br
+import contained_oci as contained
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ADAPTERS = str(_ROOT / "adapters")
@@ -121,28 +121,7 @@ def inner_protocol_stdout(stdout):
     return body
 
 
-def _cleanup_candidate(transport, name: str,
-                       primary: BaseException | None) -> None:
-    remove_failure = None
-    try:
-        transport.remove(name)
-    except BaseException as exc:
-        remove_failure = exc
-        if primary is not None:
-            preserve_cleanup_failure(primary, "candidate remove", exc)
-    try:
-        transport.require_absent(name)
-    except BaseException as exc:
-        if primary is not None:
-            preserve_cleanup_failure(primary, "candidate absence proof", exc)
-        elif remove_failure is not None:
-            refusal = PrepareError("candidate remove failed")
-            preserve_cleanup_failure(refusal, "candidate absence proof", exc)
-            raise refusal from remove_failure
-        else:
-            raise PrepareError("candidate absence proof failed") from exc
-    if primary is None and remove_failure is not None:
-        raise PrepareError("candidate remove failed") from remove_failure
+_cleanup_candidate = contained.cleanup_container
 
 
 def require_candidate_image(*, image_id: str, toolchain_image_id: str,
@@ -195,10 +174,6 @@ def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.Complete
 def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
                           sealed: bool = True, resource_profile=None,
                           execution_contract=None) -> list[str]:
-    expected = {key for key, _destination in CANDIDATE_MOUNT_SPEC}
-    extra = set(mounts) - expected
-    if extra:
-        raise PrepareError("unexpected mount")
     return docker_create_argv(
         image_id=image_id,
         name=name,
@@ -213,29 +188,7 @@ def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
     )
 
 
-class _DockerTransport:
-    skip_absent = False
-
-    def create(self, argv):
-        docker_bounded(argv[1:])
-
-    def start(self, name, deadline_seconds):
-        if type(deadline_seconds) is not int or deadline_seconds <= 0:
-            raise PrepareError("candidate deadline")
-        return br._run_capped(
-            ["docker", "start", "-a", name],
-            Path.cwd(),
-            deadline_seconds,
-        )
-
-    def inspect(self, name):
-        return parse_inspect_payload(docker_bounded(["inspect", name]))
-
-    def remove(self, name):
-        docker_bounded(["rm", "-f", name])
-
-    def require_absent(self, name):
-        require_container_absent(name)
+_DockerTransport = contained.DockerTransport
 
 
 def _run_sealed_candidate(*, image_id: str, mounts: dict,
@@ -244,46 +197,27 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
                           sealed: bool = True, transport=None,
                           execution_contract=None,
                           ) -> subprocess.CompletedProcess:
-    image_id = require_image_id(image_id)
-    profile = require_resource_profile(resource_profile)
-    if transport is None:
-        require_local_image(image_id)
-        transport = _DockerTransport()
-    if getattr(transport, "skip_absent", False):
-        raise PrepareError("absence proof skipped")
-    name = "%s%s" % (name_prefix, token_hex(4))
-    completed = _unproved("malformed")
-    try:
-        argv = candidate_create_argv(
-            image_id=image_id, name=name, mounts=mounts, sealed=sealed,
-            resource_profile=profile, execution_contract=execution_contract)
-        transport.create(argv)
-        try:
-            proc = transport.start(name, profile["deadline_seconds"])
-        except subprocess.TimeoutExpired:
-            completed = _unproved("timeout")
-        except br._OutputTooLarge:
-            completed = _unproved("output-cap")
-        except Exception as exc:
-            if str(exc) == "output_cap":
-                completed = _unproved("output-cap")
-            else:
-                raise
-        else:
-            completed = normalize_inner_event(
-                returncode=proc.returncode,
-                stdout=proc.stdout or "",
-                vectors=host_vectors_path(mounts),
-            )
-        inspect = transport.inspect(name)
-        validate_inspect_contract(
-            inspect, sealed=sealed, mount_spec=CANDIDATE_MOUNT_SPEC,
-            resource_profile=profile)
-    except BaseException as exc:
-        _cleanup_candidate(transport, name, exc)
-        raise
-    _cleanup_candidate(transport, name, None)
-    return completed
+    raw = contained.run_contained(
+        image_id=image_id,
+        mounts=mounts,
+        command=["-lc", candidate_script(
+            DEFAULT_EXECUTION_CONTRACT
+            if execution_contract is None else execution_contract)],
+        entrypoint=CANDIDATE_ENTRYPOINT,
+        mount_spec=CANDIDATE_MOUNT_SPEC,
+        resource_profile=resource_profile,
+        sealed=sealed,
+        name_prefix=name_prefix,
+        transport=transport,
+    )
+    if raw["state"] != "completed":
+        return _unproved(raw["state"])
+    proc = raw["process"]
+    return normalize_inner_event(
+        returncode=proc.returncode,
+        stdout=proc.stdout or "",
+        vectors=host_vectors_path(mounts),
+    )
 
 
 def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,

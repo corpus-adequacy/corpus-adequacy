@@ -10,7 +10,6 @@ import urllib.request
 from pathlib import Path
 from secrets import token_hex
 
-import bounded_run as br
 import corpus_adequacy as ca
 
 from aee_checker_sealed_common import (
@@ -27,8 +26,10 @@ from aee_checker_sealed_common import (
     verify_file_digest,
 )
 from aee_checker_sealed_oci import (
+    cleanup_container,
     docker_bounded,
     docker_ok,
+    docker_run_capped,
     parse_inspect_payload,
     require_container_absent,
     require_image_id,
@@ -364,9 +365,9 @@ def require_vendor_toolchain(doc) -> dict:
 
 
 def _observe_image_cmd(image_id: str, command: list[str]) -> str:
-    proc = br._run_capped(
-        ["docker", "run", "--rm", "--network", "none", image_id, *command],
-        Path.cwd(), 30)
+    proc = docker_run_capped(
+        ["run", "--rm", "--network", "none", image_id, *command],
+        timeout=30)
     if proc.returncode != 0 or not (proc.stdout or "").strip():
         raise PrepareError("toolchain observation failed")
     return proc.stdout
@@ -377,8 +378,8 @@ def pull_rust_image(*, budget=None) -> dict:
     budget.check_deadline()
     if "@sha256:" not in RUST_IMAGE:
         raise PrepareError("rust image must be a digest")
-    proc = br._run_capped(
-        ["docker", "pull", RUST_IMAGE], Path.cwd(), MATERIALIZE_DEADLINE_SECONDS)
+    proc = docker_run_capped(
+        ["pull", RUST_IMAGE], timeout=MATERIALIZE_DEADLINE_SECONDS)
     if proc.returncode != 0:
         raise PrepareError("rust image pull failed")
     inspect = parse_inspect_payload(docker_bounded(["image", "inspect", RUST_IMAGE]))
@@ -441,6 +442,14 @@ def copy_tmpfs_as_bind_owner(name: str, dest: Path) -> None:
     docker_ok(copy_tmpfs_argv(name, host_bind_owner(dest)))
 
 
+class _VendorCleanupTransport:
+    def remove(self, name: str) -> None:
+        docker_ok(["rm", "-f", name])
+
+    def require_absent(self, name: str) -> None:
+        require_container_absent(name)
+
+
 def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -> dict:
     require_vendor_outside(subject, vendor)
     vendor = Path(vendor)
@@ -451,28 +460,22 @@ def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -
         toolchain = pull_rust_image(budget=budget)
     require_vendor_toolchain(toolchain)
     name = "aee-vendor-%s" % token_hex(4)
-    created = False
+    cleanup = _VendorCleanupTransport()
     try:
         docker_bounded(vendor_create_argv(
             name=name, subject=subject, vendor=vendor, budget=budget)[1:])
-        created = True
         docker_bounded(["start", name])
-        proc = br._run_capped(
-            ["docker", "exec", name, "cargo", "vendor", "--locked", "/vendor"],
-            Path.cwd(),
-            budget.ceilings["deadline_seconds"],
+        proc = docker_run_capped(
+            ["exec", name, "cargo", "vendor", "--locked", "/vendor"],
+            timeout=budget.ceilings["deadline_seconds"],
         )
         if proc.returncode != 0:
             raise PrepareError("cargo vendor --locked failed")
         docker_ok(copy_tmpfs_argv(name, owner))
-    finally:
-        if created:
-            try:
-                docker_ok(["rm", "-f", name])
-            except PrepareError as exc:
-                require_container_absent(name)
-                raise PrepareError("container remove failed") from exc
-    require_container_absent(name)
+    except BaseException as exc:
+        cleanup_container(cleanup, name, exc, "vendor")
+        raise
+    cleanup_container(cleanup, name, None, "vendor")
     charge_existing_tree(vendor, budget)
     digest = tree_sha256(vendor)
     if digest == EMPTY_SHA256:
