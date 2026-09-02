@@ -17,6 +17,7 @@ from contained_oci import (
     docker_bounded,
     docker_create_argv,
     docker_ok,
+    docker_run_capped,
     image_platform,
     inspect_lookup,
     parse_inspect_payload,

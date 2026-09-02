@@ -1422,7 +1422,8 @@ class MaterializeBytes(unittest.TestCase):
         self.assertNotIn('docker_bounded(["image", "inspect", RUST_IMAGE])', vendor)
         self.assertIn('["start", name]', vendor)
         self.assertNotIn("start\", \"-a\"", vendor)
-        self.assertIn("docker\", \"exec\"", vendor)
+        self.assertIn("docker_run_capped", vendor)
+        self.assertIn('["exec", name, "cargo", "vendor"', vendor)
         self.assertLess(vendor.index("host_bind_owner"), vendor.index("vendor_create_argv"))
         self.assertLess(vendor.index("cargo\", \"vendor\""), vendor.index("copy_tmpfs_argv"))
         self.assertLess(vendor.index("copy_tmpfs_argv"), vendor.index("rm"))
@@ -1677,7 +1678,7 @@ class MaterializeBytes(unittest.TestCase):
         self.assertNotIn("claim_exclusive_dest", src)
         self.assertIn("state[\"staging\"]", src)
         ready = inspect.getsource(run.require_docker_ready)
-        launch = inspect.getsource(contained._docker_run_capped)
+        launch = inspect.getsource(contained.docker_run_capped)
         self.assertIn("docker", ready)
         self.assertIn("info", ready)
         self.assertIn("ServerVersion", ready)
@@ -1807,7 +1808,7 @@ class MaterializeBytes(unittest.TestCase):
         mutated = src.replace("except subprocess.TimeoutExpired as exc:", "except ZeroDivisionError as exc:")
         self.assertNotEqual(src, mutated)
         ns = {
-            "_docker_run_capped": contained._docker_run_capped,
+            "docker_run_capped": contained.docker_run_capped,
             "PrepareError": run.PrepareError,
             "subprocess": subprocess,
         }
@@ -1819,7 +1820,7 @@ class MaterializeBytes(unittest.TestCase):
     def test_noop_loaded_copy_keeps_timeout_mapping(self):
         src = inspect.getsource(run.require_docker_ready)
         ns = {
-            "_docker_run_capped": contained._docker_run_capped,
+            "docker_run_capped": contained.docker_run_capped,
             "PrepareError": run.PrepareError,
             "subprocess": subprocess,
         }

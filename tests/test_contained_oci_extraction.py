@@ -16,6 +16,7 @@ if str(MEASUREMENTS) not in sys.path:
 
 import aee_checker_sealed_candidate as candidate  # noqa: E402
 import aee_checker_sealed_common as common  # noqa: E402
+import aee_checker_sealed_materialize as materialize  # noqa: E402
 import aee_checker_sealed_oci as aee_oci  # noqa: E402
 
 
@@ -225,6 +226,132 @@ class SharedEnvelopeOwnership(unittest.TestCase):
                                 state_over,
                                 process_returncode=process_returncode,
                             ),
+                        )
+
+    def test_exceptional_start_requires_an_observed_started_container(self):
+        contained = self._contained_oci()
+
+        class ExceptionalStart:
+            skip_absent = False
+
+            def __init__(self, failure, state_over):
+                self.failure = failure
+                self.state_over = state_over
+
+            def create(self, _argv):
+                pass
+
+            def start(self, _name, _deadline):
+                raise self.failure
+
+            def inspect(self, _name):
+                return _inspect_fixture(
+                    contained,
+                    state_over=self.state_over,
+                )
+
+            def remove(self, _name):
+                pass
+
+            def require_absent(self, _name):
+                pass
+
+        failures = (
+            subprocess.TimeoutExpired(["docker", "start"], 1),
+            contained.br._OutputTooLarge(),
+        )
+        invalid_states = (
+            {"Status": "created"},
+            {"Error": "failed to start container"},
+        )
+        for failure in failures:
+            for state_over in invalid_states:
+                with self.subTest(
+                    failure=type(failure).__name__,
+                    state_over=state_over,
+                ):
+                    with tempfile.TemporaryDirectory() as raw:
+                        root = Path(raw)
+                        mounts = {}
+                        for key, _destination in contained.DEFAULT_MOUNT_SPEC:
+                            path = root / key
+                            path.mkdir()
+                            mounts[key] = path
+                        with self.assertRaises(contained.ContainerSetupError):
+                            contained.run_contained(
+                                image_id="sha256:" + ("ab" * 32),
+                                mounts=mounts,
+                                command=["deadline"],
+                                entrypoint="/probe",
+                                mount_spec=contained.DEFAULT_MOUNT_SPEC,
+                                resource_profile=contained.INERT_RESOURCE_PROFILE,
+                                sealed=True,
+                                name_prefix="probe-",
+                                transport=ExceptionalStart(
+                                    failure,
+                                    state_over,
+                                ),
+                            )
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            mounts = {}
+            for key, _destination in contained.DEFAULT_MOUNT_SPEC:
+                path = root / key
+                path.mkdir()
+                mounts[key] = path
+            result = contained.run_contained(
+                image_id="sha256:" + ("ab" * 32),
+                mounts=mounts,
+                command=["deadline"],
+                entrypoint="/probe",
+                mount_spec=contained.DEFAULT_MOUNT_SPEC,
+                resource_profile=contained.INERT_RESOURCE_PROFILE,
+                sealed=True,
+                name_prefix="probe-",
+                transport=ExceptionalStart(
+                    subprocess.TimeoutExpired(["docker", "start"], 1),
+                    {"Status": "running", "Running": True},
+                ),
+            )
+        self.assertEqual(result["state"], "timeout")
+
+    def test_materialize_docker_phases_share_missing_executable_mapping(self):
+        contained = self._contained_oci()
+        missing = FileNotFoundError("docker")
+
+        with mock.patch.object(contained.br, "_run_capped", side_effect=missing):
+            with self.assertRaises(contained.DockerUnavailable):
+                materialize._observe_image_cmd(
+                    "sha256:" + ("ab" * 32), ["rustc", "-Vv"])
+            with self.assertRaises(contained.DockerUnavailable):
+                materialize.pull_rust_image()
+
+            toolchain = {
+                "cargo_V": "cargo %s" % materialize.RUSTC_RELEASE,
+                "image_id": "sha256:" + ("cd" * 32),
+                "index": materialize.RUST_IMAGE,
+                "observation": "vendor-image; checker was not run",
+                "platform": "linux/amd64",
+                "rustc_Vv": "rustc %s" % materialize.RUSTC_RELEASE,
+            }
+            with tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                subject = root / "subject"
+                vendor = root / "vendor"
+                subject.mkdir()
+                with mock.patch.object(
+                    materialize, "docker_bounded", return_value=b""
+                ), mock.patch.object(
+                    materialize, "docker_ok", return_value=None
+                ), mock.patch.object(
+                    materialize, "require_container_absent", return_value=None
+                ):
+                    with self.assertRaises(contained.DockerUnavailable):
+                        materialize.vendor_locked(
+                            subject,
+                            vendor,
+                            toolchain=toolchain,
                         )
 
     def test_cleanup_failure_has_a_named_cleanup_type(self):
