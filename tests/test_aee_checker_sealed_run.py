@@ -31,6 +31,7 @@ import aee_checker_sealed_materialize as mat  # noqa: E402
 import aee_checker_sealed_oci as oci  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
 import bounded_run as br  # noqa: E402
+import contained_oci as contained  # noqa: E402
 
 PREREG = REPO_ROOT / "measurements" / "aee-checker-25b9dfa"
 ADAPTER = REPO_ROOT / "adapters" / "aee_checker_sealed.py"
@@ -1676,11 +1677,12 @@ class MaterializeBytes(unittest.TestCase):
         self.assertNotIn("claim_exclusive_dest", src)
         self.assertIn("state[\"staging\"]", src)
         ready = inspect.getsource(run.require_docker_ready)
+        launch = inspect.getsource(contained._docker_run_capped)
         self.assertIn("docker", ready)
         self.assertIn("info", ready)
         self.assertIn("ServerVersion", ready)
-        self.assertIn("FileNotFoundError", ready)
-        self.assertIn("DockerUnavailable", ready)
+        self.assertIn("FileNotFoundError", launch)
+        self.assertIn("DockerUnavailable", launch)
         self.assertNotIn("shutil.which", ready)
         self.assertNotIn("shutil.which", inspect.getsource(_docker_ready))
         self.assertIn("require_docker_ready", inspect.getsource(_docker_ready))
@@ -1805,10 +1807,7 @@ class MaterializeBytes(unittest.TestCase):
         mutated = src.replace("except subprocess.TimeoutExpired as exc:", "except ZeroDivisionError as exc:")
         self.assertNotEqual(src, mutated)
         ns = {
-            "br": br,
-            "Path": Path,
-            "FileNotFoundError": FileNotFoundError,
-            "DockerUnavailable": run.DockerUnavailable,
+            "_docker_run_capped": contained._docker_run_capped,
             "PrepareError": run.PrepareError,
             "subprocess": subprocess,
         }
@@ -1820,10 +1819,7 @@ class MaterializeBytes(unittest.TestCase):
     def test_noop_loaded_copy_keeps_timeout_mapping(self):
         src = inspect.getsource(run.require_docker_ready)
         ns = {
-            "br": br,
-            "Path": Path,
-            "FileNotFoundError": FileNotFoundError,
-            "DockerUnavailable": run.DockerUnavailable,
+            "_docker_run_capped": contained._docker_run_capped,
             "PrepareError": run.PrepareError,
             "subprocess": subprocess,
         }

@@ -43,6 +43,14 @@ class DockerUnavailable(PrepareError):
     """The Docker executable is unavailable, not a successful local run."""
 
 
+class ContainerSetupError(PrepareError):
+    """Docker returned without proving that candidate execution started."""
+
+
+class ContainerCleanupError(PrepareError):
+    """Container removal or the following absence proof failed."""
+
+
 def preserve_cleanup_failure(primary: BaseException, action: str,
                              failure: BaseException) -> None:
     failures = tuple(getattr(primary, "cleanup_failures", ()))
@@ -155,12 +163,18 @@ def _require_mount_spec(mount_spec) -> tuple[tuple[str, str], ...]:
     return tuple(normalized)
 
 
-def require_docker_ready() -> str:
+def _docker_run_capped(args, *, cwd: Path | None = None, timeout: int):
     try:
-        proc = br._run_capped(
-            ["docker", "info", "--format", "{{.ServerVersion}}"], Path.cwd(), 15)
+        return br._run_capped(
+            ["docker", *args], Path(cwd) if cwd else Path.cwd(), timeout)
     except FileNotFoundError as exc:
         raise DockerUnavailable("docker executable is not available") from exc
+
+
+def require_docker_ready() -> str:
+    try:
+        proc = _docker_run_capped(
+            ["info", "--format", "{{.ServerVersion}}"], timeout=15)
     except subprocess.TimeoutExpired as exc:
         raise PrepareError("docker readiness timed out") from exc
     version = (proc.stdout or "").strip()
@@ -170,11 +184,7 @@ def require_docker_ready() -> str:
 
 
 def docker_ok(args, *, cwd: Path | None = None, timeout: int = 60):
-    try:
-        proc = br._run_capped(
-            ["docker", *args], Path(cwd) if cwd else Path.cwd(), timeout)
-    except FileNotFoundError as exc:
-        raise DockerUnavailable("docker executable is not available") from exc
+    proc = _docker_run_capped(args, cwd=cwd, timeout=timeout)
     if proc.returncode != 0:
         raise PrepareError("docker %s failed" % (args[0] if args else "cmd"))
     return proc
@@ -340,7 +350,7 @@ def classify_inspect_status(returncode, stdout, stderr) -> str:
 
 
 def inspect_lookup(name: str):
-    proc = br._run_capped(["docker", "inspect", name], Path.cwd(), 30)
+    proc = _docker_run_capped(["inspect", name], timeout=30)
     status = classify_inspect_status(proc.returncode, proc.stdout or "", proc.stderr or "")
     if status == "absent":
         return None
@@ -426,13 +436,15 @@ def cleanup_container(transport, name: str,
         if primary is not None:
             preserve_cleanup_failure(primary, "%s absence proof" % label, exc)
         elif remove_failure is not None:
-            refusal = PrepareError("%s remove failed" % label)
+            refusal = ContainerCleanupError("%s remove failed" % label)
             preserve_cleanup_failure(refusal, "%s absence proof" % label, exc)
             raise refusal from remove_failure
         else:
-            raise PrepareError("%s absence proof failed" % label) from exc
+            raise ContainerCleanupError(
+                "%s absence proof failed" % label) from exc
     if primary is None and remove_failure is not None:
-        raise PrepareError("%s remove failed" % label) from remove_failure
+        raise ContainerCleanupError(
+            "%s remove failed" % label) from remove_failure
 
 
 class DockerTransport:
@@ -446,11 +458,8 @@ class DockerTransport:
     def start(self, name, deadline_seconds):
         if type(deadline_seconds) is not int or deadline_seconds <= 0:
             raise PrepareError("candidate deadline")
-        return br._run_capped(
-            ["docker", "start", "-a", name],
-            Path.cwd(),
-            deadline_seconds,
-        )
+        return _docker_run_capped(
+            ["start", "-a", name], timeout=deadline_seconds)
 
     def inspect(self, name):
         return parse_inspect_payload(docker_bounded(["inspect", name]))
@@ -460,6 +469,19 @@ class DockerTransport:
 
     def require_absent(self, name):
         require_container_absent(name)
+
+
+def require_executed_process(inspect, process) -> None:
+    """Bind a returned start process to Docker's observed terminal state."""
+    state = inspect.get("State") if type(inspect) is dict else None
+    if (type(state) is not dict or
+            state.get("Status") != "exited" or
+            state.get("Running") is not False or
+            state.get("Error") != "" or
+            type(state.get("ExitCode")) is not int or
+            type(getattr(process, "returncode", None)) is not int or
+            state["ExitCode"] != process.returncode):
+        raise ContainerSetupError("container start state was not proved")
 
 
 def run_contained(
@@ -501,6 +523,8 @@ def run_contained(
             else:
                 raise
         observed = transport.inspect(name)
+        if process is not None:
+            require_executed_process(observed, process)
         envelope = validate_inspect_contract(
             observed,
             sealed=sealed,

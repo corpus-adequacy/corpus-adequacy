@@ -70,6 +70,12 @@ def _inspect(dests, *, profile):
             {"Type": "bind", "Destination": dest, "RW": False}
             for dest in dests
         ],
+        "State": {
+            "Error": "",
+            "ExitCode": 0,
+            "Running": False,
+            "Status": "exited",
+        },
     }
 
 

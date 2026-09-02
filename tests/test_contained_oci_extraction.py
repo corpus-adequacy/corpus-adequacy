@@ -19,6 +19,43 @@ import aee_checker_sealed_common as common  # noqa: E402
 import aee_checker_sealed_oci as aee_oci  # noqa: E402
 
 
+def _inspect_fixture(contained, *, process_returncode=0, state_over=None):
+    profile = contained.INERT_RESOURCE_PROFILE
+    state = {
+        "Error": "",
+        "ExitCode": process_returncode,
+        "Running": False,
+        "Status": "exited",
+    }
+    state.update(state_over or {})
+    return {
+        "Config": {
+            "Env": ["CARGO_NET_OFFLINE=true"],
+            "User": "65532:65532",
+        },
+        "HostConfig": {
+            "CapDrop": ["ALL"],
+            "Memory": profile["memory_bytes"],
+            "MemorySwap": profile["memory_swap_bytes"],
+            "NetworkMode": "none",
+            "PidsLimit": profile["pids"],
+            "ReadonlyRootfs": True,
+            "SecurityOpt": ["no-new-privileges:true"],
+            "Tmpfs": {
+                "/tmp": "rw,size=%d,nr_inodes=%d,mode=1777" % (
+                    profile["tmp_bytes"], profile["tmp_inodes"]),
+                "/work": "rw,size=%d,nr_inodes=%d,mode=1777" % (
+                    profile["work_bytes"], profile["work_inodes"]),
+            },
+        },
+        "Mounts": [
+            {"Destination": destination, "RW": False, "Type": "bind"}
+            for _key, destination in contained.DEFAULT_MOUNT_SPEC
+        ],
+        "State": state,
+    }
+
+
 class SharedEnvelopeOwnership(unittest.TestCase):
     def _contained_oci(self):
         try:
@@ -104,6 +141,73 @@ class SharedEnvelopeOwnership(unittest.TestCase):
         ):
             with self.assertRaises(contained.DockerUnavailable):
                 contained.docker_ok(["info"])
+
+    def test_every_docker_phase_classifies_a_missing_executable_unavailable(self):
+        contained = self._contained_oci()
+
+        with mock.patch.object(
+            contained.br, "_run_capped", side_effect=FileNotFoundError("docker")
+        ):
+            with self.assertRaises(contained.DockerUnavailable):
+                contained.DockerTransport().start("candidate", 1)
+            with self.assertRaises(contained.DockerUnavailable):
+                contained.inspect_lookup("candidate")
+
+    def test_completed_process_must_match_an_executed_inspect_state(self):
+        contained = self._contained_oci()
+
+        class FailedStart:
+            skip_absent = False
+
+            def __init__(self, state_over):
+                self.state_over = state_over
+
+            def create(self, _argv):
+                pass
+
+            def start(self, _name, _deadline):
+                return subprocess.CompletedProcess([], 1, "", "")
+
+            def inspect(self, _name):
+                return _inspect_fixture(
+                    contained,
+                    process_returncode=1,
+                    state_over=self.state_over,
+                )
+
+            def remove(self, _name):
+                pass
+
+            def require_absent(self, _name):
+                pass
+
+        cases = (
+            {"Status": "created"},
+            {"Running": True},
+            {"Error": "failed to start container"},
+            {"ExitCode": 0},
+        )
+        for state_over in cases:
+            with self.subTest(state_over=state_over):
+                with tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    mounts = {}
+                    for key, _destination in contained.DEFAULT_MOUNT_SPEC:
+                        path = root / key
+                        path.mkdir()
+                        mounts[key] = path
+                    with self.assertRaises(contained.ContainerSetupError):
+                        contained.run_contained(
+                            image_id="sha256:" + ("ab" * 32),
+                            mounts=mounts,
+                            command=["disk"],
+                            entrypoint="/probe",
+                            mount_spec=contained.DEFAULT_MOUNT_SPEC,
+                            resource_profile=contained.INERT_RESOURCE_PROFILE,
+                            sealed=True,
+                            name_prefix="probe-",
+                            transport=FailedStart(state_over),
+                        )
 
     def test_shared_create_argv_owns_every_required_limit(self):
         contained = self._contained_oci()

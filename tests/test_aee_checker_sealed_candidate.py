@@ -66,7 +66,7 @@ def _classify(completed):
     )
 
 
-def _inspect(dests):
+def _inspect(dests, *, exit_code=0):
     return {
         "HostConfig": {
             "ReadonlyRootfs": True,
@@ -86,6 +86,12 @@ def _inspect(dests):
             {"Type": "bind", "Destination": dest, "RW": False}
             for dest in dests
         ],
+        "State": {
+            "Error": "",
+            "ExitCode": exit_code,
+            "Running": False,
+            "Status": "exited",
+        },
     }
 
 
@@ -403,7 +409,8 @@ class SealedLifecycle(unittest.TestCase):
                 image_id=IMAGE, mounts=mounts, transport=transport,
                 resource_profile=INERT_RESOURCE_PROFILE)
             self.assertEqual(len(transport.removed), 1)
-            broken = FakeTransport(returncode=2, stdout="fail", inspect=_inspect(dests))
+            broken = FakeTransport(
+                returncode=2, stdout="fail", inspect=_inspect(dests, exit_code=2))
             cand._run_sealed_candidate(
                 image_id=IMAGE, mounts=mounts, transport=broken,
                 resource_profile=INERT_RESOURCE_PROFILE)
