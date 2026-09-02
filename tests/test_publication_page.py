@@ -247,7 +247,7 @@ class PublicationPage(unittest.TestCase):
             page = _render(root, source_commit="a" * 40)
             self.assertEqual(rpp.projection_digest_from_html(page), digest_a)
 
-    def test_projection_digest_changes_when_only_version_changes(self):
+    def test_projection_digest_uses_published_release_not_checkout_version(self):
         with tempfile.TemporaryDirectory() as d:
             root = _write_tree(Path(d), [VALID / "report.v0.json"])
             index_bytes, records = rpp.load_listed_records(root)
@@ -257,10 +257,15 @@ class PublicationPage(unittest.TestCase):
                 index_bytes, records, renderer, commit
             )
             with mock.patch.object(rpp.ca, "VERSION", "9.9.9"):
-                mutated = rpp.compute_projection_digest(
+                checkout_only = rpp.compute_projection_digest(
                     index_bytes, records, renderer, commit
                 )
-            self.assertNotEqual(digest, mutated)
+            with mock.patch.object(rpp, "PUBLISHED_RELEASE_VERSION", "9.9.9"):
+                published = rpp.compute_projection_digest(
+                    index_bytes, records, renderer, commit
+                )
+            self.assertEqual(digest, checkout_only)
+            self.assertNotEqual(digest, published)
 
     def test_mutation_omit_source_commit_or_version_from_digest_is_red(self):
         with tempfile.TemporaryDirectory() as d:
@@ -289,10 +294,12 @@ class PublicationPage(unittest.TestCase):
                 if source_commit is not None:
                     add(b"source_commit", source_commit.encode("ascii"))
                 if version is not None:
-                    add(b"version", version.encode("ascii"))
+                    add(b"published_release_version", version.encode("ascii"))
                 return hasher.hexdigest()
 
-            self.assertNotEqual(canonical, omitted(None, ca.VERSION))
+            self.assertNotEqual(
+                canonical, omitted(None, rpp.PUBLISHED_RELEASE_VERSION)
+            )
             self.assertNotEqual(canonical, omitted(commit, None))
             self.assertNotEqual(canonical, omitted(None, None))
 
@@ -784,7 +791,7 @@ def _measure_command(directory: str) -> str:
 def _release_href() -> str:
     return (
         "https://github.com/corpus-adequacy/corpus-adequacy/releases/tag/v%s"
-        % ca.VERSION
+        % rpp.PUBLISHED_RELEASE_VERSION
     )
 
 
@@ -850,7 +857,7 @@ def _tagged_local_mirror(mirror: Path) -> None:
         timeout=180,
     )
     subprocess.run(
-        ["git", "tag", "-f", "v%s" % ca.VERSION],
+        ["git", "tag", "-f", "v%s" % rpp.PUBLISHED_RELEASE_VERSION],
         cwd=mirror,
         check=True,
         timeout=30,
@@ -951,9 +958,9 @@ class FirstRunOrientation(unittest.TestCase):
         )
         self.assertIn(_release_href(), page)
         for href in re.findall(r'releases/tag/([^"\s]+)', page):
-            self.assertEqual(href, "v%s" % ca.VERSION)
+            self.assertEqual(href, "v%s" % rpp.PUBLISHED_RELEASE_VERSION)
             self.assertIsNone(re.fullmatch(r"[0-9a-f]{40}", href))
-        self.assertIn("--branch v%s" % ca.VERSION, page)
+        self.assertIn("--branch v%s" % rpp.PUBLISHED_RELEASE_VERSION, page)
         self.assertIn('class="skip"', page)
         self.assertIn("<h1>", page)
         self.assertIn("<h2 id=\"first-run-heading\">", page)
@@ -976,6 +983,30 @@ class FirstRunOrientation(unittest.TestCase):
             doc["tool_content_sha256"],
             doc["tool_version"],
         )
+
+    def test_release_prep_does_not_advertise_an_unaddressable_checkout_version(self):
+        published = rpp.PUBLISHED_RELEASE_VERSION
+        with mock.patch.object(ca, "VERSION", "9.9.9"):
+            page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
+        self.assertIn(
+            "--branch v%s" % published,
+            _first_run_script(page),
+        )
+        self.assertIn("releases/tag/v%s" % published, page)
+        self.assertNotIn("--branch v9.9.9", page)
+        self.assertNotIn("releases/tag/v9.9.9", page)
+
+    def test_published_acquisition_version_names_an_annotated_local_tag(self):
+        tag = "v%s" % rpp.PUBLISHED_RELEASE_VERSION
+        proc = subprocess.run(
+            ["git", "cat-file", "-t", tag],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "tag")
 
     def test_extracted_first_run_route_runs_from_empty_tempdir(self):
         page = rpp.render_html(REPO_ROOT, source_commit="f" * 40)
