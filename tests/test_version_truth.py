@@ -38,7 +38,12 @@ RELEASE_TRUTH_BLOCK = "%s %s %s" % (
     CUT_ORDER_PHRASE,
     NO_ADDRESSABILITY_PHRASE,
 )
-RELEASE_DATES = {"0.1.0": "2026-08-22", "0.1.1": "2026-08-22", "0.1.2": "2026-08-23"}
+RELEASE_DATES = {
+    "0.1.0": "2026-08-22",
+    "0.1.1": "2026-08-22",
+    "0.1.2": "2026-08-23",
+    "0.1.3": "2026-09-02",
+}
 
 
 def check_version_release_truth(root: Path) -> str:
@@ -619,7 +624,16 @@ INVALID_CHANGELOGS = (
 
 class VersionReleaseTruth(unittest.TestCase):
     def test_checkout_satisfies_version_release_truth(self):
-        self.assertEqual(check_version_release_truth(REPO_ROOT), "0.1.2")
+        self.assertEqual(check_version_release_truth(REPO_ROOT), "0.1.3")
+
+    def test_v013_changelog_names_the_trusted_local_boundary(self):
+        changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        section = changelog.split("## 0.1.3 — 2026-09-02", 1)[1].split(
+            "## 0.1.2", 1
+        )[0]
+        self.assertIn("trusted-local", section)
+        self.assertIn("trusted inputs", section)
+        self.assertIn("not a sandbox", section)
 
     def test_release_date_is_pinned_independently(self):
         with _temp_tree(

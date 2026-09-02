@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.3 — 2026-09-02
+
+Accumulated hardening since 0.1.2 covers bounded child-process cleanup,
+closed report consumers, inert-control polarity, pinned adapter provenance,
+and owner-approved related-work records.
+
+The execution boundary remains trusted-local: manifests and candidate code are
+trusted inputs. Process supervision is bounded, but it is not a sandbox,
+containment claim, security certification, or product-wide adequacy claim.
+
 Controls may now explicitly declare `control_polarity: inert`; legacy controls
 remain positive. A moved inert control reports `control-MOVED`, gives aggregate
 `control_status: moved`, invalidates the run, and emits no score. An unchanged
