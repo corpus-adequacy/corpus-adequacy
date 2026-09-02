@@ -105,7 +105,7 @@ ANCHOR_EXCERPT_MAX = 200
 # One place. The report, --version, and CHANGELOG name this.
 # A tag v+VERSION exists only after the documented cut.
 # A SHA pin is exact and opaque; this is the name a measurement can quote.
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 
 # Every shipped runtime source, in one ordered explicit set. HEAD byte equality
 # and the content digest read this same tuple, so a runtime file added without

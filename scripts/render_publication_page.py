@@ -35,6 +35,9 @@ RAW_PREFIX = "https://github.com/corpus-adequacy/corpus-adequacy/raw"
 BLOB_PREFIX = "https://github.com/corpus-adequacy/corpus-adequacy/blob"
 ISSUES_INTAKE = "https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=add-corpus.yml"
 ISSUES_PUBLISH = "https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=publish-measurement.yml"
+# VERSION names the checkout being prepared. This names the last release whose
+# tag and GitHub Release are already addressable; advance it only after publish.
+PUBLISHED_RELEASE_VERSION = "0.1.2"
 HEX64 = set("0123456789abcdef")
 DISPLAY_VERDICTS = ("killed", "survived", "silent", "unproved")
 NO_LOCAL_REPRODUCTION_COMMAND = (
@@ -675,7 +678,7 @@ def _inspect_command(record: dict) -> str:
 def _release_href() -> str:
     return (
         "https://github.com/corpus-adequacy/corpus-adequacy/releases/tag/v%s"
-        % ca.VERSION
+        % PUBLISHED_RELEASE_VERSION
     )
 
 
@@ -683,7 +686,7 @@ def _clone_command() -> str:
     return (
         "git clone --depth 1 --branch v%s "
         "https://github.com/corpus-adequacy/corpus-adequacy.git"
-        % ca.VERSION
+        % PUBLISHED_RELEASE_VERSION
     )
 
 
@@ -709,7 +712,7 @@ def _first_run_html(records: list[dict], source_commit: str) -> str:
                 _esc(record["tool_version"]),
             )
         )
-    tag = "v%s" % ca.VERSION
+    tag = "v%s" % PUBLISHED_RELEASE_VERSION
     return (
         '<section id="first-run" class="non-claims" aria-labelledby="first-run-heading">\n'
         '<h2 id="first-run-heading">What this measures</h2>\n'
@@ -1093,7 +1096,7 @@ def compute_projection_digest(
             raise PublicationError("unknown publication kind %r" % kind)
     _add(b"renderer", renderer_bytes)
     _add(b"source_commit", source_commit.encode("ascii"))
-    _add(b"version", ca.VERSION.encode("ascii"))
+    _add(b"published_release_version", PUBLISHED_RELEASE_VERSION.encode("ascii"))
     return hasher.hexdigest()
 
 
