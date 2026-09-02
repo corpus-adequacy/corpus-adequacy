@@ -209,6 +209,20 @@ class SharedEnvelopeOwnership(unittest.TestCase):
                             transport=FailedStart(state_over),
                         )
 
+    def test_cleanup_failure_has_a_named_cleanup_type(self):
+        contained = self._contained_oci()
+
+        class FailedRemove:
+            def remove(self, _name):
+                raise contained.PrepareError("remove failed")
+
+            def require_absent(self, _name):
+                pass
+
+        with self.assertRaises(contained.ContainerCleanupError):
+            contained.cleanup_container(
+                FailedRemove(), "candidate", None, "candidate")
+
     def test_shared_create_argv_owns_every_required_limit(self):
         contained = self._contained_oci()
         with tempfile.TemporaryDirectory() as raw:
