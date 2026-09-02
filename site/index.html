@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="projection-digest" content="520c13525bdd19a01831560ceeff3733fd270ee680f0afea30a728fee6c45643">
+<meta name="projection-digest" content="f15d1f767eb2bdc6e12e900a145c679e6cd77922d48c69e0a90eae9f4e0a9657">
 <meta name="source-commit" content="aa2ef19efaa8f6140f7a1766553768984b60e5aa">
 <title>Published corpus-adequacy records</title>
 <style>
@@ -41,7 +41,7 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 <h2 id="first-run-heading">What this measures</h2>
 <p>This page identifies which author-declared rule-removal mutants the corpus distinguished.</p>
 <p>Obtain the tagged tool, then inspect. The inspect line reads existing report bytes and does not measure.</p>
-<pre><code>git clone --depth 1 --branch v0.1.2 https://github.com/corpus-adequacy/corpus-adequacy.git
+<pre><code>git clone --depth 1 --branch v0.1.3 https://github.com/corpus-adequacy/corpus-adequacy.git
 cd corpus-adequacy
 python3 corpus_adequacy.py --survivors measurements/tersign-0e560c1/report.v0.json --json</code></pre>
 <p>The card below keeps the measurement command. exit 1 with --json is a completed inadequate measurement with declared survivors, not a crash; exit 2 is refusal.</p>
@@ -52,8 +52,8 @@ python3 corpus_adequacy.py --survivors measurements/tersign-0e560c1/report.v0.js
 <p>report tool_content_sha256 <span class="mono">sha256:7a0f37f6c9f93daf88f96efc1f58f1f6f75264d150ab6eb72a0765d67c99037e</span></p>
 <p>report tool_version <span class="mono">0.1.2</span></p>
 <p>evidence-link commit <span class="mono">aa2ef19efaa8f6140f7a1766553768984b60e5aa</span></p>
-<p>tagged tool <span class="mono">v0.1.2</span></p>
-<p><a href="https://github.com/corpus-adequacy/corpus-adequacy/releases/tag/v0.1.2">Release v0.1.2</a></p>
+<p>tagged tool <span class="mono">v0.1.3</span></p>
+<p><a href="https://github.com/corpus-adequacy/corpus-adequacy/releases/tag/v0.1.3">Release v0.1.3</a></p>
 <p>Equal counts do not imply identical report bytes.</p>
 </section>
 <section class="non-claims" aria-labelledby="non-claims-heading">

@@ -37,7 +37,7 @@ ISSUES_INTAKE = "https://github.com/corpus-adequacy/corpus-adequacy/issues/new?t
 ISSUES_PUBLISH = "https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=publish-measurement.yml"
 # VERSION names the checkout being prepared. This names the last release whose
 # tag and GitHub Release are already addressable; advance it only after publish.
-PUBLISHED_RELEASE_VERSION = "0.1.2"
+PUBLISHED_RELEASE_VERSION = "0.1.3"
 HEX64 = set("0123456789abcdef")
 DISPLAY_VERDICTS = ("killed", "survived", "silent", "unproved")
 NO_LOCAL_REPRODUCTION_COMMAND = (
