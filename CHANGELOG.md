@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+Closed operator-owned execution-profile selection (`trusted-local`,
+`contained-oci-v0`), independent of runner (`module|process|batch`). The
+operator supplies the profile; a candidate may declare only
+`minimum_execution_profile`. Unknown values, operator-shaped manifest keys,
+downgrade from contained to local, `contained-oci-v0` with `runner: module`,
+and `contained-oci-v0` without an explicitly supplied contained backend are
+refused. There is no contained-to-local fallback. `contained-oci-v0` is one
+inspect-verified Linux/Docker envelope, not complete sandboxing and not
+author authentication. `report.v0` is unchanged and does not record the
+profile. This is not a score, not `report.v1`, and not a sandbox claim.
+
 ## 0.1.3 — 2026-09-02
 
 Accumulated hardening since 0.1.2 covers bounded child-process cleanup,

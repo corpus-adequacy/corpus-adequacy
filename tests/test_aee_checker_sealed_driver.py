@@ -168,6 +168,7 @@ class DriverHappyPath(unittest.TestCase):
         self.assertEqual(backend.call_args.kwargs["prepare_raw"], prepare_raw)
         funnel.assert_called_once()
         self.assertIs(funnel.call_args.kwargs["execution_backend"], backend_value)
+        self.assertEqual(funnel.call_args.kwargs["execution_profile"], "contained-oci-v0")
 
 
 if __name__ == "__main__":

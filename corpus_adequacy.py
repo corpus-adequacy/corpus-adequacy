@@ -122,6 +122,11 @@ TOOL_SOURCE_PATHS = (
 TOOL_SOURCE_DIGEST_TAG = b"corpus-adequacy.tool-source.v0\n"
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
+OPERATOR_PROFILE_KEY = "execution_profile"
+MINIMUM_PROFILE_KEY = "minimum_execution_profile"
+CLOSED_EXECUTION_PROFILES = frozenset({"trusted-local", "contained-oci-v0"})
+_PROFILE_STRENGTH = {"trusted-local": 0, "contained-oci-v0": 1}
+
 
 class ManifestError(Exception):
     """The manifest does not describe a measurable corpus."""
@@ -2165,11 +2170,65 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
 
 
 
+
+def _canonical_execution_profile(value, *, which: str) -> str:
+    """Return the closed-set member, never the caller's object."""
+    if not isinstance(value, str):
+        raise ManifestError(
+            "%s must be a string, got %s" % (which, type(value).__name__))
+    for canonical in CLOSED_EXECUTION_PROFILES:
+        if value == canonical:
+            return canonical
+    raise ManifestError("unknown %s %r" % (which, value))
+
+
+def resolve_execution_profile(*, operator, manifest) -> str:
+    """Closed operator-owned profile. Manifest may state only a minimum."""
+    if type(manifest) is not dict:
+        raise ManifestError(
+            "manifest must be an object, got %s" % type(manifest).__name__)
+    if OPERATOR_PROFILE_KEY in manifest:
+        raise ManifestError(
+            "manifest must not declare operator key %s (got %r); "
+            "candidates may state only %s"
+            % (OPERATOR_PROFILE_KEY, manifest[OPERATOR_PROFILE_KEY],
+               MINIMUM_PROFILE_KEY))
+    profile = _canonical_execution_profile(operator, which=OPERATOR_PROFILE_KEY)
+    if MINIMUM_PROFILE_KEY not in manifest:
+        return profile
+    minimum = _canonical_execution_profile(
+        manifest[MINIMUM_PROFILE_KEY], which=MINIMUM_PROFILE_KEY)
+    if _PROFILE_STRENGTH[profile] < _PROFILE_STRENGTH[minimum]:
+        raise ManifestError(
+            "execution_profile %s is below minimum_execution_profile %s; "
+            "downgrade is refused" % (profile, minimum))
+    return profile
+
+
+def _require_contained_execution(*, profile, runner, execution_backend) -> None:
+    contained = _canonical_execution_profile(
+        "contained-oci-v0", which=OPERATOR_PROFILE_KEY)
+    if profile != contained:
+        return
+    if runner == "module":
+        raise ManifestError(
+            "execution_profile contained-oci-v0 cannot be used with runner module")
+    if execution_backend is None or execution_backend is _default_execution_backend:
+        raise ManifestError(
+            "execution_profile contained-oci-v0 requires an explicitly supplied "
+            "contained backend; contained-to-local fallback is refused")
+
+
 def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
-                 mutation_order=None, separate_build_phase=True) -> dict:
+                 mutation_order=None, separate_build_phase=True,
+                 execution_profile="trusted-local") -> dict:
     """Mutate declared sources, rebuild, and run the corpus against the binary."""
     if type(separate_build_phase) is not bool:
         raise ManifestError("separate_build_phase must be a bool")
+    profile = resolve_execution_profile(operator=execution_profile, manifest=m)
+    _require_contained_execution(
+        profile=profile, runner=m.get("runner"),
+        execution_backend=execution_backend)
     # Validate caller-supplied identities before the lock, then resolve the
     # actual rows again from the session's detached trusted manifest below.
     ordered_declared_mutants(m["mutants"], mutation_order)
@@ -2327,10 +2386,14 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
         originals_unverified_against_head=guard.unverified)
 
 
-def run(manifest_path: Path) -> dict:
+def run(manifest_path: Path, *, execution_profile="trusted-local") -> dict:
     m = load_manifest(manifest_path)
+    profile = resolve_execution_profile(operator=execution_profile, manifest=m)
+    _require_contained_execution(
+        profile=profile, runner=m["runner"], execution_backend=None)
     if m["runner"] in ("process", "batch"):
-        return _run_process(m, manifest_path)
+        return _run_process(
+            m, manifest_path, execution_profile=execution_profile)
     source = m["_impl_path"].read_text(encoding="utf-8")
     all_vectors = load_vector_document(m)
 
@@ -2712,7 +2775,7 @@ def main() -> int:
     if args.manifest is None:
         ap.error("manifest is required")
     try:
-        rep = run(args.manifest)
+        rep = run(args.manifest, execution_profile="trusted-local")
         encoded = encode_report_v0(rep) if args.json else None
     except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError) as exc:
         print("could not measure: %s" % exc, file=sys.stderr)
