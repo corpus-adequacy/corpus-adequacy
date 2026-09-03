@@ -447,7 +447,7 @@ class ProcessMeasurement(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             repo = _measurement_repo(tmp)
-            rep = ca.run(_manifest(repo, ["verdict", "reason"]))
+            rep = ca.run(_manifest(repo, ["verdict", "reason"]), execution_profile="trusted-local")
             by = {row["label"]: row for row in rep["mutants"]}
             self.assertEqual(by[SAFE_INT]["verdict"], "killed")
             self.assertEqual(by[SAFE_INT]["moved"], 1)
@@ -469,12 +469,12 @@ class ProcessMeasurement(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             repo = _measurement_repo(tmp)
-            typed = ca.run(_manifest(repo, ["verdict", "reason"]))
+            typed = ca.run(_manifest(repo, ["verdict", "reason"]), execution_profile="trusted-local")
             self.assertEqual(
                 next(r for r in typed["mutants"] if r["label"] == SAFE_INT)["verdict"],
                 "killed",
             )
-            false_green = ca.run(_manifest(repo, ["verdict"]))
+            false_green = ca.run(_manifest(repo, ["verdict"]), execution_profile="trusted-local")
             self.assertEqual(
                 next(r for r in false_green["mutants"] if r["label"] == SAFE_INT)["verdict"],
                 "survived",

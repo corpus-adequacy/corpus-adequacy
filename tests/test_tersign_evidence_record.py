@@ -642,12 +642,12 @@ class ProcessE2E(unittest.TestCase):
                 ]
             }
             typed = _process_manifest(tmp, repo, mutants, ["verdict", "reason"])
-            rep = ca.run(typed)
+            rep = ca.run(typed, execution_profile="trusted-local")
             drift = next(r for r in rep["mutants"] if r["label"] == "n11 reason drift")
             self.assertEqual(drift["verdict"], "killed")
             self.assertEqual(drift["moved"], 1)
             verdict_only = _process_manifest(tmp, repo, mutants, ["verdict"])
-            false_green = ca.run(verdict_only)
+            false_green = ca.run(verdict_only, execution_profile="trusted-local")
             survived = next(r for r in false_green["mutants"]
                             if r["label"] == "n11 reason drift")
             self.assertEqual(survived["verdict"], "survived")

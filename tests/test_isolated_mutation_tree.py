@@ -524,7 +524,7 @@ class IsolatedRun(unittest.TestCase):
             tmp = Path(d)
             manifest = _write_batch_corpus(tmp)
             before = (tmp / "check.py").read_bytes()
-            rep = ca.run(manifest)
+            rep = ca.run(manifest, execution_profile="trusted-local")
             self.assertEqual(rep["killed"], 1)
             self.assertTrue(rep["adequate"], rep["failures"])
             self.assertEqual((tmp / "check.py").read_bytes(), before)
@@ -542,7 +542,7 @@ class IsolatedRun(unittest.TestCase):
             (tmp / "notes.txt").write_text("UNTRACKED\n", encoding="utf-8")
             before_src = (tmp / "check.py").read_bytes()
             before_notes = (tmp / "notes.txt").read_bytes()
-            rep = ca.run(manifest)
+            rep = ca.run(manifest, execution_profile="trusted-local")
             self.assertEqual(rep["killed"], 1)
             self.assertTrue(rep["adequate"], rep["failures"])
             self.assertEqual((tmp / "check.py").read_bytes(), before_src)
@@ -565,7 +565,7 @@ class IsolatedRun(unittest.TestCase):
                 before = secret.read_bytes()
                 (tmp / "escape").symlink_to(secret)
                 with self.assertRaises(ca.ManifestError) as cm:
-                    ca.run(manifest)
+                    ca.run(manifest, execution_profile="trusted-local")
                 self.assertIn("symlink", str(cm.exception).lower())
                 self.assertEqual(secret.read_bytes(), before)
                 self.assertFalse(_prefix_dirs(Path(tempfile.gettempdir()), tmp))
@@ -586,7 +586,7 @@ class IsolatedRun(unittest.TestCase):
             }
             with mock.patch.object(iso, "MATERIALIZATION_CAP_BYTES", 20):
                 with self.assertRaises(ca.ManifestError) as cm:
-                    ca.run(manifest)
+                    ca.run(manifest, execution_profile="trusted-local")
             self.assertTrue("20" in str(cm.exception) or "ceiling" in str(cm.exception).lower()
                             or "cap" in str(cm.exception).lower())
             now = {
@@ -605,7 +605,7 @@ class IsolatedRun(unittest.TestCase):
             loaded = ca.load_manifest(manifest)
             (tmp / "check.py").unlink()
             with self.assertRaises(ca.ManifestError):
-                ca._run_process(loaded, manifest)
+                ca._run_process(loaded, manifest, execution_profile="trusted-local")
             self.assertEqual(other.read_bytes(), other_before)
             self.assertFalse((tmp / "check.py").exists())
             self.assertFalse(_prefix_dirs(Path(tempfile.gettempdir()), tmp))
@@ -618,7 +618,7 @@ class IsolatedRun(unittest.TestCase):
             loaded = ca.load_manifest(manifest)
             with mock.patch.object(ca, "_build", side_effect=RuntimeError("forced")):
                 with self.assertRaises(RuntimeError):
-                    ca._run_process(loaded, manifest)
+                    ca._run_process(loaded, manifest, execution_profile="trusted-local")
             self.assertEqual((tmp / "check.py").read_bytes(), before)
             self.assertFalse(_prefix_dirs(Path(tempfile.gettempdir()), tmp))
             _assert_lock_releasable(self, tmp)
@@ -636,7 +636,7 @@ class IsolatedRun(unittest.TestCase):
                 return real(cmd, cwd, timeout)
 
             with mock.patch.object(ca, "_run_capped", side_effect=capture):
-                rep = ca.run(manifest)
+                rep = ca.run(manifest, execution_profile="trusted-local")
             self.assertEqual(rep["killed"], 1)
             self.assertTrue(captured)
             sys_tmp = Path(tempfile.gettempdir()).resolve()
@@ -652,7 +652,7 @@ class IsolatedRun(unittest.TestCase):
 
             captured.clear()
             with mock.patch.object(ca, "_run_capped", side_effect=capture):
-                ca.run(manifest)
+                ca.run(manifest, execution_profile="trusted-local")
             self.assertTrue(captured)
             self.assertNotEqual(captured[0], first)
             self.assertFalse(_under(captured[0], tmp))
@@ -662,7 +662,7 @@ class IsolatedRun(unittest.TestCase):
             tmp = Path(d)
             manifest = _write_batch_corpus(tmp)
             before = (tmp / "check.py").read_bytes()
-            ca.run(manifest)
+            ca.run(manifest, execution_profile="trusted-local")
             self.assertEqual((tmp / "check.py").read_bytes(), before)
             self.assertNotIn(b"MUTANT_VISIBLE", before)
 
@@ -768,7 +768,7 @@ class ExternalProcessSigkill(unittest.TestCase):
                 return real(cmd, cwd, timeout)
 
             with mock.patch.object(ca, "_run_capped", side_effect=capture):
-                rep = ca.run(follow)
+                rep = ca.run(follow, execution_profile="trusted-local")
             self.assertIsNotNone(rep.get("score_percent"))
             self.assertEqual(rep["killed"], 1)
             self.assertEqual((repo / "check.py").read_bytes(), before_src)

@@ -96,7 +96,8 @@ def bind_authorized_mutation_order(*, manifest: dict, sites: dict,
 
 def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
                          pins_dir: Path, manifest: dict, manifest_path: Path,
-                         execution_backend) -> dict:
+                         execution_backend,
+                         execution_profile="contained-oci-v0") -> dict:
     try:
         validated = validate_authorize(authorize_raw, prepare_raw)
         if validated["prepare"].get("schema") != PREPARE_V1_SCHEMA:
@@ -115,6 +116,7 @@ def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
         execution_backend=execution_backend,
         mutation_order=order,
         separate_build_phase=False,
+        execution_profile=execution_profile,
     )
 
 

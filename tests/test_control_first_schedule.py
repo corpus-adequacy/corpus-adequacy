@@ -142,7 +142,7 @@ class ControlFirstCallLog(unittest.TestCase):
             self._batch_manifest(tmp, mutants, equivalent=equivalent))
         with mock.patch.object(ca, "_build", side_effect=fake_build), \
                 mock.patch.object(ca, "_process_outcomes", side_effect=fake_outcomes):
-            report = ca._run_process(loaded, tmp / "m.json")
+            report = ca._run_process(loaded, tmp / "m.json", execution_profile="trusted-local")
         return calls, report
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
@@ -291,7 +291,7 @@ class ControlFirstCallLog(unittest.TestCase):
             loaded = ca.load_manifest(path)
             with mock.patch.object(ca, "_build", side_effect=fake_build), \
                     mock.patch.object(ca, "_process_outcomes", side_effect=fake_outcomes):
-                report = ca._run_process(loaded, path)
+                report = ca._run_process(loaded, path, execution_profile="trusted-local")
         self.assertEqual(calls, ["ctrl-a", "ctrl-z", "ord-a", "ord-z"])
         self.assertEqual(report["control_status"], "killed")
 
@@ -345,7 +345,7 @@ class ControlFirstCallLog(unittest.TestCase):
             loaded = ca.load_manifest(path)
             with mock.patch.object(ca, "_build", side_effect=fake_build), \
                     mock.patch.object(ca, "_process_outcomes", side_effect=fake_outcomes):
-                report = ca._run_process(loaded, path)
+                report = ca._run_process(loaded, path, execution_profile="trusted-local")
         self.assertEqual(calls, ["ord-a", "ord-z"])
         self.assertEqual(
             [(row["group"], row["label"], row["verdict"]) for row in report["mutants"]],
@@ -424,7 +424,7 @@ class ControlFirstCallLog(unittest.TestCase):
             loaded = ca.load_manifest(path)
             with mock.patch.object(ca, "_build", side_effect=fake_build), \
                     mock.patch.object(ca, "_process_outcomes", side_effect=fake_outcomes):
-                report = ca._run_process(loaded, path)
+                report = ca._run_process(loaded, path, execution_profile="trusted-local")
         self.assertEqual(
             [row["label"] for row in report["mutants"]],
             ["CTRL-a", "ord-z", "eq-z", "eq-a"],

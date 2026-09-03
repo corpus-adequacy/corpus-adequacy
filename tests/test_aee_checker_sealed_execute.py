@@ -116,6 +116,7 @@ class FunnelUsesTheGenericEngine(unittest.TestCase):
             manifest, MANIFEST_PATH,
             execution_backend=backend,
             mutation_order=EXPECTED_LABELS,
+            execution_profile="contained-oci-v0",
             separate_build_phase=False,
         )
 

@@ -221,7 +221,7 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
             with mock.patch.object(
                     ca, "_run_capped",
                     side_effect=self._fake_batch(mutant_rc=75, mutant_stdout=UNPROVED_JSON)):
-                rep = ca.run(p)
+                rep = ca.run(p, execution_profile="trusted-local")
         row = next(r for r in rep["mutants"] if r["label"] == "threshold")
         self.assertEqual(row["verdict"], "unproved")
         self.assertEqual(row["moved"], 0)
@@ -237,7 +237,7 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
             with mock.patch.object(
                     ca, "_run_capped",
                     side_effect=self._fake_batch(baseline_rc=75)):
-                rep = ca.run(p)
+                rep = ca.run(p, execution_profile="trusted-local")
         self.assertTrue(any("UNMUTATED" in f for f in rep["failures"]), rep["failures"])
         self.assertIsNone(rep["score_percent"])
         self.assertEqual(rep["killed"], 0)
@@ -250,7 +250,7 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
             with mock.patch.object(
                     ca, "_run_capped",
                     side_effect=self._fake_batch(control_rc=75)):
-                rep = ca.run(p)
+                rep = ca.run(p, execution_profile="trusted-local")
         row = next(r for r in rep["mutants"] if r["label"] == "CONTROL")
         self.assertEqual(row["verdict"], "control-error")
         self.assertEqual(rep["control_status"], "error")
@@ -272,7 +272,7 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = self._process_two_vectors(Path(d))
             with mock.patch.object(ca, "_run_capped", side_effect=self._fake_process_mixed()):
-                rep = ca.run(p)
+                rep = ca.run(p, execution_profile="trusted-local")
         self._assert_whole_mutant_unproved(rep)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
@@ -282,7 +282,7 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
             with mock.patch.object(
                     ca, "_run_capped",
                     side_effect=self._fake_process_mixed(other_rc=1)):
-                rep = ca.run(p)
+                rep = ca.run(p, execution_profile="trusted-local")
         self._assert_whole_mutant_unproved(rep)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
@@ -292,7 +292,7 @@ class DeclaredUnprovedRunSemantics(unittest.TestCase):
             with mock.patch.object(
                     ca, "_run_capped",
                     side_effect=self._fake_batch(mutant_rc=1)):
-                rep = ca.run(p)
+                rep = ca.run(p, execution_profile="trusted-local")
         row = next(r for r in rep["mutants"] if r["label"] == "threshold")
         self.assertEqual(row["verdict"], "killed")
         self.assertIn("unexpected-exit", row["how"])
@@ -406,7 +406,7 @@ class CoreUnprovedReasonContract(unittest.TestCase):
 
                 report = ca._run_process(
                     loaded, manifest_path, execution_backend=backend,
-                    separate_build_phase=True)
+                    separate_build_phase=True, execution_profile="trusted-local")
         finally:
             if saved is None:
                 sys.modules.pop("aee_checker_sealed_common", None)

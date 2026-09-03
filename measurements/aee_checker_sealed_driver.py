@@ -99,6 +99,7 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
             manifest=manifest,
             manifest_path=manifest_path,
             execution_backend=backend,
+            execution_profile="contained-oci-v0",
         )
     except (AuthorizeError, PrepareError, ca.ManifestError, execute.ExecuteError) as exc:
         raise DriverError(str(exc)) from exc
