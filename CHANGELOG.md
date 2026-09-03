@@ -11,7 +11,9 @@ and `contained-oci-v0` without an explicitly supplied contained backend are
 refused. There is no contained-to-local fallback. `contained-oci-v0` is one
 inspect-verified Linux/Docker envelope, not complete sandboxing and not
 author authentication. `report.v0` is unchanged and does not record the
-profile. This is not a score, not `report.v1`, and not a sandbox claim.
+profile. `run` and `_run_process` require `execution_profile`; omission is
+`TypeError`, not a trusted-local run. This is not a score, not `report.v1`,
+and not a sandbox claim.
 
 ## 0.1.3 — 2026-09-02
 

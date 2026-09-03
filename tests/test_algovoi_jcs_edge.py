@@ -526,7 +526,7 @@ class EndToEnd(unittest.TestCase):
                 ]
             }
             manifest = _process_manifest(repo, mutants, ["raw_sha256", "lexeme"])
-            report = ca.run(manifest)
+            report = ca.run(manifest, execution_profile="trusted-local")
             declared = next(r for r in report["mutants"]
                             if r["label"].startswith("normalize"))
             self.assertEqual(declared["verdict"], "killed")
@@ -560,7 +560,7 @@ class EndToEnd(unittest.TestCase):
                 ]
             }
             manifest = _process_manifest(repo, mutants, ["raw_sha256", "lexeme"])
-            report = ca.run(manifest)
+            report = ca.run(manifest, execution_profile="trusted-local")
             control = next(r for r in report["mutants"]
                            if r["label"].startswith("CONTROL"))
             self.assertEqual(control["moved"], 2)

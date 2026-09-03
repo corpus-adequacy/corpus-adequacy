@@ -206,7 +206,8 @@ class ClosedUnprovedVoidSuffix(unittest.TestCase):
 
             report = ca._run_process(
                 loaded, manifest_path, execution_backend=backend,
-                separate_build_phase=True)
+                separate_build_phase=True,
+                execution_profile="trusted-local")
         self.assertTrue(
             any(
                 "failed (unproved) [timeout] on" in item
@@ -255,7 +256,8 @@ class ClosedUnprovedVoidSuffix(unittest.TestCase):
 
                 report = ca._run_process(
                     loaded, manifest_path, execution_backend=backend,
-                    separate_build_phase=True)
+                    separate_build_phase=True,
+                    execution_profile="trusted-local")
         finally:
             ca.CLOSED_UNPROVED_REASONS = saved
         self.assertFalse(

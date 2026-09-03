@@ -161,16 +161,16 @@ class RunRefusesMalformedAndDowngrade(unittest.TestCase):
                 Path(d), {"a": [KILLABLE]},
                 raw={ca.OPERATOR_PROFILE_KEY: TRUSTED})
             with self.assertRaises(ca.ManifestError) as ctx:
-                ca.run(path)
+                ca.run(path, execution_profile=TRUSTED)
         self.assertIn(ca.OPERATOR_PROFILE_KEY, str(ctx.exception))
 
-    def test_default_run_downgrades_when_minimum_is_contained(self):
+    def test_trusted_local_run_downgrades_when_minimum_is_contained(self):
         with tempfile.TemporaryDirectory() as d:
             path = _manifest(
                 Path(d), {"a": [KILLABLE]},
                 raw={ca.MINIMUM_PROFILE_KEY: CONTAINED})
             with self.assertRaises(ca.ManifestError) as ctx:
-                ca.run(path)
+                ca.run(path, execution_profile=TRUSTED)
         self.assertIn(TRUSTED, str(ctx.exception))
         self.assertIn(CONTAINED, str(ctx.exception))
 
@@ -335,13 +335,32 @@ class GuardMutationsBite(unittest.TestCase):
 
 
 class ClosedProfilePlumbing(unittest.TestCase):
-    def test_run_and_process_default_to_trusted_local(self):
+    def test_run_omission_is_typeerror_not_a_local_run(self):
         run_sig = inspect.signature(ca.run)
+        self.assertIs(
+            run_sig.parameters["execution_profile"].default, inspect.Parameter.empty)
+        with tempfile.TemporaryDirectory() as d:
+            path = _manifest(Path(d), {"a": [KILLABLE]})
+            with mock.patch.object(
+                    ca, "load_manifest",
+                    side_effect=AssertionError("run omission reached load")):
+                with self.assertRaises(TypeError):
+                    ca.run(path)
+
+    def test_run_process_omission_is_typeerror_not_a_local_run(self):
         process_sig = inspect.signature(ca._run_process)
-        self.assertEqual(
-            run_sig.parameters["execution_profile"].default, TRUSTED)
-        self.assertEqual(
-            process_sig.parameters["execution_profile"].default, TRUSTED)
+        self.assertIs(
+            process_sig.parameters["execution_profile"].default,
+            inspect.Parameter.empty)
+        with tempfile.TemporaryDirectory() as d:
+            path = _process_kill_manifest(Path(d))
+            loaded = ca.load_manifest(path)
+            with mock.patch.object(
+                    ca, "resolve_execution_profile",
+                    side_effect=AssertionError(
+                        "_run_process omission reached resolver")):
+                with self.assertRaises(TypeError):
+                    ca._run_process(loaded, path)
 
     def test_cli_passes_trusted_local_explicitly(self):
         report = {
@@ -407,19 +426,19 @@ class ReportV0GainsNoProfileField(unittest.TestCase):
 
     def test_module_report_bytes_gain_no_profile_field(self):
         with tempfile.TemporaryDirectory() as d:
-            report = ca.run(_manifest(Path(d), {"a": [KILLABLE]}))
+            report = ca.run(_manifest(Path(d), {"a": [KILLABLE]}), execution_profile="trusted-local")
         self._assert_no_profile_field(report)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_process_report_bytes_gain_no_profile_field(self):
         with tempfile.TemporaryDirectory() as d:
-            report = ca.run(_process_kill_manifest(Path(d)))
+            report = ca.run(_process_kill_manifest(Path(d)), execution_profile="trusted-local")
         self._assert_no_profile_field(report)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_batch_report_bytes_gain_no_profile_field(self):
         with tempfile.TemporaryDirectory() as d:
-            report = ca.run(_batch_manifest(Path(d)))
+            report = ca.run(_batch_manifest(Path(d)), execution_profile="trusted-local")
         self._assert_no_profile_field(report)
 
     def test_report_key_tables_exclude_profile_fields(self):

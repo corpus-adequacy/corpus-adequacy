@@ -712,7 +712,7 @@ sys.exit({rc})
             self.assertIsNone(kind)
             self.assertIsInstance(value[0], dict)
             self.assertEqual(value[0]["v1"]["verdict"], "valid")
-            rep = ca.run(manifest)
+            rep = ca.run(manifest, execution_profile="trusted-local")
         self.assertIsNotNone(rep["score_percent"], rep["failures"])
         self.assertEqual(rep["control_status"], "killed")
         self.assertTrue(

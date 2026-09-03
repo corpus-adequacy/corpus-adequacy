@@ -2221,7 +2221,7 @@ def _require_contained_execution(*, profile, runner, execution_backend) -> None:
 
 def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
                  mutation_order=None, separate_build_phase=True,
-                 execution_profile="trusted-local") -> dict:
+                 execution_profile) -> dict:
     """Mutate declared sources, rebuild, and run the corpus against the binary."""
     if type(separate_build_phase) is not bool:
         raise ManifestError("separate_build_phase must be a bool")
@@ -2386,7 +2386,7 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
         originals_unverified_against_head=guard.unverified)
 
 
-def run(manifest_path: Path, *, execution_profile="trusted-local") -> dict:
+def run(manifest_path: Path, *, execution_profile) -> dict:
     m = load_manifest(manifest_path)
     profile = resolve_execution_profile(operator=execution_profile, manifest=m)
     _require_contained_execution(

@@ -695,21 +695,21 @@ class EveryCanonicalCallerCarriesIdentity(unittest.TestCase):
 
     def test_module_runner_report_carries_identity(self):
         with tempfile.TemporaryDirectory() as d:
-            report = ca.run(_module_manifest(Path(d)))
+            report = ca.run(_module_manifest(Path(d)), execution_profile="trusted-local")
         self.assertEqual(report["runner"], "module")
         self._assert_carries_identity(report)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_batch_runner_report_carries_identity(self):
         with tempfile.TemporaryDirectory() as d:
-            report = ca.run(_batch_manifest(Path(d)))
+            report = ca.run(_batch_manifest(Path(d)), execution_profile="trusted-local")
         self.assertEqual(report["runner"], "batch")
         self._assert_carries_identity(report)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_process_runner_report_carries_identity(self):
         with tempfile.TemporaryDirectory() as d:
-            report = ca.run(_process_manifest(Path(d)))
+            report = ca.run(_process_manifest(Path(d)), execution_profile="trusted-local")
         self.assertEqual(report["runner"], "process")
         self._assert_carries_identity(report)
 

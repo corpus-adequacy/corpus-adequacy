@@ -104,14 +104,14 @@ def _manifest(tmp: Path, mutants, equivalent=None, vectors=None, raw=None,
 class Scoring(unittest.TestCase):
     def test_a_discriminated_rule_is_killed_and_scores_100(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]}))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]}), execution_profile="trusted-local")
         self.assertEqual((rep["killed"], rep["survived"]), (1, 0))
         self.assertEqual(rep["score_percent"], 100.0)
         self.assertTrue(rep["adequate"])
 
     def test_an_undistinguished_rule_survives_and_fails_the_run(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, SURVIVOR]}))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, SURVIVOR]}), execution_profile="trusted-local")
         self.assertEqual((rep["killed"], rep["survived"]), (1, 1))
         self.assertEqual(rep["score_percent"], 50.0)
         self.assertFalse(rep["adequate"])
@@ -121,7 +121,7 @@ class Scoring(unittest.TestCase):
         # scope statement, not a hole, and must not manufacture a failure.
         oos = dict(SURVIVOR, scope="out_of_scope", reason="the corpus does not claim this rule")
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, oos]}))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, oos]}), execution_profile="trusted-local")
         self.assertEqual(rep["survived"], 0)
         self.assertEqual(rep["unexercised_out_of_scope"], 1)
         self.assertEqual(rep["score_percent"], 100.0)
@@ -131,7 +131,7 @@ class Scoring(unittest.TestCase):
     def test_declared_equivalents_are_excluded_from_the_denominator(self):
         with tempfile.TemporaryDirectory() as d:
             rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]},
-                                   {"a": [{"label": "eq", "reason": "both branches return ok"}]}))
+                                   {"a": [{"label": "eq", "reason": "both branches return ok"}]}), execution_profile="trusted-local")
         self.assertEqual(rep["equivalent"], 1)
         self.assertEqual(rep["killed"] + rep["survived"], 1)
 
@@ -142,7 +142,7 @@ class Scoring(unittest.TestCase):
         # "rule covered". Measure a load-bearing rule with a variant that RUNS.
         broken = {"label": "syntax", "anchor": 'return "ok"', "replacement": "return ??"}
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [broken]}))
+            rep = ca.run(_manifest(Path(d), {"a": [broken]}), execution_profile="trusted-local")
         self.assertEqual(rep["killed"], 0)
         self.assertEqual(rep["unproved"], 1)
         self.assertFalse(rep["adequate"])
@@ -185,7 +185,7 @@ def evaluate(group, inputs):
             path = _manifest(
                 tmp, {"a": [ordinary, positive, inert]}, control=False)
             (tmp / "impl.py").write_text(byte_pinned)
-            report = ca.run(path)
+            report = ca.run(path, execution_profile="trusted-local")
 
         self.assertEqual(report["control_status"], "moved")
         self.assertIsNone(report["score_percent"])
@@ -199,7 +199,7 @@ def evaluate(group, inputs):
     def test_a_killed_control_does_not_inflate_the_score(self):
         ctrl = dict(KILLABLE, label="CONTROL reachability", control=True)
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [ctrl]}))
+            rep = ca.run(_manifest(Path(d), {"a": [ctrl]}), execution_profile="trusted-local")
         self.assertEqual(rep["killed"], 0, "a control must not count as a kill")
         self.assertIn("control-killed", [r["verdict"] for r in rep["mutants"]])
         self.assertEqual(rep["control_status"], "killed")
@@ -209,7 +209,7 @@ def evaluate(group, inputs):
         # weak, versus all-survivors because nothing was ever measured.
         ctrl = dict(SURVIVOR, label="CONTROL reachability", control=True)
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, ctrl]}))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, ctrl]}), execution_profile="trusted-local")
         self.assertFalse(rep["adequate"])
         self.assertEqual(rep["control_status"], "survived")
         self.assertTrue(any("harness cannot detect" in f for f in rep["failures"]),
@@ -234,7 +234,7 @@ def evaluate(group, inputs):
         with tempfile.TemporaryDirectory() as d:
             report = ca.run(_manifest(
                 Path(d), {"a": [KILLABLE, dict(CONTROL, label="positive control"), inert]},
-                control=False))
+                control=False), execution_profile="trusted-local")
 
         self.assertTrue(report["adequate"], report["failures"])
         self.assertEqual(report["score_percent"], 100.0)
@@ -255,7 +255,7 @@ def evaluate(group, inputs):
         }
         with tempfile.TemporaryDirectory() as d:
             report = ca.run(_manifest(
-                Path(d), {"a": [KILLABLE, inert]}, control=False))
+                Path(d), {"a": [KILLABLE, inert]}, control=False), execution_profile="trusted-local")
 
         self.assertFalse(report["adequate"])
         self.assertTrue(
@@ -289,7 +289,7 @@ def evaluate(group, inputs):
             with self.subTest(anchor=anchor), tempfile.TemporaryDirectory() as d:
                 path = _manifest(
                     Path(d), {"a": [KILLABLE, dict(inert, anchor=anchor)]})
-                report = ca.run(path)
+                report = ca.run(path, execution_profile="trusted-local")
             row = next(
                 item for item in report["mutants"] if item["label"] == inert["label"])
             self.assertEqual(row["verdict"], "control-error")
@@ -300,10 +300,10 @@ def evaluate(group, inputs):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             path = _manifest(tmp, {"a": [KILLABLE]})
-            before = ca.encode_report_v0(ca.run(path))
+            before = ca.encode_report_v0(ca.run(path, execution_profile="trusted-local"))
             with (tmp / "impl.py").open("a", encoding="utf-8") as stream:
                 stream.write("\nUNUSED_NOOP = True\n")
-            after = ca.encode_report_v0(ca.run(path))
+            after = ca.encode_report_v0(ca.run(path, execution_profile="trusted-local"))
 
         self.assertEqual(after, before)
 
@@ -323,7 +323,7 @@ class KnownHoles(unittest.TestCase):
 
     def test_a_hole_acknowledged_for_the_present_digest_is_not_a_survivor(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._mf(Path(d), "sha256:aaa", "sha256:aaa", [KILLABLE]))
+            rep = ca.run(self._mf(Path(d), "sha256:aaa", "sha256:aaa", [KILLABLE]), execution_profile="trusted-local")
         self.assertEqual(rep["survived"], 0)
         self.assertEqual(rep["known_holes"], 1)
         self.assertIn("known-hole", [r["verdict"] for r in rep["mutants"]])
@@ -332,7 +332,7 @@ class KnownHoles(unittest.TestCase):
         # The rule that stops this being an escape hatch: an acknowledgement is a
         # statement about ONE corpus, so a corpus that changes loses it.
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._mf(Path(d), "sha256:NEW", "sha256:OLD", [KILLABLE]))
+            rep = ca.run(self._mf(Path(d), "sha256:NEW", "sha256:OLD", [KILLABLE]), execution_profile="trusted-local")
         self.assertEqual(rep["known_holes"], 0)
         self.assertEqual(rep["survived"], 1, "the hole must reappear as a survivor")
         self.assertFalse(rep["adequate"])
@@ -345,7 +345,7 @@ class KnownHoles(unittest.TestCase):
                 "corpus_digest_file": "digest.json", "corpus_digest_key": "corpus_digest",
                 "known_holes": {"sha256:aaa": [{"label": "now exercised", "reason": "x",
                                                 "recorded": "2026-08-19"}]}})
-            rep = ca.run(p)
+            rep = ca.run(p, execution_profile="trusted-local")
         self.assertFalse(rep["adequate"])
         # The message widened from "now exercises" to cover every transition away
         # from known-hole, not only becoming killed.
@@ -402,7 +402,7 @@ class KnownHoles(unittest.TestCase):
                 "corpus_digest_file": "digest.json", "corpus_digest_key": "corpus_digest",
                 "known_holes": {"sha256:aaa": [{"label": "hole", "reason": "x",
                                                 "recorded": "2026-08-19"}]}})
-            rep = ca.run(p)
+            rep = ca.run(p, execution_profile="trusted-local")
         self.assertFalse(rep["adequate"])
         self.assertTrue(any("no longer holes" in f for f in rep["failures"]), rep["failures"])
 
@@ -420,7 +420,7 @@ class KnownHoles(unittest.TestCase):
 
     def test_an_all_holes_manifest_reports_no_result_rather_than_100_percent(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._mf(Path(d), "sha256:aaa", "sha256:aaa"))
+            rep = ca.run(self._mf(Path(d), "sha256:aaa", "sha256:aaa"), execution_profile="trusted-local")
         self.assertIsNone(rep["score_percent"], "an empty denominator is not 100%")
         self.assertFalse(rep["adequate"])
         self.assertTrue(any("nothing was measured" in f for f in rep["failures"]))
@@ -434,7 +434,7 @@ class KnownHoles(unittest.TestCase):
         carry the correction, so it is pinned rather than left to phrasing.
         """
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._mf(Path(d), "sha256:aaa", "sha256:aaa"))
+            rep = ca.run(self._mf(Path(d), "sha256:aaa", "sha256:aaa"), execution_profile="trusted-local")
         msg = " ".join(rep["failures"])
         self.assertIn("statement about the DECLARATION", msg)
         self.assertIn("from the implementation rather than from this manifest", msg)
@@ -483,7 +483,7 @@ class BatchRunner(unittest.TestCase):
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_one_invocation_still_discriminates_via_the_summary(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d)))
+            rep = ca.run(self._corpus(Path(d)), execution_profile="trusted-local")
         self.assertEqual(rep["runner"], "batch")
         self.assertEqual(rep["killed"], 1)
         _assert_process_batch_lock_verdict(self, rep)
@@ -495,10 +495,10 @@ class BatchRunner(unittest.TestCase):
             before = (tmp / "check.py").read_bytes()
             if ca.fcntl is None:
                 with self.assertRaises(ca.ManifestError) as cm:
-                    ca.run(p)
+                    ca.run(p, execution_profile="trusted-local")
                 self.assertIn("no advisory lock", str(cm.exception))
             else:
-                ca.run(p)
+                ca.run(p, execution_profile="trusted-local")
             self.assertEqual((tmp / "check.py").read_bytes(), before)
 
     def test_a_batch_manifest_needs_no_build(self):
@@ -513,7 +513,7 @@ class BatchRunner(unittest.TestCase):
             tmp = Path(d)
             p = self._corpus(tmp)
             (tmp / "check.py").write_text("print('not json')\n")
-            rep = ca.run(p)
+            rep = ca.run(p, execution_profile="trusted-local")
         self.assertFalse(rep["adequate"])
         self.assertTrue(any("UNMUTATED" in f for f in rep["failures"]), rep["failures"])
 
@@ -665,7 +665,7 @@ class ProcessSourceContainment(unittest.TestCase):
             original_dir.symlink_to(outside_dir, target_is_directory=True)
 
             with self.assertRaises(ca.ManifestError) as cm:
-                ca._run_process(loaded, manifest)
+                ca._run_process(loaded, manifest, execution_profile="trusted-local")
 
             self.assertEqual(outside.read_bytes(), before)
         self.assertIn("outside repo_root", str(cm.exception))
@@ -699,7 +699,7 @@ class ProcessSourceContainment(unittest.TestCase):
             report = None
             with mock.patch.object(ca, "_build", side_effect=build_then_swap):
                 try:
-                    report = ca._run_process(loaded, manifest)
+                    report = ca._run_process(loaded, manifest, execution_profile="trusted-local")
                 except ca.ManifestError as exc:
                     captured = exc
 
@@ -725,7 +725,7 @@ class ProcessSourceContainment(unittest.TestCase):
             with mock.patch.object(ca.IsolatedMutationTree, "materialize",
                                    side_effect=RuntimeError("probe")):
                 try:
-                    ca._run_process(loaded, manifest)
+                    ca._run_process(loaded, manifest, execution_profile="trusted-local")
                 except RuntimeError as exc:
                     captured = exc
 
@@ -761,7 +761,7 @@ class ProcessSourceContainment(unittest.TestCase):
             loaded = ca.load_manifest(manifest)
             captured = None
             try:
-                ca._run_process(loaded, manifest)
+                ca._run_process(loaded, manifest, execution_profile="trusted-local")
             except ca.ManifestError as exc:
                 captured = exc  # Refusal before lock; keep locals alive during the lock probe.
             self.assertIsNotNone(captured)
@@ -776,7 +776,7 @@ class Guards(unittest.TestCase):
         v = {"vectors": VECTORS["vectors"] + [
             {"vector_id": "v3", "axis": "b", "inputs": {"n": 1}}]}
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]}, vectors=v))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]}, vectors=v), execution_profile="trusted-local")
         self.assertFalse(rep["adequate"])
         self.assertTrue(any("no declared mutants" in f for f in rep["failures"]))
 
@@ -784,14 +784,14 @@ class Guards(unittest.TestCase):
         stale = {"label": "gone", "anchor": "this text is not in the impl",
                  "replacement": "nor is this"}
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, stale]}))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, stale]}), execution_profile="trusted-local")
         self.assertFalse(rep["adequate"])
         self.assertTrue(any("anchor not found" in f for f in rep["failures"]))
 
     def test_mutants_declared_for_absent_groups_fail(self):
         with tempfile.TemporaryDirectory() as d:
             absent = dict(KILLABLE, label="absent-group-rule")
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE], "zz": [absent]}))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE], "zz": [absent]}), execution_profile="trusted-local")
         self.assertTrue(any("not in the corpus" in f for f in rep["failures"]))
 
 
@@ -878,7 +878,7 @@ class ManifestValidation(unittest.TestCase):
                 "corpus_digest_file": "digest.json", "corpus_digest_key": "corpus_digest",
                 "known_holes": {"sha256:aaa": [{"label": "hole", "reason": "known gap",
                                                   "recorded": "2026-08-20"}]}})
-            rep = ca.run(p)
+            rep = ca.run(p, execution_profile="trusted-local")
         identities = {"hole", "Hole", " hole "}
         verdicts = {row["label"]: row["verdict"] for row in rep["mutants"]
                     if row["label"] in identities}
@@ -938,7 +938,7 @@ class RuleyFindings(unittest.TestCase):
         # Finding 2b: a substring anchor mangled the source; the breakage scored as a kill.
         dup = {"label": "substring", "anchor": "inputs", "replacement": "broken"}
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, dup]}))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, dup]}), execution_profile="trusted-local")
         self.assertFalse(rep["adequate"])
         self.assertTrue(any("occurs" in f and "unique" in f for f in rep["failures"]),
                         rep["failures"])
@@ -948,7 +948,7 @@ class RuleyFindings(unittest.TestCase):
         # the author declared, never of the rules the implementation has.
         oos = dict(SURVIVOR, scope="out_of_scope", reason="not claimed")
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, oos]}))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, oos]}), execution_profile="trusted-local")
         self.assertEqual(rep["declared_total"], 2)
         self.assertEqual(rep["out_of_scope_ratio"], 1.0)
         self.assertIn("author-declared", rep["score_means"])
@@ -1020,7 +1020,7 @@ class Portability(unittest.TestCase):
                       "replacement": 'def check(msg):\n    return "MOVED"'}]}}
             p = d / "m.json"
             p.write_text(json.dumps(m))
-            rep = ca.run(p)
+            rep = ca.run(p, execution_profile="trusted-local")
         self.assertEqual(rep["killed"], 1)
         self.assertTrue(rep["adequate"])
 
@@ -1111,7 +1111,7 @@ class ConcurrentRunsAreExcluded(unittest.TestCase):
             held.__enter__()
             try:
                 with self.assertRaises(ca.ManifestError) as cm:
-                    ca.run(manifest)
+                    ca.run(manifest, execution_profile="trusted-local")
             finally:
                 held.__exit__()
         self.assertIn("another corpus-adequacy run holds the lock", str(cm.exception))
@@ -1123,8 +1123,8 @@ class ConcurrentRunsAreExcluded(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             manifest = self._corpus(tmp)
-            first = ca.run(manifest)
-            second = ca.run(manifest)
+            first = ca.run(manifest, execution_profile="trusted-local")
+            second = ca.run(manifest, execution_profile="trusted-local")
         self.assertEqual(first["killed"], 1)
         self.assertEqual(second["killed"], 1)
 
@@ -1146,7 +1146,7 @@ class ConcurrentRunsAreExcluded(unittest.TestCase):
                 with mock.patch.object(ca.IsolatedMutationTree, "materialize",
                                        side_effect=boom):
                     with self.assertRaises(ca.ManifestError) as cm:
-                        ca.run(manifest)
+                        ca.run(manifest, execution_profile="trusted-local")
             finally:
                 held.__exit__()
         self.assertIn("holds the lock", str(cm.exception))
@@ -1186,7 +1186,7 @@ class DeclaredOutcomeMembersMustExist(unittest.TestCase):
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_a_member_nothing_emits_is_reported_rather_than_compared_to_none(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d), ["ok", "all_reproduced"]))
+            rep = ca.run(self._corpus(Path(d), ["ok", "all_reproduced"]), execution_profile="trusted-local")
         msg = " ".join(rep["failures"])
         self.assertIn("all_reproduced", msg)
         self.assertIn("never emits", msg)
@@ -1196,7 +1196,7 @@ class DeclaredOutcomeMembersMustExist(unittest.TestCase):
     def test_a_surface_the_implementation_does_emit_is_not_flagged(self):
         # The guard must not fire on a correct manifest, or it is noise.
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d), ["ok", "failures"]))
+            rep = ca.run(self._corpus(Path(d), ["ok", "failures"]), execution_profile="trusted-local")
         self.assertNotIn("never emits", " ".join(rep["failures"]))
         _assert_process_batch_lock_verdict(self, rep)
 
@@ -1216,7 +1216,7 @@ class ControlIsRequiredOnEveryRunner(unittest.TestCase):
 
     def test_a_module_corpus_without_a_control_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]}, control=False))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]}, control=False), execution_profile="trusted-local")
         self.assertFalse(rep["adequate"], "a module run with no control must not pass")
         self.assertTrue(any("no control mutant declared" in f for f in rep["failures"]),
                         rep["failures"])
@@ -1224,7 +1224,7 @@ class ControlIsRequiredOnEveryRunner(unittest.TestCase):
     def test_the_same_corpus_with_a_control_passes(self):
         # The other half of the control: the rule must not fail everything.
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]}))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE]}), execution_profile="trusted-local")
         self.assertTrue(rep["adequate"], rep["failures"])
 
     def test_both_runners_answer_from_one_function(self):
@@ -1339,7 +1339,7 @@ class ProcessBatchPlatformContract(unittest.TestCase):
                 with self.assertRaises(ca.ManifestError) as entered:
                     lock.__enter__()
                 with self.assertRaises(ca.ManifestError) as cm:
-                    ca.run(manifest)
+                    ca.run(manifest, execution_profile="trusted-local")
             self.assertIn("no advisory lock", str(entered.exception))
             self.assertIn("no advisory lock", str(cm.exception))
             self.assertNotIn("adequate", str(cm.exception).lower())
@@ -1372,11 +1372,11 @@ class ProcessBatchPlatformContract(unittest.TestCase):
             before = (tmp / "check.py").read_bytes()
             if ca.fcntl is None:
                 with self.assertRaises(ca.ManifestError) as cm:
-                    ca.run(manifest)
+                    ca.run(manifest, execution_profile="trusted-local")
                 self.assertIn("no advisory lock", str(cm.exception))
                 self.assertEqual((tmp / "check.py").read_bytes(), before)
                 return
-            rep = ca.run(manifest)
+            rep = ca.run(manifest, execution_profile="trusted-local")
         self.assertEqual(rep["killed"], 1)
         _assert_process_batch_lock_verdict(self, rep)
 
@@ -1801,7 +1801,7 @@ class ChildExitRunSemantics(unittest.TestCase):
             p = BatchRunner()._corpus(Path(d))
             with mock.patch.object(ca, "_run_capped",
                                    return_value=_completed(1)):
-                rep = ca.run(p)
+                rep = ca.run(p, execution_profile="trusted-local")
         self.assertFalse(rep["adequate"])
         self.assertTrue(any("UNMUTATED" in f for f in rep["failures"]),
                         rep["failures"])
@@ -1815,7 +1815,7 @@ class ChildExitRunSemantics(unittest.TestCase):
             with mock.patch.object(
                     ca, "_run_capped",
                     side_effect=self._fake_from_source(control_rc=1)):
-                rep = ca.run(p)
+                rep = ca.run(p, execution_profile="trusted-local")
         verdicts = {r["label"]: r for r in rep["mutants"]}
         self.assertEqual(verdicts["CONTROL"]["verdict"], "control-error")
         self.assertEqual(rep["control_status"], "error")
@@ -1834,7 +1834,7 @@ class ChildExitRunSemantics(unittest.TestCase):
                     ca, "_run_capped",
                     side_effect=self._fake_from_source(
                         control_rc=1, mutant_stdout=moved)):
-                rep = ca.run(p)
+                rep = ca.run(p, execution_profile="trusted-local")
         verdicts = {r["label"]: r for r in rep["mutants"]}
         self.assertNotIn("threshold", verdicts)
         self.assertEqual(verdicts["CONTROL"]["verdict"], "control-error")
@@ -1849,7 +1849,7 @@ class ChildExitRunSemantics(unittest.TestCase):
             with mock.patch.object(
                     ca, "_run_capped",
                     side_effect=self._fake_from_source(mutant_rc=1)):
-                rep = ca.run(p)
+                rep = ca.run(p, execution_profile="trusted-local")
         row = next(r for r in rep["mutants"] if r["label"] == "threshold")
         self.assertEqual(row["verdict"], "killed")
         self.assertIn("unexpected-exit", row["how"])
@@ -1962,7 +1962,7 @@ class ModuleCorpusRunsInAChild(unittest.TestCase):
         # SystemExit escapes collect(), terminates the child, and the parent
         # sees unexpected-exit. The parent is alive with a parseable report.
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_hostile_manifest(Path(d), "raise SystemExit(9)", "systemexit"))
+            rep = ca.run(_hostile_manifest(Path(d), "raise SystemExit(9)", "systemexit"), execution_profile="trusted-local")
         v = _verdict(rep, "systemexit")
         self.assertEqual(v["verdict"], "killed")
         self.assertEqual(v["how"], "unexpected-exit")
@@ -1999,7 +1999,7 @@ class ModuleCorpusRunsInAChild(unittest.TestCase):
                              ("fd1", 'import os as _o\n_o.write(1, b"pollution")')):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as d:
                 rep = ca.run(_hostile_manifest(
-                    Path(d), '%s\nreturn "rejected"' % write, label))
+                    Path(d), '%s\nreturn "rejected"' % write, label), execution_profile="trusted-local")
                 self.assertEqual(_verdict(rep, label)["verdict"], "survived")
 
     # Keyed on the platform, not on _posix_process_group(): a guard that asks the
@@ -2017,7 +2017,7 @@ class ModuleCorpusRunsInAChild(unittest.TestCase):
                     '         stdout=_s.DEVNULL, stderr=_s.DEVNULL)\n'
                     '_t.sleep(0.5)\n'
                     'return "rejected"' % (child, str(pidfile)))
-            ca.run(_hostile_manifest(Path(d), body, "spawner"))
+            ca.run(_hostile_manifest(Path(d), body, "spawner"), execution_profile="trusted-local")
             self.assertTrue(pidfile.is_file(), "the fixture never spawned a descendant")
             pid = int(pidfile.read_text())
             alive = self._alive(pid)
@@ -2077,7 +2077,7 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = _hostile_manifest(Path(d), 'return "REJECTED"', "scored")
             with mock.patch.object(ca, "_run_capped", _NthChild(nth, **kw)):
-                return ca.run(p)
+                return ca.run(p, execution_profile="trusted-local")
 
     def test_observed_termination_of_a_mutant_child_is_a_named_kill(self):
         for kind, kw in TERMINATED:
@@ -2152,7 +2152,7 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
                 "anchor": 'def evaluate(group, inputs):',
                 "replacement": 'def evaluate(group, inputs):\n    raise SystemExit(42)'}
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, ctrl]}, control=False))
+            rep = ca.run(_manifest(Path(d), {"a": [KILLABLE, ctrl]}, control=False), execution_profile="trusted-local")
         v = _verdict(rep, "CONTROL systemexit")
         self.assertEqual(v["verdict"], "control-error")
         self.assertIn("unexpected-exit", v["how"])
@@ -2163,7 +2163,7 @@ class ModuleChildTerminationIsClassifiedBeforeParse(unittest.TestCase):
         # Not a new type system: whatever JSON carries is compared, and a value
         # it cannot carry is declined rather than guessed at.
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(_hostile_manifest(Path(d), "return object()", "unsupported"))
+            rep = ca.run(_hostile_manifest(Path(d), "return object()", "unsupported"), execution_profile="trusted-local")
         v = _verdict(rep, "unsupported")
         self.assertEqual(v["verdict"], "unproved")
         self.assertIn("unsupported-outcome", v["how"])
@@ -2213,7 +2213,7 @@ class MutableOutcomeIsNotAFalseKill(unittest.TestCase):
                  ]}}
             p = tmp / "m.json"
             p.write_text(json.dumps(m))
-            return ca.run(p)
+            return ca.run(p, execution_profile="trusted-local")
 
     def test_mutable_alias_survives_not_false_killed(self):
         rep = self._run()
@@ -2318,7 +2318,7 @@ def _silent_manifest(tmp: Path, extra=None):
 class SilentClass(unittest.TestCase):
     def _run(self, extra):
         with tempfile.TemporaryDirectory() as d:
-            return ca.run(_silent_manifest(Path(d), extra))
+            return ca.run(_silent_manifest(Path(d), extra), execution_profile="trusted-local")
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_diagnostic_only_move_is_silent_not_killed(self):
@@ -2426,7 +2426,7 @@ class DeclaredSelectorMembersMustExist(unittest.TestCase):
     def test_diagnostic_member_nothing_emits_fails_closed(self):
         # MISSING: every declared diagnostic member is absent from the output.
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d), ["ok"], ["no_such_member"]))
+            rep = ca.run(self._corpus(Path(d), ["ok"], ["no_such_member"]), execution_profile="trusted-local")
         msg = " ".join(rep["failures"])
         self.assertIn("diagnostic_from", msg)
         self.assertIn("no_such_member", msg)
@@ -2438,7 +2438,7 @@ class DeclaredSelectorMembersMustExist(unittest.TestCase):
         # PARTIAL is the dangerous shape: one member works, so the channel looks
         # live, while the other silently contributes nothing to every comparison.
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d), ["ok"], ["failures", "no_such_member"]))
+            rep = ca.run(self._corpus(Path(d), ["ok"], ["failures", "no_such_member"]), execution_profile="trusted-local")
         msg = " ".join(rep["failures"])
         self.assertIn("no_such_member", msg)
         self.assertIn("never emits", msg)
@@ -2449,14 +2449,14 @@ class DeclaredSelectorMembersMustExist(unittest.TestCase):
     def test_a_diagnostic_selector_the_implementation_emits_is_not_flagged(self):
         # PRESENT: the guard must not fire on a correct manifest, or it is noise.
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d), ["ok"], ["failures"]))
+            rep = ca.run(self._corpus(Path(d), ["ok"], ["failures"]), execution_profile="trusted-local")
         self.assertNotIn("never emits", " ".join(rep["failures"]))
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_the_outcome_selector_keeps_its_own_presence_rule(self):
         # The shared rule must not lose the behaviour it generalises.
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d), ["ok", "all_reproduced"]))
+            rep = ca.run(self._corpus(Path(d), ["ok", "all_reproduced"]), execution_profile="trusted-local")
         msg = " ".join(rep["failures"])
         self.assertIn("outcome_from", msg)
         self.assertIn("all_reproduced", msg)
@@ -2494,7 +2494,7 @@ class ModuleReportCarriesTheSilentFields(unittest.TestCase):
 
     def test_module_report_carries_silent_and_the_channel_flag(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._module_manifest(Path(d)))
+            rep = ca.run(self._module_manifest(Path(d)), execution_profile="trusted-local")
         self.assertIn("silent", rep)
         self.assertEqual(rep["silent"], 0)
         self.assertIn("diagnostic_channel_declared", rep)
@@ -2505,7 +2505,7 @@ class ModuleReportCarriesTheSilentFields(unittest.TestCase):
         # and it has landed: the full required-key table lives in
         # ReportShapeParityAcrossRunners, this keeps the local claim honest.
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._module_manifest(Path(d)))
+            rep = ca.run(self._module_manifest(Path(d)), execution_profile="trusted-local")
         self.assertEqual(rep["runner"], "module")
 
 
@@ -2564,7 +2564,7 @@ class HoleRatioUsesTheScoredDenominator(unittest.TestCase):
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_hole_ratio_divides_by_killed_survived_and_silent(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d)))
+            rep = ca.run(self._corpus(Path(d)), execution_profile="trusted-local")
         self.assertEqual(rep["killed"], 1)
         self.assertEqual(rep["survived"], 0)
         self.assertEqual(rep["silent"], 1)
@@ -2638,7 +2638,7 @@ class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
         second = {"label": "oos-rule", "anchor": 'tag = "A"', "replacement": 'tag = "B"',
                   "scope": "out_of_scope", "reason": "the corpus never claimed this rule"}
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d), second))
+            rep = ca.run(self._corpus(Path(d), second), execution_profile="trusted-local")
         row = {r["label"]: r for r in rep["mutants"]}["oos-rule"]
         self.assertEqual(row["verdict"], "unexercised")
         # The docs promise the row carries the diagnostic fact and says it.
@@ -2661,7 +2661,7 @@ class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
         holes = {"sha256:deadbeef": [
             {"label": "acked-rule", "reason": "acknowledged", "recorded": "2026-08-20"}]}
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d), second, known_holes=holes))
+            rep = ca.run(self._corpus(Path(d), second, known_holes=holes), execution_profile="trusted-local")
         row = {r["label"]: r for r in rep["mutants"]}["acked-rule"]
         self.assertEqual(row["verdict"], "killed")
         self.assertEqual(rep["known_holes"], 0)
@@ -2676,7 +2676,7 @@ class DiagnosticMoveDoesNotOverrideAnExclusion(unittest.TestCase):
         holes = {"sha256:deadbeef": [
             {"label": "hole-rule", "reason": "acknowledged", "recorded": "2026-08-20"}]}
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._corpus(Path(d), second, known_holes=holes))
+            rep = ca.run(self._corpus(Path(d), second, known_holes=holes), execution_profile="trusted-local")
         row = {r["label"]: r for r in rep["mutants"]}["hole-rule"]
         self.assertEqual(row["verdict"], "known-hole")
         # The row stays honest about what did see it.
@@ -2872,7 +2872,7 @@ class ReportShapeParityAcrossRunners(unittest.TestCase):
 
     def test_module_report_carries_every_required_key(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._module(Path(d)))
+            rep = ca.run(self._module(Path(d)), execution_profile="trusted-local")
         self.assertEqual(REQUIRED_REPORT_KEYS - set(rep), frozenset())
         self.assertEqual(rep["runner"], "module")
         # The process-only field must not become a fake universal one.
@@ -2881,7 +2881,7 @@ class ReportShapeParityAcrossRunners(unittest.TestCase):
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_process_report_carries_every_required_key(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._process(Path(d), "process"))
+            rep = ca.run(self._process(Path(d), "process"), execution_profile="trusted-local")
         self.assertEqual(REQUIRED_REPORT_KEYS - set(rep), frozenset())
         self.assertEqual(rep["runner"], "process")
         self.assertEqual(PROCESS_ONLY_REPORT_KEYS - set(rep), frozenset())
@@ -2889,7 +2889,7 @@ class ReportShapeParityAcrossRunners(unittest.TestCase):
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_batch_report_carries_every_required_key(self):
         with tempfile.TemporaryDirectory() as d:
-            rep = ca.run(self._process(Path(d), "batch"))
+            rep = ca.run(self._process(Path(d), "batch"), execution_profile="trusted-local")
         self.assertEqual(REQUIRED_REPORT_KEYS - set(rep), frozenset())
         self.assertEqual(rep["runner"], "batch")
         self.assertEqual(PROCESS_ONLY_REPORT_KEYS - set(rep), frozenset())
@@ -3040,9 +3040,9 @@ class ReportV0AddressingContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = _manifest(Path(d), {"a": [KILLABLE]})
             first_bytes = path.read_bytes()
-            first = ca.run(path)
+            first = ca.run(path, execution_profile="trusted-local")
             path.write_bytes(first_bytes + b"\n")
-            second = ca.run(path)
+            second = ca.run(path, execution_profile="trusted-local")
 
         self.assertEqual(
             first["manifest_sha256"],
@@ -3099,7 +3099,7 @@ class ProducerOwnedControlStatus(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             report = ca.run(_manifest(
                 Path(d), {"a": [KILLABLE]}, control=False,
-            ))
+            ), execution_profile="trusted-local")
         self.assertEqual(report["control_status"], "absent-or-invalid")
         self.assertFalse(report["adequate"])
 
@@ -3109,7 +3109,7 @@ class ProducerOwnedControlStatus(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             report = ca.run(_manifest(
                 Path(d), {"a": [KILLABLE, killed, stale]}, control=False,
-            ))
+            ), execution_profile="trusted-local")
         self.assertEqual(report["control_status"], "absent-or-invalid")
         self.assertFalse(report["adequate"])
         self.assertIn("control-killed", [row["verdict"] for row in report["mutants"]])
@@ -3142,7 +3142,7 @@ class ProducerOwnedControlStatus(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d, mock.patch.object(
                 ca, "_control_result", side_effect=conflicting):
-            report = ca.run(_manifest(Path(d), {"a": [KILLABLE]}))
+            report = ca.run(_manifest(Path(d), {"a": [KILLABLE]}), execution_profile="trusted-local")
 
         self.assertIn("control-SURVIVED", [row["verdict"] for row in report["mutants"]])
         self.assertEqual(report["control_status"], "killed")
@@ -3158,7 +3158,7 @@ class ProducerOwnedControlStatus(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d, mock.patch.object(
                 ca, "_control_result", side_effect=conflicting):
-            report = ca.run(BatchRunner()._corpus(Path(d)))
+            report = ca.run(BatchRunner()._corpus(Path(d)), execution_profile="trusted-local")
 
         self.assertIn("control-SURVIVED", [row["verdict"] for row in report["mutants"]])
         self.assertEqual(report["control_status"], "killed")
@@ -4655,7 +4655,7 @@ print(json.dumps({"digest": hashlib.sha256(Path(__file__).read_bytes()).hexdiges
     def test_moved_inert_control_barrier_omits_earlier_declared_ordinary_on_every_runner(self):
         for runner, factory in self._barrier_factories('INERT_MARKER = "renamed"'):
             with self.subTest(runner=runner), tempfile.TemporaryDirectory() as d:
-                report = ca.run(factory(Path(d)))
+                report = ca.run(factory(Path(d)), execution_profile="trusted-local")
                 self._assert_control_barrier(
                     report, status="moved", verdict="control-MOVED")
 
@@ -4663,7 +4663,7 @@ print(json.dumps({"digest": hashlib.sha256(Path(__file__).read_bytes()).hexdiges
     def test_abnormal_inert_control_barrier_omits_earlier_declared_ordinary_on_every_runner(self):
         for runner, factory in self._barrier_factories("raise SystemExit(9)"):
             with self.subTest(runner=runner), tempfile.TemporaryDirectory() as d:
-                report = ca.run(factory(Path(d)))
+                report = ca.run(factory(Path(d)), execution_profile="trusted-local")
                 self._assert_control_barrier(
                     report, status="error", verdict="control-error")
 
@@ -4710,7 +4710,7 @@ print(json.dumps({"digest": hashlib.sha256(Path(__file__).read_bytes()).hexdiges
         )
         for runner, factory in factories:
             with self.subTest(runner=runner), tempfile.TemporaryDirectory() as d:
-                report = ca.run(factory(Path(d)))
+                report = ca.run(factory(Path(d)), execution_profile="trusted-local")
             inert = next(row for row in report["mutants"] if row["label"] == "INERT")
             self.assertEqual(inert["verdict"], "control-unchanged")
             self.assertEqual(report["control_status"], "killed")
@@ -4722,7 +4722,7 @@ class SharedMutationStep(unittest.TestCase):
     """Freeze current reports, then pin the one-engine extract and its mutations."""
 
     def _batch(self, tmp: Path) -> dict:
-        return ca.run(BatchRunner()._corpus(tmp))
+        return ca.run(BatchRunner()._corpus(tmp), execution_profile="trusted-local")
 
     def test_manifest_bytes_rebind_logical_paths_without_changing_identity(self):
         raw = json.dumps({
@@ -4764,7 +4764,7 @@ class SharedMutationStep(unittest.TestCase):
 
     def test_parity_module_report_projection(self):
         with tempfile.TemporaryDirectory() as d:
-            report = ca.run(_manifest(Path(d), {"a": [KILLABLE]}))
+            report = ca.run(_manifest(Path(d), {"a": [KILLABLE]}), execution_profile="trusted-local")
         projected = _semantic_projection(report)
         self.assertEqual(projected["runner"], "module")
         self.assertEqual(projected["killed"], 1)
@@ -4780,7 +4780,7 @@ class SharedMutationStep(unittest.TestCase):
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_parity_process_report_projection(self):
         with tempfile.TemporaryDirectory() as d:
-            report = ca.run(_process_kill_manifest(Path(d)))
+            report = ca.run(_process_kill_manifest(Path(d)), execution_profile="trusted-local")
         projected = _semantic_projection(report)
         self.assertEqual(projected["runner"], "process")
         self.assertEqual(
@@ -4816,7 +4816,7 @@ class SharedMutationStep(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = BatchRunner()._corpus(Path(d))
             with mock.patch.object(ca, "_run_capped", return_value=_completed(1)):
-                report = ca.run(path)
+                report = ca.run(path, execution_profile="trusted-local")
         self.assertIsNone(report["score_percent"])
         self.assertFalse(report["adequate"])
         self.assertEqual(report["killed"], 0)
@@ -4830,7 +4830,7 @@ class SharedMutationStep(unittest.TestCase):
             with mock.patch.object(
                     ca, "_run_capped",
                     side_effect=ChildExitRunSemantics()._fake_from_source(control_rc=1)):
-                report = ca.run(path)
+                report = ca.run(path, execution_profile="trusted-local")
         row = next(item for item in report["mutants"] if item["label"] == "CONTROL")
         self.assertEqual(row["verdict"], "control-error")
         self.assertEqual(report["control_status"], "error")
@@ -4848,7 +4848,7 @@ class SharedMutationStep(unittest.TestCase):
                     3, exc=br._OutputDrainIncomplete("captured streams stayed open")
                 )
                 with mock.patch.object(ca, "_run_capped", child):
-                    report = ca.run(path)
+                    report = ca.run(path, execution_profile="trusted-local")
             row = next(item for item in report["mutants"] if item["label"] == "threshold")
             self.assertEqual(row["verdict"], "unproved")
             self.assertIn("incomplete", row["how"])
@@ -4864,7 +4864,7 @@ class SharedMutationStep(unittest.TestCase):
                     tmp = Path(d)
                     path = factory(tmp)
                     before = (tmp / "check.py").read_bytes()
-                    ca.run(path)
+                    ca.run(path, execution_profile="trusted-local")
                     self.assertEqual((tmp / "check.py").read_bytes(), before)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
@@ -4897,7 +4897,7 @@ class SharedMutationStep(unittest.TestCase):
             report = ca._run_process(
                 ca.load_manifest(path), path,
                 mutation_order=("CONTROL", "b outcome", "a threshold"),
-            )
+            execution_profile="trusted-local")
 
         self.assertTrue(report["adequate"])
         self.assertEqual(
@@ -4918,7 +4918,7 @@ class SharedMutationStep(unittest.TestCase):
             ):
                 with self.subTest(order=order), self.assertRaisesRegex(
                         ca.ManifestError, "mutation_order"):
-                    ca._run_process(dict(loaded), path, mutation_order=order)
+                    ca._run_process(dict(loaded), path, mutation_order=order, execution_profile="trusted-local")
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_combined_build_run_has_no_fabricated_compile_only_execution(self):
@@ -4934,7 +4934,7 @@ class SharedMutationStep(unittest.TestCase):
                 ca.load_manifest(path), path,
                 execution_backend=witnessed,
                 separate_build_phase=False,
-            )
+            execution_profile="trusted-local")
 
         self.assertTrue(report["adequate"])
         self.assertNotIn((True, True), calls)
@@ -4997,7 +4997,7 @@ class SharedMutationStep(unittest.TestCase):
         self.assertIn("diagnostic_from", step)
         self.assertIn("moved_diag", step)
         with tempfile.TemporaryDirectory() as d:
-            report = ca.run(_silent_manifest(Path(d), {"diagnostic_from": ["reason"]}))
+            report = ca.run(_silent_manifest(Path(d), {"diagnostic_from": ["reason"]}), execution_profile="trusted-local")
         row = next(item for item in report["mutants"] if item["label"] == "reason-text")
         self.assertEqual(row["verdict"], "silent")
         self.assertEqual(row["moved"], 0)
@@ -5019,7 +5019,7 @@ class SharedMutationStep(unittest.TestCase):
             with mock.patch.object(
                     ca, "_run_capped",
                     side_effect=ChildExitRunSemantics()._fake_from_source(control_rc=1)):
-                report = ca.run(path)
+                report = ca.run(path, execution_profile="trusted-local")
         self.assertEqual(report["killed"], 0)
         self.assertEqual(report["control_status"], "error")
         self.assertNotEqual(
@@ -5049,7 +5049,7 @@ class SharedMutationStep(unittest.TestCase):
             tmp = Path(d)
             path = BatchRunner()._corpus(tmp)
             before = (tmp / "check.py").read_bytes()
-            ca.run(path)
+            ca.run(path, execution_profile="trusted-local")
             self.assertEqual((tmp / "check.py").read_bytes(), before)
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
@@ -5078,9 +5078,9 @@ class SharedMutationStep(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             manifest = _two_group_process_manifest(Path(d))
             loaded = ca.load_manifest(manifest)
-            default = ca._run_process(dict(loaded), manifest)
+            default = ca._run_process(dict(loaded), manifest, execution_profile="trusted-local")
             poisoned = ca._run_process(
-                dict(loaded), manifest, execution_backend=hostile)
+                dict(loaded), manifest, execution_backend=hostile, execution_profile="trusted-local")
         self.assertEqual(_semantic_projection(default), _semantic_projection(poisoned))
         self.assertEqual(poisoned["schema"], ca.REPORT_SCHEMA)
         self.assertEqual(poisoned["score_percent"], 100.0)
@@ -5114,7 +5114,7 @@ class SharedMutationStep(unittest.TestCase):
                 ca._run_process(
                     ca.load_manifest(path), path,
                     execution_backend=contaminating_backend,
-                )
+                execution_profile="trusted-local")
             self.assertEqual(settings.read_text(encoding="utf-8"), "THRESHOLD = 10\n")
             self.assertIn("# MUTATION_SLOT\n", check.read_text(encoding="utf-8"))
 
@@ -5137,7 +5137,7 @@ class SharedMutationStep(unittest.TestCase):
                 ca._run_process(
                     ca.load_manifest(path), path,
                     execution_backend=contaminating_baseline,
-                )
+                execution_profile="trusted-local")
             self.assertEqual(
                 (tmp / "settings.py").read_text(encoding="utf-8"),
                 "THRESHOLD = 10\n",
@@ -5174,7 +5174,7 @@ class SharedMutationStep(unittest.TestCase):
             report = ca._run_process(
                 ca.load_manifest(path), path,
                 execution_backend=retaining_backend,
-            )
+            execution_profile="trusted-local")
         self.assertEqual(report["killed"], 0)
         self.assertEqual(report["survived"], 1)
         self.assertEqual(report["score_percent"], 0.0)
@@ -5194,7 +5194,7 @@ class SharedMutationStep(unittest.TestCase):
             tmp = Path(d)
             path = _two_group_process_manifest(tmp)
             pristine = (tmp / "check.py").read_text(encoding="utf-8")
-            report = ca.run(path)
+            report = ca.run(path, execution_profile="trusted-local")
         self.assertTrue(report["adequate"])
         self.assertEqual(snapshots.count(pristine), 1)
         self.assertEqual(len(snapshots), 4)
@@ -5211,7 +5211,7 @@ class SharedMutationStep(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = _two_group_process_manifest(Path(d))
             loaded = ca.load_manifest(path)
-            report = ca._run_process(loaded, path, execution_backend=witnessed)
+            report = ca._run_process(loaded, path, execution_backend=witnessed, execution_profile="trusted-local")
         self.assertTrue(report["adequate"])
         replacements = ("'ok': 'MOVED'", "c['n'] > 0", "'failures': ['MOVED']")
         self.assertEqual(len(snapshots), len(replacements))
@@ -5224,7 +5224,7 @@ class SharedMutationStep(unittest.TestCase):
         original = ca._report_v0
         with tempfile.TemporaryDirectory() as d, mock.patch.object(
                 ca, "_report_v0", wraps=original) as report_v0:
-            report = ca.run(_process_kill_manifest(Path(d)))
+            report = ca.run(_process_kill_manifest(Path(d)), execution_profile="trusted-local")
         self.assertTrue(report["adequate"])
         self.assertEqual(report_v0.call_count, 1)
 
@@ -5232,7 +5232,7 @@ class SharedMutationStep(unittest.TestCase):
     def test_full_process_report_matches_the_pre_refactor_contract(self):
         """Frozen from `daef54815563`; only host-local identity is normalized."""
         with tempfile.TemporaryDirectory() as d:
-            report = ca.run(_two_group_process_manifest(Path(d)))
+            report = ca.run(_two_group_process_manifest(Path(d)), execution_profile="trusted-local")
         expected = {
             "acknowledged_digests": 0, "adequate": True,
             "control_status": "killed", "corpus_digest": None,
@@ -5270,15 +5270,15 @@ class SharedMutationStep(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as d:
             reports = {
-                "module": ca.run(_manifest(Path(d), {"a": [KILLABLE]})),
+                "module": ca.run(_manifest(Path(d), {"a": [KILLABLE]}), execution_profile="trusted-local"),
             }
         with tempfile.TemporaryDirectory() as d:
-            reports["process"] = ca.run(_process_kill_manifest(Path(d)))
+            reports["process"] = ca.run(_process_kill_manifest(Path(d)), execution_profile="trusted-local")
         with tempfile.TemporaryDirectory() as d:
             reports["batch"] = self._batch(Path(d))
         with tempfile.TemporaryDirectory() as d:
             reports["silent"] = ca.run(_silent_manifest(
-                Path(d), {"diagnostic_from": ["reason"]}))
+                Path(d), {"diagnostic_from": ["reason"]}), execution_profile="trusted-local")
         for name, report in reports.items():
             with self.subTest(name=name):
                 self.assertEqual(
