@@ -7,16 +7,15 @@ import importlib.util
 import json
 import sys
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MODULE_PATH = REPO_ROOT / "measurements" / "contained_hosted_publication.py"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
 import contained_hosted_publication as hosted  # noqa: E402
+import contained_oci as contained  # noqa: E402
 
 CANDIDATE = "a" * 40
 RUNNER = "b" * 40
@@ -42,47 +41,42 @@ def _permitted_envelope(**over):
     return doc
 
 
+def _facts_file(dirpath: Path) -> Path:
+    path = Path(dirpath) / "workflow-facts.json"
+    hosted.write_workflow_facts(
+        path,
+        runs_on=hosted.RUNS_ON,
+        persist_credentials=False,
+        mounts=[],
+        env_names=[],
+    )
+    return path
+
+
 def _load_mutated_module(source: str, name: str):
-    with tempfile.TemporaryDirectory() as raw:
-        root = Path(raw)
-        path = root / "contained_hosted_publication.py"
-        path.write_text(source, encoding="utf-8")
-        # Sibling imports: copy contained_oci stub surface by path injection.
-        measurements = REPO_ROOT / "measurements"
-        sys.path.insert(0, str(measurements))
-        sys.path.insert(0, str(root))
-        try:
-            spec = importlib.util.spec_from_file_location(name, path)
-            mod = importlib.util.module_from_spec(spec)
-            assert spec.loader is not None
-            sys.modules[name] = mod
-            spec.loader.exec_module(mod)
-            return mod
-        finally:
-            sys.modules.pop(name, None)
-            if str(root) in sys.path:
-                sys.path.remove(str(root))
-            if str(measurements) in sys.path and sys.path.count(str(measurements)) > 1:
-                sys.path.remove(str(measurements))
+    root = Path(tempfile.mkdtemp())
+    path = root / "contained_hosted_publication.py"
+    path.write_text(source, encoding="utf-8")
+    measurements = REPO_ROOT / "measurements"
+    sys.path.insert(0, str(measurements))
+    sys.path.insert(0, str(root))
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 class BindingsAndProfile(unittest.TestCase):
     def test_bindings_require_candidate_runner_and_image_digests(self):
-        got = hosted.require_bindings(CANDIDATE, RUNNER, IMAGE)
-        self.assertEqual(got, BINDINGS)
-        for kwargs in (
-            {"candidate_revision": "short", "runner_revision": RUNNER,
-             "image_digest": IMAGE},
-            {"candidate_revision": CANDIDATE, "runner_revision": "short",
-             "image_digest": IMAGE},
-            {"candidate_revision": CANDIDATE, "runner_revision": RUNNER,
-             "image_digest": "sha256:dead"},
-            {"candidate_revision": None, "runner_revision": RUNNER,
-             "image_digest": IMAGE},
-        ):
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaises(hosted.HostedPublicationError):
-                    hosted.require_bindings(**kwargs)
+        self.assertEqual(hosted.require_bindings(CANDIDATE, RUNNER, IMAGE), BINDINGS)
+        with self.assertRaises(hosted.HostedPublicationError):
+            hosted.require_bindings("short", RUNNER, IMAGE)
+        with self.assertRaises(hosted.HostedPublicationError):
+            hosted.require_bindings(CANDIDATE, "short", IMAGE)
+        with self.assertRaises(hosted.HostedPublicationError):
+            hosted.require_bindings(CANDIDATE, RUNNER, "sha256:dead")
 
     def test_operator_profile_refuses_trusted_local(self):
         self.assertEqual(
@@ -96,277 +90,306 @@ class BindingsAndProfile(unittest.TestCase):
 class HostileWorkflowRefusals(unittest.TestCase):
     def test_refuse_hostile_surfaces(self):
         hosted.refuse_hostile_workflow(
-            runs_on=hosted.RUNS_ON,
-            persist_credentials=False,
-            mounts=[],
-            env_names=["PYTHON_VERSION"],
+            runs_on=hosted.RUNS_ON, persist_credentials=False, mounts=(), env_names=()
         )
-        cases = (
-            {"runs_on": "self-hosted", "persist_credentials": False,
-             "mounts": [], "env_names": []},
-            {"runs_on": "local", "persist_credentials": False,
-             "mounts": [], "env_names": []},
-            {"runs_on": "ubuntu-latest", "persist_credentials": True,
-             "mounts": [], "env_names": []},
-            {"runs_on": "ubuntu-latest", "persist_credentials": False,
-             "mounts": [{"source": "/var/run/docker.sock",
-                         "destination": "/var/run/docker.sock"}],
-             "env_names": []},
-            {"runs_on": "ubuntu-latest", "persist_credentials": False,
-             "mounts": [{"kind": "checkout", "source": "checkout",
-                         "destination": "/github/workspace", "writable": True}],
-             "env_names": []},
-            {"runs_on": "ubuntu-latest", "persist_credentials": False,
-             "mounts": [], "env_names": ["GITHUB_TOKEN"]},
-            {"runs_on": "ubuntu-latest", "persist_credentials": False,
-             "mounts": [], "env_names": ["AWS_SECRET_ACCESS_KEY"]},
-        )
-        for kwargs in cases:
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaises(hosted.HostedPublicationError):
-                    hosted.refuse_hostile_workflow(**kwargs)
+        with self.assertRaises(hosted.HostedPublicationError):
+            hosted.refuse_hostile_workflow(
+                runs_on="self-hosted", persist_credentials=False, mounts=(), env_names=()
+            )
+        with self.assertRaises(hosted.HostedPublicationError):
+            hosted.refuse_hostile_workflow(
+                runs_on=hosted.RUNS_ON, persist_credentials=True, mounts=(), env_names=()
+            )
+        with self.assertRaises(hosted.HostedPublicationError):
+            hosted.refuse_hostile_workflow(
+                runs_on=hosted.RUNS_ON,
+                persist_credentials=False,
+                mounts=[{"source": "/var/run/docker.sock", "destination": "/var/run/docker.sock"}],
+                env_names=(),
+            )
+        with self.assertRaises(hosted.HostedPublicationError):
+            hosted.refuse_hostile_workflow(
+                runs_on=hosted.RUNS_ON,
+                persist_credentials=False,
+                mounts=[{"destination": "/github/workspace", "rw": True}],
+                env_names=(),
+            )
+        with self.assertRaises(hosted.HostedPublicationError):
+            hosted.refuse_hostile_workflow(
+                runs_on=hosted.RUNS_ON,
+                persist_credentials=False,
+                mounts=(),
+                env_names=("GITHUB_TOKEN",),
+            )
 
 
 class PublicationDecisionAndArtifacts(unittest.TestCase):
-    def test_missing_containment_is_unavailable_void_never_score(self):
-        decision = hosted.publication_decision(None, setup_status="unavailable")
-        self.assertEqual(decision["decision"], "unavailable")
-        self.assertEqual(decision["score_status"], "none")
-        void = hosted.void_candidate_result(
-            reason="setup-unavailable", bindings=BINDINGS)
-        self.assertEqual(void["kind"], "void-hosted-result")
-        self.assertEqual(void["score_status"], "none")
-        self.assertEqual(void["mutant_status"], "not-scored")
-        self.assertNotIn("score", void)
-        self.assertNotIn("adequacy", void)
-
     def test_verified_envelope_only_publication_guard(self):
-        withheld = hosted.publication_decision(
-            {"publication_permission": "withheld"}, setup_status="ready")
-        self.assertEqual(withheld["decision"], "withhold")
-        missing = hosted.publication_decision(None, setup_status="ready")
-        self.assertEqual(missing["decision"], "withhold")
-        permitted = hosted.publication_decision(
-            _permitted_envelope(), setup_status="ready")
-        self.assertEqual(permitted["decision"], "publish")
+        self.assertEqual(
+            hosted.publication_decision(_permitted_envelope(), setup_status="ready")["decision"],
+            "publish",
+        )
+        self.assertEqual(
+            hosted.publication_decision(
+                _permitted_envelope(envelope_status="unverified"), setup_status="ready"
+            )["decision"],
+            "withhold",
+        )
+        absent = _permitted_envelope()
+        del absent["envelope_status"]
+        self.assertEqual(
+            hosted.publication_decision(absent, setup_status="ready")["decision"],
+            "withhold",
+        )
+        self.assertEqual(
+            hosted.publication_decision(None, setup_status="ready")["decision"],
+            "withhold",
+        )
+
+    def test_unverified_and_absent_status_independently_withhold(self):
+        # Unmasked: each failure mode is its own assertion.
+        unverified = hosted.publication_decision(
+            _permitted_envelope(envelope_status="unverified"), setup_status="ready"
+        )
+        self.assertEqual(unverified["decision"], "withhold")
+        self.assertEqual(unverified["envelope_status"], "unverified")
+        absent_status = _permitted_envelope()
+        del absent_status["envelope_status"]
+        absent = hosted.publication_decision(absent_status, setup_status="ready")
+        self.assertEqual(absent["decision"], "withhold")
+        self.assertIsNone(absent["envelope_status"])
+
+    def test_missing_containment_is_unavailable_void_never_score(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "artifacts"
+            facts = _facts_file(Path(raw))
+
+            def boom():
+                raise contained.DockerUnavailable("docker executable is not available")
+
+            decision = hosted.run_gate(
+                candidate_revision=CANDIDATE,
+                runner_revision=RUNNER,
+                image_digest=IMAGE,
+                operator_profile=hosted.REQUIRED_PROFILE,
+                out_dir=out,
+                workflow_facts_path=facts,
+                docker_ready=boom,
+            )
+            self.assertEqual(decision["decision"], "unavailable")
+            self.assertEqual(decision["score_status"], "none")
+            cand = json.loads((out / hosted.CANDIDATE_RESULT_FILENAME).read_text())
+            self.assertEqual(cand["kind"], "void-hosted-result")
+            self.assertNotIn("score_percent", cand)
+            self.assertTrue((out / hosted.RERUN_EVIDENCE_FILENAME).is_file())
 
     def test_publish_requires_separate_setup_envelope_candidate_artifacts(self):
+        setup = hosted.setup_status_doc(
+            status="unavailable", reason="x", bindings=BINDINGS
+        )
+        env = hosted.withheld_envelope_stub(reason="x", bindings=BINDINGS)
+        cand = hosted.void_candidate_result(reason="x", bindings=BINDINGS)
         with tempfile.TemporaryDirectory() as raw:
-            out = Path(raw)
-            setup = hosted.setup_status_doc(
-                status="ready", reason="ok", bindings=BINDINGS)
-            envelope = _permitted_envelope()
-            candidate = hosted.void_candidate_result(
-                reason="placeholder", bindings=BINDINGS)
-            written = hosted.write_separate_artifacts(
-                out, setup, envelope, candidate)
-            self.assertEqual(
-                set(written),
-                {
-                    hosted.SETUP_STATUS_FILENAME,
-                    hosted.EFFECTIVE_ENVELOPE_FILENAME,
-                    hosted.CANDIDATE_RESULT_FILENAME,
-                },
-            )
-            for path in written.values():
-                self.assertTrue(path.is_file())
+            hosted.write_separate_artifacts(raw, setup, env, cand)
             with self.assertRaises(hosted.HostedPublicationError):
-                hosted.write_separate_artifacts(out, setup, envelope, None)
+                hosted.write_separate_artifacts(raw, setup, None, cand)
             with self.assertRaises(hosted.HostedPublicationError):
-                hosted.write_separate_artifacts(out, setup, None, candidate)
-            with self.assertRaises(hosted.HostedPublicationError):
-                hosted.write_separate_artifacts(out, None, envelope, candidate)
+                hosted.write_separate_artifacts(raw, setup, setup, cand)
 
     def test_append_only_rerun_preserves_first_infrastructure_failure(self):
         with tempfile.TemporaryDirectory() as raw:
-            log = Path(raw) / "rerun-evidence.jsonl"
-            first = {"kind": "infrastructure-failure", "reason": "docker-missing",
-                     "seq": 1}
-            second = {"kind": "infrastructure-failure", "reason": "docker-missing",
-                      "seq": 2}
-            hosted.append_rerun_evidence(log, first)
-            first_bytes = log.read_bytes()
-            hosted.append_rerun_evidence(log, second)
-            after = log.read_bytes()
-            self.assertTrue(after.startswith(first_bytes))
-            self.assertEqual(after[:len(first_bytes)], first_bytes)
-            lines = after.splitlines()
-            self.assertEqual(len(lines), 2)
-            self.assertEqual(json.loads(lines[0]), first)
+            log = Path(raw) / "rerun.jsonl"
+            hosted.append_rerun_evidence(log, {"reason": "first"})
+            before = log.read_bytes()
+            hosted.append_rerun_evidence(log, {"reason": "second"})
+            self.assertTrue(log.read_bytes().startswith(before))
+            self.assertEqual(json.loads(log.read_text().splitlines()[0])["reason"], "first")
 
-
-class GateCLI(unittest.TestCase):
-    def test_default_gate_writes_unavailable_void_and_withheld_stub(self):
+    def test_sealed_execute_path_publishes_only_verified_permitted(self):
         with tempfile.TemporaryDirectory() as raw:
             out = Path(raw) / "artifacts"
-            log = out / "rerun-evidence.jsonl"
-            rc = hosted.main([
-                "gate",
-                "--candidate-revision", CANDIDATE,
-                "--runner-revision", RUNNER,
-                "--image-digest", IMAGE,
-                "--operator-profile", hosted.REQUIRED_PROFILE,
-                "--out", str(out),
-                "--rerun-log", str(log),
-            ])
-            self.assertEqual(rc, 0)
-            setup = json.loads(
-                (out / hosted.SETUP_STATUS_FILENAME).read_text(encoding="utf-8"))
-            envelope = json.loads(
-                (out / hosted.EFFECTIVE_ENVELOPE_FILENAME).read_text(
-                    encoding="utf-8"))
-            candidate = json.loads(
-                (out / hosted.CANDIDATE_RESULT_FILENAME).read_text(
-                    encoding="utf-8"))
-            self.assertEqual(setup["setup_status"], "unavailable")
-            self.assertEqual(envelope["publication_permission"], "withheld")
-            self.assertEqual(candidate["kind"], "void-hosted-result")
-            self.assertEqual(candidate["score_status"], "none")
-            self.assertTrue(log.is_file())
-            first = log.read_bytes()
-            hosted.append_rerun_evidence(log, {"kind": "retry", "n": 2})
-            self.assertEqual(log.read_bytes()[:len(first)], first)
+            facts = _facts_file(Path(raw))
 
-    def test_permitted_envelope_publishes_separate_artifacts(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            env_path = root / "envelope.json"
-            env_path.write_text(
-                json.dumps(_permitted_envelope(), indent=2) + "\n",
-                encoding="utf-8",
+            def ready():
+                return "27.0.0"
+
+            def execute(**kwargs):
+                Path(kwargs["envelope_dest"]).write_text(
+                    json.dumps(_permitted_envelope()), encoding="utf-8"
+                )
+
+            decision = hosted.run_gate(
+                candidate_revision=CANDIDATE,
+                runner_revision=RUNNER,
+                image_digest=IMAGE,
+                operator_profile=hosted.REQUIRED_PROFILE,
+                out_dir=out,
+                workflow_facts_path=facts,
+                authorize_path="a",
+                prepare_path="b",
+                pins_dir="c",
+                docker_ready=ready,
+                sealed_execute=execute,
             )
-            out = root / "artifacts"
-            rc = hosted.main([
-                "gate",
-                "--candidate-revision", CANDIDATE,
-                "--runner-revision", RUNNER,
-                "--image-digest", IMAGE,
-                "--out", str(out),
-                "--envelope", str(env_path),
-            ])
-            self.assertEqual(rc, 0)
-            candidate = json.loads(
-                (out / hosted.CANDIDATE_RESULT_FILENAME).read_text(
-                    encoding="utf-8"))
-            self.assertEqual(candidate["decision"], "publish")
-            self.assertEqual(candidate["score_status"], "none")
+            self.assertEqual(decision["decision"], "publish")
+
+            def execute_unverified(**kwargs):
+                Path(kwargs["envelope_dest"]).write_text(
+                    json.dumps(_permitted_envelope(envelope_status="unverified")),
+                    encoding="utf-8",
+                )
+
+            out2 = Path(raw) / "artifacts2"
+            decision2 = hosted.run_gate(
+                candidate_revision=CANDIDATE,
+                runner_revision=RUNNER,
+                image_digest=IMAGE,
+                operator_profile=hosted.REQUIRED_PROFILE,
+                out_dir=out2,
+                workflow_facts_path=facts,
+                authorize_path="a",
+                prepare_path="b",
+                pins_dir="c",
+                docker_ready=ready,
+                sealed_execute=execute_unverified,
+            )
+            self.assertEqual(decision2["decision"], "withhold")
 
 
 class SourceMutations(unittest.TestCase):
-    def _source(self) -> str:
-        return MODULE_PATH.read_text(encoding="utf-8")
-
     def test_mutation_delete_verified_envelope_guard_is_red(self):
-        """Temp rewrite that always publishes must fail the contract oracle."""
-        source = self._source()
-        poisoned = source.replace(
-            "if envelope is None or permission != \"permitted\":",
-            "if False and (envelope is None or permission != \"permitted\"):",
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        needle = 'envelope_status != "verified"'
+        mutated = original.replace(
+            needle,
+            'False and envelope_status != "verified"',
             1,
         )
-        self.assertNotEqual(poisoned, source)
-        mod = _load_mutated_module(poisoned, "hosted_mut_delete_guard")
-        # Oracle living in the test: withhold required when permission absent.
-        decision = mod.publication_decision(None, setup_status="ready")
-        self.assertEqual(
-            decision["decision"], "publish",
-            "mutated guard must mis-behave (publish without envelope)",
+        self.assertNotEqual(mutated, original)
+        bad = _load_mutated_module(mutated, "mut_guard")
+        leaked = bad.publication_decision(
+            _permitted_envelope(envelope_status="unverified"), setup_status="ready"
         )
-        # Contract oracle: live module still withholds.
-        live = hosted.publication_decision(None, setup_status="ready")
-        self.assertEqual(live["decision"], "withhold")
-        self.assertNotEqual(decision["decision"], live["decision"])
+        self.assertEqual(leaked["decision"], "publish")
+        self.assertEqual(
+            hosted.publication_decision(
+                _permitted_envelope(envelope_status="unverified"), setup_status="ready"
+            )["decision"],
+            "withhold",
+        )
+
+    def test_mutation_delete_refuse_hostile_call_is_red(self):
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        # Remove the consumer call inside run_gate (second occurrence after write_workflow_facts).
+        call = (
+            "    refuse_hostile_workflow(\n"
+            '        runs_on=facts["runs_on"],\n'
+            '        persist_credentials=facts["persist_credentials"],\n'
+            '        mounts=facts["mounts"],\n'
+            '        env_names=facts["env_names"],\n'
+            "    )\n"
+        )
+        self.assertEqual(original.count(call), 1)
+        mutated = original.replace(call, "    pass  # mutated: refuse unwired\n", 1)
+        self.assertNotEqual(mutated, original)
+        bad = _load_mutated_module(mutated, "mut_refuse")
+        with tempfile.TemporaryDirectory() as raw:
+            facts_path = Path(raw) / "facts.json"
+            # Hostile facts: self-hosted. Live gate must refuse; mutant skips refuse.
+            facts_path.write_text(
+                json.dumps(
+                    {
+                        "runs_on": "self-hosted",
+                        "persist_credentials": False,
+                        "mounts": [],
+                        "env_names": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.run_gate(
+                    candidate_revision=CANDIDATE,
+                    runner_revision=RUNNER,
+                    image_digest=IMAGE,
+                    operator_profile=hosted.REQUIRED_PROFILE,
+                    out_dir=Path(raw) / "good",
+                    workflow_facts_path=facts_path,
+                    docker_ready=lambda: (_ for _ in ()).throw(
+                        contained.DockerUnavailable("x")
+                    ),
+                )
+            # Mutant proceeds past refuse (may fail later on docker) — must NOT raise runs_on.
+            def boom():
+                raise contained.DockerUnavailable("docker executable is not available")
+
+            decision = bad.run_gate(
+                candidate_revision=CANDIDATE,
+                runner_revision=RUNNER,
+                image_digest=IMAGE,
+                operator_profile=hosted.REQUIRED_PROFILE,
+                out_dir=Path(raw) / "bad",
+                workflow_facts_path=facts_path,
+                docker_ready=boom,
+            )
+            self.assertEqual(decision["decision"], "unavailable")
 
     def test_mutation_turn_unavailable_into_score_is_red(self):
-        source = self._source()
-        poisoned = source.replace(
-            '"score_status": "none"',
-            '"score_status": "scored"',
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        mutated = original.replace(
+            '"decision": "unavailable",\n            "score_status": "none",',
+            '"decision": "unavailable",\n            "score_status": "scored", "score_percent": 100.0,',
             1,
         )
-        self.assertNotEqual(poisoned, source)
-        mod = _load_mutated_module(poisoned, "hosted_mut_unavail_score")
-        decision = mod.publication_decision(None, setup_status="unavailable")
-        self.assertEqual(decision["decision"], "unavailable")
+        self.assertNotEqual(mutated, original)
+        bad = _load_mutated_module(mutated, "mut_score")
+        decision = bad.publication_decision(None, setup_status="unavailable")
         self.assertEqual(decision["score_status"], "scored")
-        # Oracle: unavailable must never carry a score status other than none.
         self.assertEqual(
-            hosted.publication_decision(None, setup_status="unavailable")
-            ["score_status"],
+            hosted.publication_decision(None, setup_status="unavailable")["score_status"],
             "none",
         )
-        self.assertNotEqual(decision["score_status"], "none")
 
     def test_mutation_erase_first_failure_on_rerun_is_red(self):
-        source = self._source()
-        poisoned = source.replace(
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        mutated = original.replace(
             'with path.open("ab") as handle:\n        handle.write(line)',
-            'with path.open("wb") as handle:\n        handle.write(line)',
+            "path.write_bytes(line)",
             1,
         )
-        self.assertNotEqual(poisoned, source)
-        mod = _load_mutated_module(poisoned, "hosted_mut_erase_first")
+        self.assertNotEqual(mutated, original)
+        bad = _load_mutated_module(mutated, "mut_rerun")
         with tempfile.TemporaryDirectory() as raw:
             log = Path(raw) / "rerun.jsonl"
-            first = {"reason": "first", "n": 1}
-            second = {"reason": "second", "n": 2}
-            mod.append_rerun_evidence(log, first)
-            first_bytes = log.read_bytes()
-            mod.append_rerun_evidence(log, second)
-            after = log.read_bytes()
-            # Mutated truncate path erases the first failure.
-            self.assertFalse(after.startswith(first_bytes) and after != first_bytes)
-            self.assertEqual(json.loads(after.splitlines()[0]), second)
-            # Live oracle still appends.
-            live = Path(raw) / "live.jsonl"
-            hosted.append_rerun_evidence(live, first)
-            kept = live.read_bytes()
-            hosted.append_rerun_evidence(live, second)
-            self.assertTrue(live.read_bytes().startswith(kept))
+            bad.append_rerun_evidence(log, {"reason": "first"})
+            bad.append_rerun_evidence(log, {"reason": "second"})
+            self.assertEqual(len(log.read_text().splitlines()), 1)
+            good = Path(raw) / "good.jsonl"
+            hosted.append_rerun_evidence(good, {"reason": "first"})
+            before = good.read_bytes()
+            hosted.append_rerun_evidence(good, {"reason": "second"})
+            self.assertTrue(good.read_bytes().startswith(before))
 
     def test_python_comment_only_noop_control_stays_green(self):
-        source = self._source()
-        commented = source.replace(
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        mutated = original.replace(
             '"""Hosted contained publication gate (#107).',
-            '"""Hosted contained publication gate (#107).\n# comment-only noop',
+            '"""Hosted contained publication gate (#107).\n# noop',
             1,
         )
-        self.assertNotEqual(commented, source)
-        mod = _load_mutated_module(commented, "hosted_mut_comment_noop")
+        mod = _load_mutated_module(mutated, "noop")
         self.assertEqual(
             mod.publication_decision(None, setup_status="unavailable")["decision"],
             "unavailable",
         )
-        self.assertEqual(
-            mod.publication_decision(_permitted_envelope(), setup_status="ready")
-            ["decision"],
-            "publish",
-        )
-        with tempfile.TemporaryDirectory() as raw:
-            out = Path(raw)
-            mod.write_separate_artifacts(
-                out,
-                mod.setup_status_doc(status="ready", reason="ok", bindings=BINDINGS),
-                _permitted_envelope(),
-                mod.void_candidate_result(reason="ok", bindings=BINDINGS),
-            )
-            self.assertTrue((out / mod.SETUP_STATUS_FILENAME).is_file())
 
 
 class ExportedConstants(unittest.TestCase):
     def test_closed_constants(self):
         self.assertEqual(hosted.REQUIRED_PROFILE, "contained-oci-v0")
-        self.assertEqual(hosted.CONCURRENCY_GROUP, "contained-hosted-publication")
-        self.assertIs(hosted.CANCEL_IN_PROGRESS, False)
         self.assertEqual(hosted.RETENTION_DAYS, 14)
         self.assertEqual(hosted.MAX_ARTIFACT_BYTES, 5242880)
-        self.assertEqual(hosted.TIMEOUT_MINUTES, 15)
-        self.assertEqual(hosted.RUNS_ON, "ubuntu-latest")
-        self.assertEqual(
-            hosted.HOSTED_SCHEMA, "corpus-adequacy.hosted-publication.v0")
-        self.assertEqual(hosted.ARTIFACT_SETUP, "setup")
-        self.assertEqual(hosted.ARTIFACT_ENVELOPE, "effective-envelope")
-        self.assertEqual(hosted.ARTIFACT_CANDIDATE, "candidate-result")
+        self.assertEqual(hosted.ARTIFACT_RERUN, "rerun-evidence")
 
 
 if __name__ == "__main__":

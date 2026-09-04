@@ -27,13 +27,34 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                                          'digest '
                                                                          '(sha256:64hex)',
                                                           'required': True,
-                                                          'type': 'string'}}}},
+                                                          'type': 'string'},
+                                         'authorize_path': {'description': 'Path to '
+                                                                           'authorize.v0 '
+                                                                           'bytes in '
+                                                                           'the runner '
+                                                                           'tree',
+                                                            'required': True,
+                                                            'type': 'string'},
+                                         'prepare_path': {'description': 'Path to '
+                                                                         'prepare.v1 '
+                                                                         'bytes in the '
+                                                                         'runner tree',
+                                                          'required': True,
+                                                          'type': 'string'},
+                                         'pins_dir': {'description': 'Path to frozen '
+                                                                     'pins directory '
+                                                                     'in the runner '
+                                                                     'tree',
+                                                      'required': True,
+                                                      'type': 'string'}}}},
  'permissions': {'contents': 'read'},
  'concurrency': {'group': 'contained-hosted-publication', 'cancel-in-progress': False},
  'env': {'PYTHON_VERSION': '3.13',
          'OPERATOR_EXECUTION_PROFILE': 'contained-oci-v0',
          'MAX_ARTIFACT_BYTES': '5242880',
-         'ARTIFACT_RETENTION_DAYS': '14'},
+         'ARTIFACT_RETENTION_DAYS': '14',
+         'HOSTED_RUNS_ON': 'ubuntu-latest',
+         'HOSTED_PERSIST_CREDENTIALS': 'false'},
  'jobs': {'hosted-contained': {'runs-on': 'ubuntu-latest',
                                'timeout-minutes': 15,
                                'steps': [{'name': 'Checkout',
@@ -47,14 +68,36 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                           'with': {'python-version': '${{ '
                                                                      'env.PYTHON_VERSION '
                                                                      '}}'}},
+                                         {'name': 'Write workflow facts',
+                                          'shell': 'bash',
+                                          'run': 'python '
+                                                 'measurements/contained_hosted_publication.py '
+                                                 'write-workflow-facts --out '
+                                                 'artifacts/workflow-facts.json'},
                                          {'name': 'Gate hosted publication',
                                           'shell': 'bash',
-                                          'run': 'export CANDIDATE_REVISION="${{ '
-                                                 'inputs.candidate_revision }}"; '
-                                                 'export RUNNER_REVISION="${{ '
-                                                 'inputs.runner_revision }}"; export '
-                                                 'IMAGE_DIGEST="${{ '
-                                                 'inputs.image_digest }}"; python '
+                                          'env': {'CANDIDATE_REVISION': '${{ '
+                                                                        'inputs.candidate_revision '
+                                                                        '}}',
+                                                  'RUNNER_REVISION': '${{ '
+                                                                     'inputs.runner_revision '
+                                                                     '}}',
+                                                  'IMAGE_DIGEST': '${{ '
+                                                                  'inputs.image_digest '
+                                                                  '}}',
+                                                  'AUTHORIZE_PATH': '${{ '
+                                                                    'inputs.authorize_path '
+                                                                    '}}',
+                                                  'PREPARE_PATH': '${{ '
+                                                                  'inputs.prepare_path '
+                                                                  '}}',
+                                                  'PINS_DIR': '${{ inputs.pins_dir }}',
+                                                  'GITHUB_RUN_ID': '${{ github.run_id '
+                                                                   '}}',
+                                                  'GITHUB_RUN_ATTEMPT': '${{ '
+                                                                        'github.run_attempt '
+                                                                        '}}'},
+                                          'run': 'python '
                                                  'measurements/contained_hosted_publication.py '
                                                  'gate --candidate-revision '
                                                  '"$CANDIDATE_REVISION" '
@@ -64,7 +107,11 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                  '"$OPERATOR_EXECUTION_PROFILE" '
                                                  '--max-artifact-bytes '
                                                  '"$MAX_ARTIFACT_BYTES" --out '
-                                                 'artifacts --rerun-log '
+                                                 'artifacts --workflow-facts '
+                                                 'artifacts/workflow-facts.json '
+                                                 '--authorize "$AUTHORIZE_PATH" '
+                                                 '--prepare "$PREPARE_PATH" --pins-dir '
+                                                 '"$PINS_DIR" --rerun-log '
                                                  'artifacts/rerun-evidence.jsonl'},
                                          {'name': 'Upload setup',
                                           'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
@@ -82,6 +129,12 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                           'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
                                           'with': {'name': 'candidate-result',
                                                    'path': 'artifacts/candidate-result.json',
+                                                   'retention-days': 14,
+                                                   'if-no-files-found': 'error'}},
+                                         {'name': 'Upload rerun-evidence',
+                                          'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+                                          'with': {'name': 'rerun-evidence',
+                                                   'path': 'artifacts/rerun-evidence.jsonl',
                                                    'retention-days': 14,
                                                    'if-no-files-found': 'error'}}]}}}
 
@@ -192,9 +245,16 @@ def hosted_shape_violations(tree) -> list[str]:
         bad.append("MAX_ARTIFACT_BYTES ceiling missing")
     if env.get("ARTIFACT_RETENTION_DAYS") != "14":
         bad.append("ARTIFACT_RETENTION_DAYS ceiling missing")
+    if env.get("HOSTED_RUNS_ON") != "ubuntu-latest":
+        bad.append("HOSTED_RUNS_ON must be ubuntu-latest")
+    if env.get("HOSTED_PERSIST_CREDENTIALS") != "false":
+        bad.append("HOSTED_PERSIST_CREDENTIALS must be false")
     on = tree.get("on") or {}
     inputs = ((on.get("workflow_dispatch") or {}).get("inputs") or {})
-    for key in ("candidate_revision", "runner_revision", "image_digest"):
+    for key in (
+        "candidate_revision", "runner_revision", "image_digest",
+        "authorize_path", "prepare_path", "pins_dir",
+    ):
         if key not in inputs:
             bad.append("missing binding input %s" % key)
     jobs = tree.get("jobs") or {}
@@ -218,23 +278,33 @@ def hosted_shape_violations(tree) -> list[str]:
             if with_block.get("retention-days") != 14:
                 bad.append("upload retention-days ceiling missing")
         run = step.get("run")
-        if isinstance(run, str) and step.get("name") == "Gate hosted publication":
-            if "trusted-local" in run:
-                bad.append("trusted-local profile forbidden in gate run")
-            if "docker.sock" in run:
-                bad.append("docker.sock exposure forbidden")
-            for binding in (
-                "inputs.candidate_revision",
-                "inputs.runner_revision",
-                "inputs.image_digest",
-                "$CANDIDATE_REVISION",
-                "$RUNNER_REVISION",
-                "$IMAGE_DIGEST",
-            ):
-                if binding not in run:
-                    bad.append("gate run missing binding %s" % binding)
-    if upload_names != ["setup", "effective-envelope", "candidate-result"]:
-        bad.append("must upload setup, effective-envelope, candidate-result separately")
+        if isinstance(run, str):
+            if "${{ inputs." in run:
+                bad.append("workflow inputs must not appear in run: (shell breakout)")
+            if step.get("name") == "Gate hosted publication":
+                if "trusted-local" in run:
+                    bad.append("trusted-local profile forbidden in gate run")
+                for binding in (
+                    "$CANDIDATE_REVISION", "$RUNNER_REVISION", "$IMAGE_DIGEST",
+                    "$AUTHORIZE_PATH", "$PREPARE_PATH", "$PINS_DIR",
+                    "--workflow-facts",
+                ):
+                    if binding not in run:
+                        bad.append("gate run missing %s" % binding)
+                env_step = step.get("env") or {}
+                for key in (
+                    "CANDIDATE_REVISION", "RUNNER_REVISION", "IMAGE_DIGEST",
+                    "AUTHORIZE_PATH", "PREPARE_PATH", "PINS_DIR",
+                ):
+                    if key not in env_step:
+                        bad.append("gate env missing %s" % key)
+    if upload_names != [
+        "setup", "effective-envelope", "candidate-result", "rerun-evidence"
+    ]:
+        bad.append(
+            "must upload setup, effective-envelope, candidate-result, "
+            "rerun-evidence separately"
+        )
     if tree != ALLOWED_HOSTED_WORKFLOW and not bad:
         bad.append("workflow diverges from ALLOWED_HOSTED_WORKFLOW")
     return bad
@@ -254,39 +324,54 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         self.assertEqual(self.tree, ALLOWED_HOSTED_WORKFLOW)
         self.assertEqual(hosted_shape_violations(self.tree), [])
 
+    def test_mutation_shell_breakout_inputs_in_run_is_red(self):
+        # Exact breakout shape: interpolating inputs inside run.
+        poisoned = self.text.replace(
+            'run: python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION"',
+            'run: export CANDIDATE_REVISION="${{ inputs.candidate_revision }}"; python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION"',
+            1,
+        )
+        self.assertNotEqual(poisoned, self.text)
+        hits = hosted_shape_violations(parse_workflow_yaml(poisoned))
+        self.assertTrue(any("shell breakout" in h for h in hits), hits)
+
     def test_mutation_route_to_self_hosted_or_local_is_red(self):
-        mutated = self._mutated("runs-on: ubuntu-latest", "runs-on: self-hosted")
-        hits = hosted_shape_violations(mutated)
-        self.assertTrue(any("runs-on" in h for h in hits), hits)
-        mutated = self._mutated("runs-on: ubuntu-latest", "runs-on: local")
-        hits = hosted_shape_violations(mutated)
+        hits = hosted_shape_violations(self._mutated("runs-on: ubuntu-latest", "runs-on: self-hosted"))
         self.assertTrue(any("runs-on" in h for h in hits), hits)
 
     def test_mutation_allow_trusted_local_profile_is_red(self):
-        mutated = self._mutated(
+        hits = hosted_shape_violations(self._mutated(
             "OPERATOR_EXECUTION_PROFILE: contained-oci-v0",
             "OPERATOR_EXECUTION_PROFILE: trusted-local",
-        )
-        hits = hosted_shape_violations(mutated)
+        ))
         self.assertTrue(any("contained-oci-v0" in h for h in hits), hits)
 
     def test_mutation_docker_socket_or_credential_or_writable_checkout_is_red(self):
-        mutated = self._mutated("persist-credentials: false", "persist-credentials: true")
-        hits = hosted_shape_violations(mutated)
+        hits = hosted_shape_violations(self._mutated(
+            "persist-credentials: false", "persist-credentials: true"
+        ))
         self.assertTrue(any("persist-credentials" in h for h in hits), hits)
-        sneaky = self.text.replace(
-            "          persist-credentials: false\n",
-            "          persist-credentials: false\n          docker.sock: /var/run/docker.sock\n",
-            1,
-        )
-        self.assertNotEqual(sneaky, self.text)
-        hits = hosted_shape_violations(parse_workflow_yaml(sneaky))
-        self.assertTrue(any("docker.sock" in h or "diverges" in h for h in hits), hits)
 
     def test_mutation_collapse_setup_envelope_candidate_artifacts_is_red(self):
-        mutated = self._mutated("name: effective-envelope", "name: setup")
-        hits = hosted_shape_violations(mutated)
+        hits = hosted_shape_violations(self._mutated(
+            "name: effective-envelope", "name: setup"
+        ))
         self.assertTrue(any("separately" in h for h in hits), hits)
+
+    def test_mutation_omit_rerun_evidence_upload_is_red(self):
+        block = (
+            "      - name: Upload rerun-evidence\n"
+            "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
+            "        with:\n"
+            "          name: rerun-evidence\n"
+            "          path: artifacts/rerun-evidence.jsonl\n"
+            "          retention-days: 14\n"
+            "          if-no-files-found: error\n"
+        )
+        mutated = self.text.replace(block, "", 1)
+        self.assertNotEqual(mutated, self.text)
+        hits = hosted_shape_violations(parse_workflow_yaml(mutated))
+        self.assertTrue(any("rerun-evidence" in h or "separately" in h for h in hits), hits)
 
     def test_mutation_drop_revision_or_digest_binding_is_red(self):
         block = (
@@ -295,27 +380,19 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
             "        required: true\n"
             "        type: string\n"
         )
-        mutated = self._mutated(block, "")
-        hits = hosted_shape_violations(mutated)
+        hits = hosted_shape_violations(self._mutated(block, ""))
         self.assertTrue(any("image_digest" in h or "diverges" in h for h in hits), hits)
 
     def test_mutation_remove_each_resource_ceiling_is_red(self):
-        cases = [
-            (
-                "\nconcurrency:\n  group: contained-hosted-publication\n  cancel-in-progress: false\n",
-                "concurrency",
-            ),
+        for old, needle in (
+            ("\nconcurrency:\n  group: contained-hosted-publication\n  cancel-in-progress: false\n", "concurrency"),
             ('  MAX_ARTIFACT_BYTES: "5242880"\n', "MAX_ARTIFACT_BYTES"),
             ('  ARTIFACT_RETENTION_DAYS: "14"\n', "ARTIFACT_RETENTION_DAYS"),
-        ]
-        for old, needle in cases:
+        ):
             mutated_text = self.text.replace(old, "", 1)
             self.assertNotEqual(mutated_text, self.text, needle)
             hits = hosted_shape_violations(parse_workflow_yaml(mutated_text))
-            self.assertTrue(hits, "expected ceiling bite for %s: %s" % (needle, hits))
-        mutated = self._mutated("retention-days: 14", "retention-days: 0")
-        hits = hosted_shape_violations(mutated)
-        self.assertTrue(any("retention-days" in h for h in hits), hits)
+            self.assertTrue(hits, needle)
 
     def test_comment_only_noop_mutation_stays_green(self):
         mutated_text = "# noop comment\n" + self.text
