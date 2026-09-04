@@ -1,0 +1,107 @@
+name: contained-hosted-publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_revision:
+        description: Immutable candidate revision (40-hex)
+        required: true
+        type: string
+      runner_revision:
+        description: Generic runner revision (40-hex)
+        required: true
+        type: string
+      image_digest:
+        description: Contained OCI image digest (sha256:64hex)
+        required: true
+        type: string
+      packet_root:
+        description: Declared packet root (relative) holding authorize/prepare/pins/bindings
+        required: true
+        type: string
+      authorize_path:
+        description: Path to authorize.v0 bytes relative to packet root
+        required: true
+        type: string
+      prepare_path:
+        description: Path to prepare.v1 bytes relative to packet root
+        required: true
+        type: string
+      pins_dir:
+        description: Path to frozen pins directory relative to packet root
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contained-hosted-publication
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.13"
+  OPERATOR_EXECUTION_PROFILE: contained-oci-v0
+  MAX_ARTIFACT_BYTES: "5242880"
+  ARTIFACT_RETENTION_DAYS: "14"
+
+jobs:
+  hosted-contained:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.runner_revision }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Gate hosted publication
+        shell: bash
+        env:
+          CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
+          RUNNER_REVISION: ${{ inputs.runner_revision }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          PACKET_ROOT: ${{ inputs.packet_root }}
+          AUTHORIZE_PATH: ${{ inputs.authorize_path }}
+          PREPARE_PATH: ${{ inputs.prepare_path }}
+          PINS_DIR: ${{ inputs.pins_dir }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --operator-profile "$OPERATOR_EXECUTION_PROFILE" --max-artifact-bytes "$MAX_ARTIFACT_BYTES" --out artifacts --workspace-root "$GITHUB_WORKSPACE" --packet-root "$PACKET_ROOT" --authorize "$AUTHORIZE_PATH" --prepare "$PREPARE_PATH" --pins-dir "$PINS_DIR" --rerun-log artifacts/rerun-evidence.jsonl
+      - name: Upload setup
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: setup
+          path: artifacts/setup-status.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Upload effective-envelope
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: effective-envelope
+          path: artifacts/effective-envelope.v0.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Upload candidate-result
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-result
+          path: artifacts/candidate-result.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Upload rerun-evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/rerun-evidence.jsonl
+          retention-days: 14
+          if-no-files-found: error
