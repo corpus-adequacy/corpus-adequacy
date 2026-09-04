@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Bound the verified effective OCI envelope before scoring. A `contained-oci-v0` run now emits one sibling `envelope.v0` record (`corpus-adequacy.execution-envelope.v0`) carrying the requested profile, `setup_status`, `envelope_status` with the named failed observation, `candidate_outcome`, `cleanup` and a derived `publication_permission`. Effective values come from one observation-only projector with no defaulting accessor, held against the request by one comparator; projector, comparator and record share one closed key set, so a field cannot be recorded without being checked or checked without being recorded. Observed image id, runtime version, `Privileged`, `CapAdd`, host PID/user namespaces, devices, environment names and a complete mount inventory are now observed and refused when they drift; environment values are never read or recorded. A completed candidate whose cleanup fails is preserved as `completed` plus `remove-failed`/`absence-unproved` and withheld, instead of being lost to an exception. `report.v0` is unchanged, and so are `prepare.v1`, `survivors.v0` and published records; the binding runs envelope to report digest only. `measurements/effective_envelope.py` is declared in `EXECUTION_PATHS`, so execution identity changes and a fresh PREPARE is required; existing PREPARE bytes no longer drive the driver. `publication_permission` is recorded and not enforced: hosted publication remains unimplemented. This is not a score, not a sandbox-completeness claim, and not publication authorization.
+
 Closed operator-owned execution-profile selection (`trusted-local`,
 `contained-oci-v0`), independent of runner (`module|process|batch`). The
 operator supplies the profile; a candidate may declare only

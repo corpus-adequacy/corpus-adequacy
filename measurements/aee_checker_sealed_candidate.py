@@ -16,6 +16,7 @@ from pathlib import Path
 
 from aee_checker_sealed_common import (
     INERT_RESOURCE_PROFILE,
+    DockerUnavailable,
     PrepareError,
     load_strict,
     preserve_cleanup_failure,
@@ -34,6 +35,7 @@ from aee_checker_sealed_oci import (
 from aee_checker_sealed_run import load_prepare_v1
 import bounded_run as br
 import contained_oci as contained
+import effective_envelope as envelope
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ADAPTERS = str(_ROOT / "adapters")
@@ -191,13 +193,68 @@ def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
 _DockerTransport = contained.DockerTransport
 
 
-def _run_sealed_candidate(*, image_id: str, mounts: dict,
-                          resource_profile,
-                          name_prefix: str = "aee-cand-",
-                          sealed: bool = True, transport=None,
-                          execution_contract=None,
-                          ) -> subprocess.CompletedProcess:
-    raw = contained.run_contained(
+def envelope_binding(*, prepare_sha256: str, execution_commit: str) -> dict:
+    """The digests an envelope record binds itself to. No record without one."""
+    return {
+        "execution_commit": execution_commit,
+        "prepare_sha256": prepare_sha256,
+    }
+
+
+def _candidate_outcome(state: str, completed) -> str:
+    """The candidate's own result, kept separate from the envelope's."""
+    if state != "completed":
+        return state
+    if completed.returncode == UNPROVED_EXIT:
+        return "unproved"
+    return "completed"
+
+
+def _refused_envelope(binding: dict, requested, status: str,
+                      field: str) -> subprocess.CompletedProcess:
+    """Setup never became ready, so no candidate outcome may be claimed."""
+    completed = _unproved("setup")
+    if requested is None:
+        return completed
+    completed.envelope_record = envelope.build_envelope_record(
+        requested=requested,
+        setup_status=status,
+        envelope_status="unverified",
+        unverified_field=field,
+        effective=None,
+        candidate_outcome="not-run",
+        cleanup="removed-and-absent",
+        prepare_sha256=binding["prepare_sha256"],
+        execution_commit=binding["execution_commit"],
+        report_sha256=None,
+    )
+    return completed
+
+
+def _requested_envelope(*, image_id: str, resource_profile,
+                        sealed: bool) -> dict:
+    """Pure declaration, so a record always exists to hold what happened."""
+    return envelope.requested_envelope(
+        execution_profile=envelope.CONTAINED_PROFILE,
+        image_id=image_id,
+        mount_spec=CANDIDATE_MOUNT_SPEC,
+        resource_profile=resource_profile,
+        sealed=sealed,
+    )
+
+
+def _observed(transport, name: str, *args):
+    """Read one observation from the transport. Absence is not a value."""
+    reader = getattr(transport, name, None)
+    if not callable(reader):
+        raise envelope.EnvelopeError(name)
+    return reader(*args)
+
+
+def _contained_candidate_run(*, image_id: str, mounts: dict, resource_profile,
+                             name_prefix: str, sealed: bool, transport,
+                             execution_contract, record_cleanup: bool) -> dict:
+    return contained.run_contained(
         image_id=image_id,
         mounts=mounts,
         command=["-lc", candidate_script(
@@ -209,7 +266,90 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
         sealed=sealed,
         name_prefix=name_prefix,
         transport=transport,
+        record_cleanup=record_cleanup,
     )
+
+
+def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
+                               name_prefix, sealed, transport,
+                               execution_contract, binding,
+                               ) -> subprocess.CompletedProcess:
+    """Run the candidate and keep one envelope record whatever happens.
+
+    The envelope is projected from this run's own inspect output and this
+    run's own runtime version. PREPARE's inert-probe evidence describes a
+    different image and profile and cannot stand in for either.
+    """
+    requested = _requested_envelope(
+        image_id=image_id, resource_profile=resource_profile, sealed=sealed)
+    try:
+        raw = _contained_candidate_run(
+            image_id=image_id, mounts=mounts,
+            resource_profile=resource_profile, name_prefix=name_prefix,
+            sealed=sealed, transport=transport,
+            execution_contract=execution_contract, record_cleanup=True)
+    except DockerUnavailable as exc:
+        return _refused_envelope(binding, requested, "unavailable", str(exc))
+    except PrepareError as exc:
+        return _refused_envelope(binding, requested, "refused", str(exc))
+
+    if raw["state"] == "completed":
+        proc = raw["process"]
+        completed = normalize_inner_event(
+            returncode=proc.returncode,
+            stdout=proc.stdout or "",
+            vectors=host_vectors_path(mounts),
+        )
+    else:
+        completed = _unproved(raw["state"])
+
+    effective = None
+    unverified_field = None
+    try:
+        effective = envelope.project_effective_envelope(
+            raw["inspect"],
+            image_env_names=_observed(transport, "image_env_names", image_id),
+            runtime_version=_observed(transport, "version"))
+        envelope.require_envelope_matches_request(effective, requested)
+    except (envelope.EnvelopeError, PrepareError) as exc:
+        effective, unverified_field = None, str(exc) or "effective"
+
+    completed.envelope_record = envelope.build_envelope_record(
+        requested=requested,
+        setup_status="ready",
+        envelope_status="unverified" if effective is None else "verified",
+        unverified_field=unverified_field,
+        effective=effective,
+        candidate_outcome=_candidate_outcome(raw["state"], completed),
+        cleanup=raw["cleanup"],
+        prepare_sha256=binding["prepare_sha256"],
+        execution_commit=binding["execution_commit"],
+        report_sha256=None,
+    )
+    return completed
+
+
+def _run_sealed_candidate(*, image_id: str, mounts: dict,
+                          resource_profile,
+                          name_prefix: str = "aee-cand-",
+                          sealed: bool = True, transport=None,
+                          execution_contract=None, binding=None,
+                          ) -> subprocess.CompletedProcess:
+    """Without a binding this is the legacy unrecorded run, unchanged.
+
+    A record binds itself to PREPARE and execution digests, so it exists
+    only where those digests do.
+    """
+    if binding is not None:
+        return _recorded_sealed_candidate(
+            image_id=image_id, mounts=mounts,
+            resource_profile=resource_profile, name_prefix=name_prefix,
+            sealed=sealed, transport=transport,
+            execution_contract=execution_contract, binding=binding)
+    raw = _contained_candidate_run(
+        image_id=image_id, mounts=mounts, resource_profile=resource_profile,
+        name_prefix=name_prefix, sealed=sealed, transport=transport,
+        execution_contract=execution_contract, record_cleanup=False)
     if raw["state"] != "completed":
         return _unproved(raw["state"])
     proc = raw["process"]
@@ -223,7 +363,7 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
 def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,
                          name_prefix: str = "aee-cand-",
                          transport=None, execution_contract=None,
-                         ) -> subprocess.CompletedProcess:
+                         binding=None) -> subprocess.CompletedProcess:
     prepare = load_prepare_v1(prepare_raw)
     image_id = require_candidate_image(
         image_id=prepare["toolchain"]["image_id"],
@@ -238,4 +378,5 @@ def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,
         sealed=True,
         transport=transport,
         execution_contract=execution_contract,
+        binding=binding,
     )

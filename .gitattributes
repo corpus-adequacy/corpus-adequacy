@@ -31,6 +31,7 @@ adapters/aee_checker_sealed.py text eol=lf
 measurements/aee-checker-25b9dfa/** text eol=lf
 measurements/aee_checker_sealed_common.py text eol=lf
 measurements/contained_oci.py text eol=lf
+measurements/effective_envelope.py text eol=lf
 measurements/aee_checker_sealed_materialize.py text eol=lf
 measurements/aee_checker_sealed_oci.py text eol=lf
 measurements/aee_checker_sealed_run.py text eol=lf

@@ -11,6 +11,7 @@ import bounded_run as br
 import corpus_adequacy as ca
 
 HEX64 = frozenset("0123456789abcdef")
+CONTAINED_USER = "65532:65532"
 TMPFS_BYTES = 1048576
 TMPFS_INODES = 128
 MEMORY_4G = 4 * 1024 * 1024 * 1024
@@ -250,7 +251,7 @@ def validate_inspect_contract(
         str(item).replace("=", ":") == "no-new-privileges:true" for item in sec)
     if not no_new_privileges:
         raise PrepareError("no-new-privileges")
-    if cfg.get("User") != "65532:65532":
+    if cfg.get("User") != CONTAINED_USER:
         raise PrepareError("user")
     if (type(host.get("Memory")) is not int or
             host.get("Memory") != profile["memory_bytes"] or
@@ -335,6 +336,30 @@ def image_platform(image_id: str) -> str:
     return "%s/%s" % (os_name, arch)
 
 
+def image_env_names(image_id: str) -> tuple[str, ...]:
+    """Observed environment names of the pinned image, values discarded.
+
+    The allowed environment for a contained run is the image's own
+    environment plus what the create argv adds, so this is an observation
+    of an immutable pinned artifact rather than a declared allowlist.
+    """
+    inspect = parse_inspect_payload(
+        docker_bounded(["image", "inspect", require_image_id(image_id)]))
+    config = inspect.get("Config")
+    if type(config) is not dict or "Env" not in config:
+        raise PrepareError("image env")
+    env = config["Env"]
+    env = [] if env is None else env
+    if type(env) is not list:
+        raise PrepareError("image env")
+    names = []
+    for item in env:
+        if not isinstance(item, str):
+            raise PrepareError("image env")
+        names.append(item.split("=", 1)[0])
+    return tuple(sorted(names))
+
+
 def classify_inspect_status(returncode, stdout, stderr) -> str:
     if type(returncode) is not int:
         raise PrepareError("inspect infrastructure")
@@ -396,7 +421,7 @@ def docker_create_argv(
         "--read-only",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true",
-        "--user", "65532:65532",
+        "--user", CONTAINED_USER,
         "--memory", _docker_mem(profile["memory_bytes"]),
         "--memory-swap", _docker_mem(profile["memory_swap_bytes"]),
         "--pids-limit", str(profile["pids"]),
@@ -447,6 +472,25 @@ def cleanup_container(transport, name: str,
             "%s remove failed" % label) from remove_failure
 
 
+def classify_cleanup_result(transport, name: str) -> str:
+    """Remove and prove absence, reporting the outcome instead of raising.
+
+    A failed absence proof dominates a failed remove: the container may
+    still exist. Callers that do not keep a record use `cleanup_container`,
+    which still refuses.
+    """
+    remove_failed = False
+    try:
+        transport.remove(name)
+    except BaseException:
+        remove_failed = True
+    try:
+        transport.require_absent(name)
+    except BaseException:
+        return "absence-unproved"
+    return "remove-failed" if remove_failed else "removed-and-absent"
+
+
 class DockerTransport:
     """Production transport for the bounded create/start/inspect/remove funnel."""
 
@@ -469,6 +513,12 @@ class DockerTransport:
 
     def require_absent(self, name):
         require_container_absent(name)
+
+    def version(self):
+        return require_docker_ready()
+
+    def image_env_names(self, image_id):
+        return image_env_names(image_id)
 
 
 def require_observed_start(inspect, outcome: str, process) -> None:
@@ -495,8 +545,15 @@ def require_observed_start(inspect, outcome: str, process) -> None:
 def run_contained(
         *, image_id: str, mounts: dict, command: list[str], entrypoint: str,
         mount_spec, resource_profile, sealed: bool,
-        name_prefix: str, transport=None, cleanup_label: str = "candidate") -> dict:
-    """Run one container and return its inspect-verified raw outcome."""
+        name_prefix: str, transport=None, cleanup_label: str = "candidate",
+        record_cleanup: bool = False) -> dict:
+    """Run one container and return its inspect-verified raw outcome.
+
+    `record_cleanup` is for callers that keep an execution-envelope record:
+    a cleanup failure after the candidate already ran becomes a recorded
+    `cleanup` state instead of an exception that loses the run. Callers that
+    keep no record leave it false and a cleanup failure still refuses.
+    """
     image_id = require_image_id(image_id)
     profile = require_resource_profile(resource_profile)
     if transport is None:
@@ -537,9 +594,14 @@ def run_contained(
     except BaseException as exc:
         cleanup_container(transport, name, exc, cleanup_label)
         raise
-    cleanup_container(transport, name, None, cleanup_label)
+    if record_cleanup:
+        cleanup = classify_cleanup_result(transport, name)
+    else:
+        cleanup_container(transport, name, None, cleanup_label)
+        cleanup = "removed-and-absent"
     return {
-        "container_absent_after": True,
+        "cleanup": cleanup,
+        "container_absent_after": cleanup == "removed-and-absent",
         "contract": envelope,
         "inspect": observed,
         "name": name,
