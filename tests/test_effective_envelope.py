@@ -157,6 +157,22 @@ class ObservationOnlyProjector(unittest.TestCase):
                     _effective(doc)
                 self.assertEqual(str(ctx.exception), name)
 
+    def test_non_bool_boolean_observation_is_never_coerced(self):
+        """A daemon that reports a non-bool has not answered the question.
+
+        Coercing `0`, `""` or `null` to False would let a hardening flag be
+        satisfied by a value that never said `false`.
+        """
+        for path in (("HostConfig", "Privileged"),
+                     ("HostConfig", "ReadonlyRootfs")):
+            for value in (0, 1, "", "true", "false", None, [], {}):
+                with self.subTest(observation=".".join(path), value=value):
+                    doc = _inspect()
+                    doc[path[0]][path[1]] = value
+                    with self.assertRaises(env.EnvelopeError) as ctx:
+                        _effective(doc)
+                    self.assertEqual(str(ctx.exception), ".".join(path))
+
     def test_json_null_list_is_an_observed_empty_not_an_absence(self):
         doc = _inspect()
         doc["HostConfig"]["CapAdd"] = None
@@ -466,6 +482,70 @@ class ClosedStateModel(unittest.TestCase):
                     candidate_outcome=outcome, report_sha256=None)
                 self.assertEqual(record["publication_permission"], "withheld")
                 self.assertEqual(record["withheld_reason"], "candidate_outcome")
+
+    def test_each_state_withholds_under_its_own_name(self):
+        """One deviating state at a time, so no branch can be deleted silently.
+
+        Every case below is otherwise publishable, so a missing branch
+        returns `permitted` rather than falling through to another reason.
+        """
+        publishable = {
+            "setup_status": "ready",
+            "envelope_status": "verified",
+            "candidate_outcome": "completed",
+            "cleanup": "removed-and-absent",
+        }
+        deviations = {
+            "setup_status": "unavailable",
+            "envelope_status": "unverified",
+            "candidate_outcome": "timeout",
+            "cleanup": "absence-unproved",
+        }
+        self.assertEqual(
+            env.publication_permission(**publishable), ("permitted", None))
+        for state, value in deviations.items():
+            with self.subTest(state=state):
+                states = dict(publishable)
+                states[state] = value
+                self.assertEqual(
+                    env.publication_permission(**states), ("withheld", state))
+
+    def test_unverified_envelope_withholds_by_envelope_status(self):
+        record = env.build_envelope_record(
+            requested=_requested(),
+            setup_status="ready",
+            envelope_status="unverified",
+            unverified_field="privileged",
+            effective=None,
+            candidate_outcome="completed",
+            cleanup="removed-and-absent",
+            prepare_sha256=PREPARE_SHA256,
+            execution_commit=EXECUTION_COMMIT,
+            report_sha256=None,
+        )
+        self.assertEqual(record["publication_permission"], "withheld")
+        self.assertEqual(record["withheld_reason"], "envelope_status")
+
+    def test_builder_refuses_a_verified_record_that_contradicts_the_request(self):
+        """The record cannot be built around an unchecked observation.
+
+        The comparator is reachable on its own, so calling it directly is
+        not evidence that the builder calls it too.
+        """
+        cases = {
+            "privileged": lambda d: d["HostConfig"].__setitem__("Privileged", True),
+            "cap_add": lambda d: d["HostConfig"].__setitem__("CapAdd", ["SYS_ADMIN"]),
+            "image": lambda d: d.__setitem__("Image", OTHER_IMAGE),
+        }
+        for field, mutate in cases.items():
+            with self.subTest(field=field):
+                doc = _inspect()
+                mutate(doc)
+                effective = _effective(doc)
+                self.assertEqual(tuple(sorted(effective)), env.EFFECTIVE_KEYS)
+                with self.assertRaises(env.EnvelopeError) as ctx:
+                    _verified_record(effective=effective)
+                self.assertEqual(str(ctx.exception), field)
 
     def test_publication_permission_is_never_caller_supplied(self):
         parameters = inspect_mod.signature(env.build_envelope_record).parameters
