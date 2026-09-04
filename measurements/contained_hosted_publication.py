@@ -499,6 +499,32 @@ def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
     )
 
 
+def materialize_post_execute_refusal(*, out, reason, bindings, rerun_log,
+                                         identity, max_artifact_bytes=MAX_ARTIFACT_BYTES):
+    """Overwrite success-shaped post-execute artifacts, then caller re-raises.
+
+    Sealed execute may already have written a permitted/verified envelope.
+    Replace it with withheld/void/refused documents and append distinguished
+    rerun evidence so always() uploads never publish rejected success bytes.
+    Does not convert refusal into success.
+    """
+    setup_doc = setup_status_doc(
+        status="refused", reason=reason, bindings=bindings)
+    envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
+    candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
+    append_rerun_evidence(rerun_log, {
+        "kind": "post-execute-refusal",
+        "reason": reason,
+        "setup_status": "refused",
+        "bindings": bindings,
+        "dispatch_bindings": bindings,
+        **{k: v for k, v in identity.items() if v is not None},
+    })
+    write_separate_artifacts(
+        out, setup_doc, envelope_doc, candidate_doc,
+        max_bytes=max_artifact_bytes)
+
+
 def _materialize_void(*, out, reason, setup_status, bindings, rerun_log,
                       identity, max_artifact_bytes, kind="infrastructure-failure"):
     decision = publication_decision(None, setup_status=setup_status)
@@ -599,7 +625,9 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     check_prepare_bindings(prepare_doc, bindings=bindings)
 
     materialize_dest = out / "materialize"
+    execute_began = False
     try:
+        execute_began = True
         execute(
             authorize_path=authorize_resolved,
             prepare_path=prepare_resolved,
@@ -619,7 +647,16 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         )
         setup_status = envelope.get("setup_status") or "unavailable"
         reason = "contained-execution"
-    except HostedPublicationError:
+    except HostedPublicationError as exc:
+        if execute_began:
+            materialize_post_execute_refusal(
+                out=out,
+                reason=str(exc),
+                bindings=bindings,
+                rerun_log=rerun_log,
+                identity=identity,
+                max_artifact_bytes=max_artifact_bytes,
+            )
         raise
     except Exception as exc:
         reason = "contained-execution-failed:%s" % exc

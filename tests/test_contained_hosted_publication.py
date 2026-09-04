@@ -136,6 +136,47 @@ def _load_mutated_module(source: str, name: str):
     return mod
 
 
+
+def _assert_non_success_refusal_artifacts(testcase, out: Path, *, reason: str):
+    """All three uploadable artifacts present and non-success-shaped."""
+    setup_path = out / hosted.SETUP_STATUS_FILENAME
+    envelope_path = out / hosted.EFFECTIVE_ENVELOPE_FILENAME
+    candidate_path = out / hosted.CANDIDATE_RESULT_FILENAME
+    testcase.assertTrue(setup_path.is_file(), "setup-status.json missing")
+    testcase.assertTrue(envelope_path.is_file(), "effective-envelope missing")
+    testcase.assertTrue(candidate_path.is_file(), "candidate-result missing")
+    setup = json.loads(setup_path.read_text(encoding="utf-8"))
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    testcase.assertEqual(setup.get("kind"), "setup-status")
+    testcase.assertEqual(setup.get("setup_status"), "refused")
+    testcase.assertEqual(setup.get("reason"), reason)
+    testcase.assertEqual(envelope.get("kind"), "withheld-envelope-stub")
+    testcase.assertEqual(envelope.get("publication_permission"), "withheld")
+    testcase.assertEqual(envelope.get("envelope_status"), "unverified")
+    testcase.assertNotEqual(envelope.get("publication_permission"), "permitted")
+    testcase.assertNotEqual(envelope.get("envelope_status"), "verified")
+    testcase.assertNotIn("GITHUB_TOKEN", json.dumps(envelope))
+    testcase.assertEqual(candidate.get("kind"), "void-hosted-result")
+    testcase.assertEqual(candidate.get("score_status"), "none")
+    testcase.assertEqual(candidate.get("reason"), reason)
+    testcase.assertNotEqual(candidate.get("decision"), "publish")
+    rerun = out / hosted.RERUN_EVIDENCE_FILENAME
+    testcase.assertTrue(rerun.is_file())
+    entries = [
+        json.loads(line)
+        for line in rerun.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    testcase.assertTrue(
+        any(
+            e.get("kind") == "post-execute-refusal" and e.get("reason") == reason
+            for e in entries
+        ),
+        entries,
+    )
+
+
 def _run_ok(base, packet_name, rels, *, candidate=CANDIDATE, bindings=None,
             execute=None, out_name="artifacts", **over):
     bindings = dict(bindings or BINDINGS)
@@ -481,6 +522,8 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(base, "packet", rels, execute=execute_wrong_prep, out_name="o")
             self.assertEqual(str(ctx.exception), "prepare_sha256_binding")
+            _assert_non_success_refusal_artifacts(
+                self, base / "o", reason="prepare_sha256_binding")
 
     def test_dispatch_bindings_mismatch_and_prepare_swap_bite(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -654,6 +697,29 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(base, "packet", rels, execute=execute_cred, out_name="cred")
             self.assertEqual(str(ctx.exception), "credential_env")
+            _assert_non_success_refusal_artifacts(
+                self, base / "cred", reason="credential_env")
+
+    def test_pre_execute_refusal_does_not_fabricate_success_artifacts(self):
+        """Pre-execute fail-closed stays refuse-only (no post-execute sanitize)."""
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet, prepare_commit=OTHER_RUNNER)
+            seen = []
+
+            def spy(**kwargs):
+                seen.append(True)
+
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                _run_ok(base, "packet", rels, execute=spy, out_name="pre")
+            self.assertEqual(str(ctx.exception), "runner_revision_binding")
+            self.assertEqual(seen, [])
+            out = base / "pre"
+            self.assertFalse((out / hosted.SETUP_STATUS_FILENAME).exists())
+            self.assertFalse((out / hosted.EFFECTIVE_ENVELOPE_FILENAME).exists())
+            self.assertFalse((out / hosted.CANDIDATE_RESULT_FILENAME).exists())
 
 
 class SourceMutations(unittest.TestCase):
@@ -915,6 +981,143 @@ class SourceMutations(unittest.TestCase):
             before = good.read_bytes()
             hosted.append_rerun_evidence(good, {"reason": "second"})
             self.assertTrue(good.read_bytes().startswith(before))
+
+    def test_mutation_delete_post_execute_sanitization_is_red(self):
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        call = (
+            "        if execute_began:\n"
+            "            materialize_post_execute_refusal(\n"
+            "                out=out,\n"
+            "                reason=str(exc),\n"
+            "                bindings=bindings,\n"
+            "                rerun_log=rerun_log,\n"
+            "                identity=identity,\n"
+            "                max_artifact_bytes=max_artifact_bytes,\n"
+            "            )\n"
+        )
+        self.assertEqual(original.count(call), 1)
+        mutated = original.replace(call, "        pass  # mutated: no sanitize\n", 1)
+        bad = _load_mutated_module(mutated, "mut_no_sanitize")
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def execute_cred(**kwargs):
+                Path(kwargs["envelope_dest"]).write_text(
+                    json.dumps(
+                        _permitted_envelope(
+                            prepare_sha256=rels["prepare_sha256"],
+                            effective={
+                                "env_names": ["GITHUB_TOKEN"],
+                                "image_env_names": ["GITHUB_TOKEN"],
+                                "mounts": [],
+                            },
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+
+            with self.assertRaises(hosted.HostedPublicationError):
+                _run_ok(base, "packet", rels, execute=execute_cred, out_name="good")
+            _assert_non_success_refusal_artifacts(
+                self, base / "good", reason="credential_env")
+
+            with self.assertRaises(bad.HostedPublicationError):
+                bad.run_gate(
+                    candidate_revision=CANDIDATE,
+                    runner_revision=RUNNER,
+                    image_digest=IMAGE,
+                    operator_profile=hosted.REQUIRED_PROFILE,
+                    out_dir=base / "bad",
+                    workspace_root=base,
+                    packet_root="packet",
+                    authorize_path=rels["authorize"],
+                    prepare_path=rels["prepare"],
+                    pins_dir=rels["pins_dir"],
+                    docker_ready=lambda: "27.0.0",
+                    sealed_execute=execute_cred,
+                )
+            leaked = json.loads(
+                (base / "bad" / hosted.EFFECTIVE_ENVELOPE_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(leaked.get("publication_permission"), "permitted")
+            self.assertEqual(leaked.get("envelope_status"), "verified")
+            self.assertIn("GITHUB_TOKEN", json.dumps(leaked))
+            self.assertFalse((base / "bad" / hosted.SETUP_STATUS_FILENAME).exists())
+            self.assertFalse(
+                (base / "bad" / hosted.CANDIDATE_RESULT_FILENAME).exists()
+            )
+
+    def test_mutation_restore_stale_success_envelope_is_red(self):
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        needle = (
+            '    setup_doc = setup_status_doc(\n'
+            '        status="refused", reason=reason, bindings=bindings)\n'
+            '    envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)\n'
+        )
+        self.assertEqual(original.count(needle), 1)
+        restored = (
+            '    setup_doc = setup_status_doc(\n'
+            '        status="refused", reason=reason, bindings=bindings)\n'
+            '    envelope_doc = {\n'
+            '        "schema": HOSTED_SCHEMA,\n'
+            '        "kind": "stale-success-restored",\n'
+            '        "publication_permission": "permitted",\n'
+            '        "envelope_status": "verified",\n'
+            '        "bindings": dict(bindings),\n'
+            '    }  # mutated: restore stale success envelope\n'
+        )
+        mutated = original.replace(needle, restored, 1)
+        bad = _load_mutated_module(mutated, "mut_restore_envelope")
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def execute_wrong_prep(**kwargs):
+                Path(kwargs["envelope_dest"]).write_text(
+                    json.dumps(_permitted_envelope(prepare_sha256="ab" * 32)),
+                    encoding="utf-8",
+                )
+
+            with self.assertRaises(hosted.HostedPublicationError):
+                _run_ok(
+                    base, "packet", rels, execute=execute_wrong_prep, out_name="good"
+                )
+            good_env = json.loads(
+                (base / "good" / hosted.EFFECTIVE_ENVELOPE_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(good_env.get("publication_permission"), "withheld")
+
+            with self.assertRaises(bad.HostedPublicationError):
+                bad.run_gate(
+                    candidate_revision=CANDIDATE,
+                    runner_revision=RUNNER,
+                    image_digest=IMAGE,
+                    operator_profile=hosted.REQUIRED_PROFILE,
+                    out_dir=base / "bad",
+                    workspace_root=base,
+                    packet_root="packet",
+                    authorize_path=rels["authorize"],
+                    prepare_path=rels["prepare"],
+                    pins_dir=rels["pins_dir"],
+                    docker_ready=lambda: "27.0.0",
+                    sealed_execute=execute_wrong_prep,
+                )
+            leaked = json.loads(
+                (base / "bad" / hosted.EFFECTIVE_ENVELOPE_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(leaked.get("publication_permission"), "permitted")
+            self.assertEqual(leaked.get("envelope_status"), "verified")
 
     def test_python_comment_only_noop_control_stays_green(self):
         original = Path(hosted.__file__).read_text(encoding="utf-8")
