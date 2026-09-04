@@ -96,10 +96,6 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                                   'inputs.prepare_path '
                                                                   '}}',
                                                   'PINS_DIR': '${{ inputs.pins_dir }}',
-                                                  'RUNNER_ENVIRONMENT': '${{ '
-                                                                        'runner.environment '
-                                                                        '}}',
-                                                  'HOSTED_FORWARDED_ENV_NAMES': 'CANDIDATE_REVISION,RUNNER_REVISION,IMAGE_DIGEST,PACKET_ROOT,AUTHORIZE_PATH,PREPARE_PATH,PINS_DIR,RUNNER_ENVIRONMENT,HOSTED_FORWARDED_ENV_NAMES,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,OPERATOR_EXECUTION_PROFILE,MAX_ARTIFACT_BYTES',
                                                   'GITHUB_RUN_ID': '${{ github.run_id '
                                                                    '}}',
                                                   'GITHUB_RUN_ATTEMPT': '${{ '
@@ -115,31 +111,36 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                  '"$OPERATOR_EXECUTION_PROFILE" '
                                                  '--max-artifact-bytes '
                                                  '"$MAX_ARTIFACT_BYTES" --out '
-                                                 'artifacts --packet-root '
+                                                 'artifacts --workspace-root '
+                                                 '"$GITHUB_WORKSPACE" --packet-root '
                                                  '"$PACKET_ROOT" --authorize '
                                                  '"$AUTHORIZE_PATH" --prepare '
                                                  '"$PREPARE_PATH" --pins-dir '
                                                  '"$PINS_DIR" --rerun-log '
                                                  'artifacts/rerun-evidence.jsonl'},
                                          {'name': 'Upload setup',
+                                          'if': 'always() && !cancelled()',
                                           'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
                                           'with': {'name': 'setup',
                                                    'path': 'artifacts/setup-status.json',
                                                    'retention-days': 14,
                                                    'if-no-files-found': 'error'}},
                                          {'name': 'Upload effective-envelope',
+                                          'if': 'always() && !cancelled()',
                                           'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
                                           'with': {'name': 'effective-envelope',
                                                    'path': 'artifacts/effective-envelope.v0.json',
                                                    'retention-days': 14,
                                                    'if-no-files-found': 'error'}},
                                          {'name': 'Upload candidate-result',
+                                          'if': 'always() && !cancelled()',
                                           'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
                                           'with': {'name': 'candidate-result',
                                                    'path': 'artifacts/candidate-result.json',
                                                    'retention-days': 14,
                                                    'if-no-files-found': 'error'}},
                                          {'name': 'Upload rerun-evidence',
+                                          'if': 'always() && !cancelled()',
                                           'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
                                           'with': {'name': 'rerun-evidence-${{ '
                                                            'github.run_id }}-${{ '
@@ -147,7 +148,6 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                    'path': 'artifacts/rerun-evidence.jsonl',
                                                    'retention-days': 14,
                                                    'if-no-files-found': 'error'}}]}}}
-
 
 def _strip_comment(line: str) -> str:
     in_single = in_double = escaped = False
@@ -259,6 +259,8 @@ def hosted_shape_violations(tree) -> list[str]:
         bad.append("HOSTED_RUNS_ON must not be runtime evidence")
     if "HOSTED_PERSIST_CREDENTIALS" in env:
         bad.append("HOSTED_PERSIST_CREDENTIALS must not be runtime evidence")
+    if "HOSTED_FORWARDED_ENV_NAMES" in env:
+        bad.append("HOSTED_FORWARDED_ENV_NAMES must not be runtime evidence")
     on = tree.get("on") or {}
     inputs = ((on.get("workflow_dispatch") or {}).get("inputs") or {})
     for key in (
@@ -290,11 +292,21 @@ def hosted_shape_violations(tree) -> list[str]:
             upload_names.append(with_block.get("name"))
             if with_block.get("retention-days") != 14:
                 bad.append("upload retention-days ceiling missing")
+            if with_block.get("if-no-files-found") != "error":
+                bad.append("upload if-no-files-found must be error")
+            step_if = step.get("if")
+            if step_if != "always() && !cancelled()":
+                bad.append(
+                    "upload steps must run on failure/cancellation "
+                    "(if: always() && !cancelled())"
+                )
         run = step.get("run")
         if isinstance(run, str):
             if "${{ inputs." in run:
                 bad.append("workflow inputs must not appear in run: (shell breakout)")
             if step.get("name") == "Gate hosted publication":
+                if step.get("continue-on-error") is True:
+                    bad.append("gate continue-on-error would turn refusal green")
                 if "trusted-local" in run:
                     bad.append("trusted-local profile forbidden in gate run")
                 if "write-workflow-facts" in run:
@@ -310,13 +322,16 @@ def hosted_shape_violations(tree) -> list[str]:
                 for key in (
                     "CANDIDATE_REVISION", "RUNNER_REVISION", "IMAGE_DIGEST",
                     "PACKET_ROOT", "AUTHORIZE_PATH", "PREPARE_PATH", "PINS_DIR",
-                    "RUNNER_ENVIRONMENT", "HOSTED_FORWARDED_ENV_NAMES",
                     "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
                 ):
                     if key not in env_step:
                         bad.append("gate env missing %s" % key)
-                if env_step.get("RUNNER_ENVIRONMENT") != "${{ runner.environment }}":
-                    bad.append("RUNNER_ENVIRONMENT must be runner.environment")
+                if "HOSTED_FORWARDED_ENV_NAMES" in env_step:
+                    bad.append("HOSTED_FORWARDED_ENV_NAMES must not be runtime evidence")
+                if "RUNNER_ENVIRONMENT" in env_step:
+                    bad.append("RUNNER_ENVIRONMENT must remain structural-only")
+                if "--workspace-root" not in run or "$GITHUB_WORKSPACE" not in run:
+                    bad.append("gate run must pass --workspace-root $GITHUB_WORKSPACE")
     if saw_write_facts:
         bad.append("write-workflow-facts step must not exist as runtime evidence")
     expected_uploads = [
@@ -407,6 +422,7 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
     def test_mutation_omit_rerun_evidence_upload_is_red(self):
         block = (
             "      - name: Upload rerun-evidence\n"
+            "        if: always() && !cancelled()\n"
             "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
             "        with:\n"
             "          name: rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}\n"
@@ -449,6 +465,49 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
             self.assertNotEqual(mutated_text, self.text, needle)
             hits = hosted_shape_violations(parse_workflow_yaml(mutated_text))
             self.assertTrue(hits, needle)
+
+
+    def test_upload_steps_always_on_failure_and_keep_if_no_files_error(self):
+        for step in self.tree["jobs"]["hosted-contained"]["steps"]:
+            uses = str(step.get("uses") or "")
+            if uses.startswith("actions/upload-artifact@"):
+                self.assertEqual(step.get("if"), "always() && !cancelled()")
+                self.assertEqual(step["with"].get("if-no-files-found"), "error")
+        gate = self.tree["jobs"]["hosted-contained"]["steps"][2]
+        self.assertNotEqual(gate.get("continue-on-error"), True)
+
+    def test_mutation_drop_upload_always_is_red(self):
+        hits = hosted_shape_violations(self._mutated(
+            "        if: always() && !cancelled()\n",
+            "",
+        ))
+        self.assertTrue(any("always()" in h or "cancelled" in h for h in hits), hits)
+
+    def test_mutation_restore_forwarded_env_names_is_red(self):
+        poisoned = self.text.replace(
+            "          GITHUB_RUN_ID: ${{ github.run_id }}\n",
+            "          HOSTED_FORWARDED_ENV_NAMES: CANDIDATE_REVISION\n"
+            "          GITHUB_RUN_ID: ${{ github.run_id }}\n",
+            1,
+        )
+        self.assertNotEqual(poisoned, self.text)
+        hits = hosted_shape_violations(parse_workflow_yaml(poisoned))
+        self.assertTrue(
+            any("HOSTED_FORWARDED" in h or "diverges" in h for h in hits), hits
+        )
+
+    def test_mutation_gate_continue_on_error_is_red(self):
+        poisoned = self.text.replace(
+            "      - name: Gate hosted publication\n        shell: bash\n",
+            "      - name: Gate hosted publication\n"
+            "        continue-on-error: true\n"
+            "        shell: bash\n",
+            1,
+        )
+        self.assertNotEqual(poisoned, self.text)
+        hits = hosted_shape_violations(parse_workflow_yaml(poisoned))
+        self.assertTrue(any("continue-on-error" in h or "diverges" in h for h in hits), hits)
+
 
     def test_comment_only_noop_mutation_stays_green(self):
         mutated_text = "# noop comment\n" + self.text

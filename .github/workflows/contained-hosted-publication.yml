@@ -70,12 +70,11 @@ jobs:
           AUTHORIZE_PATH: ${{ inputs.authorize_path }}
           PREPARE_PATH: ${{ inputs.prepare_path }}
           PINS_DIR: ${{ inputs.pins_dir }}
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          HOSTED_FORWARDED_ENV_NAMES: CANDIDATE_REVISION,RUNNER_REVISION,IMAGE_DIGEST,PACKET_ROOT,AUTHORIZE_PATH,PREPARE_PATH,PINS_DIR,RUNNER_ENVIRONMENT,HOSTED_FORWARDED_ENV_NAMES,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,OPERATOR_EXECUTION_PROFILE,MAX_ARTIFACT_BYTES
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --operator-profile "$OPERATOR_EXECUTION_PROFILE" --max-artifact-bytes "$MAX_ARTIFACT_BYTES" --out artifacts --packet-root "$PACKET_ROOT" --authorize "$AUTHORIZE_PATH" --prepare "$PREPARE_PATH" --pins-dir "$PINS_DIR" --rerun-log artifacts/rerun-evidence.jsonl
+        run: python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --operator-profile "$OPERATOR_EXECUTION_PROFILE" --max-artifact-bytes "$MAX_ARTIFACT_BYTES" --out artifacts --workspace-root "$GITHUB_WORKSPACE" --packet-root "$PACKET_ROOT" --authorize "$AUTHORIZE_PATH" --prepare "$PREPARE_PATH" --pins-dir "$PINS_DIR" --rerun-log artifacts/rerun-evidence.jsonl
       - name: Upload setup
+        if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: setup
@@ -83,6 +82,7 @@ jobs:
           retention-days: 14
           if-no-files-found: error
       - name: Upload effective-envelope
+        if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: effective-envelope
@@ -90,6 +90,7 @@ jobs:
           retention-days: 14
           if-no-files-found: error
       - name: Upload candidate-result
+        if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: candidate-result
@@ -97,6 +98,7 @@ jobs:
           retention-days: 14
           if-no-files-found: error
       - name: Upload rerun-evidence
+        if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}

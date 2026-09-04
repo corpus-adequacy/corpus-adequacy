@@ -8,17 +8,21 @@ escape-proof OCI.
 
 Dispatch bindings (candidate_revision, runner_revision, image_digest) are
 sealed into the execution contract: a packet-root bindings file must match,
-prepare.execution.commit and the produced envelope must match runner/image,
-and setup/candidate artifacts stamp the effective bindings. Authorize,
-prepare, pins, envelope and related JSON inputs resolve only as confined
-regular files under a declared root with byte ceilings before parse.
-Runtime hostility checks use observed runner.environment and an explicit
-forwarded env-name list — not duplicated YAML literals.
+prepare.pins.subject_commit must equal candidate_revision (sole producer
+candidate identity), prepare.execution.commit / image.id and the produced
+envelope must match runner/image, and envelope prepare_sha256 must bind the
+exact checked prepare bytes. Packet root itself resolves under an explicit
+workspace root before any child read. Authorize/prepare/pins/envelope JSON
+resolve only as confined regular files under that packet root with byte
+ceilings before parse. Child-environment observation comes only from the
+contained OCI effective envelope (env_names/mounts); runner.environment,
+runs-on, and persist-credentials remain structural workflow facts.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import stat
@@ -76,6 +80,16 @@ class HostedPublicationError(Exception):
     """Hosted publication was refused before a score could be emitted."""
 
 
+
+def _canonical_path(path) -> Path:
+    """Cross-platform path identity (macOS /var→/private/var, Win 8.3)."""
+    return Path(os.path.realpath(os.fspath(path)))
+
+
+def paths_equal(left, right) -> bool:
+    return _canonical_path(left) == _canonical_path(right)
+
+
 def _require_hex40(value, where: str) -> str:
     if (not isinstance(value, str) or len(value) != 40 or
             any(ch not in HEX40 for ch in value)):
@@ -118,7 +132,9 @@ def resolve_confined_input(root, relpath, *, max_bytes: int | None = None) -> Pa
 
     When max_bytes is set, the leaf must be a regular file whose size is at
     or under the ceiling (checked via lstat before any read). When max_bytes
-    is None, the leaf must be a non-symlink directory (pins tree).
+    is None, the leaf must be a non-symlink directory (packet root / pins).
+    Path comparisons canonicalize both sides so macOS /var vs /private/var and
+    Windows long vs 8.3 aliases compare equal while genuine escapes still refuse.
     """
     if not isinstance(relpath, str) or not relpath:
         raise HostedPublicationError("confined_path")
@@ -137,7 +153,7 @@ def resolve_confined_input(root, relpath, *, max_bytes: int | None = None) -> Pa
     try:
         if root_path.is_symlink():
             raise HostedPublicationError("confined_path")
-        root_resolved = root_path.resolve(strict=True)
+        root_resolved = _canonical_path(root_path.resolve(strict=True))
     except (OSError, HostedPublicationError):
         raise HostedPublicationError("confined_path") from None
     if not root_resolved.is_dir() or root_resolved.is_symlink():
@@ -163,7 +179,7 @@ def resolve_confined_input(root, relpath, *, max_bytes: int | None = None) -> Pa
         raise HostedPublicationError("confined_path")
 
     try:
-        resolved = current.resolve(strict=True)
+        resolved = _canonical_path(current.resolve(strict=True))
         resolved.relative_to(root_resolved)
     except (OSError, ValueError) as exc:
         raise HostedPublicationError("confined_path") from exc
@@ -173,7 +189,7 @@ def resolve_confined_input(root, relpath, *, max_bytes: int | None = None) -> Pa
     if max_bytes is None:
         if not stat.S_ISDIR(st.st_mode):
             raise HostedPublicationError("confined_path")
-        return current
+        return resolved
 
     if not stat.S_ISREG(st.st_mode):
         raise HostedPublicationError("confined_path")
@@ -181,7 +197,7 @@ def resolve_confined_input(root, relpath, *, max_bytes: int | None = None) -> Pa
         raise HostedPublicationError("max_input_bytes")
     if st.st_size > max_bytes:
         raise HostedPublicationError("max_input_bytes")
-    return current
+    return resolved
 
 
 def load_json_confined(root, relpath, *, max_bytes: int):
@@ -196,6 +212,28 @@ def load_json_confined(root, relpath, *, max_bytes: int):
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise HostedPublicationError("json_input") from exc
     return doc
+
+
+def resolve_workspace_root(workspace_root) -> Path:
+    """Require an explicit existing non-symlink workspace directory."""
+    if workspace_root is None or (isinstance(workspace_root, str) and not workspace_root):
+        raise HostedPublicationError("workspace_root")
+    root = Path(workspace_root)
+    try:
+        if root.is_symlink():
+            raise HostedPublicationError("workspace_root")
+        resolved = _canonical_path(root.resolve(strict=True))
+    except (OSError, HostedPublicationError):
+        raise HostedPublicationError("workspace_root") from None
+    if not resolved.is_dir() or resolved.is_symlink():
+        raise HostedPublicationError("workspace_root")
+    return resolved
+
+
+def resolve_packet_root(workspace_root, packet_root) -> Path:
+    """Constrain packet_root itself beneath the checked-out workspace root."""
+    workspace = resolve_workspace_root(workspace_root)
+    return resolve_confined_input(workspace, packet_root, max_bytes=None)
 
 
 def load_dispatch_bindings(packet_root, *, expected: dict,
@@ -227,9 +265,14 @@ def check_prepare_bindings(prepare_doc, *, bindings) -> None:
         raise HostedPublicationError("image_digest_binding")
     if image.get("id") != bindings["image_digest"]:
         raise HostedPublicationError("image_digest_binding")
+    pins = prepare_doc.get("pins")
+    if type(pins) is not dict:
+        raise HostedPublicationError("candidate_revision_binding")
+    if pins.get("subject_commit") != bindings["candidate_revision"]:
+        raise HostedPublicationError("candidate_revision_binding")
 
 
-def check_envelope_bindings(envelope_doc, *, bindings) -> None:
+def check_envelope_bindings(envelope_doc, *, bindings, prepare_sha256) -> None:
     if type(envelope_doc) is not dict:
         raise HostedPublicationError("envelope_bindings")
     if envelope_doc.get("execution_commit") != bindings["runner_revision"]:
@@ -239,44 +282,58 @@ def check_envelope_bindings(envelope_doc, *, bindings) -> None:
         raise HostedPublicationError("image_digest_binding")
     if requested.get("image_id") != bindings["image_digest"]:
         raise HostedPublicationError("image_digest_binding")
+    if (not isinstance(prepare_sha256, str) or len(prepare_sha256) != 64 or
+            any(ch not in "0123456789abcdef" for ch in prepare_sha256)):
+        raise HostedPublicationError("prepare_sha256_binding")
+    if envelope_doc.get("prepare_sha256") != prepare_sha256:
+        raise HostedPublicationError("prepare_sha256_binding")
 
 
-def observe_runtime_workflow(*, environ=None, mounts=None) -> dict:
-    """Single producer of runtime workflow observations for refuse_*."""
-    env = os.environ if environ is None else environ
-    runner_environment = env.get("RUNNER_ENVIRONMENT")
-    if not isinstance(runner_environment, str) or not runner_environment:
-        raise HostedPublicationError("runner_environment")
-    raw_names = env.get("HOSTED_FORWARDED_ENV_NAMES")
-    if raw_names is None:
-        raise HostedPublicationError("forwarded_env_names")
-    if not isinstance(raw_names, str):
-        raise HostedPublicationError("forwarded_env_names")
-    forwarded_env_names = tuple(name for name in raw_names.split(",") if name)
+def observe_child_environment(envelope_doc) -> dict:
+    """Sole child-environment observation: contained OCI effective envelope.
+
+    Values come from the envelope projected by contained_oci / effective_envelope
+    (env_names and mounts). runner.environment, runs-on, and persist-credentials
+    are structural workflow facts and are not read here.
+    """
+    if type(envelope_doc) is not dict:
+        raise HostedPublicationError("envelope_effective")
+    effective = envelope_doc.get("effective")
+    if type(effective) is not dict:
+        raise HostedPublicationError("envelope_effective")
+    env_names = effective.get("env_names")
+    if type(env_names) not in (list, tuple):
+        raise HostedPublicationError("child_env_names")
+    for name in env_names:
+        if not isinstance(name, str) or not name:
+            raise HostedPublicationError("child_env_names")
+    mounts = effective.get("mounts")
+    if type(mounts) not in (list, tuple):
+        raise HostedPublicationError("child_mounts")
     return {
-        "runner_environment": runner_environment,
-        "forwarded_env_names": forwarded_env_names,
-        "mounts": list(mounts if mounts is not None else []),
+        "env_names": tuple(env_names),
+        "mounts": list(mounts),
+        "image_env_names": (
+            tuple(effective["image_env_names"])
+            if type(effective.get("image_env_names")) in (list, tuple)
+            else ()),
     }
 
 
-def refuse_hostile_workflow(*, runner_environment, forwarded_env_names,
-                            mounts=()):
-    """Refuse hostile runtime observations. None forwarded_env_names is error."""
-    if runner_environment != REQUIRED_RUNNER_ENVIRONMENT:
-        raise HostedPublicationError("runner_environment")
-    if forwarded_env_names is None:
-        raise HostedPublicationError("forwarded_env_names")
-    if type(forwarded_env_names) not in (list, tuple):
-        raise HostedPublicationError("forwarded_env_names")
-    for name in forwarded_env_names:
+def refuse_hostile_workflow(*, env_names, mounts=()):
+    """Refuse hostile child-environment observations from the OCI envelope."""
+    if env_names is None:
+        raise HostedPublicationError("child_env_names")
+    if type(env_names) not in (list, tuple):
+        raise HostedPublicationError("child_env_names")
+    for name in env_names:
         if _is_credential_env(name):
             raise HostedPublicationError("credential_env")
     if type(mounts) not in (list, tuple):
-        raise HostedPublicationError("mounts")
+        raise HostedPublicationError("child_mounts")
     for mount in mounts:
         if not isinstance(mount, dict):
-            raise HostedPublicationError("mounts")
+            raise HostedPublicationError("child_mounts")
         source = str(mount.get("source", "") or mount.get("Source", "") or "")
         destination = str(
             mount.get("destination", "") or mount.get("Destination", "") or "")
@@ -466,21 +523,13 @@ def _materialize_void(*, out, reason, setup_status, bindings, rerun_log,
 def run_gate(*, candidate_revision, runner_revision, image_digest,
              operator_profile, out_dir,
              packet_root=None, authorize_path=None, prepare_path=None,
-             pins_dir=None, root=None, rerun_log=None,
+             pins_dir=None, root=None, workspace_root=None, rerun_log=None,
              max_artifact_bytes=MAX_ARTIFACT_BYTES,
              max_input_bytes=MAX_INPUT_BYTES,
-             docker_ready=None, sealed_execute=None,
-             runtime_environ=None) -> dict:
+             docker_ready=None, sealed_execute=None) -> dict:
     bindings = require_bindings(
         candidate_revision, runner_revision, image_digest)
     require_operator_profile(operator_profile)
-
-    observed = observe_runtime_workflow(environ=runtime_environ)
-    refuse_hostile_workflow(
-        runner_environment=observed["runner_environment"],
-        forwarded_env_names=observed["forwarded_env_names"],
-        mounts=observed["mounts"],
-    )
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -527,7 +576,9 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             bindings=bindings, rerun_log=rerun_log, identity=identity,
             max_artifact_bytes=max_artifact_bytes)
 
-    packet = Path(packet_root)
+    if workspace_root is None:
+        workspace_root = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
+    packet = resolve_packet_root(workspace_root, packet_root)
     load_dispatch_bindings(
         packet, expected=bindings, max_bytes=max_input_bytes)
     authorize_resolved = resolve_confined_input(
@@ -535,8 +586,16 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     prepare_resolved = resolve_confined_input(
         packet, prepare_path, max_bytes=max_input_bytes)
     pins_resolved = resolve_confined_input(packet, pins_dir, max_bytes=None)
-    prepare_doc = load_json_confined(
-        packet, prepare_path, max_bytes=max_input_bytes)
+    try:
+        prepare_raw = ca.read_bounded_regular_file(
+            prepare_resolved, cap=max_input_bytes)
+    except ca.ManifestError as exc:
+        raise HostedPublicationError("max_input_bytes") from exc
+    prepare_sha256 = hashlib.sha256(prepare_raw).hexdigest()
+    try:
+        prepare_doc = json.loads(prepare_raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise HostedPublicationError("json_input") from exc
     check_prepare_bindings(prepare_doc, bindings=bindings)
 
     materialize_dest = out / "materialize"
@@ -551,7 +610,13 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             max_bytes=max_input_bytes,
         )
         envelope = load_envelope(envelope_dest, max_bytes=max_input_bytes)
-        check_envelope_bindings(envelope, bindings=bindings)
+        check_envelope_bindings(
+            envelope, bindings=bindings, prepare_sha256=prepare_sha256)
+        observed_child = observe_child_environment(envelope)
+        refuse_hostile_workflow(
+            env_names=observed_child["env_names"],
+            mounts=observed_child["mounts"],
+        )
         setup_status = envelope.get("setup_status") or "unavailable"
         reason = "contained-execution"
     except HostedPublicationError:
@@ -633,6 +698,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--prepare", default=None)
     gate.add_argument("--pins-dir", default=None)
     gate.add_argument("--root", default=None)
+    gate.add_argument("--workspace-root", default=None)
     gate.add_argument("--rerun-log", default=None)
     gate.add_argument(
         "--max-artifact-bytes", type=int, default=MAX_ARTIFACT_BYTES)
@@ -658,6 +724,7 @@ def main(argv=None) -> int:
             prepare_path=args.prepare,
             pins_dir=args.pins_dir,
             root=args.root,
+            workspace_root=args.workspace_root,
             rerun_log=args.rerun_log,
             max_artifact_bytes=args.max_artifact_bytes,
             max_input_bytes=args.max_input_bytes,
