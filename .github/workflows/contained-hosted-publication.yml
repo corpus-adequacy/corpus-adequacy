@@ -1,0 +1,70 @@
+name: contained-hosted-publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_revision:
+        description: Immutable candidate revision (40-hex)
+        required: true
+        type: string
+      runner_revision:
+        description: Generic runner revision (40-hex)
+        required: true
+        type: string
+      image_digest:
+        description: Contained OCI image digest (sha256:64hex)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contained-hosted-publication
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.13"
+  OPERATOR_EXECUTION_PROFILE: contained-oci-v0
+  MAX_ARTIFACT_BYTES: "5242880"
+  ARTIFACT_RETENTION_DAYS: "14"
+
+jobs:
+  hosted-contained:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.runner_revision }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Gate hosted publication
+        shell: bash
+        run: export CANDIDATE_REVISION="${{ inputs.candidate_revision }}"; export RUNNER_REVISION="${{ inputs.runner_revision }}"; export IMAGE_DIGEST="${{ inputs.image_digest }}"; python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --operator-profile "$OPERATOR_EXECUTION_PROFILE" --max-artifact-bytes "$MAX_ARTIFACT_BYTES" --out artifacts --rerun-log artifacts/rerun-evidence.jsonl
+      - name: Upload setup
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: setup
+          path: artifacts/setup-status.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Upload effective-envelope
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: effective-envelope
+          path: artifacts/effective-envelope.v0.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Upload candidate-result
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-result
+          path: artifacts/candidate-result.json
+          retention-days: 14
+          if-no-files-found: error
