@@ -28,23 +28,32 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                                          '(sha256:64hex)',
                                                           'required': True,
                                                           'type': 'string'},
+                                         'packet_root': {'description': 'Declared '
+                                                                        'packet root '
+                                                                        '(relative) '
+                                                                        'holding '
+                                                                        'authorize/prepare/pins/bindings',
+                                                         'required': True,
+                                                         'type': 'string'},
                                          'authorize_path': {'description': 'Path to '
                                                                            'authorize.v0 '
-                                                                           'bytes in '
-                                                                           'the runner '
-                                                                           'tree',
+                                                                           'bytes '
+                                                                           'relative '
+                                                                           'to packet '
+                                                                           'root',
                                                             'required': True,
                                                             'type': 'string'},
                                          'prepare_path': {'description': 'Path to '
                                                                          'prepare.v1 '
-                                                                         'bytes in the '
-                                                                         'runner tree',
+                                                                         'bytes '
+                                                                         'relative to '
+                                                                         'packet root',
                                                           'required': True,
                                                           'type': 'string'},
                                          'pins_dir': {'description': 'Path to frozen '
                                                                      'pins directory '
-                                                                     'in the runner '
-                                                                     'tree',
+                                                                     'relative to '
+                                                                     'packet root',
                                                       'required': True,
                                                       'type': 'string'}}}},
  'permissions': {'contents': 'read'},
@@ -52,9 +61,7 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
  'env': {'PYTHON_VERSION': '3.13',
          'OPERATOR_EXECUTION_PROFILE': 'contained-oci-v0',
          'MAX_ARTIFACT_BYTES': '5242880',
-         'ARTIFACT_RETENTION_DAYS': '14',
-         'HOSTED_RUNS_ON': 'ubuntu-latest',
-         'HOSTED_PERSIST_CREDENTIALS': 'false'},
+         'ARTIFACT_RETENTION_DAYS': '14'},
  'jobs': {'hosted-contained': {'runs-on': 'ubuntu-latest',
                                'timeout-minutes': 15,
                                'steps': [{'name': 'Checkout',
@@ -68,12 +75,6 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                           'with': {'python-version': '${{ '
                                                                      'env.PYTHON_VERSION '
                                                                      '}}'}},
-                                         {'name': 'Write workflow facts',
-                                          'shell': 'bash',
-                                          'run': 'python '
-                                                 'measurements/contained_hosted_publication.py '
-                                                 'write-workflow-facts --out '
-                                                 'artifacts/workflow-facts.json'},
                                          {'name': 'Gate hosted publication',
                                           'shell': 'bash',
                                           'env': {'CANDIDATE_REVISION': '${{ '
@@ -85,6 +86,9 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                   'IMAGE_DIGEST': '${{ '
                                                                   'inputs.image_digest '
                                                                   '}}',
+                                                  'PACKET_ROOT': '${{ '
+                                                                 'inputs.packet_root '
+                                                                 '}}',
                                                   'AUTHORIZE_PATH': '${{ '
                                                                     'inputs.authorize_path '
                                                                     '}}',
@@ -92,6 +96,10 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                                   'inputs.prepare_path '
                                                                   '}}',
                                                   'PINS_DIR': '${{ inputs.pins_dir }}',
+                                                  'RUNNER_ENVIRONMENT': '${{ '
+                                                                        'runner.environment '
+                                                                        '}}',
+                                                  'HOSTED_FORWARDED_ENV_NAMES': 'CANDIDATE_REVISION,RUNNER_REVISION,IMAGE_DIGEST,PACKET_ROOT,AUTHORIZE_PATH,PREPARE_PATH,PINS_DIR,RUNNER_ENVIRONMENT,HOSTED_FORWARDED_ENV_NAMES,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,OPERATOR_EXECUTION_PROFILE,MAX_ARTIFACT_BYTES',
                                                   'GITHUB_RUN_ID': '${{ github.run_id '
                                                                    '}}',
                                                   'GITHUB_RUN_ATTEMPT': '${{ '
@@ -107,10 +115,10 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                  '"$OPERATOR_EXECUTION_PROFILE" '
                                                  '--max-artifact-bytes '
                                                  '"$MAX_ARTIFACT_BYTES" --out '
-                                                 'artifacts --workflow-facts '
-                                                 'artifacts/workflow-facts.json '
-                                                 '--authorize "$AUTHORIZE_PATH" '
-                                                 '--prepare "$PREPARE_PATH" --pins-dir '
+                                                 'artifacts --packet-root '
+                                                 '"$PACKET_ROOT" --authorize '
+                                                 '"$AUTHORIZE_PATH" --prepare '
+                                                 '"$PREPARE_PATH" --pins-dir '
                                                  '"$PINS_DIR" --rerun-log '
                                                  'artifacts/rerun-evidence.jsonl'},
                                          {'name': 'Upload setup',
@@ -133,7 +141,9 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                    'if-no-files-found': 'error'}},
                                          {'name': 'Upload rerun-evidence',
                                           'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
-                                          'with': {'name': 'rerun-evidence',
+                                          'with': {'name': 'rerun-evidence-${{ '
+                                                           'github.run_id }}-${{ '
+                                                           'github.run_attempt }}',
                                                    'path': 'artifacts/rerun-evidence.jsonl',
                                                    'retention-days': 14,
                                                    'if-no-files-found': 'error'}}]}}}
@@ -245,14 +255,14 @@ def hosted_shape_violations(tree) -> list[str]:
         bad.append("MAX_ARTIFACT_BYTES ceiling missing")
     if env.get("ARTIFACT_RETENTION_DAYS") != "14":
         bad.append("ARTIFACT_RETENTION_DAYS ceiling missing")
-    if env.get("HOSTED_RUNS_ON") != "ubuntu-latest":
-        bad.append("HOSTED_RUNS_ON must be ubuntu-latest")
-    if env.get("HOSTED_PERSIST_CREDENTIALS") != "false":
-        bad.append("HOSTED_PERSIST_CREDENTIALS must be false")
+    if "HOSTED_RUNS_ON" in env:
+        bad.append("HOSTED_RUNS_ON must not be runtime evidence")
+    if "HOSTED_PERSIST_CREDENTIALS" in env:
+        bad.append("HOSTED_PERSIST_CREDENTIALS must not be runtime evidence")
     on = tree.get("on") or {}
     inputs = ((on.get("workflow_dispatch") or {}).get("inputs") or {})
     for key in (
-        "candidate_revision", "runner_revision", "image_digest",
+        "candidate_revision", "runner_revision", "image_digest", "packet_root",
         "authorize_path", "prepare_path", "pins_dir",
     ):
         if key not in inputs:
@@ -263,9 +273,12 @@ def hosted_shape_violations(tree) -> list[str]:
         bad.append("runs-on must be ubuntu-latest (no self-hosted/local)")
     steps = job.get("steps") or []
     upload_names = []
+    saw_write_facts = False
     for step in steps:
         if not isinstance(step, dict):
             continue
+        if step.get("name") == "Write workflow facts":
+            saw_write_facts = True
         uses = str(step.get("uses") or "")
         with_block = step.get("with") or {}
         if uses.startswith("actions/checkout@"):
@@ -284,27 +297,45 @@ def hosted_shape_violations(tree) -> list[str]:
             if step.get("name") == "Gate hosted publication":
                 if "trusted-local" in run:
                     bad.append("trusted-local profile forbidden in gate run")
+                if "write-workflow-facts" in run:
+                    bad.append("write-workflow-facts must not be runtime evidence path")
                 for binding in (
                     "$CANDIDATE_REVISION", "$RUNNER_REVISION", "$IMAGE_DIGEST",
-                    "$AUTHORIZE_PATH", "$PREPARE_PATH", "$PINS_DIR",
-                    "--workflow-facts",
+                    "$PACKET_ROOT", "$AUTHORIZE_PATH", "$PREPARE_PATH", "$PINS_DIR",
+                    "--packet-root",
                 ):
                     if binding not in run:
                         bad.append("gate run missing %s" % binding)
                 env_step = step.get("env") or {}
                 for key in (
                     "CANDIDATE_REVISION", "RUNNER_REVISION", "IMAGE_DIGEST",
-                    "AUTHORIZE_PATH", "PREPARE_PATH", "PINS_DIR",
+                    "PACKET_ROOT", "AUTHORIZE_PATH", "PREPARE_PATH", "PINS_DIR",
+                    "RUNNER_ENVIRONMENT", "HOSTED_FORWARDED_ENV_NAMES",
+                    "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
                 ):
                     if key not in env_step:
                         bad.append("gate env missing %s" % key)
-    if upload_names != [
-        "setup", "effective-envelope", "candidate-result", "rerun-evidence"
-    ]:
+                if env_step.get("RUNNER_ENVIRONMENT") != "${{ runner.environment }}":
+                    bad.append("RUNNER_ENVIRONMENT must be runner.environment")
+    if saw_write_facts:
+        bad.append("write-workflow-facts step must not exist as runtime evidence")
+    expected_uploads = [
+        "setup", "effective-envelope", "candidate-result",
+    ]
+    if len(upload_names) != 4 or upload_names[:3] != expected_uploads:
         bad.append(
             "must upload setup, effective-envelope, candidate-result, "
             "rerun-evidence separately"
         )
+    else:
+        rerun_name = upload_names[3]
+        if not isinstance(rerun_name, str):
+            bad.append("rerun-evidence artifact name missing run identity")
+        else:
+            if "github.run_id" not in rerun_name or "github.run_attempt" not in rerun_name:
+                bad.append("rerun-evidence artifact name must include run_id and run_attempt")
+            if rerun_name == "rerun-evidence":
+                bad.append("rerun-evidence artifact name must not be static")
     if tree != ALLOWED_HOSTED_WORKFLOW and not bad:
         bad.append("workflow diverges from ALLOWED_HOSTED_WORKFLOW")
     return bad
@@ -324,8 +355,13 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         self.assertEqual(self.tree, ALLOWED_HOSTED_WORKFLOW)
         self.assertEqual(hosted_shape_violations(self.tree), [])
 
+    def test_structural_pins_runs_on_and_persist_credentials(self):
+        job = self.tree["jobs"]["hosted-contained"]
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        checkout = job["steps"][0]
+        self.assertIs(checkout["with"]["persist-credentials"], False)
+
     def test_mutation_shell_breakout_inputs_in_run_is_red(self):
-        # Exact breakout shape: interpolating inputs inside run.
         poisoned = self.text.replace(
             'run: python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION"',
             'run: export CANDIDATE_REVISION="${{ inputs.candidate_revision }}"; python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION"',
@@ -358,12 +394,22 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         ))
         self.assertTrue(any("separately" in h for h in hits), hits)
 
+    def test_mutation_static_rerun_artifact_name_is_red(self):
+        hits = hosted_shape_violations(self._mutated(
+            "name: rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}",
+            "name: rerun-evidence",
+        ))
+        self.assertTrue(
+            any("run_id" in h or "run_attempt" in h or "static" in h for h in hits),
+            hits,
+        )
+
     def test_mutation_omit_rerun_evidence_upload_is_red(self):
         block = (
             "      - name: Upload rerun-evidence\n"
             "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
             "        with:\n"
-            "          name: rerun-evidence\n"
+            "          name: rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}\n"
             "          path: artifacts/rerun-evidence.jsonl\n"
             "          retention-days: 14\n"
             "          if-no-files-found: error\n"
@@ -382,6 +428,16 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         )
         hits = hosted_shape_violations(self._mutated(block, ""))
         self.assertTrue(any("image_digest" in h or "diverges" in h for h in hits), hits)
+
+    def test_mutation_restore_hosted_runs_on_literal_evidence_is_red(self):
+        poisoned = self.text.replace(
+            '  ARTIFACT_RETENTION_DAYS: "14"\n',
+            '  ARTIFACT_RETENTION_DAYS: "14"\n  HOSTED_RUNS_ON: ubuntu-latest\n',
+            1,
+        )
+        self.assertNotEqual(poisoned, self.text)
+        hits = hosted_shape_violations(parse_workflow_yaml(poisoned))
+        self.assertTrue(any("HOSTED_RUNS_ON" in h or "diverges" in h for h in hits), hits)
 
     def test_mutation_remove_each_resource_ceiling_is_red(self):
         for old, needle in (

@@ -15,16 +15,20 @@ on:
         description: Contained OCI image digest (sha256:64hex)
         required: true
         type: string
+      packet_root:
+        description: Declared packet root (relative) holding authorize/prepare/pins/bindings
+        required: true
+        type: string
       authorize_path:
-        description: Path to authorize.v0 bytes in the runner tree
+        description: Path to authorize.v0 bytes relative to packet root
         required: true
         type: string
       prepare_path:
-        description: Path to prepare.v1 bytes in the runner tree
+        description: Path to prepare.v1 bytes relative to packet root
         required: true
         type: string
       pins_dir:
-        description: Path to frozen pins directory in the runner tree
+        description: Path to frozen pins directory relative to packet root
         required: true
         type: string
 
@@ -40,8 +44,6 @@ env:
   OPERATOR_EXECUTION_PROFILE: contained-oci-v0
   MAX_ARTIFACT_BYTES: "5242880"
   ARTIFACT_RETENTION_DAYS: "14"
-  HOSTED_RUNS_ON: ubuntu-latest
-  HOSTED_PERSIST_CREDENTIALS: "false"
 
 jobs:
   hosted-contained:
@@ -58,21 +60,21 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Write workflow facts
-        shell: bash
-        run: python measurements/contained_hosted_publication.py write-workflow-facts --out artifacts/workflow-facts.json
       - name: Gate hosted publication
         shell: bash
         env:
           CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
           RUNNER_REVISION: ${{ inputs.runner_revision }}
           IMAGE_DIGEST: ${{ inputs.image_digest }}
+          PACKET_ROOT: ${{ inputs.packet_root }}
           AUTHORIZE_PATH: ${{ inputs.authorize_path }}
           PREPARE_PATH: ${{ inputs.prepare_path }}
           PINS_DIR: ${{ inputs.pins_dir }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          HOSTED_FORWARDED_ENV_NAMES: CANDIDATE_REVISION,RUNNER_REVISION,IMAGE_DIGEST,PACKET_ROOT,AUTHORIZE_PATH,PREPARE_PATH,PINS_DIR,RUNNER_ENVIRONMENT,HOSTED_FORWARDED_ENV_NAMES,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,OPERATOR_EXECUTION_PROFILE,MAX_ARTIFACT_BYTES
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --operator-profile "$OPERATOR_EXECUTION_PROFILE" --max-artifact-bytes "$MAX_ARTIFACT_BYTES" --out artifacts --workflow-facts artifacts/workflow-facts.json --authorize "$AUTHORIZE_PATH" --prepare "$PREPARE_PATH" --pins-dir "$PINS_DIR" --rerun-log artifacts/rerun-evidence.jsonl
+        run: python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --operator-profile "$OPERATOR_EXECUTION_PROFILE" --max-artifact-bytes "$MAX_ARTIFACT_BYTES" --out artifacts --packet-root "$PACKET_ROOT" --authorize "$AUTHORIZE_PATH" --prepare "$PREPARE_PATH" --pins-dir "$PINS_DIR" --rerun-log artifacts/rerun-evidence.jsonl
       - name: Upload setup
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -97,7 +99,7 @@ jobs:
       - name: Upload rerun-evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: rerun-evidence
+          name: rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/rerun-evidence.jsonl
           retention-days: 14
           if-no-files-found: error

@@ -5,6 +5,15 @@ Enforces #106 `publication_permission` and attempts a real contained-oci-v0
 execution via existing primitives. Does not reimplement the OCI projector or
 comparator. Does not score, authenticate, endorse, audit, certify, or claim
 escape-proof OCI.
+
+Dispatch bindings (candidate_revision, runner_revision, image_digest) are
+sealed into the execution contract: a packet-root bindings file must match,
+prepare.execution.commit and the produced envelope must match runner/image,
+and setup/candidate artifacts stamp the effective bindings. Authorize,
+prepare, pins, envelope and related JSON inputs resolve only as confined
+regular files under a declared root with byte ceilings before parse.
+Runtime hostility checks use observed runner.environment and an explicit
+forwarded env-name list — not duplicated YAML literals.
 """
 
 from __future__ import annotations
@@ -12,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -23,8 +33,10 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import contained_oci as contained  # noqa: E402
+import corpus_adequacy as ca  # noqa: E402
 
 REQUIRED_PROFILE = "contained-oci-v0"
+REQUIRED_RUNNER_ENVIRONMENT = "github-hosted"
 ARTIFACT_SETUP = "setup"
 ARTIFACT_ENVELOPE = "effective-envelope"
 ARTIFACT_CANDIDATE = "candidate-result"
@@ -33,23 +45,23 @@ SETUP_STATUS_FILENAME = "setup-status.json"
 EFFECTIVE_ENVELOPE_FILENAME = "effective-envelope.v0.json"
 CANDIDATE_RESULT_FILENAME = "candidate-result.json"
 RERUN_EVIDENCE_FILENAME = "rerun-evidence.jsonl"
-WORKFLOW_FACTS_FILENAME = "workflow-facts.json"
+DISPATCH_BINDINGS_FILENAME = "hosted-dispatch-bindings.v0.json"
 CONCURRENCY_GROUP = "contained-hosted-publication"
 CANCEL_IN_PROGRESS = False
 RETENTION_DAYS = 14
 MAX_ARTIFACT_BYTES = 5242880
+MAX_INPUT_BYTES = MAX_ARTIFACT_BYTES
 TIMEOUT_MINUTES = 15
 RUNS_ON = "ubuntu-latest"
 HOSTED_SCHEMA = "corpus-adequacy.hosted-publication.v0"
-WORKFLOW_FACTS_KEYS = (
-    "runs_on", "persist_credentials", "mounts", "env_names",
+DISPATCH_BINDING_KEYS = (
+    "candidate_revision", "runner_revision", "image_digest",
 )
 
 HEX40 = frozenset("0123456789abcdef")
 _CREDENTIAL_ENV_EXACT = frozenset({"GITHUB_TOKEN", "GH_TOKEN"})
 _CREDENTIAL_ENV_PREFIXES = ("AWS_", "DOCKER_")
 _CREDENTIAL_ENV_MARKERS = ("SECRET", "PASSWORD", "CREDENTIAL")
-_HOSTILE_RUNNER_LABELS = frozenset({"self-hosted", "local"})
 
 NON_CLAIMS = (
     "Not authentication of the candidate author or operator.",
@@ -101,24 +113,165 @@ def _is_credential_env(name: str) -> bool:
     return any(marker in upper for marker in _CREDENTIAL_ENV_MARKERS)
 
 
-def _runner_labels(runs_on) -> set[str]:
-    if isinstance(runs_on, str):
-        return {runs_on}
-    if isinstance(runs_on, (list, tuple)):
-        return {str(item) for item in runs_on}
-    raise HostedPublicationError("runs_on")
+def resolve_confined_input(root, relpath, *, max_bytes: int | None = None) -> Path:
+    """Resolve relpath strictly under root; refuse abs/.. /symlink/non-regular.
+
+    When max_bytes is set, the leaf must be a regular file whose size is at
+    or under the ceiling (checked via lstat before any read). When max_bytes
+    is None, the leaf must be a non-symlink directory (pins tree).
+    """
+    if not isinstance(relpath, str) or not relpath:
+        raise HostedPublicationError("confined_path")
+    if relpath.startswith("/") or relpath.startswith("\\"):
+        raise HostedPublicationError("confined_path")
+    rel = Path(relpath)
+    if rel.is_absolute():
+        raise HostedPublicationError("confined_path")
+    parts = rel.parts
+    if not parts or any(part == ".." for part in parts):
+        raise HostedPublicationError("confined_path")
+    if any(part == "" for part in parts):
+        raise HostedPublicationError("confined_path")
+
+    root_path = Path(root)
+    try:
+        if root_path.is_symlink():
+            raise HostedPublicationError("confined_path")
+        root_resolved = root_path.resolve(strict=True)
+    except (OSError, HostedPublicationError):
+        raise HostedPublicationError("confined_path") from None
+    if not root_resolved.is_dir() or root_resolved.is_symlink():
+        raise HostedPublicationError("confined_path")
+
+    current = root_resolved
+    for part in parts:
+        if part in (".", ".."):
+            raise HostedPublicationError("confined_path")
+        current = current / part
+        try:
+            st = current.lstat()
+        except OSError as exc:
+            raise HostedPublicationError("confined_path") from exc
+        if stat.S_ISLNK(st.st_mode):
+            raise HostedPublicationError("confined_path")
+
+    try:
+        st = current.lstat()
+    except OSError as exc:
+        raise HostedPublicationError("confined_path") from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise HostedPublicationError("confined_path")
+
+    try:
+        resolved = current.resolve(strict=True)
+        resolved.relative_to(root_resolved)
+    except (OSError, ValueError) as exc:
+        raise HostedPublicationError("confined_path") from exc
+    if resolved.is_symlink():
+        raise HostedPublicationError("confined_path")
+
+    if max_bytes is None:
+        if not stat.S_ISDIR(st.st_mode):
+            raise HostedPublicationError("confined_path")
+        return current
+
+    if not stat.S_ISREG(st.st_mode):
+        raise HostedPublicationError("confined_path")
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise HostedPublicationError("max_input_bytes")
+    if st.st_size > max_bytes:
+        raise HostedPublicationError("max_input_bytes")
+    return current
 
 
-def refuse_hostile_workflow(*, runs_on, persist_credentials, mounts, env_names):
-    labels = _runner_labels(runs_on)
-    if labels != {RUNS_ON}:
-        raise HostedPublicationError("runs_on")
-    if labels & _HOSTILE_RUNNER_LABELS:
-        raise HostedPublicationError("runs_on")
-    if any(label.startswith("self-hosted") for label in labels):
-        raise HostedPublicationError("runs_on")
-    if persist_credentials is not False:
-        raise HostedPublicationError("persist_credentials")
+def load_json_confined(root, relpath, *, max_bytes: int):
+    """Size-check then read+parse JSON under a confined root (before loads)."""
+    path = resolve_confined_input(root, relpath, max_bytes=max_bytes)
+    try:
+        raw = ca.read_bounded_regular_file(path, cap=max_bytes)
+    except ca.ManifestError as exc:
+        raise HostedPublicationError("max_input_bytes") from exc
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise HostedPublicationError("json_input") from exc
+    return doc
+
+
+def load_dispatch_bindings(packet_root, *, expected: dict,
+                           max_bytes: int = MAX_INPUT_BYTES) -> dict:
+    doc = load_json_confined(
+        packet_root, DISPATCH_BINDINGS_FILENAME, max_bytes=max_bytes)
+    if type(doc) is not dict:
+        raise HostedPublicationError("dispatch_bindings")
+    sealed = require_bindings(
+        doc.get("candidate_revision"),
+        doc.get("runner_revision"),
+        doc.get("image_digest"),
+    )
+    if sealed != expected:
+        raise HostedPublicationError("dispatch_bindings")
+    return sealed
+
+
+def check_prepare_bindings(prepare_doc, *, bindings) -> None:
+    if type(prepare_doc) is not dict:
+        raise HostedPublicationError("prepare_bindings")
+    execution = prepare_doc.get("execution")
+    if type(execution) is not dict:
+        raise HostedPublicationError("runner_revision_binding")
+    if execution.get("commit") != bindings["runner_revision"]:
+        raise HostedPublicationError("runner_revision_binding")
+    image = prepare_doc.get("image")
+    if type(image) is not dict:
+        raise HostedPublicationError("image_digest_binding")
+    if image.get("id") != bindings["image_digest"]:
+        raise HostedPublicationError("image_digest_binding")
+
+
+def check_envelope_bindings(envelope_doc, *, bindings) -> None:
+    if type(envelope_doc) is not dict:
+        raise HostedPublicationError("envelope_bindings")
+    if envelope_doc.get("execution_commit") != bindings["runner_revision"]:
+        raise HostedPublicationError("runner_revision_binding")
+    requested = envelope_doc.get("requested")
+    if type(requested) is not dict:
+        raise HostedPublicationError("image_digest_binding")
+    if requested.get("image_id") != bindings["image_digest"]:
+        raise HostedPublicationError("image_digest_binding")
+
+
+def observe_runtime_workflow(*, environ=None, mounts=None) -> dict:
+    """Single producer of runtime workflow observations for refuse_*."""
+    env = os.environ if environ is None else environ
+    runner_environment = env.get("RUNNER_ENVIRONMENT")
+    if not isinstance(runner_environment, str) or not runner_environment:
+        raise HostedPublicationError("runner_environment")
+    raw_names = env.get("HOSTED_FORWARDED_ENV_NAMES")
+    if raw_names is None:
+        raise HostedPublicationError("forwarded_env_names")
+    if not isinstance(raw_names, str):
+        raise HostedPublicationError("forwarded_env_names")
+    forwarded_env_names = tuple(name for name in raw_names.split(",") if name)
+    return {
+        "runner_environment": runner_environment,
+        "forwarded_env_names": forwarded_env_names,
+        "mounts": list(mounts if mounts is not None else []),
+    }
+
+
+def refuse_hostile_workflow(*, runner_environment, forwarded_env_names,
+                            mounts=()):
+    """Refuse hostile runtime observations. None forwarded_env_names is error."""
+    if runner_environment != REQUIRED_RUNNER_ENVIRONMENT:
+        raise HostedPublicationError("runner_environment")
+    if forwarded_env_names is None:
+        raise HostedPublicationError("forwarded_env_names")
+    if type(forwarded_env_names) not in (list, tuple):
+        raise HostedPublicationError("forwarded_env_names")
+    for name in forwarded_env_names:
+        if _is_credential_env(name):
+            raise HostedPublicationError("credential_env")
     if type(mounts) not in (list, tuple):
         raise HostedPublicationError("mounts")
     for mount in mounts:
@@ -128,16 +281,12 @@ def refuse_hostile_workflow(*, runs_on, persist_credentials, mounts, env_names):
         destination = str(
             mount.get("destination", "") or mount.get("Destination", "") or "")
         joined = "%s:%s" % (source, destination)
-        if "docker.sock" in source or "docker.sock" in destination or "docker.sock" in joined:
+        if ("docker.sock" in source or "docker.sock" in destination
+                or "docker.sock" in joined):
             raise HostedPublicationError("docker.sock")
         writable = mount.get("writable", mount.get("RW", mount.get("rw")))
         if writable is True:
             raise HostedPublicationError("writable_checkout")
-    if type(env_names) not in (list, tuple):
-        raise HostedPublicationError("env_names")
-    for name in env_names:
-        if _is_credential_env(name):
-            raise HostedPublicationError("credential_env")
     return None
 
 
@@ -185,6 +334,7 @@ def void_candidate_result(*, reason, bindings) -> dict:
         "mutant_status": "not-scored",
         "reason": reason,
         "bindings": dict(bindings),
+        "dispatch_bindings": dict(bindings),
         "non_claims": list(NON_CLAIMS),
     }
 
@@ -248,61 +398,17 @@ def setup_status_doc(*, status, reason, bindings) -> dict:
         "setup_status": status,
         "reason": reason,
         "bindings": dict(bindings),
+        "dispatch_bindings": dict(bindings),
         "operator_profile": REQUIRED_PROFILE,
         "non_claims": list(NON_CLAIMS),
     }
 
 
-def load_envelope(path: Path) -> dict:
-    try:
-        doc = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise HostedPublicationError("envelope") from exc
-    if type(doc) is not dict:
-        raise HostedPublicationError("envelope")
-    return doc
-
-
-def load_workflow_facts(path: Path) -> dict:
-    try:
-        doc = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise HostedPublicationError("workflow_facts") from exc
-    if type(doc) is not dict or set(doc) != set(WORKFLOW_FACTS_KEYS):
-        raise HostedPublicationError("workflow_facts")
-    return {
-        "runs_on": doc["runs_on"],
-        "persist_credentials": doc["persist_credentials"],
-        "mounts": doc["mounts"],
-        "env_names": tuple(doc["env_names"]),
-    }
-
-
-def write_workflow_facts(out_path: Path, *, runs_on, persist_credentials,
-                         mounts=None, env_names=None) -> dict:
-    if isinstance(persist_credentials, str):
-        if persist_credentials.lower() == "false":
-            persist_credentials = False
-        elif persist_credentials.lower() == "true":
-            persist_credentials = True
-    facts = {
-        "runs_on": runs_on,
-        "persist_credentials": persist_credentials,
-        "mounts": list(mounts if mounts is not None else []),
-        "env_names": list(env_names if env_names is not None else []),
-    }
-    if set(facts) != set(WORKFLOW_FACTS_KEYS):
-        raise HostedPublicationError("workflow_facts")
-    refuse_hostile_workflow(
-        runs_on=facts["runs_on"],
-        persist_credentials=facts["persist_credentials"],
-        mounts=facts["mounts"],
-        env_names=tuple(facts["env_names"]),
-    )
-    path = Path(out_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_encode_json(facts))
-    return facts
+def load_envelope(path: Path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
+    """Load envelope with pre-parse ceiling; path must be a regular file."""
+    path = Path(path)
+    parent = path.parent
+    return load_json_confined(parent, path.name, max_bytes=max_bytes)
 
 
 def _run_attempt_identity() -> dict:
@@ -319,10 +425,13 @@ def default_docker_ready() -> str:
 
 
 def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
-                           envelope_dest, materialize_dest) -> None:
+                           envelope_dest, materialize_dest,
+                           max_bytes: int = MAX_INPUT_BYTES) -> None:
     import aee_checker_sealed_driver as driver
-    authorize_raw = Path(authorize_path).read_bytes()
-    prepare_raw = Path(prepare_path).read_bytes()
+    authorize_raw = ca.read_bounded_regular_file(
+        Path(authorize_path), cap=max_bytes)
+    prepare_raw = ca.read_bounded_regular_file(
+        Path(prepare_path), cap=max_bytes)
     driver.run_authorized(
         authorize_raw=authorize_raw,
         prepare_raw=prepare_raw,
@@ -333,23 +442,44 @@ def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
     )
 
 
+def _materialize_void(*, out, reason, setup_status, bindings, rerun_log,
+                      identity, max_artifact_bytes, kind="infrastructure-failure"):
+    decision = publication_decision(None, setup_status=setup_status)
+    setup_doc = setup_status_doc(
+        status=setup_status, reason=reason, bindings=bindings)
+    envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
+    candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
+    append_rerun_evidence(rerun_log, {
+        "kind": kind,
+        "reason": reason,
+        "setup_status": setup_status,
+        "bindings": bindings,
+        "dispatch_bindings": bindings,
+        **{k: v for k, v in identity.items() if v is not None},
+    })
+    write_separate_artifacts(
+        out, setup_doc, envelope_doc, candidate_doc,
+        max_bytes=max_artifact_bytes)
+    return decision
+
+
 def run_gate(*, candidate_revision, runner_revision, image_digest,
-             operator_profile, out_dir, workflow_facts_path,
-             authorize_path=None, prepare_path=None, pins_dir=None,
-             root=None, rerun_log=None,
+             operator_profile, out_dir,
+             packet_root=None, authorize_path=None, prepare_path=None,
+             pins_dir=None, root=None, rerun_log=None,
              max_artifact_bytes=MAX_ARTIFACT_BYTES,
-             docker_ready=None, sealed_execute=None) -> dict:
+             max_input_bytes=MAX_INPUT_BYTES,
+             docker_ready=None, sealed_execute=None,
+             runtime_environ=None) -> dict:
     bindings = require_bindings(
         candidate_revision, runner_revision, image_digest)
     require_operator_profile(operator_profile)
 
-    facts = load_workflow_facts(Path(workflow_facts_path))
-    # Single producer→consumer path: facts file → refuse_hostile_workflow.
+    observed = observe_runtime_workflow(environ=runtime_environ)
     refuse_hostile_workflow(
-        runs_on=facts["runs_on"],
-        persist_credentials=facts["persist_credentials"],
-        mounts=facts["mounts"],
-        env_names=facts["env_names"],
+        runner_environment=observed["runner_environment"],
+        forwarded_env_names=observed["forwarded_env_names"],
+        mounts=observed["mounts"],
     )
 
     out = Path(out_dir)
@@ -364,6 +494,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     append_rerun_evidence(rerun_log, {
         "kind": "run-attempt-start",
         "bindings": bindings,
+        "dispatch_bindings": bindings,
         **{k: v for k, v in identity.items() if v is not None},
     })
 
@@ -378,76 +509,53 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         probe()
     except contained.DockerUnavailable as exc:
         reason = "containment-unavailable:%s" % exc
-        setup_status = "unavailable"
-        decision = publication_decision(None, setup_status=setup_status)
-        setup_doc = setup_status_doc(
-            status="unavailable", reason=reason, bindings=bindings)
-        envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
-        candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
-        append_rerun_evidence(rerun_log, {
-            "kind": "infrastructure-failure",
-            "reason": reason,
-            "setup_status": "unavailable",
-            "bindings": bindings,
-            **{k: v for k, v in identity.items() if v is not None},
-        })
-        write_separate_artifacts(
-            out, setup_doc, envelope_doc, candidate_doc,
-            max_bytes=max_artifact_bytes)
-        return decision
+        return _materialize_void(
+            out=out, reason=reason, setup_status="unavailable",
+            bindings=bindings, rerun_log=rerun_log, identity=identity,
+            max_artifact_bytes=max_artifact_bytes)
     except contained.PrepareError as exc:
         reason = "containment-refused:%s" % exc
-        setup_status = "refused"
-        decision = publication_decision(None, setup_status=setup_status)
-        setup_doc = setup_status_doc(
-            status="refused", reason=reason, bindings=bindings)
-        envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
-        candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
-        append_rerun_evidence(rerun_log, {
-            "kind": "infrastructure-failure",
-            "reason": reason,
-            "setup_status": "refused",
-            "bindings": bindings,
-            **{k: v for k, v in identity.items() if v is not None},
-        })
-        write_separate_artifacts(
-            out, setup_doc, envelope_doc, candidate_doc,
-            max_bytes=max_artifact_bytes)
-        return decision
+        return _materialize_void(
+            out=out, reason=reason, setup_status="refused",
+            bindings=bindings, rerun_log=rerun_log, identity=identity,
+            max_artifact_bytes=max_artifact_bytes)
 
-    if not (authorize_path and prepare_path and pins_dir):
+    if not (packet_root and authorize_path and prepare_path and pins_dir):
         reason = "execution-packets-required"
-        setup_status = "refused"
-        decision = publication_decision(None, setup_status=setup_status)
-        setup_doc = setup_status_doc(
-            status="refused", reason=reason, bindings=bindings)
-        envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
-        candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
-        append_rerun_evidence(rerun_log, {
-            "kind": "infrastructure-failure",
-            "reason": reason,
-            "setup_status": "refused",
-            "bindings": bindings,
-            **{k: v for k, v in identity.items() if v is not None},
-        })
-        write_separate_artifacts(
-            out, setup_doc, envelope_doc, candidate_doc,
-            max_bytes=max_artifact_bytes)
-        return decision
+        return _materialize_void(
+            out=out, reason=reason, setup_status="refused",
+            bindings=bindings, rerun_log=rerun_log, identity=identity,
+            max_artifact_bytes=max_artifact_bytes)
+
+    packet = Path(packet_root)
+    load_dispatch_bindings(
+        packet, expected=bindings, max_bytes=max_input_bytes)
+    authorize_resolved = resolve_confined_input(
+        packet, authorize_path, max_bytes=max_input_bytes)
+    prepare_resolved = resolve_confined_input(
+        packet, prepare_path, max_bytes=max_input_bytes)
+    pins_resolved = resolve_confined_input(packet, pins_dir, max_bytes=None)
+    prepare_doc = load_json_confined(
+        packet, prepare_path, max_bytes=max_input_bytes)
+    check_prepare_bindings(prepare_doc, bindings=bindings)
 
     materialize_dest = out / "materialize"
     try:
         execute(
-            authorize_path=authorize_path,
-            prepare_path=prepare_path,
-            pins_dir=pins_dir,
+            authorize_path=authorize_resolved,
+            prepare_path=prepare_resolved,
+            pins_dir=pins_resolved,
             root=root or _ROOT,
             envelope_dest=envelope_dest,
             materialize_dest=materialize_dest,
+            max_bytes=max_input_bytes,
         )
-        envelope = load_envelope(envelope_dest)
+        envelope = load_envelope(envelope_dest, max_bytes=max_input_bytes)
+        check_envelope_bindings(envelope, bindings=bindings)
         setup_status = envelope.get("setup_status") or "unavailable"
         reason = "contained-execution"
+    except HostedPublicationError:
+        raise
     except Exception as exc:
         reason = "contained-execution-failed:%s" % exc
         setup_status = "unavailable"
@@ -457,6 +565,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             "reason": reason,
             "setup_status": setup_status,
             "bindings": bindings,
+            "dispatch_bindings": bindings,
             **{k: v for k, v in identity.items() if v is not None},
         })
 
@@ -487,6 +596,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     else:
         setup_doc = setup_status_doc(
             status="ready", reason="publication-permitted", bindings=bindings)
+        # Envelope stays AEE schema as-is; bindings already verified above.
         envelope_doc = envelope
         candidate_doc = {
             "schema": HOSTED_SCHEMA,
@@ -494,6 +604,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             "score_status": "none",
             "decision": "publish",
             "bindings": dict(bindings),
+            "dispatch_bindings": dict(bindings),
             "non_claims": list(NON_CLAIMS),
         }
 
@@ -511,18 +622,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    facts = sub.add_parser(
-        "write-workflow-facts",
-        help="Write closed workflow-facts.json from literal host env")
-    facts.add_argument("--out", required=True)
-
     gate = sub.add_parser("gate", help="Execute contained lane and gate publication")
     gate.add_argument("--candidate-revision", required=True)
     gate.add_argument("--runner-revision", required=True)
     gate.add_argument("--image-digest", required=True)
     gate.add_argument("--operator-profile", default=REQUIRED_PROFILE)
     gate.add_argument("--out", required=True)
-    gate.add_argument("--workflow-facts", required=True)
+    gate.add_argument("--packet-root", default=None)
     gate.add_argument("--authorize", default=None)
     gate.add_argument("--prepare", default=None)
     gate.add_argument("--pins-dir", default=None)
@@ -530,6 +636,8 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--rerun-log", default=None)
     gate.add_argument(
         "--max-artifact-bytes", type=int, default=MAX_ARTIFACT_BYTES)
+    gate.add_argument(
+        "--max-input-bytes", type=int, default=MAX_INPUT_BYTES)
     return parser
 
 
@@ -537,20 +645,6 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.command == "write-workflow-facts":
-            mounts_raw = os.environ.get("HOSTED_MOUNTS_JSON", "[]")
-            names_raw = os.environ.get("HOSTED_ENV_NAMES", "")
-            mounts = json.loads(mounts_raw)
-            env_names = [n for n in names_raw.split(",") if n]
-            write_workflow_facts(
-                Path(args.out),
-                runs_on=os.environ.get("HOSTED_RUNS_ON", RUNS_ON),
-                persist_credentials=os.environ.get(
-                    "HOSTED_PERSIST_CREDENTIALS", "false"),
-                mounts=mounts,
-                env_names=env_names,
-            )
-            return 0
         if args.command != "gate":
             parser.error("unsupported command")
         run_gate(
@@ -559,13 +653,14 @@ def main(argv=None) -> int:
             image_digest=args.image_digest,
             operator_profile=args.operator_profile,
             out_dir=args.out,
-            workflow_facts_path=args.workflow_facts,
+            packet_root=args.packet_root,
             authorize_path=args.authorize,
             prepare_path=args.prepare,
             pins_dir=args.pins_dir,
             root=args.root,
             rerun_log=args.rerun_log,
             max_artifact_bytes=args.max_artifact_bytes,
+            max_input_bytes=args.max_input_bytes,
         )
     except HostedPublicationError as exc:
         print("hosted publication refused: %s" % exc, file=sys.stderr)
