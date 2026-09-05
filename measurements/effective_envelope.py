@@ -419,6 +419,22 @@ def bind_report(record: dict, report_sha256) -> dict:
     )
 
 
+def validate_envelope_record(record: dict) -> dict:
+    """Validate that an execution-envelope record is internally consistent.
+
+    Reconstructs the envelope record through bind_report and requires exact
+    equality with the original document. An inconsistent or mutated record
+    raises EnvelopeError and is never normalized into a pass.
+    """
+    if type(record) is not dict:
+        raise EnvelopeError("envelope")
+    _require_exact(record, ENVELOPE_KEYS, "envelope")
+    rebuilt = bind_report(record, record["report_sha256"])
+    if rebuilt != record:
+        raise EnvelopeError("envelope_semantic_mismatch")
+    return record
+
+
 def encode_envelope(record: dict) -> bytes:
     _require_exact(record, ENVELOPE_KEYS, "envelope")
     return (json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True)

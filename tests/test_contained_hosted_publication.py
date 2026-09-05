@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
 import contained_hosted_publication as hosted  # noqa: E402
 import contained_oci as contained  # noqa: E402
+import effective_envelope as env_mod  # noqa: E402
 
 CANDIDATE = "a" * 40
 RUNNER = "b" * 40
@@ -74,26 +75,111 @@ def _prepare_sha256(**kwargs) -> str:
     return hashlib.sha256(_prepare_raw(**kwargs)).hexdigest()
 
 
+def _base_envelope_requested(*, image=IMAGE, sealed=True):
+    return env_mod.requested_envelope(
+        execution_profile="contained-oci-v0",
+        image_id=image,
+        mount_spec=[("/in", "/in")],
+        resource_profile=contained.CANDIDATE_RESOURCE_PROFILE,
+        sealed=sealed,
+    )
+
+
+def _base_envelope_effective(*, image=IMAGE, runtime_version="27.1.1", sealed=True):
+    profile = contained.CANDIDATE_RESOURCE_PROFILE
+    env_names = ["CARGO_NET_OFFLINE", "HOME", "PATH"] if sealed else ["HOME", "PATH"]
+    image_env_names = ["HOME", "PATH"]
+    return {
+        "cap_add": [],
+        "cap_drop": ["ALL"],
+        "devices": [],
+        "env_names": sorted(env_names),
+        "image": image,
+        "image_env_names": sorted(image_env_names),
+        "memory": profile["memory_bytes"],
+        "memory_swap": profile["memory_swap_bytes"],
+        "mounts": [{"destination": "/in", "rw": False, "type": "bind"}],
+        "network_mode": "none" if sealed else "",
+        "no_new_privileges": True,
+        "pid_mode": "",
+        "pids_limit": profile["pids"],
+        "privileged": False,
+        "read_only_root": True,
+        "runtime_version": runtime_version,
+        "tmpfs": {
+            "/tmp": {
+                "exec": False,
+                "nr_inodes": profile["tmp_inodes"],
+                "size": profile["tmp_bytes"],
+            },
+            "/work": {
+                "exec": profile["work_exec"],
+                "nr_inodes": profile["work_inodes"],
+                "size": profile["work_bytes"],
+            },
+        },
+        "user": contained.CONTAINED_USER,
+        "userns_mode": "",
+    }
+
+
 def _permitted_envelope(*, prepare_sha256=None, **over):
     if prepare_sha256 is None:
         prepare_sha256 = _prepare_sha256()
-    doc = {
-        "schema": "corpus-adequacy.execution-envelope.v0",
-        "setup_status": "ready",
-        "envelope_status": "verified",
-        "publication_permission": "permitted",
-        "candidate_outcome": "completed",
-        "cleanup": "removed-and-absent",
-        "withheld_reason": None,
-        "execution_commit": RUNNER,
-        "prepare_sha256": prepare_sha256,
-        "requested": {"image_id": IMAGE, "execution_profile": "contained-oci-v0"},
-        "effective": {
-            "env_names": ["PATH", "HOME"],
-            "image_env_names": ["PATH", "HOME"],
-            "mounts": [{"destination": "/in", "rw": False, "type": "bind"}],
-        },
-    }
+    req = _base_envelope_requested()
+    if "requested" in over:
+        custom_req = over.pop("requested")
+        if isinstance(custom_req, dict):
+            req.update(custom_req)
+        else:
+            req = custom_req
+    image = req.get("image_id", IMAGE) if isinstance(req, dict) else IMAGE
+    sealed = req.get("sealed", True) if isinstance(req, dict) else True
+    eff = _base_envelope_effective(image=image, sealed=sealed)
+    if "effective" in over:
+        custom_eff = over.pop("effective")
+        if isinstance(custom_eff, dict):
+            eff.update(custom_eff)
+            if "mounts" in custom_eff and isinstance(req, dict):
+                req["mount_spec"] = [m["destination"] for m in custom_eff["mounts"]]
+            if "env_names" in custom_eff:
+                if "image_env_names" not in custom_eff:
+                    eff["image_env_names"] = list(custom_eff["env_names"])
+                else:
+                    eff["image_env_names"] = list(custom_eff["image_env_names"])
+                if sealed:
+                    if "CARGO_NET_OFFLINE" not in eff["env_names"]:
+                        eff["env_names"] = sorted(list(eff["env_names"]) + ["CARGO_NET_OFFLINE"])
+                    if "CARGO_NET_OFFLINE" not in eff["image_env_names"]:
+                        eff["image_env_names"] = sorted(list(eff["image_env_names"]) + ["CARGO_NET_OFFLINE"])
+        else:
+            eff = custom_eff
+
+    setup_status = over.pop("setup_status", "ready")
+    envelope_status = over.pop("envelope_status", "verified")
+    candidate_outcome = over.pop("candidate_outcome", "completed")
+    cleanup = over.pop("cleanup", "removed-and-absent")
+    execution_commit = over.pop("execution_commit", RUNNER)
+    report_sha256 = over.pop("report_sha256", None)
+    unverified_field = over.pop("unverified_field", None)
+
+    if envelope_status != "verified":
+        eff = None
+        if unverified_field is None:
+            unverified_field = "runtime_version"
+
+    doc = env_mod.build_envelope_record(
+        requested=req,
+        setup_status=setup_status,
+        envelope_status=envelope_status,
+        unverified_field=unverified_field,
+        effective=eff,
+        candidate_outcome=candidate_outcome,
+        cleanup=cleanup,
+        prepare_sha256=prepare_sha256,
+        execution_commit=execution_commit,
+        report_sha256=report_sha256,
+    )
     doc.update(over)
     return doc
 
@@ -344,7 +430,7 @@ class HostileWorkflowRefusals(unittest.TestCase):
     def test_observe_child_environment_from_envelope_only(self):
         env = _permitted_envelope()
         observed = hosted.observe_child_environment(env)
-        self.assertEqual(observed["env_names"], ("PATH", "HOME"))
+        self.assertEqual(observed["env_names"], ("CARGO_NET_OFFLINE", "HOME", "PATH"))
         self.assertEqual(len(observed["mounts"]), 1)
         with self.assertRaises(hosted.HostedPublicationError):
             hosted.observe_child_environment({"effective": {}})
@@ -902,12 +988,18 @@ class SourceMutations(unittest.TestCase):
         self.assertNotEqual(mutated, original)
         bad = _load_mutated_module(mutated, "mut_guard")
         leaked = bad.publication_decision(
-            _permitted_envelope(envelope_status="unverified"), setup_status="ready"
+            _permitted_envelope(
+                envelope_status="unverified", publication_permission="permitted"
+            ),
+            setup_status="ready",
         )
         self.assertEqual(leaked["decision"], "publish")
         self.assertEqual(
             hosted.publication_decision(
-                _permitted_envelope(envelope_status="unverified"), setup_status="ready"
+                _permitted_envelope(
+                    envelope_status="unverified", publication_permission="permitted"
+                ),
+                setup_status="ready",
             )["decision"],
             "withhold",
         )

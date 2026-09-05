@@ -41,6 +41,7 @@ if str(_ROOT) not in sys.path:
 
 import contained_oci as contained  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
+import effective_envelope  # noqa: E402
 from aee_checker_sealed_candidate import require_candidate_image  # noqa: E402
 
 REQUIRED_PROFILE = "contained-oci-v0"
@@ -311,6 +312,8 @@ def observe_child_environment(envelope_doc) -> dict:
     """
     if type(envelope_doc) is not dict:
         raise HostedPublicationError("envelope_effective")
+    if envelope_doc.get("envelope_status") != "verified" and envelope_doc.get("effective") is None:
+        return {"env_names": (), "mounts": [], "image_env_names": ()}
     effective = envelope_doc.get("effective")
     if type(effective) is not dict:
         raise HostedPublicationError("envelope_effective")
@@ -478,7 +481,12 @@ def load_envelope(path: Path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
     """Load envelope with pre-parse ceiling; path must be a regular file."""
     path = Path(path)
     parent = path.parent
-    return load_json_confined(parent, path.name, max_bytes=max_bytes)
+    doc = load_json_confined(parent, path.name, max_bytes=max_bytes)
+    try:
+        effective_envelope.validate_envelope_record(doc)
+    except effective_envelope.EnvelopeError as exc:
+        raise HostedPublicationError("envelope_corrupt") from exc
+    return doc
 
 
 def _run_attempt_identity() -> dict:
