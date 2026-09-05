@@ -59,18 +59,25 @@ def member_digest(raw: bytes) -> str:
 
 
 def bounded_encoded_size(record: dict, limit: int) -> int:
-    """Exact encoded size, refused as soon as it passes `limit`, without materializing it.
+    """Exact final size including the trailing newline, refused as soon as it passes `limit`.
 
-    `json.dumps` builds the whole string before anything can measure it. `iterencode` yields the
-    same output in pieces, so a record too large to keep is refused mid-encode.
+    SCOPE, and it is narrower than "bounded allocation". `iterencode` avoids holding the whole
+    document, so accumulated output is checked as it is produced and an over-large record is
+    refused mid-encode. It does NOT bound a single value: the encoder yields an entire escaped
+    string scalar as one chunk, so one huge string is materialized before this sees it. Bounding
+    that needs per-scalar and per-collection limits, which are not implemented here and are not
+    claimed.
+
+    The `+ 1` is inside the check, not after it: `encode_envelope` appends a newline, so a record
+    that fits only without it would otherwise pass here and write one byte over.
     """
-    total = 0
+    total = 1  # the trailing newline encode_envelope appends, counted from the start
     encoder = json.JSONEncoder(ensure_ascii=False, indent=2, sort_keys=True)
     for chunk in encoder.iterencode(record):
         total += len(chunk.encode("utf-8"))
         if total > limit:
             raise CollectionError("collection member byte ceiling")
-    return total + 1  # the trailing newline encode_envelope appends
+    return total
 
 
 def _encode_index(doc: dict) -> bytes:
@@ -211,7 +218,9 @@ def load_collection(dest, *, max_index_bytes: int = MAX_INDEX_BYTES,
         raise CollectionError("collection index byte ceiling")
     try:
         index = json.loads(index_path.read_text(encoding="utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    # ValueError, not JSONDecodeError: an integer literal past CPython's digit limit raises a
+    # bare ValueError, and a narrower clause lets it escape unmapped -- the #116 F1 defect.
+    except (UnicodeError, ValueError) as exc:
         raise CollectionError("collection index json") from exc
     _require_exact(index, INDEX_KEYS, "collection index")
     if index["schema"] != COLLECTION_SCHEMA:
@@ -259,7 +268,7 @@ def load_collection(dest, *, max_index_bytes: int = MAX_INDEX_BYTES,
             raise CollectionError("collection member digest")
         try:
             doc = json.loads(raw.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
+        except (UnicodeError, ValueError) as exc:
             raise CollectionError("collection member json") from exc
         # The shared validator judges the record. A matching digest is not semantic validation.
         try:

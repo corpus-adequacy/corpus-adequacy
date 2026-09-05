@@ -420,3 +420,51 @@ class StagedWrite(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MalformedMemberBytes(unittest.TestCase):
+    def test_oversized_integer_literal_is_a_named_refusal_not_an_escape(self):
+        """A >4300-digit integer raises a bare ValueError, not JSONDecodeError. A narrower
+        clause lets it escape unmapped -- the defect corpus #116 found at the other loader."""
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"
+            _write_pair(dest)
+            member = sorted(dest.glob("member-*.json"))[0]
+            raw = ('{"n": ' + "9" * 4400 + "}").encode()
+            member.write_bytes(raw)
+            index_path = dest / collection.INDEX_FILENAME
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            index["members"][0]["sha256"] = collection.member_digest(raw)
+            index_path.write_text(
+                json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8")
+            with self.assertRaises(collection.CollectionError):
+                collection.load_collection(dest)
+
+
+class PreflightBoundary(unittest.TestCase):
+    def test_the_trailing_newline_is_inside_the_limit_not_after_it(self):
+        """bounded_encoded_size({}, 2) returned 3: the newline was added after the check, so a
+        record exactly at the boundary passed and then wrote one byte over."""
+        exact = len(json.dumps({}, ensure_ascii=False, indent=2, sort_keys=True)) + 1
+        self.assertEqual(collection.bounded_encoded_size({}, exact), exact)
+        with self.assertRaises(collection.CollectionError):
+            collection.bounded_encoded_size({}, exact - 1)
+
+    def test_preflight_matches_the_encoder_including_the_newline(self):
+        record = collection.envelope.bind_report(_valid_record(), "a" * 64)
+        actual = len(collection.envelope.encode_envelope(record))
+        self.assertEqual(collection.bounded_encoded_size(record, actual), actual)
+        with self.assertRaises(collection.CollectionError):
+            collection.bounded_encoded_size(record, actual - 1)
+
+    def test_a_single_huge_scalar_is_NOT_bounded_and_that_is_stated(self):
+        """Documents the real limit rather than overclaiming: iterencode yields one escaped
+        string scalar whole, so a single large value is materialized before the cap sees it.
+        Small input; no large allocation needed to show the shape."""
+        chunks = list(json.JSONEncoder(ensure_ascii=False, indent=2, sort_keys=True)
+                      .iterencode({"s": "x" * 64}))
+        biggest = max(len(c) for c in chunks)
+        self.assertGreaterEqual(biggest, 64,
+                                "one scalar arrives as a single chunk, so per-chunk size is "
+                                "not bounded by the limit")
