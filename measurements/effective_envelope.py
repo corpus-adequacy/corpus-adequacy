@@ -232,14 +232,53 @@ def _require_exact(doc, keys, where: str) -> None:
         raise EnvelopeError(where)
 
 
+def require_requested_record(requested) -> dict:
+    """Validate that a stored requested declaration conforms to the closed schema.
+
+    Enforces that execution_profile is contained-oci-v0, image_id is a valid
+    sha256 digest, sealed is strictly a bool, resource_profile conforms to
+    RESOURCE_PROFILE_SCHEMA with positive integer limits and bool work_exec,
+    and mount_spec is a strictly sorted list of unique destination strings
+    starting with '/'.
+    """
+    _require_exact(requested, REQUESTED_KEYS, "requested")
+    if requested["execution_profile"] != CONTAINED_PROFILE:
+        raise EnvelopeError("execution_profile")
+    try:
+        contained.require_image_id(requested["image_id"])
+    except contained.PrepareError as exc:
+        raise EnvelopeError("image_id") from exc
+    if type(requested["sealed"]) is not bool:
+        raise EnvelopeError("sealed")
+    try:
+        contained.require_resource_profile(requested["resource_profile"])
+    except contained.PrepareError as exc:
+        raise EnvelopeError("resource_profile") from exc
+    mount_spec = requested["mount_spec"]
+    if type(mount_spec) not in (list, tuple):
+        raise EnvelopeError("mount_spec")
+    seen_destinations = set()
+    prev = None
+    for dest in mount_spec:
+        if not isinstance(dest, str) or not dest.startswith("/") or not dest:
+            raise EnvelopeError("mount_spec")
+        if dest in seen_destinations:
+            raise EnvelopeError("mount_spec")
+        if prev is not None and dest <= prev:
+            raise EnvelopeError("mount_spec")
+        seen_destinations.add(dest)
+        prev = dest
+    return requested
+
+
 def require_envelope_matches_request(effective, requested) -> None:
     """Hold one observation against one declaration. Observation cannot yield.
 
     Every projected key is compared here, so a field cannot be recorded
     without being checked and cannot be checked without being recorded.
     """
+    require_requested_record(requested)
     _require_exact(effective, EFFECTIVE_KEYS, "effective")
-    _require_exact(requested, REQUESTED_KEYS, "requested")
     profile = requested["resource_profile"]
 
     if effective["image"] != requested["image_id"]:
@@ -247,21 +286,21 @@ def require_envelope_matches_request(effective, requested) -> None:
     if not isinstance(effective["runtime_version"], str) or not effective[
             "runtime_version"].strip():
         raise EnvelopeError("runtime_version")
-    if effective["privileged"] is not False:
+    if type(effective["privileged"]) is not bool or effective["privileged"] is not False:
         raise EnvelopeError("privileged")
-    if effective["cap_add"] != []:
+    if effective["cap_add"] != [] or type(effective["cap_add"]) is not list:
         raise EnvelopeError("cap_add")
-    if effective["cap_drop"] != ["ALL"]:
+    if effective["cap_drop"] != ["ALL"] or type(effective["cap_drop"]) is not list:
         raise EnvelopeError("cap_drop")
-    if effective["devices"] != []:
+    if effective["devices"] != [] or type(effective["devices"]) is not list:
         raise EnvelopeError("devices")
     if effective["pid_mode"] != "":
         raise EnvelopeError("pid_mode")
     if effective["userns_mode"] != "":
         raise EnvelopeError("userns_mode")
-    if effective["no_new_privileges"] is not True:
+    if type(effective["no_new_privileges"]) is not bool or effective["no_new_privileges"] is not True:
         raise EnvelopeError("no_new_privileges")
-    if effective["read_only_root"] is not True:
+    if type(effective["read_only_root"]) is not bool or effective["read_only_root"] is not True:
         raise EnvelopeError("read_only_root")
     if effective["user"] != CONTAINED_USER:
         raise EnvelopeError("user")
@@ -272,13 +311,15 @@ def require_envelope_matches_request(effective, requested) -> None:
     if not sealed and effective["network_mode"] == "none":
         raise EnvelopeError("network_mode")
 
-    if effective["memory"] != profile["memory_bytes"]:
+    if type(effective["memory"]) is not int or effective["memory"] != profile["memory_bytes"]:
         raise EnvelopeError("memory")
-    if effective["memory_swap"] != profile["memory_swap_bytes"]:
+    if type(effective["memory_swap"]) is not int or effective["memory_swap"] != profile["memory_swap_bytes"]:
         raise EnvelopeError("memory_swap")
-    if effective["pids_limit"] != profile["pids"]:
+    if type(effective["pids_limit"]) is not int or effective["pids_limit"] != profile["pids"]:
         raise EnvelopeError("pids_limit")
 
+    if type(effective["tmpfs"]) is not dict:
+        raise EnvelopeError("tmpfs")
     expected_tmpfs = {
         "/tmp": {"exec": False, "nr_inodes": profile["tmp_inodes"],
                  "size": profile["tmp_bytes"]},
@@ -288,11 +329,25 @@ def require_envelope_matches_request(effective, requested) -> None:
     }
     if effective["tmpfs"] != expected_tmpfs:
         raise EnvelopeError("tmpfs")
+    for _dest, spec in effective["tmpfs"].items():
+        if type(spec) is not dict:
+            raise EnvelopeError("tmpfs")
+        if type(spec.get("exec")) is not bool:
+            raise EnvelopeError("tmpfs")
+        if type(spec.get("nr_inodes")) is not int or type(spec.get("size")) is not int:
+            raise EnvelopeError("tmpfs")
 
     # The allowed environment is the pinned image's own observed environment
     # plus exactly what the create argv adds. A name injected at create time
     # is outside that set by construction, so no denylist is needed and no
     # value is ever read.
+    if type(effective["image_env_names"]) not in (list, tuple) or any(
+            not isinstance(name, str) or not name for name in effective["image_env_names"]):
+        raise EnvelopeError("image_env_names")
+    if type(effective["env_names"]) not in (list, tuple) or any(
+            not isinstance(name, str) or not name for name in effective["env_names"]):
+        raise EnvelopeError("env_names")
+
     allowed = set(effective["image_env_names"])
     if sealed:
         allowed.add(OFFLINE_ENV_NAME)
@@ -300,6 +355,16 @@ def require_envelope_matches_request(effective, requested) -> None:
         raise EnvelopeError("env_names")
     if sealed != (OFFLINE_ENV_NAME in effective["env_names"]):
         raise EnvelopeError("env_names")
+
+    if type(effective["mounts"]) not in (list, tuple):
+        raise EnvelopeError("mounts")
+    for mount in effective["mounts"]:
+        if type(mount) is not dict:
+            raise EnvelopeError("mounts")
+        if type(mount.get("rw")) is not bool or mount.get("rw") is not False:
+            raise EnvelopeError("mounts")
+        if not isinstance(mount.get("destination"), str) or not isinstance(mount.get("type"), str):
+            raise EnvelopeError("mounts")
 
     expected_mounts = [
         {"destination": destination, "rw": False, "type": "bind"}
@@ -347,7 +412,7 @@ def build_envelope_record(*, requested, setup_status, envelope_status,
     together, and no combination manufactures a score. There is deliberately
     no `publication_permission` parameter: it cannot be caller-supplied.
     """
-    _require_exact(requested, REQUESTED_KEYS, "requested")
+    require_requested_record(requested)
     setup_status = _require_member(setup_status, SETUP_STATUSES, "setup_status")
     envelope_status = _require_member(
         envelope_status, ENVELOPE_STATUSES, "envelope_status")
@@ -423,8 +488,13 @@ def validate_envelope_record(record: dict) -> dict:
     """Validate that an execution-envelope record is internally consistent.
 
     Reconstructs the envelope record through bind_report and requires exact
-    equality with the original document. An inconsistent or mutated record
-    raises EnvelopeError and is never normalized into a pass.
+    equality with the original document. Round-trip equality verifies the
+    closure of the state model (derived publication permission, withheld reason,
+    schema, non-claims, and state invariants) against explicit nested validators
+    for requested declarations and effective observations. It does not prove
+    that the record was authentic or produced by a specific unverified run.
+    An inconsistent or mutated record raises EnvelopeError and is never
+    normalized into a pass.
     """
     if type(record) is not dict:
         raise EnvelopeError("envelope")

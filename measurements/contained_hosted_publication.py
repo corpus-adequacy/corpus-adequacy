@@ -301,6 +301,12 @@ def check_envelope_bindings(envelope_doc, *, bindings, prepare_sha256) -> None:
         raise HostedPublicationError("prepare_sha256_binding")
     if envelope_doc.get("prepare_sha256") != prepare_sha256:
         raise HostedPublicationError("prepare_sha256_binding")
+    if requested.get("execution_profile") != REQUIRED_PROFILE:
+        raise HostedPublicationError("execution_profile_binding")
+    if requested.get("sealed") is not True:
+        raise HostedPublicationError("sealed_binding")
+    if requested.get("resource_profile") != contained.CANDIDATE_RESOURCE_PROFILE:
+        raise HostedPublicationError("resource_profile_binding")
 
 
 def observe_child_environment(envelope_doc) -> dict:
@@ -309,6 +315,12 @@ def observe_child_environment(envelope_doc) -> dict:
     Values come from the envelope projected by contained_oci / effective_envelope
     (env_names and mounts). runner.environment, runs-on, and persist-credentials
     are structural workflow facts and are not read here.
+
+    When envelope_status is not 'verified' and effective is None (a withheld
+    run), empty tuples are returned so refuse_hostile_workflow does not fail on
+    missing data. This is an unavailable observation, not a measured-clean
+    result; publication_decision strictly requires envelope_status == 'verified'
+    and publication_permission == 'permitted' before any output can publish.
     """
     if type(envelope_doc) is not dict:
         raise HostedPublicationError("envelope_effective")

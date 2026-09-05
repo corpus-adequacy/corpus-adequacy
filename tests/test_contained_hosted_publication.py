@@ -916,6 +916,26 @@ class CandidateImageBinding(unittest.TestCase):
             )
         self.assertEqual(str(ctx.exception), "prepare_sha256_binding")
 
+    def test_unsealed_and_forged_profile_envelope_refused(self):
+        sha = _prepare_sha256()
+        env_unsealed = _permitted_envelope(
+            prepare_sha256=sha,
+            requested=_base_envelope_requested(sealed=False),
+            effective=_base_envelope_effective(sealed=False),
+        )
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_envelope_bindings(env_unsealed, bindings=BINDINGS, prepare_sha256=sha)
+        self.assertEqual(str(ctx.exception), "sealed_binding")
+
+        env_forged_prof = _permitted_envelope(prepare_sha256=sha)
+        env_forged_prof["requested"]["resource_profile"] = {
+            **contained.CANDIDATE_RESOURCE_PROFILE,
+            "pids": 999999,
+        }
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_envelope_bindings(env_forged_prof, bindings=BINDINGS, prepare_sha256=sha)
+        self.assertEqual(str(ctx.exception), "resource_profile_binding")
+
     def test_mutation_restore_probe_comparison_is_red(self):
         original = Path(hosted.__file__).read_text(encoding="utf-8")
         delegated = (
