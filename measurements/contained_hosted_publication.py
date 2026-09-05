@@ -42,7 +42,10 @@ if str(_ROOT) not in sys.path:
 import contained_oci as contained  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
 import effective_envelope  # noqa: E402
-from aee_checker_sealed_candidate import require_candidate_image  # noqa: E402
+from aee_checker_sealed_candidate import (  # noqa: E402
+    CANDIDATE_MOUNT_SPEC,
+    require_candidate_image,
+)
 
 REQUIRED_PROFILE = "contained-oci-v0"
 REQUIRED_RUNNER_ENVIRONMENT = "github-hosted"
@@ -214,7 +217,7 @@ def load_json_confined(root, relpath, *, max_bytes: int):
         raise HostedPublicationError("max_input_bytes") from exc
     try:
         doc = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, ValueError) as exc:
         raise HostedPublicationError("json_input") from exc
     return doc
 
@@ -307,6 +310,11 @@ def check_envelope_bindings(envelope_doc, *, bindings, prepare_sha256) -> None:
         raise HostedPublicationError("sealed_binding")
     if requested.get("resource_profile") != contained.CANDIDATE_RESOURCE_PROFILE:
         raise HostedPublicationError("resource_profile_binding")
+    candidate_mount_destinations = sorted(
+        destination for _key, destination in CANDIDATE_MOUNT_SPEC
+    )
+    if requested.get("mount_spec") != candidate_mount_destinations:
+        raise HostedPublicationError("mount_spec_binding")
 
 
 def observe_child_environment(envelope_doc) -> dict:
@@ -653,7 +661,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     prepare_sha256 = hashlib.sha256(prepare_raw).hexdigest()
     try:
         prepare_doc = json.loads(prepare_raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, ValueError) as exc:
         raise HostedPublicationError("json_input") from exc
     check_prepare_bindings(prepare_doc, bindings=bindings)
 

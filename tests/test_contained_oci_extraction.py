@@ -696,6 +696,62 @@ class SharedEnvelopeOwnership(unittest.TestCase):
                     transport=UnexpectedCreate(),
                 )
 
+    def test_validate_mount_destinations_shared_predicate(self):
+        contained = self._contained_oci()
+
+        # Valid destinations
+        res = contained.validate_mount_destinations(["/a", "/b"])
+        self.assertEqual(res, ("/a", "/b"))
+
+        # Empty sequences refused
+        for empty in ([], ()):
+            with self.assertRaises(contained.PrepareError) as ctx:
+                contained.validate_mount_destinations(empty)
+            self.assertEqual(str(ctx.exception), "mount specification")
+
+        # Non-sequence types refused
+        for bad in (None, 123, "/a", {"/a": True}):
+            with self.assertRaises(contained.PrepareError) as ctx:
+                contained.validate_mount_destinations(bad)
+            self.assertEqual(str(ctx.exception), "mount specification")
+
+        # Invalid path members refused
+        for bad_elem in ([""], ["a"], [123], ["/a", ""]):
+            with self.assertRaises(contained.PrepareError) as ctx:
+                contained.validate_mount_destinations(bad_elem)
+            self.assertEqual(str(ctx.exception), "mount specification")
+
+        # Duplicate destinations refused
+        with self.assertRaises(contained.PrepareError) as ctx:
+            contained.validate_mount_destinations(["/a", "/a"])
+        self.assertEqual(str(ctx.exception), "mount specification")
+
+        # Strictly sorted flag enforced
+        self.assertEqual(
+            contained.validate_mount_destinations(["/a", "/b"], strictly_sorted=True),
+            ("/a", "/b"),
+        )
+        with self.assertRaises(contained.PrepareError) as ctx:
+            contained.validate_mount_destinations(["/b", "/a"], strictly_sorted=True)
+        self.assertEqual(str(ctx.exception), "mount specification")
+
+        # strictly_sorted=False allows non-sorted unique destinations
+        self.assertEqual(
+            contained.validate_mount_destinations(["/b", "/a"], strictly_sorted=False),
+            ("/b", "/a"),
+        )
+
+        # Parity: CANDIDATE_MOUNT_SPEC destinations pass both constructor and stored validator
+        candidate_destinations = sorted(d for _, d in candidate.CANDIDATE_MOUNT_SPEC)
+        self.assertEqual(
+            contained.validate_mount_destinations(candidate_destinations, strictly_sorted=True),
+            tuple(candidate_destinations),
+        )
+        self.assertEqual(
+            [d for _, d in contained._require_mount_spec(candidate.CANDIDATE_MOUNT_SPEC)],
+            [d for _, d in candidate.CANDIDATE_MOUNT_SPEC],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

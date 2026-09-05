@@ -255,19 +255,10 @@ def require_requested_record(requested) -> dict:
     except contained.PrepareError as exc:
         raise EnvelopeError("resource_profile") from exc
     mount_spec = requested["mount_spec"]
-    if type(mount_spec) not in (list, tuple):
-        raise EnvelopeError("mount_spec")
-    seen_destinations = set()
-    prev = None
-    for dest in mount_spec:
-        if not isinstance(dest, str) or not dest.startswith("/") or not dest:
-            raise EnvelopeError("mount_spec")
-        if dest in seen_destinations:
-            raise EnvelopeError("mount_spec")
-        if prev is not None and dest <= prev:
-            raise EnvelopeError("mount_spec")
-        seen_destinations.add(dest)
-        prev = dest
+    try:
+        contained.validate_mount_destinations(mount_spec, strictly_sorted=True)
+    except contained.PrepareError as exc:
+        raise EnvelopeError("mount_spec") from exc
     return requested
 
 

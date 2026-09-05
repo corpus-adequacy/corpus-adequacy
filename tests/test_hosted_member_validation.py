@@ -331,19 +331,37 @@ class ConsumerMemberValidationTests(unittest.TestCase):
 
     def test_malformed_nested_members_produce_envelope_error_and_hosted_refusal(self):
         """F1/F4: Malformed nested structures must raise EnvelopeError and map to envelope_corrupt."""
+        def _mutate_unsorted_matching(doc):
+            doc["requested"]["mount_spec"] = ["/vendor", "/input"]
+            doc["effective"]["mounts"] = [
+                {"destination": "/vendor", "rw": False, "type": "bind"},
+                {"destination": "/input", "rw": False, "type": "bind"},
+            ]
+
+        def _mutate_duplicate_matching(doc):
+            doc["requested"]["mount_spec"] = ["/input", "/input"]
+            doc["effective"]["mounts"] = [
+                {"destination": "/input", "rw": False, "type": "bind"},
+                {"destination": "/input", "rw": False, "type": "bind"},
+            ]
+
         test_cases = [
             ("resource_profile string", lambda doc: doc["requested"].__setitem__("resource_profile", "not-a-dict")),
             ("resource_profile empty", lambda doc: doc["requested"].__setitem__("resource_profile", {})),
             ("resource_profile None", lambda doc: doc["requested"].__setitem__("resource_profile", None)),
             ("mount_spec int", lambda doc: doc["requested"].__setitem__("mount_spec", 123)),
+            ("mount_spec empty", lambda doc: doc["requested"].__setitem__("mount_spec", [])),
             ("mount_spec unsorted", lambda doc: doc["requested"].__setitem__("mount_spec", ["/vendor", "/input"])),
+            ("mount_spec unsorted with matching mounts", _mutate_unsorted_matching),
             ("mount_spec duplicate", lambda doc: doc["requested"].__setitem__("mount_spec", ["/input", "/input"])),
+            ("mount_spec duplicate with matching mounts", _mutate_duplicate_matching),
             ("mount_spec not-slash", lambda doc: doc["requested"].__setitem__("mount_spec", ["input"])),
             ("env_names int", lambda doc: doc["effective"].__setitem__("env_names", 123)),
             ("image_env_names int", lambda doc: doc["effective"].__setitem__("image_env_names", 123)),
             ("mounts rw int 0", lambda doc: doc["effective"]["mounts"][0].__setitem__("rw", 0)),
             ("memory float", lambda doc: doc["effective"].__setitem__("memory", float(doc["effective"]["memory"]))),
-            ("tmpfs exec int 0", lambda doc: doc["effective"]["tmpfs"]["/work"].__setitem__("exec", 0)),
+            ("tmpfs /tmp exec int 0", lambda doc: doc["effective"]["tmpfs"]["/tmp"].__setitem__("exec", 0)),
+            ("tmpfs /work exec int 1", lambda doc: doc["effective"]["tmpfs"]["/work"].__setitem__("exec", 1)),
             ("requested sealed int 1", lambda doc: doc["requested"].__setitem__("sealed", 1)),
         ]
         for name, mutator in test_cases:
@@ -446,6 +464,86 @@ class ConsumerMemberValidationTests(unittest.TestCase):
             hosted.check_envelope_bindings(wrong_prof_env, bindings=BINDINGS, prepare_sha256=sha)
         self.assertEqual(str(ctx.exception), "execution_profile_binding")
 
+    def test_require_requested_record_empty_mount_spec_refused(self):
+        """F3: Stored requested declaration must refuse empty mount_spec."""
+        req = _requested()
+        req["mount_spec"] = []
+        with self.assertRaises(env_mod.EnvelopeError) as ctx:
+            env_mod.require_requested_record(req)
+        self.assertEqual(str(ctx.exception), "mount_spec")
+
+    def test_unverified_record_requested_schema_validated_in_builder(self):
+        """F4/M4: build_envelope_record must validate requested schema even when effective is None."""
+        base_req = _requested()
+
+        # Bad resource profile in unverified record
+        bad_req = dict(base_req, resource_profile="not-a-dict")
+        with self.assertRaises(env_mod.EnvelopeError) as ctx:
+            env_mod.build_envelope_record(
+                requested=bad_req,
+                setup_status="ready",
+                envelope_status="unverified",
+                unverified_field="candidate_exit",
+                effective=None,
+                candidate_outcome="completed",
+                cleanup="removed-and-absent",
+                prepare_sha256="0" * 64,
+                execution_commit="0" * 40,
+                report_sha256="0" * 64,
+            )
+        self.assertEqual(str(ctx.exception), "resource_profile")
+
+        # Bad mount_spec in unverified record
+        bad_req = dict(base_req, mount_spec=123)
+        with self.assertRaises(env_mod.EnvelopeError) as ctx:
+            env_mod.build_envelope_record(
+                requested=bad_req,
+                setup_status="ready",
+                envelope_status="unverified",
+                unverified_field="candidate_exit",
+                effective=None,
+                candidate_outcome="completed",
+                cleanup="removed-and-absent",
+                prepare_sha256="0" * 64,
+                execution_commit="0" * 40,
+                report_sha256="0" * 64,
+            )
+        self.assertEqual(str(ctx.exception), "mount_spec")
+
+        # Empty mount_spec in unverified record
+        bad_req = dict(base_req, mount_spec=[])
+        with self.assertRaises(env_mod.EnvelopeError) as ctx:
+            env_mod.build_envelope_record(
+                requested=bad_req,
+                setup_status="ready",
+                envelope_status="unverified",
+                unverified_field="candidate_exit",
+                effective=None,
+                candidate_outcome="completed",
+                cleanup="removed-and-absent",
+                prepare_sha256="0" * 64,
+                execution_commit="0" * 40,
+                report_sha256="0" * 64,
+            )
+        self.assertEqual(str(ctx.exception), "mount_spec")
+
+        # Bad sealed in unverified record
+        bad_req = dict(base_req, sealed=1)
+        with self.assertRaises(env_mod.EnvelopeError) as ctx:
+            env_mod.build_envelope_record(
+                requested=bad_req,
+                setup_status="ready",
+                envelope_status="unverified",
+                unverified_field="candidate_exit",
+                effective=None,
+                candidate_outcome="completed",
+                cleanup="removed-and-absent",
+                prepare_sha256="0" * 64,
+                execution_commit="0" * 40,
+                report_sha256="0" * 64,
+            )
+        self.assertEqual(str(ctx.exception), "sealed")
+
 
 class MemberValidationMutations(unittest.TestCase):
     """Mutation and deletion controls for consumer validation."""
@@ -459,8 +557,10 @@ class MemberValidationMutations(unittest.TestCase):
             "    except effective_envelope.EnvelopeError as exc:\n"
             '        raise HostedPublicationError("envelope_corrupt") from exc\n'
         )
-        if call_snippet not in original:
-            self.skipTest("call snippet not found in source")
+        self.assertIn(
+            call_snippet, original,
+            "call snippet not found in source; harness maintenance required",
+        )
         mutated = original.replace(call_snippet, "    pass  # mutated: validation bypassed\n", 1)
         bad_mod = _load_mutated_module(
             mutated, "mut_bypass_validation", "contained_hosted_publication.py"
@@ -488,8 +588,10 @@ class MemberValidationMutations(unittest.TestCase):
             "    if rebuilt != record:\n"
             '        raise EnvelopeError("envelope_semantic_mismatch")\n'
         )
-        if cmp_snippet not in original:
-            self.skipTest("comparison snippet not found in source")
+        self.assertIn(
+            cmp_snippet, original,
+            "comparison snippet not found in source; harness maintenance required",
+        )
         mutated = original.replace(cmp_snippet, "    pass  # mutated: comparison omitted\n", 1)
         bad_mod = _load_mutated_module(
             mutated, "mut_omit_comparison", "effective_envelope.py"
