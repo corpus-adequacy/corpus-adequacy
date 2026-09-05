@@ -1396,6 +1396,8 @@ class SourceMutations(unittest.TestCase):
                 )
             )
             self.assertEqual(leaked.get("publication_permission"), "permitted")
+            self.assertEqual(leaked.get("envelope_status"), "verified")
+
     def test_load_envelope_huge_integer_refuses_json_input(self):
         doc = _permitted_envelope()
         raw = json.dumps(doc)
