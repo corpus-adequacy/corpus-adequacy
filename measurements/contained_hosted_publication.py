@@ -9,9 +9,12 @@ escape-proof OCI.
 Dispatch bindings (candidate_revision, runner_revision, image_digest) are
 sealed into the execution contract: a packet-root bindings file must match,
 prepare.pins.subject_commit must equal candidate_revision (sole producer
-candidate identity), prepare.execution.commit / image.id and the produced
-envelope must match runner/image, and envelope prepare_sha256 must bind the
-exact checked prepare bytes. Packet root itself resolves under an explicit
+candidate identity), prepare.execution.commit must match runner_revision,
+image_digest is candidate/toolchain image B (not inert probe A), preflight
+requires prepare.image.id (probe A) and prepare.toolchain.image_id (B) and
+delegates identity/type/distinctness to require_candidate_image, the produced
+envelope requested.image_id must match B, and envelope prepare_sha256 must
+bind the exact checked prepare bytes (probe A remains prepare-bound). Packet root itself resolves under an explicit
 workspace root before any child read. Authorize/prepare/pins/envelope JSON
 resolve only as confined regular files under that packet root with byte
 ceilings before parse. Child-environment observation comes only from the
@@ -38,6 +41,7 @@ if str(_ROOT) not in sys.path:
 
 import contained_oci as contained  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
+from aee_checker_sealed_candidate import require_candidate_image  # noqa: E402
 
 REQUIRED_PROFILE = "contained-oci-v0"
 REQUIRED_RUNNER_ENVIRONMENT = "github-hosted"
@@ -263,8 +267,17 @@ def check_prepare_bindings(prepare_doc, *, bindings) -> None:
     image = prepare_doc.get("image")
     if type(image) is not dict:
         raise HostedPublicationError("image_digest_binding")
-    if image.get("id") != bindings["image_digest"]:
+    toolchain = prepare_doc.get("toolchain")
+    if type(toolchain) is not dict:
         raise HostedPublicationError("image_digest_binding")
+    try:
+        require_candidate_image(
+            image_id=bindings["image_digest"],
+            toolchain_image_id=toolchain.get("image_id"),
+            probe_image_id=image.get("id"),
+        )
+    except contained.PrepareError as exc:
+        raise HostedPublicationError("image_digest_binding") from exc
     pins = prepare_doc.get("pins")
     if type(pins) is not dict:
         raise HostedPublicationError("candidate_revision_binding")

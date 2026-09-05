@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       image_digest:
-        description: Contained OCI image digest (sha256:64hex)
+        description: Candidate/toolchain image digest B (sha256:64hex)
         required: true
         type: string
       packet_root:

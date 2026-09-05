@@ -21,7 +21,9 @@ import contained_oci as contained  # noqa: E402
 
 CANDIDATE = "a" * 40
 RUNNER = "b" * 40
+# Option 2: IMAGE is candidate/toolchain B; PROBE_IMAGE is inert probe A.
 IMAGE = "sha256:" + ("c" * 64)
+PROBE_IMAGE = "sha256:" + ("11" * 32)
 OTHER_CANDIDATE = "f" * 40
 OTHER_RUNNER = "d" * 40
 OTHER_IMAGE = "sha256:" + ("e" * 64)
@@ -37,7 +39,7 @@ def _canonical(path):
 
 
 def _prepare_doc(*, bindings=None, subject_commit=None, prepare_commit=None,
-                 prepare_image=None, prepare_extra=None):
+                 prepare_image=None, toolchain_image=None, prepare_extra=None):
     bindings = dict(bindings or BINDINGS)
     subject = (
         subject_commit if subject_commit is not None
@@ -45,13 +47,18 @@ def _prepare_doc(*, bindings=None, subject_commit=None, prepare_commit=None,
     prepare_commit = (
         prepare_commit if prepare_commit is not None
         else bindings["runner_revision"])
+    # Probe A defaults distinct from dispatch B (bindings image_digest).
     prepare_image = (
         prepare_image if prepare_image is not None
+        else PROBE_IMAGE)
+    toolchain_image = (
+        toolchain_image if toolchain_image is not None
         else bindings["image_digest"])
     prepare = {
         "schema": "corpus-adequacy.prepare.v1",
         "execution": {"commit": prepare_commit, "content_sha256": "f" * 64},
         "image": {"id": prepare_image},
+        "toolchain": {"image_id": toolchain_image},
         "pins": {"subject_commit": subject},
     }
     if prepare_extra:
@@ -92,7 +99,7 @@ def _permitted_envelope(*, prepare_sha256=None, **over):
 
 
 def _write_packet(root: Path, *, bindings=None, prepare_commit=None,
-                  prepare_image=None, subject_commit=None,
+                  prepare_image=None, toolchain_image=None, subject_commit=None,
                   authorize="authorize-bytes", prepare_extra=None):
     bindings = dict(bindings or BINDINGS)
     (root / hosted.DISPATCH_BINDINGS_FILENAME).write_text(
@@ -106,6 +113,7 @@ def _write_packet(root: Path, *, bindings=None, prepare_commit=None,
         subject_commit=subject_commit,
         prepare_commit=prepare_commit,
         prepare_image=prepare_image,
+        toolchain_image=toolchain_image,
         prepare_extra=prepare_extra,
     )
     (root / "prepare.v1").write_bytes(raw)
@@ -545,7 +553,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
 
             packet3 = base / "packet3"
             packet3.mkdir()
-            rels3 = _write_packet(packet3, prepare_image=OTHER_IMAGE)
+            rels3 = _write_packet(packet3, toolchain_image=OTHER_IMAGE)
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(base, "packet3", rels3, out_name="out3")
             self.assertEqual(str(ctx.exception), "image_digest_binding")
@@ -720,6 +728,166 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             self.assertFalse((out / hosted.SETUP_STATUS_FILENAME).exists())
             self.assertFalse((out / hosted.EFFECTIVE_ENVELOPE_FILENAME).exists())
             self.assertFalse((out / hosted.CANDIDATE_RESULT_FILENAME).exists())
+
+
+class CandidateImageBinding(unittest.TestCase):
+    """Option 2: image_digest is candidate/toolchain B; probe A is prepare-bound."""
+
+    def test_real_helpers_distinct_ab_prepare_and_envelope_green(self):
+        import aee_checker_sealed_candidate as cand
+        self.assertNotEqual(PROBE_IMAGE, IMAGE)
+        self.assertEqual(
+            cand.require_candidate_image(
+                image_id=IMAGE, toolchain_image_id=IMAGE, probe_image_id=PROBE_IMAGE),
+            IMAGE,
+        )
+        prepare = _prepare_doc()
+        self.assertEqual(prepare["image"]["id"], PROBE_IMAGE)
+        self.assertEqual(prepare["toolchain"]["image_id"], IMAGE)
+        hosted.check_prepare_bindings(prepare, bindings=BINDINGS)
+        sha = _prepare_sha256()
+        hosted.check_envelope_bindings(
+            _permitted_envelope(prepare_sha256=sha),
+            bindings=BINDINGS,
+            prepare_sha256=sha,
+        )
+
+    def test_valid_distinct_ab_run_gate_publishes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+            decision = _run_ok(base, "packet", rels)
+            self.assertEqual(decision["decision"], "publish")
+
+    def test_dispatch_probe_a_refused(self):
+        prepare = _prepare_doc()
+        bad = dict(BINDINGS)
+        bad["image_digest"] = PROBE_IMAGE
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_prepare_bindings(prepare, bindings=bad)
+        self.assertEqual(str(ctx.exception), "image_digest_binding")
+
+    def test_absent_toolchain_b_refused(self):
+        prepare = _prepare_doc()
+        del prepare["toolchain"]
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_prepare_bindings(prepare, bindings=BINDINGS)
+        self.assertEqual(str(ctx.exception), "image_digest_binding")
+
+    def test_wrong_toolchain_b_refused(self):
+        prepare = _prepare_doc(toolchain_image=OTHER_IMAGE)
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_prepare_bindings(prepare, bindings=BINDINGS)
+        self.assertEqual(str(ctx.exception), "image_digest_binding")
+
+    def test_wrong_envelope_b_refused(self):
+        sha = _prepare_sha256()
+        env = _permitted_envelope(
+            prepare_sha256=sha,
+            requested={"image_id": OTHER_IMAGE, "execution_profile": "contained-oci-v0"},
+        )
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_envelope_bindings(
+                env, bindings=BINDINGS, prepare_sha256=sha)
+        self.assertEqual(str(ctx.exception), "image_digest_binding")
+
+    def test_a_equals_b_refused(self):
+        prepare = _prepare_doc(prepare_image=IMAGE, toolchain_image=IMAGE)
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_prepare_bindings(prepare, bindings=BINDINGS)
+        self.assertEqual(str(ctx.exception), "image_digest_binding")
+
+    def test_missing_probe_a_refused(self):
+        prepare = _prepare_doc()
+        prepare["image"] = {}
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_prepare_bindings(prepare, bindings=BINDINGS)
+        self.assertEqual(str(ctx.exception), "image_digest_binding")
+
+    def test_invalid_probe_a_refused(self):
+        prepare = _prepare_doc(prepare_image="sha256:dead")
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_prepare_bindings(prepare, bindings=BINDINGS)
+        self.assertEqual(str(ctx.exception), "image_digest_binding")
+
+    def test_unrelated_revision_and_prepare_sha256_still_bite(self):
+        prepare = _prepare_doc(prepare_commit=OTHER_RUNNER)
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_prepare_bindings(prepare, bindings=BINDINGS)
+        self.assertEqual(str(ctx.exception), "runner_revision_binding")
+        prepare2 = _prepare_doc(subject_commit=OTHER_CANDIDATE)
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_prepare_bindings(prepare2, bindings=BINDINGS)
+        self.assertEqual(str(ctx.exception), "candidate_revision_binding")
+        sha = _prepare_sha256()
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_envelope_bindings(
+                _permitted_envelope(prepare_sha256="ab" * 32),
+                bindings=BINDINGS,
+                prepare_sha256=sha,
+            )
+        self.assertEqual(str(ctx.exception), "prepare_sha256_binding")
+
+    def test_mutation_restore_probe_comparison_is_red(self):
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        delegated = (
+            "    try:\n"
+            "        require_candidate_image(\n"
+            '            image_id=bindings["image_digest"],\n'
+            '            toolchain_image_id=toolchain.get("image_id"),\n'
+            '            probe_image_id=image.get("id"),\n'
+            "        )\n"
+            "    except contained.PrepareError as exc:\n"
+            '        raise HostedPublicationError("image_digest_binding") from exc\n'
+        )
+        restored = (
+            '    if image.get("id") != bindings["image_digest"]:\n'
+            '        raise HostedPublicationError("image_digest_binding")\n'
+        )
+        self.assertEqual(original.count(delegated), 1)
+        mutated = original.replace(delegated, restored, 1)
+        bad = _load_mutated_module(mutated, "mut_restore_probe_cmp")
+        prepare = _prepare_doc()
+        with self.assertRaises(bad.HostedPublicationError) as ctx:
+            bad.check_prepare_bindings(prepare, bindings=BINDINGS)
+        self.assertEqual(str(ctx.exception), "image_digest_binding")
+        hosted.check_prepare_bindings(prepare, bindings=BINDINGS)
+
+    def test_mutation_delete_require_candidate_image_call_is_red(self):
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        delegated = (
+            "    try:\n"
+            "        require_candidate_image(\n"
+            '            image_id=bindings["image_digest"],\n'
+            '            toolchain_image_id=toolchain.get("image_id"),\n'
+            '            probe_image_id=image.get("id"),\n'
+            "        )\n"
+            "    except contained.PrepareError as exc:\n"
+            '        raise HostedPublicationError("image_digest_binding") from exc\n'
+        )
+        self.assertEqual(original.count(delegated), 1)
+        mutated = original.replace(
+            delegated, "    pass  # mutated: candidate image unbound\n", 1)
+        bad = _load_mutated_module(mutated, "mut_delete_require_cand")
+        prepare = _prepare_doc()
+        bad_bindings = dict(BINDINGS)
+        bad_bindings["image_digest"] = PROBE_IMAGE
+        with self.assertRaises(hosted.HostedPublicationError):
+            hosted.check_prepare_bindings(prepare, bindings=bad_bindings)
+        bad.check_prepare_bindings(prepare, bindings=bad_bindings)
+
+    def test_mutation_noop_comment_control_stays_green(self):
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        mutated = original.replace(
+            '"""Hosted contained publication gate (#107).',
+            '"""Hosted contained publication gate (#107).\n# noop image-binding',
+            1,
+        )
+        mod = _load_mutated_module(mutated, "noop_image_binding")
+        prepare = _prepare_doc()
+        mod.check_prepare_bindings(prepare, bindings=BINDINGS)
 
 
 class SourceMutations(unittest.TestCase):
