@@ -295,5 +295,98 @@ class Ceilings(unittest.TestCase):
             ledger.register()
 
 
+class ReportBinding(unittest.TestCase):
+    """A coordinator probe found the index carried a report claim nothing checked, and the
+    members carried none at all. Only None fixtures were being tested."""
+
+    REPORT = "a" * 64
+
+    def _write(self, dest, report):
+        ledger = collection.Ledger()
+        for _ in range(2):
+            ledger.recorded(ledger.register(), _valid_record())
+        collection.write_collection(ledger, dest, report_sha256=report)
+
+    def test_non_null_report_reaches_every_member_round_trip(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"
+            self._write(dest, self.REPORT)
+            loaded = collection.load_collection(dest)
+            self.assertEqual(loaded["index"]["report_sha256"], self.REPORT)
+            self.assertEqual([m["report_sha256"] for m in loaded["members"]],
+                             [self.REPORT, self.REPORT],
+                             "every member must be bound to the report, not left None")
+
+    def test_malformed_index_report_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"
+            self._write(dest, self.REPORT)
+            index_path = dest / collection.INDEX_FILENAME
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            index["report_sha256"] = "not-a-digest"
+            index_path.write_text(
+                json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8")
+            with self.assertRaises(collection.CollectionError):
+                collection.load_collection(dest)
+
+    def test_index_report_that_disagrees_with_members_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"
+            self._write(dest, self.REPORT)
+            index_path = dest / collection.INDEX_FILENAME
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            index["report_sha256"] = "b" * 64      # well-formed, but not what members carry
+            index_path.write_text(
+                json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8")
+            with self.assertRaises(collection.CollectionError):
+                collection.load_collection(dest)
+
+
+class AttemptCeilingIsIndependent(unittest.TestCase):
+    def test_non_recorded_attempts_cannot_bypass_the_cap(self):
+        # 257 attempts that emitted nothing passed a cap of 256 because only members were
+        # counted. Permission stayed withheld, so never a false publish -- but the resource
+        # contract did not hold on input, which is what this pins.
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"
+            ledger = collection.Ledger(max_members=300)
+            for _ in range(257):
+                ledger.no_envelope(ledger.register())
+            collection.write_collection(ledger, dest, report_sha256=None)
+            with self.assertRaises(collection.CollectionError):
+                collection.load_collection(dest)          # default cap is 256
+
+    def test_the_cap_still_admits_exactly_its_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"
+            ledger = collection.Ledger(max_members=300)
+            for _ in range(256):
+                ledger.no_envelope(ledger.register())
+            collection.write_collection(ledger, dest, report_sha256=None)
+            loaded = collection.load_collection(dest)     # control: 256 is admitted
+            self.assertEqual(collection.collection_permission(loaded), "withheld")
+
+
+class StagedWrite(unittest.TestCase):
+    def test_index_ceiling_refuses_before_any_member_is_written(self):
+        # The index is built and bounded first, so an index-size refusal leaves nothing behind.
+        # An earlier version wrote members first and then claimed that property.
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"
+            ledger = collection.Ledger()
+            ledger.recorded(ledger.register(), _valid_record())
+            original = collection.MAX_INDEX_BYTES
+            try:
+                collection.MAX_INDEX_BYTES = 16
+                with self.assertRaises(collection.CollectionError):
+                    collection.write_collection(ledger, dest, report_sha256=None)
+            finally:
+                collection.MAX_INDEX_BYTES = original
+            self.assertEqual(list(dest.glob("member-*.json")), [],
+                             "no member may be written before the index is known to fit")
+
+
 if __name__ == "__main__":
     unittest.main()

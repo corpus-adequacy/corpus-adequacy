@@ -12,7 +12,7 @@ from aee_checker_sealed_run import load_prepare_v1
 
 
 def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, transport=None,
-                        envelope_sink=None):
+                        envelope_sink=None, ledger=None):
     """Return a backend that executes only the PREPARE-bound sealed candidate.
 
     `envelope_sink` receives the execution-envelope record for each contained
@@ -42,14 +42,28 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, transport=Non
             "tool": materialized["tool"],
             "subject": subject,
         }
-        completed = candidate.run_sealed_candidate(
-            prepare_raw=prepare_raw,
-            mounts=mounts,
-            execution_contract=execution_manifest,
-            transport=transport,
-            binding=binding,
-        )
+        # Registered immediately before the call, never in the sink: the sink runs after return,
+        # so it can never observe an invocation that raised. Attempts are therefore never
+        # derived from emissions.
+        ordinal = None if ledger is None else ledger.register()
+        try:
+            completed = candidate.run_sealed_candidate(
+                prepare_raw=prepare_raw,
+                mounts=mounts,
+                execution_contract=execution_manifest,
+                transport=transport,
+                binding=binding,
+            )
+        except BaseException as exc:
+            if ledger is not None:
+                ledger.raised(ordinal, type(exc).__name__)
+            raise
         record = getattr(completed, "envelope_record", None)
+        if ledger is not None:
+            if record is None:
+                ledger.no_envelope(ordinal)
+            else:
+                ledger.recorded(ordinal, record)
         if envelope_sink is not None and record is not None:
             envelope_sink(record)
         outcome, diagnostic, kind = ca.child_outcome(execution_manifest, completed)
