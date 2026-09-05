@@ -325,7 +325,8 @@ def observe_child_environment(envelope_doc) -> dict:
     are structural workflow facts and are not read here.
 
     When envelope_status is not 'verified' and effective is None (a withheld
-    run), empty tuples are returned so refuse_hostile_workflow does not fail on
+    run), empty collections (empty tuples for env names, empty list for
+    mounts) are returned so refuse_hostile_workflow does not fail on
     missing data. This is an unavailable observation, not a measured-clean
     result; publication_decision strictly requires envelope_status == 'verified'
     and publication_permission == 'permitted' before any output can publish.
