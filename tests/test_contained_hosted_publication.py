@@ -18,6 +18,8 @@ sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
 import contained_hosted_publication as hosted  # noqa: E402
 import contained_oci as contained  # noqa: E402
+import effective_envelope as env_mod  # noqa: E402
+from aee_checker_sealed_candidate import CANDIDATE_MOUNT_SPEC  # noqa: E402
 
 CANDIDATE = "a" * 40
 RUNNER = "b" * 40
@@ -74,26 +76,114 @@ def _prepare_sha256(**kwargs) -> str:
     return hashlib.sha256(_prepare_raw(**kwargs)).hexdigest()
 
 
+def _base_envelope_requested(*, image=IMAGE, sealed=True):
+    return env_mod.requested_envelope(
+        execution_profile="contained-oci-v0",
+        image_id=image,
+        mount_spec=CANDIDATE_MOUNT_SPEC,
+        resource_profile=contained.CANDIDATE_RESOURCE_PROFILE,
+        sealed=sealed,
+    )
+
+
+def _base_envelope_effective(*, image=IMAGE, runtime_version="27.1.1", sealed=True):
+    profile = contained.CANDIDATE_RESOURCE_PROFILE
+    env_names = ["CARGO_NET_OFFLINE", "HOME", "PATH"] if sealed else ["HOME", "PATH"]
+    image_env_names = ["HOME", "PATH"]
+    return {
+        "cap_add": [],
+        "cap_drop": ["ALL"],
+        "devices": [],
+        "env_names": sorted(env_names),
+        "image": image,
+        "image_env_names": sorted(image_env_names),
+        "memory": profile["memory_bytes"],
+        "memory_swap": profile["memory_swap_bytes"],
+        "mounts": [
+            {"destination": destination, "rw": False, "type": "bind"}
+            for destination in sorted(d for _, d in CANDIDATE_MOUNT_SPEC)
+        ],
+        "network_mode": "none" if sealed else "",
+        "no_new_privileges": True,
+        "pid_mode": "",
+        "pids_limit": profile["pids"],
+        "privileged": False,
+        "read_only_root": True,
+        "runtime_version": runtime_version,
+        "tmpfs": {
+            "/tmp": {
+                "exec": False,
+                "nr_inodes": profile["tmp_inodes"],
+                "size": profile["tmp_bytes"],
+            },
+            "/work": {
+                "exec": profile["work_exec"],
+                "nr_inodes": profile["work_inodes"],
+                "size": profile["work_bytes"],
+            },
+        },
+        "user": contained.CONTAINED_USER,
+        "userns_mode": "",
+    }
+
+
 def _permitted_envelope(*, prepare_sha256=None, **over):
     if prepare_sha256 is None:
         prepare_sha256 = _prepare_sha256()
-    doc = {
-        "schema": "corpus-adequacy.execution-envelope.v0",
-        "setup_status": "ready",
-        "envelope_status": "verified",
-        "publication_permission": "permitted",
-        "candidate_outcome": "completed",
-        "cleanup": "removed-and-absent",
-        "withheld_reason": None,
-        "execution_commit": RUNNER,
-        "prepare_sha256": prepare_sha256,
-        "requested": {"image_id": IMAGE, "execution_profile": "contained-oci-v0"},
-        "effective": {
-            "env_names": ["PATH", "HOME"],
-            "image_env_names": ["PATH", "HOME"],
-            "mounts": [{"destination": "/in", "rw": False, "type": "bind"}],
-        },
-    }
+    req = _base_envelope_requested()
+    if "requested" in over:
+        custom_req = over.pop("requested")
+        if isinstance(custom_req, dict):
+            req.update(custom_req)
+        else:
+            req = custom_req
+    image = req.get("image_id", IMAGE) if isinstance(req, dict) else IMAGE
+    sealed = req.get("sealed", True) if isinstance(req, dict) else True
+    eff = _base_envelope_effective(image=image, sealed=sealed)
+    if "effective" in over:
+        custom_eff = over.pop("effective")
+        if isinstance(custom_eff, dict):
+            eff.update(custom_eff)
+            if "mounts" in custom_eff and isinstance(req, dict):
+                req["mount_spec"] = [m["destination"] for m in custom_eff["mounts"]]
+            if "env_names" in custom_eff:
+                if "image_env_names" not in custom_eff:
+                    eff["image_env_names"] = list(custom_eff["env_names"])
+                else:
+                    eff["image_env_names"] = list(custom_eff["image_env_names"])
+                if sealed:
+                    if "CARGO_NET_OFFLINE" not in eff["env_names"]:
+                        eff["env_names"] = sorted(list(eff["env_names"]) + ["CARGO_NET_OFFLINE"])
+                    if "CARGO_NET_OFFLINE" not in eff["image_env_names"]:
+                        eff["image_env_names"] = sorted(list(eff["image_env_names"]) + ["CARGO_NET_OFFLINE"])
+        else:
+            eff = custom_eff
+
+    setup_status = over.pop("setup_status", "ready")
+    envelope_status = over.pop("envelope_status", "verified")
+    candidate_outcome = over.pop("candidate_outcome", "completed")
+    cleanup = over.pop("cleanup", "removed-and-absent")
+    execution_commit = over.pop("execution_commit", RUNNER)
+    report_sha256 = over.pop("report_sha256", None)
+    unverified_field = over.pop("unverified_field", None)
+
+    if envelope_status != "verified":
+        eff = None
+        if unverified_field is None:
+            unverified_field = "runtime_version"
+
+    doc = env_mod.build_envelope_record(
+        requested=req,
+        setup_status=setup_status,
+        envelope_status=envelope_status,
+        unverified_field=unverified_field,
+        effective=eff,
+        candidate_outcome=candidate_outcome,
+        cleanup=cleanup,
+        prepare_sha256=prepare_sha256,
+        execution_commit=execution_commit,
+        report_sha256=report_sha256,
+    )
     doc.update(over)
     return doc
 
@@ -344,8 +434,8 @@ class HostileWorkflowRefusals(unittest.TestCase):
     def test_observe_child_environment_from_envelope_only(self):
         env = _permitted_envelope()
         observed = hosted.observe_child_environment(env)
-        self.assertEqual(observed["env_names"], ("PATH", "HOME"))
-        self.assertEqual(len(observed["mounts"]), 1)
+        self.assertEqual(observed["env_names"], ("CARGO_NET_OFFLINE", "HOME", "PATH"))
+        self.assertEqual(len(observed["mounts"]), len(CANDIDATE_MOUNT_SPEC))
         with self.assertRaises(hosted.HostedPublicationError):
             hosted.observe_child_environment({"effective": {}})
         # Self-declared HOSTED_FORWARDED_ENV_NAMES must not exist as evidence.
@@ -693,9 +783,6 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
                             effective={
                                 "env_names": ["PATH", "GITHUB_TOKEN"],
                                 "image_env_names": ["PATH", "GITHUB_TOKEN"],
-                                "mounts": [
-                                    {"destination": "/in", "rw": False, "type": "bind"}
-                                ],
                             },
                         )
                     ),
@@ -830,6 +917,26 @@ class CandidateImageBinding(unittest.TestCase):
             )
         self.assertEqual(str(ctx.exception), "prepare_sha256_binding")
 
+    def test_unsealed_and_forged_profile_envelope_refused(self):
+        sha = _prepare_sha256()
+        env_unsealed = _permitted_envelope(
+            prepare_sha256=sha,
+            requested=_base_envelope_requested(sealed=False),
+            effective=_base_envelope_effective(sealed=False),
+        )
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_envelope_bindings(env_unsealed, bindings=BINDINGS, prepare_sha256=sha)
+        self.assertEqual(str(ctx.exception), "sealed_binding")
+
+        env_forged_prof = _permitted_envelope(prepare_sha256=sha)
+        env_forged_prof["requested"]["resource_profile"] = {
+            **contained.CANDIDATE_RESOURCE_PROFILE,
+            "pids": 999999,
+        }
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_envelope_bindings(env_forged_prof, bindings=BINDINGS, prepare_sha256=sha)
+        self.assertEqual(str(ctx.exception), "resource_profile_binding")
+
     def test_mutation_restore_probe_comparison_is_red(self):
         original = Path(hosted.__file__).read_text(encoding="utf-8")
         delegated = (
@@ -902,12 +1009,18 @@ class SourceMutations(unittest.TestCase):
         self.assertNotEqual(mutated, original)
         bad = _load_mutated_module(mutated, "mut_guard")
         leaked = bad.publication_decision(
-            _permitted_envelope(envelope_status="unverified"), setup_status="ready"
+            _permitted_envelope(
+                envelope_status="unverified", publication_permission="permitted"
+            ),
+            setup_status="ready",
         )
         self.assertEqual(leaked["decision"], "publish")
         self.assertEqual(
             hosted.publication_decision(
-                _permitted_envelope(envelope_status="unverified"), setup_status="ready"
+                _permitted_envelope(
+                    envelope_status="unverified", publication_permission="permitted"
+                ),
+                setup_status="ready",
             )["decision"],
             "withhold",
         )
@@ -939,7 +1052,6 @@ class SourceMutations(unittest.TestCase):
                             effective={
                                 "env_names": ["GITHUB_TOKEN"],
                                 "image_env_names": ["GITHUB_TOKEN"],
-                                "mounts": [],
                             },
                         )
                     ),
@@ -1180,7 +1292,6 @@ class SourceMutations(unittest.TestCase):
                             effective={
                                 "env_names": ["GITHUB_TOKEN"],
                                 "image_env_names": ["GITHUB_TOKEN"],
-                                "mounts": [],
                             },
                         )
                     ),
@@ -1286,6 +1397,172 @@ class SourceMutations(unittest.TestCase):
             )
             self.assertEqual(leaked.get("publication_permission"), "permitted")
             self.assertEqual(leaked.get("envelope_status"), "verified")
+
+    def test_load_envelope_huge_integer_refuses_json_input(self):
+        doc = _permitted_envelope()
+        raw = json.dumps(doc)
+        huge_int = "9" * 10000
+        mem = doc["effective"]["memory"]
+        raw_mutated = raw.replace(f'"memory": {mem}', f'"memory": {huge_int}', 1)
+        self.assertIn(huge_int, raw_mutated)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "envelope.v0.json"
+            path.write_text(raw_mutated, encoding="utf-8")
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_envelope(path)
+            self.assertEqual(str(ctx.exception), "json_input")
+
+    def test_run_gate_huge_integer_envelope_materializes_post_execute_refusal(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            base = Path(raw_dir)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+            huge_int = "9" * 10000
+
+            def execute_huge_int_envelope(**kwargs):
+                env = _permitted_envelope(prepare_sha256=rels["prepare_sha256"])
+                serialized = json.dumps(env)
+                mem = env["effective"]["memory"]
+                mutated = serialized.replace(f'"memory": {mem}', f'"memory": {huge_int}', 1)
+                Path(kwargs["envelope_dest"]).write_text(mutated, encoding="utf-8")
+
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                _run_ok(
+                    base,
+                    "packet",
+                    rels,
+                    execute=execute_huge_int_envelope,
+                    out_name="out_huge_int",
+                )
+            self.assertEqual(str(ctx.exception), "json_input")
+            out_dir = base / "out_huge_int"
+            rerun_lines = [
+                json.loads(line)
+                for line in (out_dir / hosted.RERUN_EVIDENCE_FILENAME).read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                if line.strip()
+            ]
+            self.assertTrue(
+                any(
+                    entry.get("kind") == "post-execute-refusal"
+                    and entry.get("reason") == "json_input"
+                    for entry in rerun_lines
+                ),
+                f"expected post-execute-refusal in rerun lines, got: {rerun_lines}",
+            )
+            self.assertFalse(
+                any(entry.get("kind") == "infrastructure-failure" for entry in rerun_lines),
+                f"must not escape as infrastructure-failure: {rerun_lines}",
+            )
+
+    def test_run_gate_huge_integer_prepare_refuses_json_input(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            base = Path(raw_dir)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+            prepare_file = packet / rels["prepare"]
+            huge_int = "9" * 10000
+            raw_prep = prepare_file.read_text(encoding="utf-8")
+            mutated_prep = raw_prep.replace(
+                '{"schema":', f'{{"huge": {huge_int}, "schema":', 1
+            )
+            self.assertIn(huge_int, mutated_prep)
+            prepare_file.write_text(mutated_prep, encoding="utf-8")
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                _run_ok(base, "packet", rels, out_name="out_prep_huge")
+            self.assertEqual(str(ctx.exception), "json_input")
+
+    def test_envelope_mount_spec_binding_enforced(self):
+        doc = _permitted_envelope()
+        bindings = {
+            "candidate_revision": CANDIDATE,
+            "runner_revision": doc["execution_commit"],
+            "image_digest": doc["requested"]["image_id"],
+        }
+        prep_sha = doc["prepare_sha256"]
+
+        # Valid candidate mount spec passes
+        hosted.check_envelope_bindings(doc, bindings=bindings, prepare_sha256=prep_sha)
+
+        # Forged /etc mount refused
+        forged_doc = json.loads(json.dumps(doc))
+        forged_doc["requested"]["mount_spec"] = [
+            "/etc", "/input", "/subject", "/tool", "/vendor"
+        ]
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_envelope_bindings(
+                forged_doc, bindings=bindings, prepare_sha256=prep_sha
+            )
+        self.assertEqual(str(ctx.exception), "mount_spec_binding")
+
+        # Empty mount spec refused
+        empty_doc = json.loads(json.dumps(doc))
+        empty_doc["requested"]["mount_spec"] = []
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_envelope_bindings(
+                empty_doc, bindings=bindings, prepare_sha256=prep_sha
+            )
+        self.assertEqual(str(ctx.exception), "mount_spec_binding")
+
+        # Missing mount refused
+        missing_doc = json.loads(json.dumps(doc))
+        missing_doc["requested"]["mount_spec"] = ["/input", "/subject", "/tool"]
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            hosted.check_envelope_bindings(
+                missing_doc, bindings=bindings, prepare_sha256=prep_sha
+            )
+        self.assertEqual(str(ctx.exception), "mount_spec_binding")
+
+    def test_run_gate_forged_mount_spec_refused_post_execute(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            base = Path(raw_dir)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def execute_forged_mounts(**kwargs):
+                env = _permitted_envelope(prepare_sha256=rels["prepare_sha256"])
+                env["requested"]["mount_spec"] = [
+                    "/etc", "/input", "/subject", "/tool", "/vendor"
+                ]
+                env["effective"]["mounts"] = [
+                    {"destination": "/etc", "rw": False, "type": "bind"},
+                    {"destination": "/input", "rw": False, "type": "bind"},
+                    {"destination": "/subject", "rw": False, "type": "bind"},
+                    {"destination": "/tool", "rw": False, "type": "bind"},
+                    {"destination": "/vendor", "rw": False, "type": "bind"},
+                ]
+                Path(kwargs["envelope_dest"]).write_text(
+                    json.dumps(env), encoding="utf-8"
+                )
+
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                _run_ok(
+                    base,
+                    "packet",
+                    rels,
+                    execute=execute_forged_mounts,
+                    out_name="out_forged_mounts",
+                )
+            self.assertEqual(str(ctx.exception), "mount_spec_binding")
+            out_dir = base / "out_forged_mounts"
+            rerun_lines = [
+                json.loads(line)
+                for line in (out_dir / hosted.RERUN_EVIDENCE_FILENAME).read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                if line.strip()
+            ]
+            self.assertTrue(
+                any(
+                    entry.get("kind") == "post-execute-refusal"
+                    and entry.get("reason") == "mount_spec_binding"
+                    for entry in rerun_lines
+                )
+            )
 
     def test_python_comment_only_noop_control_stays_green(self):
         original = Path(hosted.__file__).read_text(encoding="utf-8")

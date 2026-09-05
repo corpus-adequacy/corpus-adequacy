@@ -41,7 +41,11 @@ if str(_ROOT) not in sys.path:
 
 import contained_oci as contained  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
-from aee_checker_sealed_candidate import require_candidate_image  # noqa: E402
+import effective_envelope  # noqa: E402
+from aee_checker_sealed_candidate import (  # noqa: E402
+    CANDIDATE_MOUNT_SPEC,
+    require_candidate_image,
+)
 
 REQUIRED_PROFILE = "contained-oci-v0"
 REQUIRED_RUNNER_ENVIRONMENT = "github-hosted"
@@ -213,7 +217,7 @@ def load_json_confined(root, relpath, *, max_bytes: int):
         raise HostedPublicationError("max_input_bytes") from exc
     try:
         doc = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, ValueError) as exc:
         raise HostedPublicationError("json_input") from exc
     return doc
 
@@ -300,6 +304,17 @@ def check_envelope_bindings(envelope_doc, *, bindings, prepare_sha256) -> None:
         raise HostedPublicationError("prepare_sha256_binding")
     if envelope_doc.get("prepare_sha256") != prepare_sha256:
         raise HostedPublicationError("prepare_sha256_binding")
+    if requested.get("execution_profile") != REQUIRED_PROFILE:
+        raise HostedPublicationError("execution_profile_binding")
+    if requested.get("sealed") is not True:
+        raise HostedPublicationError("sealed_binding")
+    if requested.get("resource_profile") != contained.CANDIDATE_RESOURCE_PROFILE:
+        raise HostedPublicationError("resource_profile_binding")
+    candidate_mount_destinations = sorted(
+        destination for _key, destination in CANDIDATE_MOUNT_SPEC
+    )
+    if requested.get("mount_spec") != candidate_mount_destinations:
+        raise HostedPublicationError("mount_spec_binding")
 
 
 def observe_child_environment(envelope_doc) -> dict:
@@ -308,9 +323,18 @@ def observe_child_environment(envelope_doc) -> dict:
     Values come from the envelope projected by contained_oci / effective_envelope
     (env_names and mounts). runner.environment, runs-on, and persist-credentials
     are structural workflow facts and are not read here.
+
+    When envelope_status is not 'verified' and effective is None (a withheld
+    run), empty collections (empty tuples for env names, empty list for
+    mounts) are returned so refuse_hostile_workflow does not fail on
+    missing data. This is an unavailable observation, not a measured-clean
+    result; publication_decision strictly requires envelope_status == 'verified'
+    and publication_permission == 'permitted' before any output can publish.
     """
     if type(envelope_doc) is not dict:
         raise HostedPublicationError("envelope_effective")
+    if envelope_doc.get("envelope_status") != "verified" and envelope_doc.get("effective") is None:
+        return {"env_names": (), "mounts": [], "image_env_names": ()}
     effective = envelope_doc.get("effective")
     if type(effective) is not dict:
         raise HostedPublicationError("envelope_effective")
@@ -478,7 +502,12 @@ def load_envelope(path: Path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
     """Load envelope with pre-parse ceiling; path must be a regular file."""
     path = Path(path)
     parent = path.parent
-    return load_json_confined(parent, path.name, max_bytes=max_bytes)
+    doc = load_json_confined(parent, path.name, max_bytes=max_bytes)
+    try:
+        effective_envelope.validate_envelope_record(doc)
+    except effective_envelope.EnvelopeError as exc:
+        raise HostedPublicationError("envelope_corrupt") from exc
+    return doc
 
 
 def _run_attempt_identity() -> dict:
@@ -633,7 +662,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     prepare_sha256 = hashlib.sha256(prepare_raw).hexdigest()
     try:
         prepare_doc = json.loads(prepare_raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, ValueError) as exc:
         raise HostedPublicationError("json_input") from exc
     check_prepare_bindings(prepare_doc, bindings=bindings)
 

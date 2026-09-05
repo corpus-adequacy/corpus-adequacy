@@ -143,24 +143,51 @@ def require_resource_profile(profile) -> dict:
     return dict(profile)
 
 
+def validate_mount_destinations(
+    destinations, *, strictly_sorted: bool = False
+) -> tuple[str, ...]:
+    """Validate a sequence of mount destinations.
+
+    Destinations must be a non-empty sequence of non-empty absolute path strings,
+    with no duplicates. When strictly_sorted is True, items must be strictly increasing.
+    """
+    if type(destinations) not in (list, tuple) or not destinations:
+        raise PrepareError("mount specification")
+    seen = set()
+    prev = None
+    res = []
+    for dest in destinations:
+        if not isinstance(dest, str) or not dest or not dest.startswith("/"):
+            raise PrepareError("mount specification")
+        if dest in seen:
+            raise PrepareError("mount specification")
+        if strictly_sorted:
+            if prev is not None and dest <= prev:
+                raise PrepareError("mount specification")
+            prev = dest
+        seen.add(dest)
+        res.append(dest)
+    return tuple(res)
+
+
 def _require_mount_spec(mount_spec) -> tuple[tuple[str, str], ...]:
     if type(mount_spec) not in (list, tuple) or not mount_spec:
         raise PrepareError("mount specification")
     normalized = []
     keys = set()
-    destinations = set()
+    destinations = []
     for item in mount_spec:
         if type(item) not in (list, tuple) or len(item) != 2:
             raise PrepareError("mount specification")
         key, destination = item
-        if (not isinstance(key, str) or not key or
-                not isinstance(destination, str) or not destination.startswith("/")):
+        if not isinstance(key, str) or not key:
             raise PrepareError("mount specification")
-        if key in keys or destination in destinations:
+        if key in keys:
             raise PrepareError("mount specification")
         keys.add(key)
-        destinations.add(destination)
+        destinations.append(destination)
         normalized.append((key, destination))
+    validate_mount_destinations(destinations, strictly_sorted=False)
     return tuple(normalized)
 
 
