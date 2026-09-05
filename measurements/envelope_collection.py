@@ -5,18 +5,15 @@
 backend more than once. Retaining only one record would hide another execution, so the attempts
 are collected instead.
 
-What this module does NOT do, deliberately:
+Contract:
 
-- it does not touch the frozen single-envelope v0 record. Every member IS one, built by
-  `build_envelope_record` and validated by `validate_envelope_record`, which stay shared and
-  unchanged. Member validation is not reimplemented here;
-- it does not restate the permission rule. `publication_permission` remains the one derivation;
-  this module only quantifies it over the members;
-- it does not summarise. There is no folded record, because a derived artifact that validates on
-  its own becomes an alternative to the evidence it derives from, and deleting a member would
-  stop being visible;
-- it does not promise provenance. An index digest binds bytes; it does not authenticate origin,
-  and it cannot detect a byte-identical record produced by a different run.
+- members are ordinary v0 records, built and validated by the shared `build_envelope_record` /
+  `validate_envelope_record`. Member semantics are not reimplemented here;
+- `publication_permission` stays the one derivation; this module only quantifies it universally;
+- no summary record exists: a folded artifact would validate on its own and become an alternative
+  to the members, so a deletion would stop being visible;
+- an index digest binds bytes. It does not authenticate origin and cannot detect a byte-identical
+  record from another run.
 """
 from __future__ import annotations
 
@@ -61,6 +58,21 @@ def member_digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def bounded_encoded_size(record: dict, limit: int) -> int:
+    """Exact encoded size, refused as soon as it passes `limit`, without materializing it.
+
+    `json.dumps` builds the whole string before anything can measure it. `iterencode` yields the
+    same output in pieces, so a record too large to keep is refused mid-encode.
+    """
+    total = 0
+    encoder = json.JSONEncoder(ensure_ascii=False, indent=2, sort_keys=True)
+    for chunk in encoder.iterencode(record):
+        total += len(chunk.encode("utf-8"))
+        if total > limit:
+            raise CollectionError("collection member byte ceiling")
+    return total + 1  # the trailing newline encode_envelope appends
+
+
 def _encode_index(doc: dict) -> bytes:
     return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
@@ -80,21 +92,16 @@ class Ledger:
         self.max_member_total_bytes = int(max_member_total_bytes)
         self._states: list[str | None] = []
         self._records: dict[int, dict] = {}
-        self._encoded: dict[int, bytes] = {}
-        self._bytes = 0
+
 
     def register(self) -> int:
-        """Admission gate, run BEFORE the invocation. Count, and capacity actually left.
+        """Admission gate, before the invocation: the count cap, the only bound knowable here.
 
-        It cannot check this record's size: the record does not exist yet. It checks the two
-        things that are knowable — the count cap, and whether the budget already consumed by
-        settled members leaves any room at all. Reserving a full per-member ceiling here would
-        make the later aggregate gate unreachable, which is how a bound stops being a bound.
+        Bytes cannot be judged yet -- the record does not exist, and its written size is not
+        fixed until the report digest is bound. That gate lives in `write_collection`.
         """
         if len(self._states) >= self.max_members:
             raise CollectionError("collection member count ceiling")
-        if self._bytes >= self.max_member_total_bytes:
-            raise CollectionError("collection aggregate byte ceiling")
         self._states.append(None)
         return len(self._states) - 1
 
@@ -106,32 +113,10 @@ class Ledger:
         self._states[ordinal] = state
 
     def recorded(self, ordinal: int, record: dict) -> None:
-        """Size gate, run at settle time -- the earliest point the size is knowable.
-
-        HONEST SCOPE, corrected after a coordinator probe: this is a **pre-write** size check on
-        an already-materialized encoding, NOT bounded serialization. `encode_envelope` runs
-        `json.dumps` over the whole record and returns the finished bytes; `len` is taken after
-        that. Nothing here streams or truncates, and an earlier version of this docstring claimed
-        otherwise.
-        
-        What actually bounds the allocation is upstream and structural: the record comes from
-        `build_envelope_record`, whose shape is fixed by `ENVELOPE_KEYS` and whose variable parts
-        (`env_names`, `image_env_names`, `mounts`, `tmpfs`) are themselves bounded by the
-        container the run declared. That is a real bound, but it is not enforced here and is not
-        claimed as one. Probing the true upstream ceiling would mean allocating a huge record on
-        purpose, which is not worth doing to measure it.
-        """
+        """Settle the attempt. Size is NOT judged here: the bytes that get written are the
+        report-bound encoding, which does not exist until the report digest is known."""
         self._settle(ordinal, RECORDED)
-        raw = envelope.encode_envelope(envelope.bind_report(record, None))
-        if len(raw) > self.max_member_bytes:
-            self._states[ordinal] = None
-            raise CollectionError("collection member byte ceiling")
-        if self._bytes + len(raw) > self.max_member_total_bytes:
-            self._states[ordinal] = None
-            raise CollectionError("collection aggregate byte ceiling")
-        self._bytes += len(raw)
         self._records[ordinal] = record
-        self._encoded[ordinal] = raw
 
     def raised(self, ordinal: int, exception_type: str) -> None:
         """Type name only. An exception message can carry host content."""
@@ -144,9 +129,6 @@ class Ledger:
     @property
     def attempts(self) -> int:
         return len(self._states)
-
-    def encoded(self, ordinal: int) -> bytes:
-        return self._encoded[ordinal]
 
     def record(self, ordinal: int) -> dict:
         return self._records[ordinal]
@@ -173,11 +155,14 @@ def write_collection(ledger: Ledger, dest, *, report_sha256) -> Path:
         ledger_rows.append(row)
         if state != RECORDED:
             continue
-        # Bind through the SHARED function. The report is the product of the whole collection,
-        # so every member carries the same digest: uniform, and therefore not the first/last
-        # selection that binding it to one member would be.
-        raw = envelope.encode_envelope(
-            envelope.bind_report(ledger.record(ordinal), report_sha256))
+        # Every member carries the same report digest: uniform, not a first/last selection.
+        bound = envelope.bind_report(ledger.record(ordinal), report_sha256)
+        # Preflight the FINAL encoding -- the bytes actually written. The unbound record is a
+        # different, smaller string.
+        size = bounded_encoded_size(bound, ledger.max_member_bytes)
+        if total + size > ledger.max_member_total_bytes:
+            raise CollectionError("collection aggregate byte ceiling")
+        raw = envelope.encode_envelope(bound)
         relpath = MEMBER_TEMPLATE % ordinal
         pending.append((relpath, raw))
         total += len(raw)
@@ -196,9 +181,8 @@ def write_collection(ledger: Ledger, dest, *, report_sha256) -> Path:
         "schema": COLLECTION_SCHEMA,
     }
     raw_index = _encode_index(index)
-    # Staged deliberately: the index is bounded BEFORE any member is written, so an index-size
-    # refusal leaves no partial collection behind. An earlier version wrote members first and
-    # then claimed that property it did not have.
+    # Staged: the index is bounded before any member is written, so an index-size refusal
+    # leaves no partial collection.
     if len(raw_index) > MAX_INDEX_BYTES:
         raise CollectionError("collection index byte ceiling")
     for relpath, raw in pending:
@@ -236,9 +220,7 @@ def load_collection(dest, *, max_index_bytes: int = MAX_INDEX_BYTES,
     rows = index["ledger"]
     if type(rows) is not list or len(rows) != index["attempts"]:
         raise CollectionError("collection attempts do not match the ledger")
-    # The ATTEMPT ceiling is independent of how many attempts emitted a record. Checking only
-    # `members` let 257 no-envelope attempts through a cap of 256: withheld, so never a false
-    # publish, but a resource contract that did not hold on input.
+    # The attempt ceiling is independent of how many attempts emitted a record.
     if not isinstance(index["attempts"], int) or index["attempts"] > max_members:
         raise CollectionError("collection attempt count ceiling")
     for position, row in enumerate(rows):
@@ -284,8 +266,7 @@ def load_collection(dest, *, max_index_bytes: int = MAX_INDEX_BYTES,
             envelope.validate_envelope_record(doc)
         except envelope.EnvelopeError as exc:
             raise CollectionError("collection member semantics") from exc
-        # The index's report claim is checked against every member, not trusted. Leaving it
-        # unchecked made the index an assertion nothing verified.
+        # The index's report claim is checked against every member, not trusted.
         if doc.get("report_sha256") != claimed_report:
             raise CollectionError("collection member report digest")
         referenced.add(relpath)

@@ -42,9 +42,8 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, transport=Non
             "tool": materialized["tool"],
             "subject": subject,
         }
-        # Registered immediately before the call, never in the sink: the sink runs after return,
-        # so it can never observe an invocation that raised. Attempts are therefore never
-        # derived from emissions.
+        # Registered before the call, never in the sink: the sink runs after return and cannot
+        # observe an invocation that raised.
         ordinal = None if ledger is None else ledger.register()
         try:
             completed = candidate.run_sealed_candidate(

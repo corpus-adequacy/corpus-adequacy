@@ -262,37 +262,67 @@ class Ceilings(unittest.TestCase):
         with self.assertRaises(collection.CollectionError):
             ledger.register()
 
-    def test_member_byte_ceiling_refuses_at_serialization_before_any_write(self):
+    def test_member_ceiling_is_judged_on_the_REPORT_BOUND_encoding(self):
+        """The bytes that get written are the report-bound ones. Sizing the unbound record
+        admitted members the writer then exceeded: 2769 admitted, 2831 written, own reader
+        rejected."""
+        record = _valid_record()
+        unbound = len(collection.envelope.encode_envelope(
+            collection.envelope.bind_report(record, None)))
+        bound = len(collection.envelope.encode_envelope(
+            collection.envelope.bind_report(record, "a" * 64)))
+        self.assertGreater(bound, unbound, "binding a report must grow the record")
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"
+            ledger = collection.Ledger(max_member_bytes=unbound)
+            ledger.recorded(ledger.register(), record)
+            with self.assertRaises(collection.CollectionError):
+                collection.write_collection(ledger, dest, report_sha256="a" * 64)
+            self.assertEqual(list(dest.glob("member-*.json")) if dest.exists() else [], [],
+                             "nothing may be written when the final size is refused")
+
+    def test_preflight_refuses_without_materializing_the_full_encoding(self):
+        """Encoder spy, no huge allocation: encode_envelope must never run for a record the
+        preflight rejects."""
+        calls = []
+        original = collection.envelope.encode_envelope
+
+        def spy(record):
+            calls.append(record)
+            return original(record)
+
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "collection"
             ledger = collection.Ledger(max_member_bytes=64)
-            with self.assertRaises(collection.CollectionError):
-                ledger.recorded(ledger.register(), _valid_record())
-            self.assertFalse(dest.exists(), "nothing may be written before the size is known good")
-
-    def test_aggregate_ceiling_refuses_the_second_member_and_keeps_the_first(self):
-        # The aggregate gate must be reachable. An admission gate that reserved a full
-        # per-member ceiling would refuse at register() and this could never fire.
-        one = len(collection.envelope.encode_envelope(
-            collection.envelope.bind_report(_valid_record(), None)))
-        ledger = collection.Ledger(max_member_total_bytes=one + 10)
-        ledger.recorded(ledger.register(), _valid_record())
-        with self.assertRaises(collection.CollectionError):
             ledger.recorded(ledger.register(), _valid_record())
+            collection.envelope.encode_envelope = spy
+            try:
+                with self.assertRaises(collection.CollectionError):
+                    collection.write_collection(ledger, dest, report_sha256=None)
+            finally:
+                collection.envelope.encode_envelope = original
+        self.assertEqual(calls, [],
+                         "the full encoding must not be built for a record already over the cap")
+
+    def test_bounded_encoded_size_matches_the_encoder_exactly_when_it_fits(self):
+        record = collection.envelope.bind_report(_valid_record(), "a" * 64)
+        actual = len(collection.envelope.encode_envelope(record))
+        self.assertEqual(collection.bounded_encoded_size(record, actual), actual,
+                         "the preflight must be exact, not an estimate")
+
+    def test_aggregate_ceiling_uses_final_sizes_and_keeps_nothing_partial(self):
+        record = _valid_record()
+        one = len(collection.envelope.encode_envelope(
+            collection.envelope.bind_report(record, "a" * 64)))
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "collection"
-            collection.write_collection(ledger, dest, report_sha256=None)
-            self.assertEqual(len(list(dest.glob("member-*.json"))), 1,
-                             "the first member survives the second's refusal")
-            self.assertEqual(len(collection.load_collection(dest)["members"]), 1)
-
-    def test_exhausted_budget_refuses_the_next_registration(self):
-        one = len(collection.envelope.encode_envelope(
-            collection.envelope.bind_report(_valid_record(), None)))
-        ledger = collection.Ledger(max_member_total_bytes=one)
-        ledger.recorded(ledger.register(), _valid_record())
-        with self.assertRaises(collection.CollectionError):
-            ledger.register()
+            ledger = collection.Ledger(max_member_total_bytes=one + 10)
+            ledger.recorded(ledger.register(), record)
+            ledger.recorded(ledger.register(), record)
+            with self.assertRaises(collection.CollectionError):
+                collection.write_collection(ledger, dest, report_sha256="a" * 64)
+            self.assertEqual(list(dest.glob("member-*.json")) if dest.exists() else [], [],
+                             "the aggregate refusal happens before any write")
 
 
 class ReportBinding(unittest.TestCase):
