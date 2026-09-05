@@ -22,9 +22,9 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                                             '(40-hex)',
                                                              'required': True,
                                                              'type': 'string'},
-                                         'image_digest': {'description': 'Contained '
-                                                                         'OCI image '
-                                                                         'digest '
+                                         'image_digest': {'description': 'Candidate/toolchain '
+                                                                         'image digest '
+                                                                         'B '
                                                                          '(sha256:64hex)',
                                                           'required': True,
                                                           'type': 'string'},
@@ -438,7 +438,7 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
     def test_mutation_drop_revision_or_digest_binding_is_red(self):
         block = (
             "      image_digest:\n"
-            "        description: Contained OCI image digest (sha256:64hex)\n"
+            "        description: Candidate/toolchain image digest B (sha256:64hex)\n"
             "        required: true\n"
             "        type: string\n"
         )
