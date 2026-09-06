@@ -28,7 +28,6 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import stat
 import sys
 from pathlib import Path
@@ -62,6 +61,8 @@ COLLECTION_DIRNAME = "effective-envelope-collection.v0"
 # run's observations are kept verbatim here rather than rewritten: the refusal is about what may
 # be published, not about what was seen.
 WITHHELD_COLLECTION_DIRNAME = "withheld-collection.diagnostic.v0"
+QUARANTINE_ATTEMPT_TEMPLATE = "attempt-%04d"
+MAX_QUARANTINE_ATTEMPTS = 256
 CANDIDATE_RESULT_FILENAME = "candidate-result.json"
 RERUN_EVIDENCE_FILENAME = "rerun-evidence.jsonl"
 DISPATCH_BINDINGS_FILENAME = "hosted-dispatch-bindings.v0.json"
@@ -448,18 +449,27 @@ def _encode_json(doc) -> bytes:
 def _quarantine_current_run_collection(out: Path) -> Path | None:
     """Move THIS invocation's collection out of every upload selection, byte for byte.
 
-    Not a rewrite and not a deletion: a refused run's raw observations stay exactly as the
-    runtime recorded them, addressable for diagnosis, and simply stop being publishable
-    evidence. Only the current invocation's output is touched.
+    Not a rewrite and not a deletion. The out root is reusable, so a second refusal must not
+    cost the first one's evidence: each quarantine lands in its own attempt directory under
+    `WITHHELD_COLLECTION_DIRNAME` and an occupied destination is never overwritten. Ordinals are
+    assigned by scanning for the first free one rather than from a clock, so the layout is
+    deterministic and two retained sets are distinguishable by name.
     """
     live = out / COLLECTION_DIRNAME
     if not live.is_dir():
         return None
-    quarantine = out / WITHHELD_COLLECTION_DIRNAME
-    if quarantine.exists():
-        shutil.rmtree(quarantine)
-    live.rename(quarantine)
-    return quarantine
+    parent = out / WITHHELD_COLLECTION_DIRNAME
+    parent.mkdir(parents=True, exist_ok=True)
+    ordinal = 0
+    while True:
+        attempt = parent / (QUARANTINE_ATTEMPT_TEMPLATE % ordinal)
+        if not attempt.exists():
+            break
+        ordinal += 1
+        if ordinal > MAX_QUARANTINE_ATTEMPTS:
+            raise HostedPublicationError("quarantine_attempt_ceiling")
+    live.rename(attempt)
+    return attempt
 
 
 def _refuse_collection_at_legacy_path(doc) -> None:
@@ -651,6 +661,22 @@ def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
     )
 
 
+def _record_cleanup_failure(rerun_log, primary_reason, cleanup_exc, identity, bindings) -> None:
+    """Append the cleanup failure as its own distinguished evidence, never as the outcome."""
+    try:
+        append_rerun_evidence(rerun_log, {
+            "kind": "post-execute-refusal-cleanup-failed",
+            "reason": primary_reason,
+            "cleanup_error_type": type(cleanup_exc).__name__,
+            "bindings": bindings,
+            "dispatch_bindings": bindings,
+            **{k: v for k, v in identity.items() if v is not None},
+        })
+    except BaseException:
+        # Evidence appending is best-effort here; it must never mask the primary refusal.
+        pass
+
+
 def materialize_post_execute_refusal(*, out, reason, bindings, rerun_log,
                                          identity, max_artifact_bytes=MAX_ARTIFACT_BYTES):
     """Overwrite success-shaped post-execute artifacts, then caller re-raises.
@@ -807,14 +833,22 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         reason = "contained-execution"
     except HostedPublicationError as exc:
         if execute_began:
-            materialize_post_execute_refusal(
-                out=out,
-                reason=str(exc),
-                bindings=bindings,
-                rerun_log=rerun_log,
-                identity=identity,
-                max_artifact_bytes=max_artifact_bytes,
-            )
+            try:
+                materialize_post_execute_refusal(
+                    out=out,
+                    reason=str(exc),
+                    bindings=bindings,
+                    rerun_log=rerun_log,
+                    identity=identity,
+                    max_artifact_bytes=max_artifact_bytes,
+                )
+            except BaseException as cleanup_exc:
+                # A sanitization failure must not replace the reason the run was refused: the
+                # primary refusal is the finding, the cleanup failure is context on it. The
+                # upload authorization does not depend on this succeeding -- the gate exits
+                # nonzero either way, and the published collection is bound to gate success.
+                _record_cleanup_failure(rerun_log, str(exc), cleanup_exc, identity, bindings)
+                raise exc from cleanup_exc
         raise
     except Exception as exc:
         reason = "contained-execution-failed:%s" % exc

@@ -61,6 +61,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Gate hosted publication
+        id: gate
         shell: bash
         env:
           CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
@@ -82,7 +83,12 @@ jobs:
           retention-days: 14
           if-no-files-found: error
       - name: Upload effective-envelope
-        if: always() && !cancelled()
+        # Fail-closed upload authorization, not a cleanliness claim: the collection is published
+        # only when the gate step itself succeeded. Quarantine is a filesystem move and can fail;
+        # if it does, the gate exits nonzero and this step never runs, so permitted members
+        # cannot reach the artifact even when sanitization did not complete. The setup,
+        # candidate and rerun diagnostics stay always-on so a refusal remains observable.
+        if: steps.gate.outcome == 'success' && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: effective-envelope

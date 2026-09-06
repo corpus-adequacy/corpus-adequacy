@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+GATE_BOUND_UPLOAD_IF = "steps.gate.outcome == 'success' && !cancelled()"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "contained-hosted-publication.yml"
 
 sys.path.insert(0, str(REPO_ROOT))
@@ -94,6 +95,7 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                                      'env.PYTHON_VERSION '
                                                                      '}}'}},
                                          {'name': 'Gate hosted publication',
+                                          'id': 'gate',
                                           'shell': 'bash',
                                           'env': {'CANDIDATE_REVISION': '${{ '
                                                                         'inputs.candidate_revision '
@@ -144,7 +146,7 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                    'retention-days': 14,
                                                    'if-no-files-found': 'error'}},
                                          {'name': 'Upload effective-envelope',
-                                          'if': 'always() && !cancelled()',
+                                          'if': "steps.gate.outcome == 'success' && !cancelled()",
                                           'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
                                           'with': {'name': 'effective-envelope',
                                                    'path': 'artifacts/effective-envelope-collection.v0/',
@@ -313,9 +315,18 @@ def hosted_shape_violations(tree) -> list[str]:
             if with_block.get("if-no-files-found") != "error":
                 bad.append("upload if-no-files-found must be error")
             step_if = step.get("if")
-            if step_if != "always() && !cancelled()":
+            if with_block.get("name") == "effective-envelope":
+                # Fail-closed upload authorization. Quarantine is a filesystem move and can
+                # fail; if it does the gate exits nonzero, and the published collection must
+                # not be uploaded anyway. This is an authorization boundary, not a claim that
+                # a refused run was clean.
+                if step_if != GATE_BOUND_UPLOAD_IF:
+                    bad.append(
+                        "the published collection upload must be bound to gate success "
+                        "(if: %s)" % GATE_BOUND_UPLOAD_IF)
+            elif step_if != "always() && !cancelled()":
                 bad.append(
-                    "upload steps must run on failure/cancellation "
+                    "diagnostic upload steps must run on failure/cancellation "
                     "(if: always() && !cancelled())"
                 )
         run = step.get("run")
@@ -486,11 +497,20 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
 
 
     def test_upload_steps_always_on_failure_and_keep_if_no_files_error(self):
+        diagnostics = 0
         for step in self.tree["jobs"]["hosted-contained"]["steps"]:
             uses = str(step.get("uses") or "")
-            if uses.startswith("actions/upload-artifact@"):
+            if not uses.startswith("actions/upload-artifact@"):
+                continue
+            self.assertEqual(step["with"].get("if-no-files-found"), "error")
+            if step["with"].get("name") == "effective-envelope":
+                # Published evidence: authorized only by a successful gate.
+                self.assertEqual(step.get("if"), GATE_BOUND_UPLOAD_IF)
+            else:
+                # Refusal diagnostics: still observable when the gate fails.
                 self.assertEqual(step.get("if"), "always() && !cancelled()")
-                self.assertEqual(step["with"].get("if-no-files-found"), "error")
+                diagnostics += 1
+        self.assertEqual(diagnostics, 3, "setup, candidate and rerun must stay always-on")
         gate = self.tree["jobs"]["hosted-contained"]["steps"][2]
         self.assertNotEqual(gate.get("continue-on-error"), True)
 
@@ -516,8 +536,9 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
 
     def test_mutation_gate_continue_on_error_is_red(self):
         poisoned = self.text.replace(
-            "      - name: Gate hosted publication\n        shell: bash\n",
+            "      - name: Gate hosted publication\n        id: gate\n        shell: bash\n",
             "      - name: Gate hosted publication\n"
+            "        id: gate\n"
             "        continue-on-error: true\n"
             "        shell: bash\n",
             1,

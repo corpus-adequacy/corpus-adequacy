@@ -1318,19 +1318,17 @@ class SourceMutations(unittest.TestCase):
 
     def test_mutation_delete_post_execute_sanitization_is_red(self):
         original = Path(hosted.__file__).read_text(encoding="utf-8")
-        call = (
-            "        if execute_began:\n"
-            "            materialize_post_execute_refusal(\n"
-            "                out=out,\n"
-            "                reason=str(exc),\n"
-            "                bindings=bindings,\n"
-            "                rerun_log=rerun_log,\n"
-            "                identity=identity,\n"
-            "                max_artifact_bytes=max_artifact_bytes,\n"
-            "            )\n"
-        )
+        # The whole sanitization block is the control: slicing it from the source keeps the
+        # mutation honest as the block moves, instead of pinning a brittle literal.
+        begin = original.index("            try:\n"
+                               "                materialize_post_execute_refusal(")
+        stop = original.index("raise exc from cleanup_exc\n", begin) + len(
+            "raise exc from cleanup_exc\n")
+        call = original[begin:stop]
         self.assertEqual(original.count(call), 1)
-        mutated = original.replace(call, "        pass  # mutated: no sanitize\n", 1)
+        self.assertIn("materialize_post_execute_refusal", call)
+        mutated = original.replace(call, "            pass  # mutated: no sanitize\n", 1)
+        self.assertNotEqual(mutated, original)
         bad = _load_mutated_module(mutated, "mut_no_sanitize")
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)
@@ -1631,3 +1629,77 @@ class ExportedConstants(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuarantineRetainsEveryRefusal(unittest.TestCase):
+    """The out root is reusable, so a second refusal must not cost the first one's evidence."""
+
+    def _refuse_once(self, out, marker):
+        ledger = collection.Ledger()
+        doc = dict(_permitted_envelope(prepare_sha256="a" * 64))
+        doc["execution_commit"] = marker
+        ledger.recorded(ledger.register(), doc)
+        collection.write_collection(
+            ledger, out / hosted.COLLECTION_DIRNAME, report_sha256="e" * 64)
+        hosted.write_separate_artifacts(
+            out, {"kind": "setup-status"},
+            hosted.withheld_envelope_stub(reason="r", bindings=BINDINGS),
+            {"kind": "void-hosted-result"})
+
+    def test_two_successive_refusals_retain_both_byte_sets(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "artifacts"
+            out.mkdir(parents=True)
+            self._refuse_once(out, "c" * 40)
+            self._refuse_once(out, "d" * 40)
+            parent = out / hosted.WITHHELD_COLLECTION_DIRNAME
+            attempts = sorted(p.name for p in parent.iterdir() if p.is_dir())
+            self.assertEqual(attempts, ["attempt-0000", "attempt-0001"],
+                             "a repeated refusal overwrote the first retained evidence")
+            commits = set()
+            for name in attempts:
+                member = json.loads(
+                    (parent / name / (collection.MEMBER_TEMPLATE % 0)).read_text("utf-8"))
+                commits.add(member["execution_commit"])
+            self.assertEqual(commits, {"c" * 40, "d" * 40},
+                             "both refusals must keep their own observed bytes")
+            self.assertFalse((out / hosted.COLLECTION_DIRNAME).exists())
+
+
+class QuarantineFailureKeepsThePrimaryRefusal(unittest.TestCase):
+    """A cleanup failure is context on the refusal, never a replacement for it."""
+
+    def test_rename_failure_does_not_mask_the_refusal_reason(self):
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        anchor = "    live.rename(attempt)\n"
+        self.assertEqual(original.count(anchor), 1)
+        mutated = original.replace(
+            anchor, '    raise OSError("injected rename failure")\n', 1)
+        bad = _load_mutated_module(mutated, "mut_rename_fail")
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def execute_cred(**kwargs):
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                    prepare_sha256=rels["prepare_sha256"],
+                    effective={"env_names": ["GITHUB_TOKEN"],
+                               "image_env_names": ["GITHUB_TOKEN"]}))
+
+            out = base / "artifacts"
+            with self.assertRaises(bad.HostedPublicationError) as ctx:
+                bad.run_gate(
+                    candidate_revision=CANDIDATE, runner_revision=RUNNER,
+                    image_digest=IMAGE, operator_profile="contained-oci-v0",
+                    out_dir=out, workspace_root=base, packet_root="packet",
+                    authorize_path="authorize.v0", prepare_path="prepare.v1",
+                    pins_dir="pins", docker_ready=lambda: "27.0.0",
+                    sealed_execute=execute_cred)
+            # The refusal reason survives; the cleanup failure is only its cause chain.
+            self.assertEqual(str(ctx.exception), "credential_env")
+            self.assertIsInstance(ctx.exception.__cause__, OSError)
+            # And the permitted members are still on disk, which is exactly why the published
+            # upload is authorized by gate success rather than by always().
+            self.assertTrue((out / bad.COLLECTION_DIRNAME).is_dir())
