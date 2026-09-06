@@ -16,7 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
-import contained_hosted_publication as hosted  # noqa: E402
+import contained_hosted_publication as hosted
+import envelope_collection as collection  # noqa: E402
 import contained_oci as contained  # noqa: E402
 import effective_envelope as env_mod  # noqa: E402
 from aee_checker_sealed_candidate import CANDIDATE_MOUNT_SPEC  # noqa: E402
@@ -29,6 +30,46 @@ PROBE_IMAGE = "sha256:" + ("11" * 32)
 OTHER_CANDIDATE = "f" * 40
 OTHER_RUNNER = "d" * 40
 OTHER_IMAGE = "sha256:" + ("e" * 64)
+
+def _read_only_member(artifacts_dir):
+    """Read the one member of a written collection, refusing any other cardinality.
+
+    A test that silently took `members[0]` would pass on a multi-member collection it did not
+    intend, so the count is asserted rather than assumed.
+    """
+    coll = Path(artifacts_dir) / hosted.COLLECTION_DIRNAME
+    files = sorted(p for p in coll.iterdir() if p.name != collection.INDEX_FILENAME)
+    assert len(files) == 1, "expected exactly one member, found %d" % len(files)
+    return json.loads(files[0].read_text(encoding="utf-8"))
+
+
+def _write_collection(dest, doc, *, report_sha256=None):
+    """Write a one-member collection where a single envelope file used to be written.
+
+    The hosted consumer requires a collection now: a lone record is refused rather than read,
+    so these fixtures produce the shape a real driver produces.
+    """
+    ledger = collection.Ledger()
+    ledger.recorded(ledger.register(), doc)
+    collection.write_collection(ledger, Path(dest), report_sha256=report_sha256)
+
+
+def _write_collection_raw(dest, doc, raw_text):
+    """Same, then overwrite the member with deliberately malformed bytes and re-digest them,
+    so the refusal under test is about the CONTENT and not about a stale digest."""
+    _write_collection(dest, doc)
+    dest = Path(dest)
+    member = sorted(dest.glob("member-*.json"))[0]
+    raw = raw_text.encode("utf-8")
+    member.write_bytes(raw)
+    index_path = dest / collection.INDEX_FILENAME
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["members"][0]["sha256"] = collection.member_digest(raw)
+    index_path.write_text(
+        json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+
+
 BINDINGS = {
     "candidate_revision": CANDIDATE,
     "runner_revision": RUNNER,
@@ -282,10 +323,7 @@ def _run_ok(base, packet_name, rels, *, candidate=CANDIDATE, bindings=None,
         sha = rels["prepare_sha256"]
 
         def execute(**kwargs):
-            Path(kwargs["envelope_dest"]).write_text(
-                json.dumps(_permitted_envelope(prepare_sha256=sha)),
-                encoding="utf-8",
-            )
+            _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=sha))
 
     return hosted.run_gate(
         candidate_revision=candidate,
@@ -537,23 +575,18 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             cand = json.loads((base / "artifacts" / hosted.CANDIDATE_RESULT_FILENAME).read_text())
             self.assertEqual(setup["dispatch_bindings"], BINDINGS)
             self.assertEqual(cand["dispatch_bindings"], BINDINGS)
-            envelope = json.loads(
-                (base / "artifacts" / hosted.EFFECTIVE_ENVELOPE_FILENAME).read_text()
-            )
+            # The collection directory is the authoritative artifact; the single legacy file
+            # is no longer the envelope's home, so read the member that was actually observed.
+            envelope = _read_only_member(base / "artifacts")
             self.assertNotIn("dispatch_bindings", envelope)
             self.assertEqual(envelope["schema"], "corpus-adequacy.execution-envelope.v0")
             self.assertEqual(envelope["prepare_sha256"], rels["prepare_sha256"])
 
             def execute_unverified(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             envelope_status="unverified",
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             decision2 = _run_ok(
                 base, "packet", rels, execute=execute_unverified, out_name="artifacts2"
@@ -577,10 +610,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
                     "auth": hashlib.sha256(Path(kwargs["authorize_path"]).read_bytes()).hexdigest(),
                     "prep": hashlib.sha256(Path(kwargs["prepare_path"]).read_bytes()).hexdigest(),
                 })
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256=prepare_hash)),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=prepare_hash))
 
             d1 = _run_ok(base, "packet", rels, execute=execute, out_name="o1")
             self.assertEqual(d1["decision"], "publish")
@@ -612,10 +642,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_wrong_prep(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256="ab" * 32)),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256="ab" * 32))
 
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(base, "packet", rels, execute=execute_wrong_prep, out_name="o")
@@ -656,32 +683,22 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_wrong_commit(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             execution_commit=OTHER_RUNNER,
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=execute_wrong_commit, out_name="out")
 
             def execute_wrong_image(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             requested={
                                 "image_id": OTHER_IMAGE,
                                 "execution_profile": "contained-oci-v0",
                             },
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=execute_wrong_image, out_name="out2")
@@ -776,18 +793,13 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             effective={
                                 "env_names": ["PATH", "GITHUB_TOKEN"],
                                 "image_env_names": ["PATH", "GITHUB_TOKEN"],
                             },
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(base, "packet", rels, execute=execute_cred, out_name="cred")
@@ -1027,15 +1039,17 @@ class SourceMutations(unittest.TestCase):
 
     def test_mutation_delete_refuse_hostile_call_is_red(self):
         original = Path(hosted.__file__).read_text(encoding="utf-8")
+        # Anchored on the per-member loop: the call moved inside it when the gate began
+        # quantifying over every observation instead of one envelope.
         call = (
-            "        observed_child = observe_child_environment(envelope)\n"
-            "        refuse_hostile_workflow(\n"
-            '            env_names=observed_child["env_names"],\n'
-            '            mounts=observed_child["mounts"],\n'
-            "        )\n"
+            "            observed_child = observe_child_environment(member)\n"
+            "            refuse_hostile_workflow(\n"
+            '                env_names=observed_child["env_names"],\n'
+            '                mounts=observed_child["mounts"],\n'
+            "            )\n"
         )
         self.assertEqual(original.count(call), 1)
-        mutated = original.replace(call, "        pass  # mutated: refuse unwired\n", 1)
+        mutated = original.replace(call, "            pass  # mutated: refuse unwired\n", 1)
         self.assertNotEqual(mutated, original)
         bad = _load_mutated_module(mutated, "mut_refuse")
         with tempfile.TemporaryDirectory() as raw:
@@ -1045,18 +1059,13 @@ class SourceMutations(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             effective={
                                 "env_names": ["GITHUB_TOKEN"],
                                 "image_env_names": ["GITHUB_TOKEN"],
                             },
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=execute_cred, out_name="good")
@@ -1099,10 +1108,7 @@ class SourceMutations(unittest.TestCase):
             )
 
             def execute(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256=rels["prepare_sha256"])),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 hosted.run_gate(
@@ -1150,10 +1156,7 @@ class SourceMutations(unittest.TestCase):
 
             def spy(**kwargs):
                 executed.append(True)
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256=rels["prepare_sha256"])),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=spy, out_name="good")
@@ -1190,10 +1193,7 @@ class SourceMutations(unittest.TestCase):
             abs_root = str(packet.resolve())
 
             def execute(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256=rels["prepare_sha256"])),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 hosted.run_gate(
@@ -1285,18 +1285,13 @@ class SourceMutations(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             effective={
                                 "env_names": ["GITHUB_TOKEN"],
                                 "image_env_names": ["GITHUB_TOKEN"],
                             },
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=execute_cred, out_name="good")
@@ -1318,11 +1313,7 @@ class SourceMutations(unittest.TestCase):
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=execute_cred,
                 )
-            leaked = json.loads(
-                (base / "bad" / hosted.EFFECTIVE_ENVELOPE_FILENAME).read_text(
-                    encoding="utf-8"
-                )
-            )
+            leaked = _read_only_member(base / "bad")
             self.assertEqual(leaked.get("publication_permission"), "permitted")
             self.assertEqual(leaked.get("envelope_status"), "verified")
             self.assertIn("GITHUB_TOKEN", json.dumps(leaked))
@@ -1359,10 +1350,7 @@ class SourceMutations(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_wrong_prep(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256="ab" * 32)),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256="ab" * 32))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(
@@ -1425,7 +1413,7 @@ class SourceMutations(unittest.TestCase):
                 serialized = json.dumps(env)
                 mem = env["effective"]["memory"]
                 mutated = serialized.replace(f'"memory": {mem}', f'"memory": {huge_int}', 1)
-                Path(kwargs["envelope_dest"]).write_text(mutated, encoding="utf-8")
+                _write_collection_raw(kwargs["envelope_dest"], env, mutated)
 
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(
@@ -1535,9 +1523,7 @@ class SourceMutations(unittest.TestCase):
                     {"destination": "/tool", "rw": False, "type": "bind"},
                     {"destination": "/vendor", "rw": False, "type": "bind"},
                 ]
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(env), encoding="utf-8"
-                )
+                _write_collection(kwargs["envelope_dest"], env)
 
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(

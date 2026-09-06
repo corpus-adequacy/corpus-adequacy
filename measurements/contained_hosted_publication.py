@@ -41,6 +41,7 @@ if str(_ROOT) not in sys.path:
 
 import contained_oci as contained  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
+import envelope_collection as collection  # noqa: E402
 import effective_envelope  # noqa: E402
 from aee_checker_sealed_candidate import (  # noqa: E402
     CANDIDATE_MOUNT_SPEC,
@@ -55,6 +56,7 @@ ARTIFACT_CANDIDATE = "candidate-result"
 ARTIFACT_RERUN = "rerun-evidence"
 SETUP_STATUS_FILENAME = "setup-status.json"
 EFFECTIVE_ENVELOPE_FILENAME = "effective-envelope.v0.json"
+COLLECTION_DIRNAME = "effective-envelope-collection.v0"
 CANDIDATE_RESULT_FILENAME = "candidate-result.json"
 RERUN_EVIDENCE_FILENAME = "rerun-evidence.jsonl"
 DISPATCH_BINDINGS_FILENAME = "hosted-dispatch-bindings.v0.json"
@@ -510,6 +512,66 @@ def load_envelope(path: Path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
     return doc
 
 
+# A member whose own envelope semantics fail is an envelope defect and is named as one; every
+# other check is a property of the collection (index, digests, ordinals, ceilings) and is named
+# as that. The reason follows the check that actually failed, never the member count -- one
+# member does not make a collection failure an envelope failure, and several do not make an
+# envelope failure a collection one.
+_MEMBER_SEMANTIC_CHECKS = frozenset({"collection member semantics"})
+# A payload that will not parse is a JSON-input failure wherever it sits, and the pre-collection
+# vocabulary already named it. Keeping that name preserves the distinction rather than folding a
+# parse failure into a collection-integrity one.
+_JSON_INPUT_CHECKS = frozenset({"collection member json", "collection index json"})
+
+
+def _collection_refusal_reason(exc) -> str:
+    check = str(exc)
+    if check in _MEMBER_SEMANTIC_CHECKS:
+        return "envelope_corrupt"
+    if check in _JSON_INPUT_CHECKS:
+        return "json_input"
+    return "envelope_collection_corrupt"
+
+
+def load_envelope_collection(directory, *, max_bytes: int = MAX_INPUT_BYTES) -> list:
+    """Load every member of a contained run's collection, or refuse.
+
+    No singleton fallback exists: if the index is absent the run is refused rather than read as a
+    lone record, or deleting the index would restore the hole this replaces.
+    """
+    try:
+        loaded = collection.load_collection(
+            Path(directory), max_index_bytes=max_bytes, max_member_bytes=max_bytes)
+    except collection.CollectionError as exc:
+        raise HostedPublicationError(_collection_refusal_reason(exc)) from exc
+    if collection.collection_permission(loaded) != "permitted":
+        # Diagnostics stay representable: the members still load and are returned, and the
+        # withheld reason travels with them for the decision below.
+        loaded["withheld_reason"] = collection.withheld_reason(loaded)
+    return loaded
+
+
+def collection_publication_decision(loaded, *, setup_status) -> dict:
+    """Decide from EVERY observation, reusing the single-record rule unchanged.
+
+    A later member passing cannot rescue an earlier one that did not: the quantifier is
+    universal, not positional, and `publication_decision` remains the one rule.
+    """
+    members = loaded.get("members", []) if isinstance(loaded, dict) else []
+    if not members:
+        return publication_decision(None, setup_status=setup_status)
+    decisions = [publication_decision(m, setup_status=setup_status) for m in members]
+    for decision in decisions:
+        if decision["decision"] != "publish":
+            return decision
+    if loaded.get("withheld_reason") is not None:
+        withheld = dict(decisions[0])
+        withheld["decision"] = "withhold"
+        withheld["score_status"] = "none"
+        return withheld
+    return decisions[0]
+
+
 def _run_attempt_identity() -> dict:
     return {
         "run_id": os.environ.get("GITHUB_RUN_ID") or os.environ.get("HOSTED_RUN_ID"),
@@ -601,7 +663,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    envelope_dest = out / EFFECTIVE_ENVELOPE_FILENAME
+    envelope_dest = out / COLLECTION_DIRNAME
     if rerun_log is None:
         rerun_log = out / RERUN_EVIDENCE_FILENAME
     else:
@@ -679,15 +741,21 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             materialize_dest=materialize_dest,
             max_bytes=max_input_bytes,
         )
-        envelope = load_envelope(envelope_dest, max_bytes=max_input_bytes)
-        check_envelope_bindings(
-            envelope, bindings=bindings, prepare_sha256=prepare_sha256)
-        observed_child = observe_child_environment(envelope)
-        refuse_hostile_workflow(
-            env_names=observed_child["env_names"],
-            mounts=observed_child["mounts"],
-        )
-        setup_status = envelope.get("setup_status") or "unavailable"
+        loaded = load_envelope_collection(envelope_dest, max_bytes=max_input_bytes)
+        envelope = loaded
+        # Every member is bound and observed. Checking one would let a hostile sibling ride along
+        # behind a benign first record.
+        for member in loaded["members"]:
+            check_envelope_bindings(
+                member, bindings=bindings, prepare_sha256=prepare_sha256)
+            observed_child = observe_child_environment(member)
+            refuse_hostile_workflow(
+                env_names=observed_child["env_names"],
+                mounts=observed_child["mounts"],
+            )
+        setup_status = "unavailable"
+        if loaded["members"]:
+            setup_status = loaded["members"][0].get("setup_status") or "unavailable"
         reason = "contained-execution"
     except HostedPublicationError as exc:
         if execute_began:
@@ -713,7 +781,9 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             **{k: v for k, v in identity.items() if v is not None},
         })
 
-    decision = publication_decision(envelope, setup_status=setup_status)
+    # Quantified over every member. `publication_decision` stays the one rule; this only
+    # applies it universally, so a later member cannot rescue an earlier one.
+    decision = collection_publication_decision(envelope, setup_status=setup_status)
 
     if decision["decision"] == "unavailable":
         setup_doc = setup_status_doc(

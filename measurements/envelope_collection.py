@@ -163,7 +163,16 @@ def write_collection(ledger: Ledger, dest, *, report_sha256) -> Path:
         if state != RECORDED:
             continue
         # Every member carries the same report digest: uniform, not a first/last selection.
-        bound = envelope.bind_report(ledger.record(ordinal), report_sha256)
+        # Binding ATTACHES the digest to the observation; it does not rebuild the record.
+        # `bind_report` reconstructs from a record's inputs, which is exactly how
+        # `validate_envelope_record` detects a contradiction -- it rebuilds and demands equality.
+        # Writing that reconstruction would make it agree with the stored bytes by construction,
+        # so the contradiction would be erased by the very mechanism meant to catch it, and a
+        # malformed member would land on disk as an honestly-withheld one. The writer therefore
+        # preserves what was observed and leaves the judging to the reader, which validates every
+        # member. The added digest field is the one authorized change; no observed value moves.
+        bound = dict(ledger.record(ordinal))
+        bound["report_sha256"] = report_sha256
         # Preflight the FINAL encoding -- the bytes actually written. The unbound record is a
         # different, smaller string.
         size = bounded_encoded_size(bound, ledger.max_member_bytes)

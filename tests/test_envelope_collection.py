@@ -325,6 +325,83 @@ class Ceilings(unittest.TestCase):
                              "the aggregate refusal happens before any write")
 
 
+def _contradictory_record(**kw):
+    """An OBSERVATION the runtime could hand us that the validator must reject.
+
+    Built valid, then contradicted in place: `cleanup` says the removal failed while
+    `publication_permission` still claims `permitted`. The builder can never emit this, which is
+    the point -- it is what a buggy or hostile producer emits, and the collection's job is to
+    carry it faithfully so the reader can refuse it, not to quietly agree with one half.
+    """
+    record = dict(_valid_record(**kw))
+    record["cleanup"] = "remove-failed"
+    record["publication_permission"] = "permitted"
+    return record
+
+
+class WriterPreservesObservations(unittest.TestCase):
+    """The writer records what was observed; only the reader judges it.
+
+    `bind_report` reconstructs a record from its inputs, which is exactly how
+    `validate_envelope_record` detects a contradiction. Writing that reconstruction instead of the
+    observation makes the reconstruction trivially agree with the stored bytes and destroys the
+    check at the moment of writing.
+    """
+
+    def _write_one(self, dest, record):
+        ledger = collection.Ledger()
+        ledger.recorded(ledger.register(), record)
+        collection.write_collection(ledger, dest, report_sha256="b" * 64)
+
+    def test_writer_does_not_normalize_a_contradicted_permission(self):
+        observed = _contradictory_record()
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "coll"
+            self._write_one(dest, observed)
+            member = json.loads(
+                (dest / (collection.MEMBER_TEMPLATE % 0)).read_text("utf-8"))
+        # Report binding is an authorized field addition, so byte identity with the pre-binding
+        # dict is NOT claimed. Every other observed field must survive verbatim.
+        self.assertEqual(member["cleanup"], "remove-failed")
+        self.assertEqual(
+            member["publication_permission"], "permitted",
+            "writer rewrote an observed contradiction into an honestly-withheld member")
+        self.assertEqual(member["report_sha256"], "b" * 64)
+
+    def test_contradicted_member_is_still_refused_on_read(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "coll"
+            self._write_one(dest, _contradictory_record())
+            with self.assertRaises(collection.CollectionError) as ctx:
+                collection.load_collection(dest)
+        self.assertEqual(str(ctx.exception), "collection member semantics")
+
+    def test_contradiction_last_is_refused(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "coll"
+            _write_pair(dest, _valid_record(), _contradictory_record())
+            with self.assertRaises(collection.CollectionError) as ctx:
+                collection.load_collection(dest)
+        self.assertEqual(str(ctx.exception), "collection member semantics")
+
+    def test_contradiction_first_is_refused(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "coll"
+            _write_pair(dest, _contradictory_record(), _valid_record())
+            with self.assertRaises(collection.CollectionError) as ctx:
+                collection.load_collection(dest)
+        self.assertEqual(str(ctx.exception), "collection member semantics")
+
+    def test_an_uncontradicted_withheld_member_still_round_trips(self):
+        """Positive control: the refusal must key on the contradiction, not on `withheld`."""
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "coll"
+            self._write_one(dest, _valid_record(cleanup="remove-failed"))
+            loaded = collection.load_collection(dest)
+        self.assertEqual(len(loaded["members"]), 1)
+        self.assertEqual(loaded["members"][0]["publication_permission"], "withheld")
+
+
 class ReportBinding(unittest.TestCase):
     """A coordinator probe found the index carried a report claim nothing checked, and the
     members carried none at all. Only None fixtures were being tested."""
