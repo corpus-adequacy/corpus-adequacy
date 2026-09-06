@@ -35,8 +35,10 @@ from aee_checker_sealed_run import (  # noqa: E402
     PREPARE_PART_KEYS,
     PREPARE_SCHEMA,
     PREPARE_V1_SCHEMA,
+    PREPARE_V2_SCHEMA,
     emit_prepare_v0,
     load_prepare_v1,
+    load_prepare_v2,
 )
 
 AUTHORIZE_SCHEMA = "corpus-adequacy.aee-checker-sealed.authorize.v0"
@@ -107,11 +109,15 @@ def load_prepare(raw: bytes) -> dict:
         doc = load_strict(raw)
     except PrepareError as exc:
         raise _wrap(exc) from exc
-    if doc.get("schema") == PREPARE_V1_SCHEMA:
-        try:
-            return load_prepare_v1(raw)
-        except PrepareError as exc:
-            raise _wrap(exc) from exc
+    # authorize.v0's wire keys do not change: `prepare_schema` already carries the version and
+    # `prepare_sha256` already binds the exact canonical bytes, whichever codec produced them.
+    for schema, loader in ((PREPARE_V1_SCHEMA, load_prepare_v1),
+                           (PREPARE_V2_SCHEMA, load_prepare_v2)):
+        if doc.get("schema") == schema:
+            try:
+                return loader(raw)
+            except PrepareError as exc:
+                raise _wrap(exc) from exc
     if doc.get("schema") != PREPARE_SCHEMA:
         raise AuthorizeError("prepare_schema drift")
     _exact(doc, PREPARE_KEYS, "prepare.v0")

@@ -32,6 +32,7 @@ import aee_checker_sealed_oci as oci  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
 import bounded_run as br  # noqa: E402
 import contained_oci as contained  # noqa: E402
+from aee_checker_sealed_common import PrepareError  # noqa: E402
 
 PREREG = REPO_ROOT / "measurements" / "aee-checker-25b9dfa"
 ADAPTER = REPO_ROOT / "adapters" / "aee_checker_sealed.py"
@@ -2558,3 +2559,80 @@ class ExplicitPrepareImage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrepareV2Codec(unittest.TestCase):
+    """prepare.v2 emits and loads exactly once through the shared canonical rules."""
+
+    def _parts(self):
+        parts = {**PrepareEvidence._parts(self),
+                 "candidate_profile": dict(contained.CANDIDATE_RESOURCE_PROFILE_V2)}
+        parts["image"] = {**parts["image"], "id_scope": "host-local",
+                          "platform": "linux/arm64"}
+        return parts
+
+    def test_emitted_v2_bytes_round_trip_through_the_canonical_loader(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "prepare.v2.json"
+            emitted = run.emit_prepare_v2(self._parts(), dest)
+            self.assertEqual(dest.read_bytes(), emitted)
+            doc = run.load_prepare_v2(emitted)
+        self.assertEqual(doc["schema"], run.PREPARE_V2_SCHEMA)
+        self.assertEqual(doc["candidate_profile"],
+                         contained.CANDIDATE_RESOURCE_PROFILE_V2)
+
+    def test_only_the_final_schema_is_written(self):
+        with tempfile.TemporaryDirectory() as raw:
+            emitted = run.emit_prepare_v2(self._parts(), Path(raw) / "p.json")
+        self.assertNotIn(run.PREPARE_SCHEMA.encode(), emitted)
+        self.assertNotIn(run.PREPARE_V1_SCHEMA.encode(), emitted)
+
+    def test_non_canonical_bytes_refuse(self):
+        with tempfile.TemporaryDirectory() as raw:
+            emitted = run.emit_prepare_v2(self._parts(), Path(raw) / "p.json")
+        with self.assertRaises(PrepareError):
+            run.load_prepare_v2(b" " + emitted)
+
+    def test_v1_profile_in_a_v2_prepare_refuses(self):
+        parts = self._parts()
+        parts["candidate_profile"] = dict(contained.CANDIDATE_RESOURCE_PROFILE)
+        with self.assertRaises(PrepareError):
+            run.emit_prepare_v2(parts, Path("/dev/null"))
+
+    def test_wellformed_but_non_fixture_v2_profile_refuses(self):
+        """The generic validator alone is not the equality check."""
+        parts = self._parts()
+        off_policy = dict(contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        off_policy["cpu_rate_millicpu"] = 2000
+        contained.require_resource_profile_v2(off_policy)   # well-formed
+        parts["candidate_profile"] = off_policy
+        with self.assertRaises(PrepareError):               # still refused as a PREPARE
+            run.emit_prepare_v2(parts, Path("/dev/null"))
+
+    def test_named_v1_loader_refuses_v2_bytes_and_the_reverse(self):
+        with tempfile.TemporaryDirectory() as raw:
+            v2 = run.emit_prepare_v2(self._parts(), Path(raw) / "p2.json")
+        with self.assertRaises(PrepareError):
+            run.load_prepare_v1(v2)
+
+    def test_production_prepare_dispatch_does_not_emit_v2(self):
+        """Codec infrastructure only: no CLI or production path produces prepare.v2 here."""
+        import inspect as _inspect
+        src = _inspect.getsource(run.prepare)
+        self.assertNotIn("PREPARE_V2_SCHEMA", src)
+        self.assertNotIn("emit_prepare_v2", src)
+
+    def test_execute_and_driver_still_require_v1(self):
+        """Downstream production admission stays closed, observed by calling the requirement."""
+        import aee_checker_sealed_execute as ex
+        with tempfile.TemporaryDirectory() as raw:
+            v2 = run.emit_prepare_v2(self._parts(), Path(raw) / "p2.json")
+        doc = json.loads(v2.decode("utf-8"))
+        self.assertEqual(doc["schema"], run.PREPARE_V2_SCHEMA)
+        self.assertNotEqual(doc["schema"], run.PREPARE_V1_SCHEMA)
+        self.assertIn("PREPARE_V1_SCHEMA", _inspect_source(ex))
+
+
+def _inspect_source(module):
+    import inspect as _i
+    return _i.getsource(module)

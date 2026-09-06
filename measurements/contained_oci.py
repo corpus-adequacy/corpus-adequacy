@@ -22,10 +22,19 @@ DECLARED_CEILINGS = {
     "output_bytes": br.OUTPUT_CAP_BYTES,
 }
 RESOURCE_PROFILE_SCHEMA = "corpus-adequacy.aee-checker-sealed.resource-profile.v1"
+RESOURCE_PROFILE_V2_SCHEMA = "corpus-adequacy.aee-checker-sealed.resource-profile.v2"
+# One CPU expressed in thousandths, so the Docker rate argument is exact integer arithmetic and
+# no float ever reaches the wire. Operator policy, not measured tuning.
+CPU_PERIOD_USEC = 100000
+MILLICPU_PER_CPU = 1000
 RESOURCE_PROFILE_KEYS = (
     "schema", "work_bytes", "tmp_bytes", "work_inodes", "tmp_inodes",
     "work_exec", "deadline_seconds", "output_bytes", "memory_bytes",
     "memory_swap_bytes", "pids",
+)
+# v2 is a sibling: v1's keys and its fixture are untouched, and neither loader admits the other.
+RESOURCE_PROFILE_V2_KEYS = RESOURCE_PROFILE_KEYS + (
+    "cpu_rate_millicpu", "nofile_soft", "nofile_hard",
 )
 
 _INSPECT_ABSENT = ("no such object", "no such container")
@@ -124,23 +133,86 @@ CANDIDATE_RESOURCE_PROFILE = _resource_profile(
     memory_swap_bytes=MEMORY_4G,
     pids=512,
 )
+CANDIDATE_RESOURCE_PROFILE_V2 = {
+    **CANDIDATE_RESOURCE_PROFILE,
+    "schema": RESOURCE_PROFILE_V2_SCHEMA,
+    # Operator policy, not measured tuning and not a cumulative CPU-seconds budget:
+    # one CPU of aggregate cgroup rate, and a per-process descriptor limit.
+    "cpu_rate_millicpu": 1 * MILLICPU_PER_CPU,
+    "nofile_soft": 1024,
+    "nofile_hard": 1024,
+}
 
 
-def require_resource_profile(profile) -> dict:
-    exact_object(profile, RESOURCE_PROFILE_KEYS, "resource profile")
-    if profile.get("schema") != RESOURCE_PROFILE_SCHEMA:
+def _require_positive_int(profile, key) -> int:
+    """`type(...) is not int` rather than isinstance: bool is an int subclass, and a profile
+    carrying True where a count belongs must refuse rather than be read as 1."""
+    value = profile[key]
+    if type(value) is not int or value <= 0:
+        raise PrepareError("resource profile %s" % key)
+    return value
+
+
+def _require_cpu_and_nofile(profile) -> None:
+    """v2-only policy. Ints only, so no float, NaN, infinity or bool can reach the argv."""
+    rate = _require_positive_int(profile, "cpu_rate_millicpu")
+    if rate * CPU_PERIOD_USEC % MILLICPU_PER_CPU:
+        raise PrepareError("resource profile cpu_rate_millicpu is not exactly representable")
+    soft = _require_positive_int(profile, "nofile_soft")
+    hard = _require_positive_int(profile, "nofile_hard")
+    if soft > hard:
+        raise PrepareError("resource profile nofile_soft exceeds nofile_hard")
+
+
+# Closed schema selection over ONE rule. Two copied validators would drift, and the drift would
+# be invisible until a profile validated differently in two places.
+_PROFILE_POLICIES = {
+    RESOURCE_PROFILE_SCHEMA: (RESOURCE_PROFILE_KEYS, None),
+    RESOURCE_PROFILE_V2_SCHEMA: (RESOURCE_PROFILE_V2_KEYS, _require_cpu_and_nofile),
+}
+
+
+def _require_profile(profile, *, schema: str) -> dict:
+    keys, extra = _PROFILE_POLICIES[schema]
+    exact_object(profile, keys, "resource profile")
+    if profile.get("schema") != schema:
         raise PrepareError("resource profile schema")
-    for key in RESOURCE_PROFILE_KEYS:
+    for key in keys:
         if key in ("schema", "work_exec"):
             continue
-        value = profile[key]
-        if type(value) is not int or value <= 0:
-            raise PrepareError("resource profile %s" % key)
+        _require_positive_int(profile, key)
     if type(profile["work_exec"]) is not bool:
         raise PrepareError("resource profile work_exec")
     if profile["output_bytes"] != br.OUTPUT_CAP_BYTES:
         raise PrepareError("resource profile output_bytes is not enforced")
+    if extra is not None:
+        extra(profile)
     return dict(profile)
+
+
+def require_resource_profile(profile) -> dict:
+    """The v1 loader, unchanged in meaning: it admits v1 and refuses v2 by exact keys."""
+    return _require_profile(profile, schema=RESOURCE_PROFILE_SCHEMA)
+
+
+def require_resource_profile_v2(profile) -> dict:
+    return _require_profile(profile, schema=RESOURCE_PROFILE_V2_SCHEMA)
+
+
+def docker_resource_argv_v2(profile) -> list[str]:
+    """The CPU rate and descriptor arguments implied by a validated v2 profile.
+
+    Encoding an argument is not applying or observing a limit, and these are not applied by the
+    v1 path this slice leaves untouched. The rate is a cgroup aggregate quota over a period; the
+    wall deadline remains a separate, independently enforced bound and does not appear here.
+    """
+    checked = require_resource_profile_v2(profile)
+    quota = checked["cpu_rate_millicpu"] * CPU_PERIOD_USEC // MILLICPU_PER_CPU
+    return [
+        "--cpu-period", str(CPU_PERIOD_USEC),
+        "--cpu-quota", str(quota),
+        "--ulimit", "nofile=%d:%d" % (checked["nofile_soft"], checked["nofile_hard"]),
+    ]
 
 
 def validate_mount_destinations(

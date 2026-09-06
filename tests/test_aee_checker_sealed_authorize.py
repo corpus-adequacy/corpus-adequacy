@@ -479,3 +479,72 @@ class FrozenSitesPin(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrepareV2Authorization(unittest.TestCase):
+    """authorize.v0 binds canonical prepare.v2 bytes without changing its own wire keys.
+
+    Synthetic bytes only. Emitting an authorize record for a synthetic prepare is codec
+    activity; no GO-RUN authorization for any third party is issued here.
+    """
+
+    def _v2_prepare(self, tmp):
+        from tests.test_aee_checker_sealed_run import PrepareV2Codec
+        parts = PrepareV2Codec._parts(self)
+        return run.emit_prepare_v2(parts, Path(tmp) / "prepare.v2.json")
+
+    def test_authorize_wire_keys_are_unchanged(self):
+        self.assertEqual(auth.AUTHORIZE_KEYS,
+                         ("phase", "prepare_schema", "prepare_sha256", "schema"))
+
+    def test_authorize_binds_canonical_v2_bytes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            prepare_raw = self._v2_prepare(raw)
+            auth_raw = auth.emit_authorize_v0(prepare_raw, Path(raw) / "a.json")
+            doc = json.loads(auth_raw.decode("utf-8"))
+            self.assertEqual(doc["prepare_schema"], run.PREPARE_V2_SCHEMA)
+            self.assertEqual(doc["prepare_sha256"],
+                             hashlib.sha256(prepare_raw).hexdigest())
+            checked = auth.validate_authorize(auth_raw, prepare_raw)
+            self.assertEqual(checked["prepare"]["schema"], run.PREPARE_V2_SCHEMA)
+            self.assertEqual(checked["authorize"]["prepare_schema"],
+                             run.PREPARE_V2_SCHEMA)
+
+    def test_changed_prepare_bytes_refuse_independently(self):
+        with tempfile.TemporaryDirectory() as raw:
+            prepare_raw = self._v2_prepare(raw)
+            auth_raw = auth.emit_authorize_v0(prepare_raw, Path(raw) / "a.json")
+            with self.assertRaises(auth.AuthorizeError) as ctx:
+                auth.validate_authorize(auth_raw, prepare_raw + b" ")
+            self.assertEqual(str(ctx.exception), "prepare_sha256")
+
+    def test_wrong_prepare_schema_with_a_recomputed_digest_refuses(self):
+        """The digest alone is not the binding: the schema name is bound too."""
+        with tempfile.TemporaryDirectory() as raw:
+            prepare_raw = self._v2_prepare(raw)
+            forged = {
+                "phase": auth.AUTHORIZE_PHASE,
+                "prepare_schema": run.PREPARE_V1_SCHEMA,
+                "prepare_sha256": hashlib.sha256(prepare_raw).hexdigest(),
+                "schema": auth.AUTHORIZE_SCHEMA,
+            }
+            forged_raw = common.encode_json(forged)
+            with self.assertRaises(auth.AuthorizeError) as ctx:
+                auth.validate_authorize(forged_raw, prepare_raw)
+            self.assertEqual(str(ctx.exception), "prepare_schema drift")
+
+    def test_v0_and_v1_authorization_still_work(self):
+        with tempfile.TemporaryDirectory() as raw:
+            from tests.test_aee_checker_sealed_run import PrepareEvidence
+            import contained_oci as contained
+            parts = {**PrepareEvidence._parts(self),
+                     "candidate_profile": dict(contained.CANDIDATE_RESOURCE_PROFILE)}
+            parts["image"] = {**parts["image"], "id_scope": "host-local",
+                              "platform": "linux/arm64"}
+            v1_raw = run.emit_prepare_v1(parts, Path(raw) / "p1.json")
+            a1 = auth.emit_authorize_v0(v1_raw, Path(raw) / "a1.json")
+            self.assertEqual(
+                json.loads(a1.decode("utf-8"))["prepare_schema"],
+                run.PREPARE_V1_SCHEMA)
+            self.assertEqual(auth.validate_authorize(a1, v1_raw)["prepare"]["schema"],
+                             run.PREPARE_V1_SCHEMA)
