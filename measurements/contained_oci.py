@@ -27,6 +27,15 @@ RESOURCE_PROFILE_V2_SCHEMA = "corpus-adequacy.aee-checker-sealed.resource-profil
 # no float ever reaches the wire. Operator policy, not measured tuning.
 CPU_PERIOD_USEC = 100000
 MILLICPU_PER_CPU = 1000
+# A representational ceiling, NOT a tuned CPU policy and not an applied host limit. The emitted
+# quota is written into a cgroup interface that reads a signed 64-bit microsecond value, so a rate
+# whose quota cannot be represented there is refused here rather than encoded and rejected later
+# by something that never sees this codec. Positive-and-integer was not bounded: 10**100 passed.
+_INT64_MAX = 2 ** 63 - 1
+MAX_CPU_RATE_MILLICPU = _INT64_MAX * MILLICPU_PER_CPU // CPU_PERIOD_USEC
+# Descriptor limits are per-process RLIMIT values passed as decimal on the wire; bound them by the
+# same representational argument rather than leaving an unbounded integer.
+MAX_NOFILE = _INT64_MAX
 RESOURCE_PROFILE_KEYS = (
     "schema", "work_bytes", "tmp_bytes", "work_inodes", "tmp_inodes",
     "work_exec", "deadline_seconds", "output_bytes", "memory_bytes",
@@ -154,14 +163,19 @@ def _require_positive_int(profile, key) -> int:
 
 
 def _require_cpu_and_nofile(profile) -> None:
-    """v2-only policy. Ints only, so no float, NaN, infinity or bool can reach the argv."""
+    """v2-only policy. Ints only, so no float, NaN, infinity or bool can reach the argv, and
+    finite, so an unrepresentable rate refuses here instead of being encoded."""
     rate = _require_positive_int(profile, "cpu_rate_millicpu")
     if rate * CPU_PERIOD_USEC % MILLICPU_PER_CPU:
         raise PrepareError("resource profile cpu_rate_millicpu is not exactly representable")
+    if rate > MAX_CPU_RATE_MILLICPU:
+        raise PrepareError("resource profile cpu_rate_millicpu exceeds the representable ceiling")
     soft = _require_positive_int(profile, "nofile_soft")
     hard = _require_positive_int(profile, "nofile_hard")
     if soft > hard:
         raise PrepareError("resource profile nofile_soft exceeds nofile_hard")
+    if hard > MAX_NOFILE:
+        raise PrepareError("resource profile nofile_hard exceeds the representable ceiling")
 
 
 # Closed schema selection over ONE rule. Two copied validators would drift, and the drift would

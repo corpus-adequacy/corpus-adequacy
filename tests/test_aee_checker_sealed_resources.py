@@ -671,6 +671,37 @@ class ResourceProfileV2Codec(unittest.TestCase):
         self.assertIn("--ulimit", argv)
         self.assertIn("nofile=1024:1024", argv)
 
+    def test_v2_argv_binds_alternate_values_not_only_the_default(self):
+        """F1: the frozen default cannot discriminate a hardcoded constant."""
+        argv = contained.docker_resource_argv_v2(
+            self._v2(cpu_rate_millicpu=2500, nofile_soft=512, nofile_hard=2048))
+        self.assertEqual(argv[argv.index("--cpu-quota") + 1], "250000")
+        self.assertEqual(argv[argv.index("--cpu-period") + 1], "100000")
+        self.assertEqual(argv[argv.index("--ulimit") + 1], "nofile=512:2048")
+
+    def test_cpu_rate_has_a_finite_representational_ceiling(self):
+        """F2: bounded, not merely positive. This is a wire-representation limit."""
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile_v2(
+                self._v2(cpu_rate_millicpu=10 ** 100))
+        with self.assertRaises(PrepareError):
+            contained.docker_resource_argv_v2(
+                self._v2(cpu_rate_millicpu=10 ** 100))
+
+    def test_cpu_rate_ceiling_boundary_is_exact(self):
+        at_bound = contained.MAX_CPU_RATE_MILLICPU
+        accepted = contained.require_resource_profile_v2(
+            self._v2(cpu_rate_millicpu=at_bound))
+        self.assertEqual(accepted["cpu_rate_millicpu"], at_bound)
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile_v2(
+                self._v2(cpu_rate_millicpu=at_bound + 1))
+
+    def test_nofile_has_a_finite_ceiling_too(self):
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile_v2(
+                self._v2(nofile_soft=1, nofile_hard=10 ** 100))
+
     def test_v2_argv_is_independent_of_the_wall_deadline(self):
         slower = dict(contained.CANDIDATE_RESOURCE_PROFILE_V2)
         slower["deadline_seconds"] = contained.CANDIDATE_RESOURCE_PROFILE_V2[

@@ -20,6 +20,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import unittest.mock as mock
 from pathlib import Path
 
@@ -2622,15 +2623,66 @@ class PrepareV2Codec(unittest.TestCase):
         self.assertNotIn("PREPARE_V2_SCHEMA", src)
         self.assertNotIn("emit_prepare_v2", src)
 
-    def test_execute_and_driver_still_require_v1(self):
-        """Downstream production admission stays closed, observed by calling the requirement."""
+    def test_execute_and_driver_refuse_v2_before_any_effect(self):
+        """F1: call the real funnels, do not search their source.
+
+        Every later boundary is a raising sentinel, so a refusal that arrives late would surface
+        as a sentinel rather than as a pass. Nothing runs a process, materializes, reads frozen
+        sites or computes an execution identity.
+        """
+        import aee_checker_sealed_authorize as auth
         import aee_checker_sealed_execute as ex
+        import aee_checker_sealed_driver as driver
         with tempfile.TemporaryDirectory() as raw:
-            v2 = run.emit_prepare_v2(self._parts(), Path(raw) / "p2.json")
-        doc = json.loads(v2.decode("utf-8"))
-        self.assertEqual(doc["schema"], run.PREPARE_V2_SCHEMA)
-        self.assertNotEqual(doc["schema"], run.PREPARE_V1_SCHEMA)
-        self.assertIn("PREPARE_V1_SCHEMA", _inspect_source(ex))
+            root = Path(raw)
+            prepare = run.emit_prepare_v2(self._parts(), root / "p.json")
+            authorize = auth.emit_authorize_v0(prepare, root / "a.json")
+
+            with mock.patch.object(
+                    ex, "load_frozen_sites",
+                    side_effect=AssertionError("funnel advanced past schema")) as sites, \
+                 mock.patch.object(
+                    ex.ca, "_run_process",
+                    side_effect=AssertionError("process boundary reached")) as process:
+                with self.assertRaises(ex.ExecuteError) as ctx:
+                    ex.run_execution_funnel(
+                        authorize_raw=authorize, prepare_raw=prepare, pins_dir=root,
+                        manifest={}, manifest_path=root / "manifest.json",
+                        execution_backend=None)
+                self.assertIn("prepare.v1", str(ctx.exception))
+                sites.assert_not_called()
+                process.assert_not_called()
+
+            with mock.patch.object(
+                    driver, "execution_identity",
+                    side_effect=AssertionError("driver advanced past schema")) as identity, \
+                 mock.patch.object(
+                    driver, "materialize_pinned",
+                    side_effect=AssertionError("materialization reached")) as materialize:
+                with self.assertRaises(driver.DriverError) as ctx:
+                    driver.run_authorized(
+                        authorize_raw=authorize, prepare_raw=prepare, pins_dir=root,
+                        materialize_dest=root / "never-created", root=root)
+                self.assertIn("prepare.v1", str(ctx.exception))
+                identity.assert_not_called()
+                materialize.assert_not_called()
+                self.assertFalse((root / "never-created").exists())
+
+    def test_v1_and_v2_share_one_image_validation_rule(self):
+        """F3: one malformed-image table, both versions, same refusal."""
+        for key, value in (("id_scope", "remote"), ("kind", "candidate"),
+                           ("platform", ""), ("id", "tag:latest")):
+            for version in (1, 2):
+                parts = self._parts()
+                if version == 1:
+                    parts["candidate_profile"] = dict(
+                        contained.CANDIDATE_RESOURCE_PROFILE)
+                parts["image"] = {**parts["image"], key: value}
+                with tempfile.TemporaryDirectory() as raw:
+                    with self.subTest(version=version, key=key), \
+                         self.assertRaises(PrepareError):
+                        getattr(run, "emit_prepare_v%d" % version)(
+                            parts, Path(raw) / "p.json")
 
 
 def _inspect_source(module):

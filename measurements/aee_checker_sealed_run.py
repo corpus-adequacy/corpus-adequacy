@@ -438,13 +438,14 @@ def emit_prepare_v0(parts: dict, dest: Path) -> bytes:
     return raw
 
 
-def _prepare_v1_doc(parts: dict) -> dict:
-    exact_object(parts, PREPARE_V1_PART_KEYS, "prepare")
-    profile = require_resource_profile(parts["candidate_profile"])
-    if profile == INERT_RESOURCE_PROFILE:
-        raise PrepareError("candidate profile must not be the inert profile")
-    if profile != CANDIDATE_RESOURCE_PROFILE:
-        raise PrepareError("candidate profile must be the bounded fixture")
+def _require_prepare_image(parts: dict) -> None:
+    """The one image rule both versioned PREPARE codecs apply.
+
+    It was written twice and the copies were identical, so removing one half's scope condition
+    left every test green. Sharing removes that particular blind spot; it does not make future
+    divergence impossible, which is why the malformed-image control runs across both versions.
+    Error strings and refusal order are unchanged, so v1's bytes and messages are untouched.
+    """
     image = parts["image"]
     exact_object(image, PREPARE_IMAGE_KEYS, "prepare image")
     require_image_id(image.get("id"))
@@ -452,6 +453,16 @@ def _prepare_v1_doc(parts: dict) -> dict:
         raise PrepareError("prepare image must remain the host-local inert probe")
     if not isinstance(image.get("platform"), str) or not image["platform"]:
         raise PrepareError("prepare image platform")
+
+
+def _prepare_v1_doc(parts: dict) -> dict:
+    exact_object(parts, PREPARE_V1_PART_KEYS, "prepare")
+    profile = require_resource_profile(parts["candidate_profile"])
+    if profile == INERT_RESOURCE_PROFILE:
+        raise PrepareError("candidate profile must not be the inert profile")
+    if profile != CANDIDATE_RESOURCE_PROFILE:
+        raise PrepareError("candidate profile must be the bounded fixture")
+    _require_prepare_image(parts)
     doc = _prepare_v0_doc({key: parts[key] for key in PREPARE_PART_KEYS})
     doc["schema"] = PREPARE_V1_SCHEMA
     doc["candidate_profile"] = profile
@@ -477,13 +488,7 @@ def _prepare_v2_doc(parts: dict) -> dict:
     profile = require_resource_profile_v2(parts["candidate_profile"])
     if profile != CANDIDATE_RESOURCE_PROFILE_V2:
         raise PrepareError("candidate profile must be the bounded v2 fixture")
-    image = parts["image"]
-    exact_object(image, PREPARE_IMAGE_KEYS, "prepare image")
-    require_image_id(image.get("id"))
-    if image.get("id_scope") != "host-local" or image.get("kind") != "inert-probe":
-        raise PrepareError("prepare image must remain the host-local inert probe")
-    if not isinstance(image.get("platform"), str) or not image["platform"]:
-        raise PrepareError("prepare image platform")
+    _require_prepare_image(parts)
     doc = _prepare_v0_doc({key: parts[key] for key in PREPARE_PART_KEYS})
     doc["schema"] = PREPARE_V2_SCHEMA
     doc["candidate_profile"] = profile
