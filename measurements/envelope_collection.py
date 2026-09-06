@@ -21,6 +21,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import corpus_adequacy as ca
 import effective_envelope as envelope
 
 COLLECTION_SCHEMA = "corpus-adequacy.execution-envelope-collection.v0"
@@ -268,11 +269,22 @@ def load_collection(dest, *, max_index_bytes: int = MAX_INDEX_BYTES,
         if relpath != MEMBER_TEMPLATE % entry["ordinal"]:
             raise CollectionError("collection member relpath")
         path = dest / relpath
-        if not path.is_file():
+        if not path.exists():
             raise CollectionError("collection member absent")
-        if path.stat().st_size > max_member_bytes:
-            raise CollectionError("collection member byte ceiling")
-        raw = path.read_bytes()
+        # The collection directory is an uploaded artifact, so a symlinked member would publish
+        # whatever it points at -- and a matching index digest would make that look correct.
+        # The shared bounded reader already refuses symlinks and non-regular files and bounds the
+        # size from fstat before any parse; reuse it rather than restating the rule here.
+        try:
+            raw = ca.read_bounded_regular_file(path, cap=max_member_bytes)
+        except ca.ManifestError as exc:
+            # The reader refuses both shapes with one error type. The refusal has already
+            # happened; this only names which check it was, so the two stay distinguishable in
+            # the reason. It is a diagnosis of a settled refusal, not a second gate.
+            nonregular = path.is_symlink() or not path.is_file()
+            raise CollectionError(
+                "collection member not a regular file" if nonregular
+                else "collection member byte ceiling") from exc
         if member_digest(raw) != entry.get("sha256"):
             raise CollectionError("collection member digest")
         try:

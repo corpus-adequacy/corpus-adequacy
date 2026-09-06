@@ -276,8 +276,31 @@ def _load_mutated_module(source: str, name: str):
 
 
 
+def _assert_upload_surface_carries_no_success_members(testcase, out: Path):
+    """The collection directory the workflow uploads must hold no permitted/verified member.
+
+    Sanitizing the legacy stub stopped being sufficient when the upload was retargeted at the
+    collection: a refused run whose members still say `permitted`/`verified` publishes exactly
+    the bytes the refusal rejected. Raw observations are not rewritten -- they are moved out of
+    the upload selection and kept as diagnostics.
+    """
+    live = out / hosted.COLLECTION_DIRNAME
+    surviving = sorted(p.name for p in live.iterdir()) if live.is_dir() else []
+    for name in surviving:
+        doc = json.loads((live / name).read_text(encoding="utf-8"))
+        testcase.assertNotEqual(
+            doc.get("publication_permission"), "permitted",
+            "refused run left a permitted member on the upload surface: %s" % name)
+        testcase.assertNotEqual(doc.get("envelope_status"), "verified", name)
+    quarantine = out / hosted.WITHHELD_COLLECTION_DIRNAME
+    if quarantine.is_dir():
+        # Diagnostic retention, deliberately outside every upload selection.
+        testcase.assertNotEqual(quarantine.name, hosted.COLLECTION_DIRNAME)
+
+
 def _assert_non_success_refusal_artifacts(testcase, out: Path, *, reason: str):
     """All three uploadable artifacts present and non-success-shaped."""
+    _assert_upload_surface_carries_no_success_members(testcase, out)
     setup_path = out / hosted.SETUP_STATUS_FILENAME
     envelope_path = out / hosted.EFFECTIVE_ENVELOPE_FILENAME
     candidate_path = out / hosted.CANDIDATE_RESULT_FILENAME

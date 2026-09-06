@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -57,6 +58,10 @@ ARTIFACT_RERUN = "rerun-evidence"
 SETUP_STATUS_FILENAME = "setup-status.json"
 EFFECTIVE_ENVELOPE_FILENAME = "effective-envelope.v0.json"
 COLLECTION_DIRNAME = "effective-envelope-collection.v0"
+# Diagnostic retention, deliberately outside every upload selection in the workflow. A refused
+# run's observations are kept verbatim here rather than rewritten: the refusal is about what may
+# be published, not about what was seen.
+WITHHELD_COLLECTION_DIRNAME = "withheld-collection.diagnostic.v0"
 CANDIDATE_RESULT_FILENAME = "candidate-result.json"
 RERUN_EVIDENCE_FILENAME = "rerun-evidence.jsonl"
 DISPATCH_BINDINGS_FILENAME = "hosted-dispatch-bindings.v0.json"
@@ -440,6 +445,23 @@ def _encode_json(doc) -> bytes:
             + "\n").encode("utf-8")
 
 
+def _quarantine_current_run_collection(out: Path) -> Path | None:
+    """Move THIS invocation's collection out of every upload selection, byte for byte.
+
+    Not a rewrite and not a deletion: a refused run's raw observations stay exactly as the
+    runtime recorded them, addressable for diagnosis, and simply stop being publishable
+    evidence. Only the current invocation's output is touched.
+    """
+    live = out / COLLECTION_DIRNAME
+    if not live.is_dir():
+        return None
+    quarantine = out / WITHHELD_COLLECTION_DIRNAME
+    if quarantine.exists():
+        shutil.rmtree(quarantine)
+    live.rename(quarantine)
+    return quarantine
+
+
 def _refuse_collection_at_legacy_path(doc) -> None:
     """The legacy path names a single envelope. A collection document there would be read as one
     by every consumer that predates the collection, so it is refused rather than written."""
@@ -465,6 +487,14 @@ def write_separate_artifacts(out_dir, setup_doc, envelope_doc, candidate_doc,
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     written = {}
+    if envelope_doc is not None:
+        # A withheld/refused stub at the legacy path and a live collection on the upload surface
+        # must never coexist: the stub says the run was refused while the uploaded directory
+        # still carries permitted, verified members -- the exact bytes the refusal rejected.
+        # Sanitizing the legacy file alone stopped being sufficient when the upload was
+        # retargeted at the collection. The observations are moved, not rewritten, so nothing
+        # honest is lost and nothing publishable survives.
+        _quarantine_current_run_collection(out)
     if envelope_doc is None:
         stale = out / EFFECTIVE_ENVELOPE_FILENAME
         if stale.exists():
@@ -551,7 +581,7 @@ def _collection_refusal_reason(exc) -> str:
     return "envelope_collection_corrupt"
 
 
-def load_envelope_collection(directory, *, max_bytes: int = MAX_INPUT_BYTES) -> list:
+def load_envelope_collection(directory, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
     """Load every member of a contained run's collection, or refuse.
 
     No singleton fallback exists: if the index is absent the run is refused rather than read as a

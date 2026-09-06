@@ -545,3 +545,38 @@ class PreflightBoundary(unittest.TestCase):
         self.assertGreaterEqual(biggest, 64,
                                 "one scalar arrives as a single chunk, so per-chunk size is "
                                 "not bounded by the limit")
+
+
+class MemberIsAReadRegularFile(unittest.TestCase):
+    """Ruley's residual: the collection directory is now uploaded, so a symlinked member would
+    publish whatever it points at, and a matching index digest would make that look correct.
+    """
+
+    def _one(self, dest):
+        ledger = collection.Ledger()
+        ledger.recorded(ledger.register(), _valid_record())
+        collection.write_collection(ledger, dest, report_sha256="d" * 64)
+        return dest / (collection.MEMBER_TEMPLATE % 0)
+
+    def test_ordinary_file_member_loads(self):
+        """Control: the defense must not refuse the normal case."""
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "coll"
+            self._one(dest)
+            self.assertEqual(len(collection.load_collection(dest)["members"]), 1)
+
+    def test_symlinked_member_is_refused_even_with_a_matching_digest(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "coll"
+            member = self._one(dest)
+            payload = member.read_bytes()
+            elsewhere = Path(raw) / "outside.json"
+            elsewhere.write_bytes(payload)
+            member.unlink()
+            member.symlink_to(elsewhere)
+            # The digest still matches: content identity is not path identity.
+            self.assertEqual(collection.member_digest(member.read_bytes()),
+                             collection.member_digest(payload))
+            with self.assertRaises(collection.CollectionError) as ctx:
+                collection.load_collection(dest)
+            self.assertEqual(str(ctx.exception), "collection member not a regular file")
