@@ -540,18 +540,49 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             self.assertNotIn("score_percent", cand)
             self.assertTrue((out / hosted.RERUN_EVIDENCE_FILENAME).is_file())
 
-    def test_publish_requires_separate_setup_envelope_candidate_artifacts(self):
-        setup = hosted.setup_status_doc(
-            status="unavailable", reason="x", bindings=BINDINGS
-        )
-        env = hosted.withheld_envelope_stub(reason="x", bindings=BINDINGS)
-        cand = hosted.void_candidate_result(reason="x", bindings=BINDINGS)
+    def test_publish_requires_separate_setup_and_candidate_artifacts(self):
+        """Separation still binds, but the envelope slot now has a legitimate empty case.
+
+        `envelope_doc=None` means the collection directory is authoritative, so it is not a
+        collapse. Setup and candidate remain mandatory and must stay distinct documents, and a
+        collection document is refused at the legacy single-envelope path outright.
+        """
+        setup = {"kind": "setup"}
+        cand = {"kind": "candidate"}
         with tempfile.TemporaryDirectory() as raw:
-            hosted.write_separate_artifacts(raw, setup, env, cand)
-            with self.assertRaises(hosted.HostedPublicationError):
-                hosted.write_separate_artifacts(raw, setup, None, cand)
-            with self.assertRaises(hosted.HostedPublicationError):
-                hosted.write_separate_artifacts(raw, setup, setup, cand)
+            out = Path(raw) / "artifacts"
+            for bad in ((None, cand), (setup, None)):
+                with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                    hosted.write_separate_artifacts(out, bad[0], None, bad[1])
+                self.assertEqual(str(ctx.exception), "collapsed_artifacts")
+            shared = {"kind": "shared"}
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.write_separate_artifacts(out, shared, None, shared)
+            self.assertEqual(str(ctx.exception), "collapsed_artifacts")
+
+            # A collection document may never sit at the legacy single-envelope path.
+            for masquerade in ({"schema": collection.COLLECTION_SCHEMA},
+                               {"members": [], "attempts": 0}):
+                with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                    hosted.write_separate_artifacts(out, setup, masquerade, cand)
+                self.assertEqual(str(ctx.exception),
+                                 "collection_at_legacy_envelope_path")
+
+            # The authoritative-collection case writes setup and candidate, and no legacy file.
+            written = hosted.write_separate_artifacts(out, setup, None, cand)
+            self.assertEqual(sorted(written), sorted(
+                [hosted.SETUP_STATUS_FILENAME, hosted.CANDIDATE_RESULT_FILENAME]))
+            self.assertFalse((out / hosted.EFFECTIVE_ENVELOPE_FILENAME).exists())
+
+    def test_stale_legacy_envelope_is_removed_not_reused(self):
+        """A leftover single envelope beside a fresh collection is a false record."""
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "artifacts"
+            out.mkdir(parents=True)
+            stale = out / hosted.EFFECTIVE_ENVELOPE_FILENAME
+            stale.write_text('{"stale": true}', encoding="utf-8")
+            hosted.write_separate_artifacts(out, {"kind": "s"}, None, {"kind": "c"})
+            self.assertFalse(stale.exists(), "stale legacy envelope survived the run")
 
     def test_append_only_rerun_preserves_first_infrastructure_failure(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -440,21 +440,39 @@ def _encode_json(doc) -> bytes:
             + "\n").encode("utf-8")
 
 
+def _refuse_collection_at_legacy_path(doc) -> None:
+    """The legacy path names a single envelope. A collection document there would be read as one
+    by every consumer that predates the collection, so it is refused rather than written."""
+    if isinstance(doc, dict) and (
+            doc.get("schema") == collection.COLLECTION_SCHEMA or "members" in doc):
+        raise HostedPublicationError("collection_at_legacy_envelope_path")
+
+
 def write_separate_artifacts(out_dir, setup_doc, envelope_doc, candidate_doc,
                              *, max_bytes: int = MAX_ARTIFACT_BYTES) -> dict:
-    if setup_doc is None or envelope_doc is None or candidate_doc is None:
+    """`envelope_doc=None` means the collection directory is the authoritative artifact.
+
+    The legacy single-envelope file is then not written, and any file left there by an earlier
+    attempt is removed -- a stale envelope beside a fresh collection is a false record, and
+    silently reusing it is exactly the fallback this integration forbids.
+    """
+    if setup_doc is None or candidate_doc is None:
         raise HostedPublicationError("collapsed_artifacts")
     if (setup_doc is envelope_doc or setup_doc is candidate_doc or
-            envelope_doc is candidate_doc):
+            (envelope_doc is not None and envelope_doc is candidate_doc)):
         raise HostedPublicationError("collapsed_artifacts")
+    _refuse_collection_at_legacy_path(envelope_doc)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     written = {}
-    for name, doc in (
-            (SETUP_STATUS_FILENAME, setup_doc),
-            (EFFECTIVE_ENVELOPE_FILENAME, envelope_doc),
-            (CANDIDATE_RESULT_FILENAME, candidate_doc),
-    ):
+    if envelope_doc is None:
+        stale = out / EFFECTIVE_ENVELOPE_FILENAME
+        if stale.exists():
+            stale.unlink()
+    entries = [(SETUP_STATUS_FILENAME, setup_doc), (CANDIDATE_RESULT_FILENAME, candidate_doc)]
+    if envelope_doc is not None:
+        entries.insert(1, (EFFECTIVE_ENVELOPE_FILENAME, envelope_doc))
+    for name, doc in entries:
         raw = _encode_json(doc)
         if len(raw) > max_bytes:
             raise HostedPublicationError("max_artifact_bytes")
@@ -792,26 +810,24 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             reason=reason,
             bindings=bindings,
         )
-        envelope_doc = (
-            envelope if envelope is not None
-            else withheld_envelope_stub(reason=reason, bindings=bindings))
+        envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
         candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
     elif decision["decision"] == "withhold":
         setup_doc = setup_status_doc(
             status="ready" if setup_status == "ready" else setup_status,
             reason="publication-withheld",
             bindings=bindings)
-        envelope_doc = (
-            envelope if envelope is not None
-            else withheld_envelope_stub(
-                reason="publication-withheld", bindings=bindings))
+        envelope_doc = withheld_envelope_stub(
+            reason="publication-withheld", bindings=bindings)
         candidate_doc = void_candidate_result(
             reason="publication-withheld", bindings=bindings)
     else:
         setup_doc = setup_status_doc(
             status="ready", reason="publication-permitted", bindings=bindings)
-        # Envelope stays AEE schema as-is; bindings already verified above.
-        envelope_doc = envelope
+        # The collection directory is the authoritative artifact. Writing a derived aggregate
+        # to the legacy single-envelope path would be a second, weaker authority for the same
+        # facts, so nothing is written there on the success path.
+        envelope_doc = None
         candidate_doc = {
             "schema": HOSTED_SCHEMA,
             "kind": "hosted-candidate-result",

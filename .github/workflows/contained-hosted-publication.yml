@@ -86,7 +86,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: effective-envelope
-          path: artifacts/effective-envelope.v0.json
+          # The collection directory is the authoritative artifact: its index plus every
+          # addressed member. A re-serialized aggregate cannot stand in for those bytes, so the
+          # whole directory is uploaded rather than one derived file.
+          path: artifacts/effective-envelope-collection.v0/
           retention-days: 14
           if-no-files-found: error
       - name: Upload candidate-result
