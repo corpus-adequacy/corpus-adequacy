@@ -48,3 +48,5 @@ measurements/aee_checker_sealed_driver.py text eol=lf
 measurements/aee_checker_sealed_runtime.py text eol=lf
 tests/test_aee_checker_sealed_driver.py text eol=lf
 tests/test_aee_checker_sealed_runtime.py text eol=lf
+measurements/envelope_collection.py text eol=lf
+tests/test_envelope_collection.py text eol=lf

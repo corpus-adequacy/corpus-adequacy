@@ -16,7 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
-import contained_hosted_publication as hosted  # noqa: E402
+import contained_hosted_publication as hosted
+import envelope_collection as collection  # noqa: E402
 import contained_oci as contained  # noqa: E402
 import effective_envelope as env_mod  # noqa: E402
 from aee_checker_sealed_candidate import CANDIDATE_MOUNT_SPEC  # noqa: E402
@@ -29,6 +30,46 @@ PROBE_IMAGE = "sha256:" + ("11" * 32)
 OTHER_CANDIDATE = "f" * 40
 OTHER_RUNNER = "d" * 40
 OTHER_IMAGE = "sha256:" + ("e" * 64)
+
+def _read_only_member(artifacts_dir):
+    """Read the one member of a written collection, refusing any other cardinality.
+
+    A test that silently took `members[0]` would pass on a multi-member collection it did not
+    intend, so the count is asserted rather than assumed.
+    """
+    coll = Path(artifacts_dir) / hosted.COLLECTION_DIRNAME
+    files = sorted(p for p in coll.iterdir() if p.name != collection.INDEX_FILENAME)
+    assert len(files) == 1, "expected exactly one member, found %d" % len(files)
+    return json.loads(files[0].read_text(encoding="utf-8"))
+
+
+def _write_collection(dest, doc, *, report_sha256=None):
+    """Write a one-member collection where a single envelope file used to be written.
+
+    The hosted consumer requires a collection now: a lone record is refused rather than read,
+    so these fixtures produce the shape a real driver produces.
+    """
+    ledger = collection.Ledger()
+    ledger.recorded(ledger.register(), doc)
+    collection.write_collection(ledger, Path(dest), report_sha256=report_sha256)
+
+
+def _write_collection_raw(dest, doc, raw_text):
+    """Same, then overwrite the member with deliberately malformed bytes and re-digest them,
+    so the refusal under test is about the CONTENT and not about a stale digest."""
+    _write_collection(dest, doc)
+    dest = Path(dest)
+    member = sorted(dest.glob("member-*.json"))[0]
+    raw = raw_text.encode("utf-8")
+    member.write_bytes(raw)
+    index_path = dest / collection.INDEX_FILENAME
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["members"][0]["sha256"] = collection.member_digest(raw)
+    index_path.write_text(
+        json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+
+
 BINDINGS = {
     "candidate_revision": CANDIDATE,
     "runner_revision": RUNNER,
@@ -235,8 +276,31 @@ def _load_mutated_module(source: str, name: str):
 
 
 
+def _assert_upload_surface_carries_no_success_members(testcase, out: Path):
+    """The collection directory the workflow uploads must hold no permitted/verified member.
+
+    Sanitizing the legacy stub stopped being sufficient when the upload was retargeted at the
+    collection: a refused run whose members still say `permitted`/`verified` publishes exactly
+    the bytes the refusal rejected. Raw observations are not rewritten -- they are moved out of
+    the upload selection and kept as diagnostics.
+    """
+    live = out / hosted.COLLECTION_DIRNAME
+    surviving = sorted(p.name for p in live.iterdir()) if live.is_dir() else []
+    for name in surviving:
+        doc = json.loads((live / name).read_text(encoding="utf-8"))
+        testcase.assertNotEqual(
+            doc.get("publication_permission"), "permitted",
+            "refused run left a permitted member on the upload surface: %s" % name)
+        testcase.assertNotEqual(doc.get("envelope_status"), "verified", name)
+    quarantine = out / hosted.WITHHELD_COLLECTION_DIRNAME
+    if quarantine.is_dir():
+        # Diagnostic retention, deliberately outside every upload selection.
+        testcase.assertNotEqual(quarantine.name, hosted.COLLECTION_DIRNAME)
+
+
 def _assert_non_success_refusal_artifacts(testcase, out: Path, *, reason: str):
     """All three uploadable artifacts present and non-success-shaped."""
+    _assert_upload_surface_carries_no_success_members(testcase, out)
     setup_path = out / hosted.SETUP_STATUS_FILENAME
     envelope_path = out / hosted.EFFECTIVE_ENVELOPE_FILENAME
     candidate_path = out / hosted.CANDIDATE_RESULT_FILENAME
@@ -282,10 +346,7 @@ def _run_ok(base, packet_name, rels, *, candidate=CANDIDATE, bindings=None,
         sha = rels["prepare_sha256"]
 
         def execute(**kwargs):
-            Path(kwargs["envelope_dest"]).write_text(
-                json.dumps(_permitted_envelope(prepare_sha256=sha)),
-                encoding="utf-8",
-            )
+            _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=sha))
 
     return hosted.run_gate(
         candidate_revision=candidate,
@@ -502,18 +563,49 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             self.assertNotIn("score_percent", cand)
             self.assertTrue((out / hosted.RERUN_EVIDENCE_FILENAME).is_file())
 
-    def test_publish_requires_separate_setup_envelope_candidate_artifacts(self):
-        setup = hosted.setup_status_doc(
-            status="unavailable", reason="x", bindings=BINDINGS
-        )
-        env = hosted.withheld_envelope_stub(reason="x", bindings=BINDINGS)
-        cand = hosted.void_candidate_result(reason="x", bindings=BINDINGS)
+    def test_publish_requires_separate_setup_and_candidate_artifacts(self):
+        """Separation still binds, but the envelope slot now has a legitimate empty case.
+
+        `envelope_doc=None` means the collection directory is authoritative, so it is not a
+        collapse. Setup and candidate remain mandatory and must stay distinct documents, and a
+        collection document is refused at the legacy single-envelope path outright.
+        """
+        setup = {"kind": "setup"}
+        cand = {"kind": "candidate"}
         with tempfile.TemporaryDirectory() as raw:
-            hosted.write_separate_artifacts(raw, setup, env, cand)
-            with self.assertRaises(hosted.HostedPublicationError):
-                hosted.write_separate_artifacts(raw, setup, None, cand)
-            with self.assertRaises(hosted.HostedPublicationError):
-                hosted.write_separate_artifacts(raw, setup, setup, cand)
+            out = Path(raw) / "artifacts"
+            for bad in ((None, cand), (setup, None)):
+                with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                    hosted.write_separate_artifacts(out, bad[0], None, bad[1])
+                self.assertEqual(str(ctx.exception), "collapsed_artifacts")
+            shared = {"kind": "shared"}
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.write_separate_artifacts(out, shared, None, shared)
+            self.assertEqual(str(ctx.exception), "collapsed_artifacts")
+
+            # A collection document may never sit at the legacy single-envelope path.
+            for masquerade in ({"schema": collection.COLLECTION_SCHEMA},
+                               {"members": [], "attempts": 0}):
+                with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                    hosted.write_separate_artifacts(out, setup, masquerade, cand)
+                self.assertEqual(str(ctx.exception),
+                                 "collection_at_legacy_envelope_path")
+
+            # The authoritative-collection case writes setup and candidate, and no legacy file.
+            written = hosted.write_separate_artifacts(out, setup, None, cand)
+            self.assertEqual(sorted(written), sorted(
+                [hosted.SETUP_STATUS_FILENAME, hosted.CANDIDATE_RESULT_FILENAME]))
+            self.assertFalse((out / hosted.EFFECTIVE_ENVELOPE_FILENAME).exists())
+
+    def test_stale_legacy_envelope_is_removed_not_reused(self):
+        """A leftover single envelope beside a fresh collection is a false record."""
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "artifacts"
+            out.mkdir(parents=True)
+            stale = out / hosted.EFFECTIVE_ENVELOPE_FILENAME
+            stale.write_text('{"stale": true}', encoding="utf-8")
+            hosted.write_separate_artifacts(out, {"kind": "s"}, None, {"kind": "c"})
+            self.assertFalse(stale.exists(), "stale legacy envelope survived the run")
 
     def test_append_only_rerun_preserves_first_infrastructure_failure(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -537,23 +629,18 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             cand = json.loads((base / "artifacts" / hosted.CANDIDATE_RESULT_FILENAME).read_text())
             self.assertEqual(setup["dispatch_bindings"], BINDINGS)
             self.assertEqual(cand["dispatch_bindings"], BINDINGS)
-            envelope = json.loads(
-                (base / "artifacts" / hosted.EFFECTIVE_ENVELOPE_FILENAME).read_text()
-            )
+            # The collection directory is the authoritative artifact; the single legacy file
+            # is no longer the envelope's home, so read the member that was actually observed.
+            envelope = _read_only_member(base / "artifacts")
             self.assertNotIn("dispatch_bindings", envelope)
             self.assertEqual(envelope["schema"], "corpus-adequacy.execution-envelope.v0")
             self.assertEqual(envelope["prepare_sha256"], rels["prepare_sha256"])
 
             def execute_unverified(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             envelope_status="unverified",
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             decision2 = _run_ok(
                 base, "packet", rels, execute=execute_unverified, out_name="artifacts2"
@@ -577,10 +664,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
                     "auth": hashlib.sha256(Path(kwargs["authorize_path"]).read_bytes()).hexdigest(),
                     "prep": hashlib.sha256(Path(kwargs["prepare_path"]).read_bytes()).hexdigest(),
                 })
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256=prepare_hash)),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=prepare_hash))
 
             d1 = _run_ok(base, "packet", rels, execute=execute, out_name="o1")
             self.assertEqual(d1["decision"], "publish")
@@ -612,10 +696,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_wrong_prep(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256="ab" * 32)),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256="ab" * 32))
 
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(base, "packet", rels, execute=execute_wrong_prep, out_name="o")
@@ -656,32 +737,22 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_wrong_commit(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             execution_commit=OTHER_RUNNER,
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=execute_wrong_commit, out_name="out")
 
             def execute_wrong_image(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             requested={
                                 "image_id": OTHER_IMAGE,
                                 "execution_profile": "contained-oci-v0",
                             },
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=execute_wrong_image, out_name="out2")
@@ -776,18 +847,13 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             effective={
                                 "env_names": ["PATH", "GITHUB_TOKEN"],
                                 "image_env_names": ["PATH", "GITHUB_TOKEN"],
                             },
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(base, "packet", rels, execute=execute_cred, out_name="cred")
@@ -1027,15 +1093,17 @@ class SourceMutations(unittest.TestCase):
 
     def test_mutation_delete_refuse_hostile_call_is_red(self):
         original = Path(hosted.__file__).read_text(encoding="utf-8")
+        # Anchored on the per-member loop: the call moved inside it when the gate began
+        # quantifying over every observation instead of one envelope.
         call = (
-            "        observed_child = observe_child_environment(envelope)\n"
-            "        refuse_hostile_workflow(\n"
-            '            env_names=observed_child["env_names"],\n'
-            '            mounts=observed_child["mounts"],\n'
-            "        )\n"
+            "            observed_child = observe_child_environment(member)\n"
+            "            refuse_hostile_workflow(\n"
+            '                env_names=observed_child["env_names"],\n'
+            '                mounts=observed_child["mounts"],\n'
+            "            )\n"
         )
         self.assertEqual(original.count(call), 1)
-        mutated = original.replace(call, "        pass  # mutated: refuse unwired\n", 1)
+        mutated = original.replace(call, "            pass  # mutated: refuse unwired\n", 1)
         self.assertNotEqual(mutated, original)
         bad = _load_mutated_module(mutated, "mut_refuse")
         with tempfile.TemporaryDirectory() as raw:
@@ -1045,18 +1113,13 @@ class SourceMutations(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             effective={
                                 "env_names": ["GITHUB_TOKEN"],
                                 "image_env_names": ["GITHUB_TOKEN"],
                             },
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=execute_cred, out_name="good")
@@ -1099,10 +1162,7 @@ class SourceMutations(unittest.TestCase):
             )
 
             def execute(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256=rels["prepare_sha256"])),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 hosted.run_gate(
@@ -1150,10 +1210,7 @@ class SourceMutations(unittest.TestCase):
 
             def spy(**kwargs):
                 executed.append(True)
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256=rels["prepare_sha256"])),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=spy, out_name="good")
@@ -1190,10 +1247,7 @@ class SourceMutations(unittest.TestCase):
             abs_root = str(packet.resolve())
 
             def execute(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256=rels["prepare_sha256"])),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 hosted.run_gate(
@@ -1264,19 +1318,17 @@ class SourceMutations(unittest.TestCase):
 
     def test_mutation_delete_post_execute_sanitization_is_red(self):
         original = Path(hosted.__file__).read_text(encoding="utf-8")
-        call = (
-            "        if execute_began:\n"
-            "            materialize_post_execute_refusal(\n"
-            "                out=out,\n"
-            "                reason=str(exc),\n"
-            "                bindings=bindings,\n"
-            "                rerun_log=rerun_log,\n"
-            "                identity=identity,\n"
-            "                max_artifact_bytes=max_artifact_bytes,\n"
-            "            )\n"
-        )
+        # The whole sanitization block is the control: slicing it from the source keeps the
+        # mutation honest as the block moves, instead of pinning a brittle literal.
+        begin = original.index("            try:\n"
+                               "                materialize_post_execute_refusal(")
+        stop = original.index("raise exc from cleanup_exc\n", begin) + len(
+            "raise exc from cleanup_exc\n")
+        call = original[begin:stop]
         self.assertEqual(original.count(call), 1)
-        mutated = original.replace(call, "        pass  # mutated: no sanitize\n", 1)
+        self.assertIn("materialize_post_execute_refusal", call)
+        mutated = original.replace(call, "            pass  # mutated: no sanitize\n", 1)
+        self.assertNotEqual(mutated, original)
         bad = _load_mutated_module(mutated, "mut_no_sanitize")
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)
@@ -1285,18 +1337,13 @@ class SourceMutations(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(
-                        _permitted_envelope(
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             effective={
                                 "env_names": ["GITHUB_TOKEN"],
                                 "image_env_names": ["GITHUB_TOKEN"],
                             },
-                        )
-                    ),
-                    encoding="utf-8",
-                )
+                        ))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=execute_cred, out_name="good")
@@ -1318,11 +1365,7 @@ class SourceMutations(unittest.TestCase):
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=execute_cred,
                 )
-            leaked = json.loads(
-                (base / "bad" / hosted.EFFECTIVE_ENVELOPE_FILENAME).read_text(
-                    encoding="utf-8"
-                )
-            )
+            leaked = _read_only_member(base / "bad")
             self.assertEqual(leaked.get("publication_permission"), "permitted")
             self.assertEqual(leaked.get("envelope_status"), "verified")
             self.assertIn("GITHUB_TOKEN", json.dumps(leaked))
@@ -1359,10 +1402,7 @@ class SourceMutations(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_wrong_prep(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(_permitted_envelope(prepare_sha256="ab" * 32)),
-                    encoding="utf-8",
-                )
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256="ab" * 32))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(
@@ -1425,7 +1465,7 @@ class SourceMutations(unittest.TestCase):
                 serialized = json.dumps(env)
                 mem = env["effective"]["memory"]
                 mutated = serialized.replace(f'"memory": {mem}', f'"memory": {huge_int}', 1)
-                Path(kwargs["envelope_dest"]).write_text(mutated, encoding="utf-8")
+                _write_collection_raw(kwargs["envelope_dest"], env, mutated)
 
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(
@@ -1535,9 +1575,7 @@ class SourceMutations(unittest.TestCase):
                     {"destination": "/tool", "rw": False, "type": "bind"},
                     {"destination": "/vendor", "rw": False, "type": "bind"},
                 ]
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(env), encoding="utf-8"
-                )
+                _write_collection(kwargs["envelope_dest"], env)
 
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(
@@ -1591,3 +1629,77 @@ class ExportedConstants(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuarantineRetainsEveryRefusal(unittest.TestCase):
+    """The out root is reusable, so a second refusal must not cost the first one's evidence."""
+
+    def _refuse_once(self, out, marker):
+        ledger = collection.Ledger()
+        doc = dict(_permitted_envelope(prepare_sha256="a" * 64))
+        doc["execution_commit"] = marker
+        ledger.recorded(ledger.register(), doc)
+        collection.write_collection(
+            ledger, out / hosted.COLLECTION_DIRNAME, report_sha256="e" * 64)
+        hosted.write_separate_artifacts(
+            out, {"kind": "setup-status"},
+            hosted.withheld_envelope_stub(reason="r", bindings=BINDINGS),
+            {"kind": "void-hosted-result"})
+
+    def test_two_successive_refusals_retain_both_byte_sets(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "artifacts"
+            out.mkdir(parents=True)
+            self._refuse_once(out, "c" * 40)
+            self._refuse_once(out, "d" * 40)
+            parent = out / hosted.WITHHELD_COLLECTION_DIRNAME
+            attempts = sorted(p.name for p in parent.iterdir() if p.is_dir())
+            self.assertEqual(attempts, ["attempt-0000", "attempt-0001"],
+                             "a repeated refusal overwrote the first retained evidence")
+            commits = set()
+            for name in attempts:
+                member = json.loads(
+                    (parent / name / (collection.MEMBER_TEMPLATE % 0)).read_text("utf-8"))
+                commits.add(member["execution_commit"])
+            self.assertEqual(commits, {"c" * 40, "d" * 40},
+                             "both refusals must keep their own observed bytes")
+            self.assertFalse((out / hosted.COLLECTION_DIRNAME).exists())
+
+
+class QuarantineFailureKeepsThePrimaryRefusal(unittest.TestCase):
+    """A cleanup failure is context on the refusal, never a replacement for it."""
+
+    def test_rename_failure_does_not_mask_the_refusal_reason(self):
+        original = Path(hosted.__file__).read_text(encoding="utf-8")
+        anchor = "    live.rename(attempt)\n"
+        self.assertEqual(original.count(anchor), 1)
+        mutated = original.replace(
+            anchor, '    raise OSError("injected rename failure")\n', 1)
+        bad = _load_mutated_module(mutated, "mut_rename_fail")
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def execute_cred(**kwargs):
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                    prepare_sha256=rels["prepare_sha256"],
+                    effective={"env_names": ["GITHUB_TOKEN"],
+                               "image_env_names": ["GITHUB_TOKEN"]}))
+
+            out = base / "artifacts"
+            with self.assertRaises(bad.HostedPublicationError) as ctx:
+                bad.run_gate(
+                    candidate_revision=CANDIDATE, runner_revision=RUNNER,
+                    image_digest=IMAGE, operator_profile="contained-oci-v0",
+                    out_dir=out, workspace_root=base, packet_root="packet",
+                    authorize_path="authorize.v0", prepare_path="prepare.v1",
+                    pins_dir="pins", docker_ready=lambda: "27.0.0",
+                    sealed_execute=execute_cred)
+            # The refusal reason survives; the cleanup failure is only its cause chain.
+            self.assertEqual(str(ctx.exception), "credential_env")
+            self.assertIsInstance(ctx.exception.__cause__, OSError)
+            # And the permitted members are still on disk, which is exactly why the published
+            # upload is authorized by gate success rather than by always().
+            self.assertTrue((out / bad.COLLECTION_DIRNAME).is_dir())

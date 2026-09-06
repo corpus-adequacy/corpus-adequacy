@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO_ROOT / "measurements"))
 import contained_hosted_publication as hosted  # noqa: E402
 import contained_oci as contained  # noqa: E402
 import effective_envelope as env_mod  # noqa: E402
+import envelope_collection as collection_mod  # noqa: E402
 
 CANDIDATE = "a" * 40
 RUNNER = "b" * 40
@@ -125,6 +126,23 @@ def _prepare_doc(*, bindings=None, subject_commit=None, prepare_commit=None,
         "toolchain": {"image_id": toolchain_image},
         "pins": {"subject_commit": subject},
     }
+
+
+
+def _emit_collection(envelope_dest, *docs):
+    """Producer stub for the sealed-execute seam.
+
+    The seam's contract is a collection directory, not a lone envelope file, so this writes one
+    through the production writer rather than hand-rolling the on-disk shape -- a hand-written
+    index would drift from `write_collection` silently and the drift would look like a consumer
+    bug. The envelope docs themselves are passed through untouched, so a test that wants a
+    malformed member still gets exactly the bytes it asked for.
+    """
+    ledger = collection_mod.Ledger()
+    for doc in docs:
+        ledger.recorded(ledger.register(), doc)
+    collection_mod.write_collection(
+        ledger, Path(envelope_dest), report_sha256=None)
 
 
 def _write_packet(root: Path, *, bindings=None):
@@ -280,9 +298,7 @@ class ConsumerMemberValidationTests(unittest.TestCase):
             self.assertEqual(inconsistent_doc["publication_permission"], "permitted")
 
             def mock_execute(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(inconsistent_doc, indent=2), encoding="utf-8"
-                )
+                _emit_collection(kwargs["envelope_dest"], inconsistent_doc)
 
             out_dir = base / "out"
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
@@ -393,9 +409,7 @@ class ConsumerMemberValidationTests(unittest.TestCase):
             corrupt_doc["requested"]["resource_profile"] = "string-instead-of-dict"
 
             def mock_execute(**kwargs):
-                Path(kwargs["envelope_dest"]).write_text(
-                    json.dumps(corrupt_doc, indent=2), encoding="utf-8"
-                )
+                _emit_collection(kwargs["envelope_dest"], corrupt_doc)
 
             out_dir = base / "out"
             with self.assertRaises(hosted.HostedPublicationError) as ctx:

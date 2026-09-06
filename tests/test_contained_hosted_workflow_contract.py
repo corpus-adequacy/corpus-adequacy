@@ -4,10 +4,29 @@
 from __future__ import annotations
 
 import unittest
+import json
+import shutil
+import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+GATE_BOUND_UPLOAD_IF = "steps.gate.outcome == 'success' && !cancelled()"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "contained-hosted-publication.yml"
+
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "measurements"))
+
+import envelope_collection as collection  # noqa: E402
+import contained_hosted_publication as hosted  # noqa: E402
+
+# Reuse the pinned record builder rather than restating it: a second fixture would be a second
+# definition of what a valid envelope is, and the two would drift.
+from tests.test_envelope_collection import _valid_record as _inert_record  # noqa: E402
+
+
+def collection_dirname():
+    return hosted.COLLECTION_DIRNAME
 
 ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
  'on': {'workflow_dispatch': {'inputs': {'candidate_revision': {'description': 'Immutable '
@@ -76,6 +95,7 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                                      'env.PYTHON_VERSION '
                                                                      '}}'}},
                                          {'name': 'Gate hosted publication',
+                                          'id': 'gate',
                                           'shell': 'bash',
                                           'env': {'CANDIDATE_REVISION': '${{ '
                                                                         'inputs.candidate_revision '
@@ -126,10 +146,10 @@ ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
                                                    'retention-days': 14,
                                                    'if-no-files-found': 'error'}},
                                          {'name': 'Upload effective-envelope',
-                                          'if': 'always() && !cancelled()',
+                                          'if': "steps.gate.outcome == 'success' && !cancelled()",
                                           'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
                                           'with': {'name': 'effective-envelope',
-                                                   'path': 'artifacts/effective-envelope.v0.json',
+                                                   'path': 'artifacts/effective-envelope-collection.v0/',
                                                    'retention-days': 14,
                                                    'if-no-files-found': 'error'}},
                                          {'name': 'Upload candidate-result',
@@ -295,9 +315,18 @@ def hosted_shape_violations(tree) -> list[str]:
             if with_block.get("if-no-files-found") != "error":
                 bad.append("upload if-no-files-found must be error")
             step_if = step.get("if")
-            if step_if != "always() && !cancelled()":
+            if with_block.get("name") == "effective-envelope":
+                # Fail-closed upload authorization. Quarantine is a filesystem move and can
+                # fail; if it does the gate exits nonzero, and the published collection must
+                # not be uploaded anyway. This is an authorization boundary, not a claim that
+                # a refused run was clean.
+                if step_if != GATE_BOUND_UPLOAD_IF:
+                    bad.append(
+                        "the published collection upload must be bound to gate success "
+                        "(if: %s)" % GATE_BOUND_UPLOAD_IF)
+            elif step_if != "always() && !cancelled()":
                 bad.append(
-                    "upload steps must run on failure/cancellation "
+                    "diagnostic upload steps must run on failure/cancellation "
                     "(if: always() && !cancelled())"
                 )
         run = step.get("run")
@@ -468,11 +497,20 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
 
 
     def test_upload_steps_always_on_failure_and_keep_if_no_files_error(self):
+        diagnostics = 0
         for step in self.tree["jobs"]["hosted-contained"]["steps"]:
             uses = str(step.get("uses") or "")
-            if uses.startswith("actions/upload-artifact@"):
+            if not uses.startswith("actions/upload-artifact@"):
+                continue
+            self.assertEqual(step["with"].get("if-no-files-found"), "error")
+            if step["with"].get("name") == "effective-envelope":
+                # Published evidence: authorized only by a successful gate.
+                self.assertEqual(step.get("if"), GATE_BOUND_UPLOAD_IF)
+            else:
+                # Refusal diagnostics: still observable when the gate fails.
                 self.assertEqual(step.get("if"), "always() && !cancelled()")
-                self.assertEqual(step["with"].get("if-no-files-found"), "error")
+                diagnostics += 1
+        self.assertEqual(diagnostics, 3, "setup, candidate and rerun must stay always-on")
         gate = self.tree["jobs"]["hosted-contained"]["steps"][2]
         self.assertNotEqual(gate.get("continue-on-error"), True)
 
@@ -498,8 +536,9 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
 
     def test_mutation_gate_continue_on_error_is_red(self):
         poisoned = self.text.replace(
-            "      - name: Gate hosted publication\n        shell: bash\n",
+            "      - name: Gate hosted publication\n        id: gate\n        shell: bash\n",
             "      - name: Gate hosted publication\n"
+            "        id: gate\n"
             "        continue-on-error: true\n"
             "        shell: bash\n",
             1,
@@ -517,3 +556,161 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _upload_selection(tree, artifact_name):
+    """The path the workflow ACTUALLY declares for one upload, read from the file."""
+    for step in tree["jobs"]["hosted-contained"]["steps"]:
+        with_ = step.get("with") or {}
+        if with_.get("name") == artifact_name:
+            return with_["path"]
+    raise AssertionError("no upload step named %r" % artifact_name)
+
+
+def _select(workspace: Path, path_value: str):
+    """Resolve an upload-artifact `path:` over a real tree, as the uploader would.
+
+    `workspace` is the checkout root the workflow runs from, so the declared path is applied
+    exactly as written -- `artifacts/...` included -- rather than reinterpreted.
+
+    A directory selects everything beneath it, relative paths included; a file selects itself.
+    This is deliberately applied to generated bytes rather than compared against a literal, so a
+    path that no longer reaches the members fails here instead of passing a string check.
+    """
+    rel = path_value.rstrip("/")
+    target = workspace / rel
+    if target.is_dir():
+        return {str(f.relative_to(target)) for f in target.rglob("*") if f.is_file()}
+    return {target.name} if target.is_file() else set()
+
+
+class UploadSelectionRetainsEveryMember(unittest.TestCase):
+    """The uploaded proof must carry the exact index and every addressed member byte."""
+
+    def setUp(self):
+        self.tree = parse_workflow_yaml(WORKFLOW.read_text(encoding="utf-8"))
+        self.selection = _upload_selection(self.tree, "effective-envelope")
+
+    def _artifacts(self, tmp, members=2):
+        out = Path(tmp) / "artifacts"
+        out.mkdir(parents=True)
+        ledger = collection.Ledger()
+        for _ in range(members):
+            ledger.recorded(ledger.register(), _inert_record())
+        collection.write_collection(
+            ledger, out / collection_dirname(), report_sha256="c" * 64)
+        return out
+
+    # --- positive: complete selection ---
+    def test_selection_carries_index_and_every_addressed_member(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._artifacts(tmp, members=3)
+            coll = out / collection_dirname()
+            index = json.loads(
+                (coll / collection.INDEX_FILENAME).read_text("utf-8"))
+            selected = _select(out.parent, self.selection)
+            self.assertIn(collection.INDEX_FILENAME, selected)
+            addressed = {m["relpath"] for m in index["members"]}
+            self.assertEqual(len(addressed), 3)
+            missing = addressed - selected
+            self.assertEqual(missing, set(),
+                             "addressed members never left the artifact selection")
+
+    # --- RED 1/2: index or a member absent from the selection ---
+    def test_index_missing_from_selection_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._artifacts(tmp)
+            (out / collection_dirname() / collection.INDEX_FILENAME).unlink()
+            self.assertNotIn(collection.INDEX_FILENAME, _select(out.parent, self.selection))
+
+    def test_member_missing_from_selection_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._artifacts(tmp)
+            coll = out / collection_dirname()
+            index = json.loads((coll / collection.INDEX_FILENAME).read_text("utf-8"))
+            victim = index["members"][0]["relpath"]
+            (coll / victim).unlink()
+            self.assertNotIn(victim, _select(out.parent, self.selection))
+            with self.assertRaises(collection.CollectionError) as ctx:
+                collection.load_collection(coll)
+            self.assertEqual(str(ctx.exception), "collection member absent")
+
+    # --- RED 3: correct bytes, changed digest ---
+    def test_digest_drift_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._artifacts(tmp)
+            coll = out / collection_dirname()
+            index = json.loads((coll / collection.INDEX_FILENAME).read_text("utf-8"))
+            index["members"][0]["sha256"] = "0" * 64
+            (coll / collection.INDEX_FILENAME).write_text(
+                json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            with self.assertRaises(collection.CollectionError) as ctx:
+                collection.load_collection(coll)
+            self.assertEqual(str(ctx.exception), "collection member digest")
+
+    # --- RED 4: collection document disguised at the legacy path ---
+    def test_collection_document_is_refused_at_the_legacy_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "artifacts"
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.write_separate_artifacts(
+                    out, {"k": "s"}, {"schema": collection.COLLECTION_SCHEMA}, {"k": "c"})
+            self.assertEqual(str(ctx.exception), "collection_at_legacy_envelope_path")
+
+    # --- RED 5: multi-member, first-only selection ---
+    def test_multi_member_first_only_selection_is_not_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._artifacts(tmp, members=3)
+            coll = out / collection_dirname()
+            index = json.loads((coll / collection.INDEX_FILENAME).read_text("utf-8"))
+            addressed = [m["relpath"] for m in index["members"]]
+            first_only = {collection.INDEX_FILENAME, addressed[0]}
+            self.assertNotEqual(
+                first_only, _select(out.parent, self.selection),
+                "a first-member-only selection must not satisfy the upload contract")
+            self.assertTrue(set(addressed[1:]) <= _select(out.parent, self.selection))
+
+    # --- RED 6: stale legacy file must not be reused ---
+    def test_stale_legacy_file_is_not_part_of_the_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._artifacts(tmp)
+            (out / "effective-envelope.v0.json").write_text(
+                '{"stale": true}', encoding="utf-8")
+            self.assertNotIn("effective-envelope.v0.json", _select(out.parent, self.selection))
+
+    # --- RED 7: a corrupt collection has no legacy fallback ---
+    def test_corrupt_collection_has_no_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._artifacts(tmp)
+            coll = out / collection_dirname()
+            (coll / collection.INDEX_FILENAME).write_text("{not json", encoding="utf-8")
+            (out / "effective-envelope.v0.json").write_text(
+                json.dumps(_inert_record()), encoding="utf-8")
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_envelope_collection(coll)
+            self.assertEqual(str(ctx.exception), "json_input")
+
+    # --- the refusal-distinction control ---
+    def test_recorded_refusal_and_absent_index_are_distinct(self):
+        """A run that recorded a refusal is not the same evidence as a deleted index.
+
+        Missing index alone stays unattributed: it names what is absent and invents no cause.
+        """
+        import contained_hosted_publication as hosted
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "artifacts"
+            out.mkdir(parents=True)
+            recorded = out / "recorded"
+            ledger = collection.Ledger()
+            ledger.raised(ledger.register(), "RuntimeError")
+            collection.write_collection(ledger, recorded, report_sha256=None)
+            loaded = collection.load_collection(recorded)
+            self.assertEqual(loaded["members"], [])
+            self.assertEqual(loaded["ledger"][0]["state"], "raised")
+            self.assertEqual(loaded["ledger"][0]["exception_type"], "RuntimeError")
+
+            erased = out / "erased"
+            erased.mkdir()
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_envelope_collection(erased)
+            self.assertEqual(str(ctx.exception), "envelope_collection_corrupt")

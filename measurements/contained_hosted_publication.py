@@ -41,6 +41,7 @@ if str(_ROOT) not in sys.path:
 
 import contained_oci as contained  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
+import envelope_collection as collection  # noqa: E402
 import effective_envelope  # noqa: E402
 from aee_checker_sealed_candidate import (  # noqa: E402
     CANDIDATE_MOUNT_SPEC,
@@ -55,6 +56,13 @@ ARTIFACT_CANDIDATE = "candidate-result"
 ARTIFACT_RERUN = "rerun-evidence"
 SETUP_STATUS_FILENAME = "setup-status.json"
 EFFECTIVE_ENVELOPE_FILENAME = "effective-envelope.v0.json"
+COLLECTION_DIRNAME = "effective-envelope-collection.v0"
+# Diagnostic retention, deliberately outside every upload selection in the workflow. A refused
+# run's observations are kept verbatim here rather than rewritten: the refusal is about what may
+# be published, not about what was seen.
+WITHHELD_COLLECTION_DIRNAME = "withheld-collection.diagnostic.v0"
+QUARANTINE_ATTEMPT_TEMPLATE = "attempt-%04d"
+MAX_QUARANTINE_ATTEMPTS = 256
 CANDIDATE_RESULT_FILENAME = "candidate-result.json"
 RERUN_EVIDENCE_FILENAME = "rerun-evidence.jsonl"
 DISPATCH_BINDINGS_FILENAME = "hosted-dispatch-bindings.v0.json"
@@ -438,21 +446,73 @@ def _encode_json(doc) -> bytes:
             + "\n").encode("utf-8")
 
 
+def _quarantine_current_run_collection(out: Path) -> Path | None:
+    """Move THIS invocation's collection out of every upload selection, byte for byte.
+
+    Not a rewrite and not a deletion. The out root is reusable, so a second refusal must not
+    cost the first one's evidence: each quarantine lands in its own attempt directory under
+    `WITHHELD_COLLECTION_DIRNAME` and an occupied destination is never overwritten. Ordinals are
+    assigned by scanning for the first free one rather than from a clock, so the layout is
+    deterministic and two retained sets are distinguishable by name.
+    """
+    live = out / COLLECTION_DIRNAME
+    if not live.is_dir():
+        return None
+    parent = out / WITHHELD_COLLECTION_DIRNAME
+    parent.mkdir(parents=True, exist_ok=True)
+    ordinal = 0
+    while True:
+        attempt = parent / (QUARANTINE_ATTEMPT_TEMPLATE % ordinal)
+        if not attempt.exists():
+            break
+        ordinal += 1
+        if ordinal > MAX_QUARANTINE_ATTEMPTS:
+            raise HostedPublicationError("quarantine_attempt_ceiling")
+    live.rename(attempt)
+    return attempt
+
+
+def _refuse_collection_at_legacy_path(doc) -> None:
+    """The legacy path names a single envelope. A collection document there would be read as one
+    by every consumer that predates the collection, so it is refused rather than written."""
+    if isinstance(doc, dict) and (
+            doc.get("schema") == collection.COLLECTION_SCHEMA or "members" in doc):
+        raise HostedPublicationError("collection_at_legacy_envelope_path")
+
+
 def write_separate_artifacts(out_dir, setup_doc, envelope_doc, candidate_doc,
                              *, max_bytes: int = MAX_ARTIFACT_BYTES) -> dict:
-    if setup_doc is None or envelope_doc is None or candidate_doc is None:
+    """`envelope_doc=None` means the collection directory is the authoritative artifact.
+
+    The legacy single-envelope file is then not written, and any file left there by an earlier
+    attempt is removed -- a stale envelope beside a fresh collection is a false record, and
+    silently reusing it is exactly the fallback this integration forbids.
+    """
+    if setup_doc is None or candidate_doc is None:
         raise HostedPublicationError("collapsed_artifacts")
     if (setup_doc is envelope_doc or setup_doc is candidate_doc or
-            envelope_doc is candidate_doc):
+            (envelope_doc is not None and envelope_doc is candidate_doc)):
         raise HostedPublicationError("collapsed_artifacts")
+    _refuse_collection_at_legacy_path(envelope_doc)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     written = {}
-    for name, doc in (
-            (SETUP_STATUS_FILENAME, setup_doc),
-            (EFFECTIVE_ENVELOPE_FILENAME, envelope_doc),
-            (CANDIDATE_RESULT_FILENAME, candidate_doc),
-    ):
+    if envelope_doc is not None:
+        # A withheld/refused stub at the legacy path and a live collection on the upload surface
+        # must never coexist: the stub says the run was refused while the uploaded directory
+        # still carries permitted, verified members -- the exact bytes the refusal rejected.
+        # Sanitizing the legacy file alone stopped being sufficient when the upload was
+        # retargeted at the collection. The observations are moved, not rewritten, so nothing
+        # honest is lost and nothing publishable survives.
+        _quarantine_current_run_collection(out)
+    if envelope_doc is None:
+        stale = out / EFFECTIVE_ENVELOPE_FILENAME
+        if stale.exists():
+            stale.unlink()
+    entries = [(SETUP_STATUS_FILENAME, setup_doc), (CANDIDATE_RESULT_FILENAME, candidate_doc)]
+    if envelope_doc is not None:
+        entries.insert(1, (EFFECTIVE_ENVELOPE_FILENAME, envelope_doc))
+    for name, doc in entries:
         raw = _encode_json(doc)
         if len(raw) > max_bytes:
             raise HostedPublicationError("max_artifact_bytes")
@@ -510,6 +570,66 @@ def load_envelope(path: Path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
     return doc
 
 
+# A member whose own envelope semantics fail is an envelope defect and is named as one; every
+# other check is a property of the collection (index, digests, ordinals, ceilings) and is named
+# as that. The reason follows the check that actually failed, never the member count -- one
+# member does not make a collection failure an envelope failure, and several do not make an
+# envelope failure a collection one.
+_MEMBER_SEMANTIC_CHECKS = frozenset({"collection member semantics"})
+# A payload that will not parse is a JSON-input failure wherever it sits, and the pre-collection
+# vocabulary already named it. Keeping that name preserves the distinction rather than folding a
+# parse failure into a collection-integrity one.
+_JSON_INPUT_CHECKS = frozenset({"collection member json", "collection index json"})
+
+
+def _collection_refusal_reason(exc) -> str:
+    check = str(exc)
+    if check in _MEMBER_SEMANTIC_CHECKS:
+        return "envelope_corrupt"
+    if check in _JSON_INPUT_CHECKS:
+        return "json_input"
+    return "envelope_collection_corrupt"
+
+
+def load_envelope_collection(directory, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
+    """Load every member of a contained run's collection, or refuse.
+
+    No singleton fallback exists: if the index is absent the run is refused rather than read as a
+    lone record, or deleting the index would restore the hole this replaces.
+    """
+    try:
+        loaded = collection.load_collection(
+            Path(directory), max_index_bytes=max_bytes, max_member_bytes=max_bytes)
+    except collection.CollectionError as exc:
+        raise HostedPublicationError(_collection_refusal_reason(exc)) from exc
+    if collection.collection_permission(loaded) != "permitted":
+        # Diagnostics stay representable: the members still load and are returned, and the
+        # withheld reason travels with them for the decision below.
+        loaded["withheld_reason"] = collection.withheld_reason(loaded)
+    return loaded
+
+
+def collection_publication_decision(loaded, *, setup_status) -> dict:
+    """Decide from EVERY observation, reusing the single-record rule unchanged.
+
+    A later member passing cannot rescue an earlier one that did not: the quantifier is
+    universal, not positional, and `publication_decision` remains the one rule.
+    """
+    members = loaded.get("members", []) if isinstance(loaded, dict) else []
+    if not members:
+        return publication_decision(None, setup_status=setup_status)
+    decisions = [publication_decision(m, setup_status=setup_status) for m in members]
+    for decision in decisions:
+        if decision["decision"] != "publish":
+            return decision
+    if loaded.get("withheld_reason") is not None:
+        withheld = dict(decisions[0])
+        withheld["decision"] = "withhold"
+        withheld["score_status"] = "none"
+        return withheld
+    return decisions[0]
+
+
 def _run_attempt_identity() -> dict:
     return {
         "run_id": os.environ.get("GITHUB_RUN_ID") or os.environ.get("HOSTED_RUN_ID"),
@@ -539,6 +659,22 @@ def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
         root=Path(root),
         envelope_dest=Path(envelope_dest),
     )
+
+
+def _record_cleanup_failure(rerun_log, primary_reason, cleanup_exc, identity, bindings) -> None:
+    """Append the cleanup failure as its own distinguished evidence, never as the outcome."""
+    try:
+        append_rerun_evidence(rerun_log, {
+            "kind": "post-execute-refusal-cleanup-failed",
+            "reason": primary_reason,
+            "cleanup_error_type": type(cleanup_exc).__name__,
+            "bindings": bindings,
+            "dispatch_bindings": bindings,
+            **{k: v for k, v in identity.items() if v is not None},
+        })
+    except BaseException:
+        # Evidence appending is best-effort here; it must never mask the primary refusal.
+        pass
 
 
 def materialize_post_execute_refusal(*, out, reason, bindings, rerun_log,
@@ -601,7 +737,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    envelope_dest = out / EFFECTIVE_ENVELOPE_FILENAME
+    envelope_dest = out / COLLECTION_DIRNAME
     if rerun_log is None:
         rerun_log = out / RERUN_EVIDENCE_FILENAME
     else:
@@ -679,26 +815,40 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             materialize_dest=materialize_dest,
             max_bytes=max_input_bytes,
         )
-        envelope = load_envelope(envelope_dest, max_bytes=max_input_bytes)
-        check_envelope_bindings(
-            envelope, bindings=bindings, prepare_sha256=prepare_sha256)
-        observed_child = observe_child_environment(envelope)
-        refuse_hostile_workflow(
-            env_names=observed_child["env_names"],
-            mounts=observed_child["mounts"],
-        )
-        setup_status = envelope.get("setup_status") or "unavailable"
+        loaded = load_envelope_collection(envelope_dest, max_bytes=max_input_bytes)
+        envelope = loaded
+        # Every member is bound and observed. Checking one would let a hostile sibling ride along
+        # behind a benign first record.
+        for member in loaded["members"]:
+            check_envelope_bindings(
+                member, bindings=bindings, prepare_sha256=prepare_sha256)
+            observed_child = observe_child_environment(member)
+            refuse_hostile_workflow(
+                env_names=observed_child["env_names"],
+                mounts=observed_child["mounts"],
+            )
+        setup_status = "unavailable"
+        if loaded["members"]:
+            setup_status = loaded["members"][0].get("setup_status") or "unavailable"
         reason = "contained-execution"
     except HostedPublicationError as exc:
         if execute_began:
-            materialize_post_execute_refusal(
-                out=out,
-                reason=str(exc),
-                bindings=bindings,
-                rerun_log=rerun_log,
-                identity=identity,
-                max_artifact_bytes=max_artifact_bytes,
-            )
+            try:
+                materialize_post_execute_refusal(
+                    out=out,
+                    reason=str(exc),
+                    bindings=bindings,
+                    rerun_log=rerun_log,
+                    identity=identity,
+                    max_artifact_bytes=max_artifact_bytes,
+                )
+            except BaseException as cleanup_exc:
+                # A sanitization failure must not replace the reason the run was refused: the
+                # primary refusal is the finding, the cleanup failure is context on it. The
+                # upload authorization does not depend on this succeeding -- the gate exits
+                # nonzero either way, and the published collection is bound to gate success.
+                _record_cleanup_failure(rerun_log, str(exc), cleanup_exc, identity, bindings)
+                raise exc from cleanup_exc
         raise
     except Exception as exc:
         reason = "contained-execution-failed:%s" % exc
@@ -713,7 +863,9 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             **{k: v for k, v in identity.items() if v is not None},
         })
 
-    decision = publication_decision(envelope, setup_status=setup_status)
+    # Quantified over every member. `publication_decision` stays the one rule; this only
+    # applies it universally, so a later member cannot rescue an earlier one.
+    decision = collection_publication_decision(envelope, setup_status=setup_status)
 
     if decision["decision"] == "unavailable":
         setup_doc = setup_status_doc(
@@ -722,26 +874,24 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             reason=reason,
             bindings=bindings,
         )
-        envelope_doc = (
-            envelope if envelope is not None
-            else withheld_envelope_stub(reason=reason, bindings=bindings))
+        envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
         candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
     elif decision["decision"] == "withhold":
         setup_doc = setup_status_doc(
             status="ready" if setup_status == "ready" else setup_status,
             reason="publication-withheld",
             bindings=bindings)
-        envelope_doc = (
-            envelope if envelope is not None
-            else withheld_envelope_stub(
-                reason="publication-withheld", bindings=bindings))
+        envelope_doc = withheld_envelope_stub(
+            reason="publication-withheld", bindings=bindings)
         candidate_doc = void_candidate_result(
             reason="publication-withheld", bindings=bindings)
     else:
         setup_doc = setup_status_doc(
             status="ready", reason="publication-permitted", bindings=bindings)
-        # Envelope stays AEE schema as-is; bindings already verified above.
-        envelope_doc = envelope
+        # The collection directory is the authoritative artifact. Writing a derived aggregate
+        # to the legacy single-envelope path would be a second, weaker authority for the same
+        # facts, so nothing is written there on the success path.
+        envelope_doc = None
         candidate_doc = {
             "schema": HOSTED_SCHEMA,
             "kind": "hosted-candidate-result",

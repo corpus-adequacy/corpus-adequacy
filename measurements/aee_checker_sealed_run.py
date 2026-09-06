@@ -133,6 +133,9 @@ EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_common.py",
     "measurements/contained_oci.py",
     "measurements/effective_envelope.py",
+    # The sealed driver imports and calls this; a module the execution runs must sit
+    # inside the identity boundary or it can change between PREPARE and the run unseen.
+    "measurements/envelope_collection.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_candidate.py",
     "measurements/aee_checker_sealed_materialize.py",

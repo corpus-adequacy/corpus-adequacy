@@ -75,6 +75,8 @@ AEE_LF_ATTRS = (
     "measurements/aee_checker_sealed_common.py text eol=lf",
     "measurements/contained_oci.py text eol=lf",
     "measurements/effective_envelope.py text eol=lf",
+    "measurements/envelope_collection.py text eol=lf",
+    "tests/test_envelope_collection.py text eol=lf",
     "measurements/aee_checker_sealed_materialize.py text eol=lf",
     "measurements/aee_checker_sealed_oci.py text eol=lf",
     "measurements/aee_checker_sealed_candidate.py text eol=lf",
@@ -99,6 +101,8 @@ AEE_LF_PATHS = (
     "measurements/aee_checker_sealed_common.py",
     "measurements/contained_oci.py",
     "measurements/effective_envelope.py",
+    "measurements/envelope_collection.py",
+    "tests/test_envelope_collection.py",
     "measurements/aee_checker_sealed_materialize.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_candidate.py",
@@ -123,6 +127,7 @@ REQUIRED_EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_common.py",
     "measurements/contained_oci.py",
     "measurements/effective_envelope.py",
+    "measurements/envelope_collection.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_candidate.py",
     "measurements/aee_checker_sealed_materialize.py",
@@ -1014,6 +1019,40 @@ class ExecutionIdentityDirty(unittest.TestCase):
                 run.execution_identity(root)
             self.assertRegex(str(ctx.exception).lower(), r"dirty|untracked|head")
 
+    def test_dirty_envelope_collection_is_refused(self):
+        """The collection writer runs inside the sealed execution, so it must be inside the
+        identity boundary. `aee_checker_sealed_driver` imports and calls it; a module the driver
+        executes but the inventory omits can be edited between PREPARE and the run without the
+        dirty gate or the content digest noticing.
+        """
+        rel = "measurements/envelope_collection.py"
+        self.assertIn(
+            rel, run.EXECUTION_PATHS,
+            "a module the sealed driver executes is outside the execution identity boundary")
+        with tempfile.TemporaryDirectory() as d:
+            root = _committed_execution_root(Path(d))
+            target = root / rel
+            target.write_bytes(target.read_bytes() + b"# dirty\n")
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.execution_identity(root)
+            self.assertRegex(str(ctx.exception).lower(), r"dirty|untracked|head")
+
+    def test_committed_envelope_collection_change_moves_the_content_digest(self):
+        """Committed, not dirty: the gate passes and the digest must still move."""
+        rel = "measurements/envelope_collection.py"
+        with tempfile.TemporaryDirectory() as d:
+            root = _committed_execution_root(Path(d))
+            before = run.execution_identity(root)["content_sha256"]
+            target = root / rel
+            target.write_bytes(target.read_bytes() + b"# committed change\n")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "c2"],
+                cwd=root, check=True, capture_output=True)
+            after = run.execution_identity(root)
+        self.assertNotEqual(before, after["content_sha256"])
+        self.assertIn(rel, after["paths"])
+
     def test_committed_execution_paths_bind_head_blobs(self):
         with tempfile.TemporaryDirectory() as d:
             root = _committed_execution_root(Path(d))
@@ -1025,6 +1064,7 @@ class ExecutionIdentityDirty(unittest.TestCase):
         self.assertEqual(run.EXECUTION_PATHS, REQUIRED_EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_common.py", run.EXECUTION_PATHS)
         self.assertIn("measurements/contained_oci.py", run.EXECUTION_PATHS)
+        self.assertIn("measurements/envelope_collection.py", run.EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_oci.py", run.EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_materialize.py", run.EXECUTION_PATHS)
         self.assertIn("execution/aee-checker-sealed/cargo-config.toml", run.EXECUTION_PATHS)

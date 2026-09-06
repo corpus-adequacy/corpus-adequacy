@@ -21,6 +21,7 @@ if str(_ROOT) not in sys.path:
 
 import corpus_adequacy as ca  # noqa: E402
 import effective_envelope as envelope  # noqa: E402
+import envelope_collection as collection  # noqa: E402
 import aee_checker_sealed_execute as execute  # noqa: E402
 import aee_checker_sealed_runtime as runtime  # noqa: E402
 from aee_checker_sealed_authorize import (  # noqa: E402
@@ -114,9 +115,12 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
         manifest = ca.load_manifest_bytes(
             manifest_raw, manifest_path, path_root=dest)
         records = []
+        # One ledger per run. The runtime registers each attempt immediately before the candidate
+        # call, so an invocation that raises is still counted.
+        ledger = collection.Ledger()
         backend = runtime.make_sealed_backend(
             prepare_raw=prepare_raw, materialized=materialized,
-            transport=transport, envelope_sink=records.append)
+            transport=transport, envelope_sink=records.append, ledger=ledger)
         try:
             report = execute.run_execution_funnel(
                 authorize_raw=authorize_raw,
@@ -128,19 +132,25 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
                 execution_profile="contained-oci-v0",
             )
         except BaseException as primary:
-            # The run failed, but the envelope is the record of that failure.
-            # Emitting it must never replace the primary refusal.
-            if envelope_dest is not None and records:
+            # The run failed, but the collection is the record of that failure. Emitting it must
+            # never replace the primary refusal. No `and records` guard: zero attempts is a state
+            # to record, not a reason to write nothing.
+            if envelope_dest is not None:
                 try:
-                    emit_envelope(records, Path(envelope_dest), None)
+                    collection.write_collection(
+                        ledger, Path(envelope_dest), report_sha256=None)
                 except BaseException as exc:
-                    preserve_cleanup_failure(primary, "envelope emit", exc)
+                    preserve_cleanup_failure(primary, "collection emit", exc)
             raise
-        if envelope_dest is not None and records:
-            emit_envelope(records, Path(envelope_dest), report)
+        if envelope_dest is not None:
+            report_sha256 = None
+            if report is not None:
+                report_sha256 = hashlib.sha256(ca.encode_report_v0(report)).hexdigest()
+            collection.write_collection(
+                ledger, Path(envelope_dest), report_sha256=report_sha256)
         return report
     except (AuthorizeError, PrepareError, ca.ManifestError, execute.ExecuteError,
-            envelope.EnvelopeError) as exc:
+            envelope.EnvelopeError, collection.CollectionError) as exc:
         raise DriverError(str(exc)) from exc
 
 
