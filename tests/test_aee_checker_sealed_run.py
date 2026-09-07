@@ -820,7 +820,15 @@ class PublicStrings(unittest.TestCase):
         self.assertIn("cargo vendor --locked", joined)
         self.assertNotIn("entirely offline", joined)
         self.assertNotIn("--cpus", joined)
-        self.assertNotIn("nofile", joined)
+        # `nofile` is v2 codec vocabulary in contained_oci.py, not an applied limit, so a
+        # blanket substring ban over the module set rejects a legal inactive encoding. The
+        # invariant it stood for -- the v1 default applies no descriptor limit -- is asserted
+        # on the real argv in DockerArgvContract. Keep the word confined to the module that
+        # encodes it, and out of the v1 key tuple.
+        for rel, text in texts.items():
+            if rel != "measurements/contained_oci.py":
+                self.assertNotIn("nofile", text, rel)
+        self.assertNotIn("nofile", " ".join(contained.RESOURCE_PROFILE_KEYS))
         self.assertNotIn("cleanup_named_containers", joined)
         self.assertNotIn("load_prepare_request", joined)
         self.assertNotIn("REQUEST_SCHEMA", joined)
