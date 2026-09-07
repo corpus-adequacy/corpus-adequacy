@@ -145,6 +145,12 @@ the manifest is written by the same hand as the corpus. The report therefore
 never prints a bare percentage — it prints the numerator, the denominator, the
 exclusions, and what the percentage is a percentage of.
 
+## Agents and contributors
+
+See [`AGENTS.md`](AGENTS.md) for where to start, the manifest-review checklist
+(*enforced* vs *judgment*), and what a run proves. That file documents reviewer
+practice and existing tool behaviour; it does not add tool rules.
+
 ## The rules it enforces on a manifest
 
 - **One mutant per declared rule**, not per line, so a survivor names the rule an
@@ -324,9 +330,18 @@ that rather than claiming more.
 ## Provenance
 
 Extracted from [`Rul1an/assay`](https://github.com/Rul1an/assay) at
-`78c792f574e882aad683b690bfbff5445774056e`, under that repository's MIT
-license. The root `LICENSE` is that upstream text, including the copyright
-notice, copied without alteration.
+[`49953e94d563db1d5e16b349cf7f84f09db91309`](https://github.com/Rul1an/assay/commit/49953e94d563db1d5e16b349cf7f84f09db91309),
+under that repository's MIT license. The root `LICENSE` is that upstream text,
+including the copyright notice, copied without alteration.
+
+That commit is on `main`, and it is the one that completes the extraction: it
+stops vendoring the measurement upstream and consumes this repository instead.
+The working commit it squashes, `78c792f574e882aad683b690bfbff5445774056e`, was
+this document's anchor until 2026-09-07. It is retained upstream: its patch never
+landed on `main` in that form, but the commit itself remains reachable through the
+merged pull request that carried it, independently of whether the branch is later
+deleted. The anchor is the merge because the merge is what `main` records, and the
+working commit is named beside it so a reader can line the two up.
 
 The move is an extraction rather than a copy: two implementations of a
 measurement drift, and the copy that drifts is the one that stops measuring.
