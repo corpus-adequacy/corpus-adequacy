@@ -145,6 +145,12 @@ the manifest is written by the same hand as the corpus. The report therefore
 never prints a bare percentage — it prints the numerator, the denominator, the
 exclusions, and what the percentage is a percentage of.
 
+## Agents and contributors
+
+See [`AGENTS.md`](AGENTS.md) for where to start, the manifest-review checklist
+(*enforced* vs *judgment*), and what a run proves. That file documents reviewer
+practice and existing tool behaviour; it does not add tool rules.
+
 ## The rules it enforces on a manifest
 
 - **One mutant per declared rule**, not per line, so a survivor names the rule an
