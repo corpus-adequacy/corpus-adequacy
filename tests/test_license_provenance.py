@@ -25,13 +25,32 @@ UPSTREAM_LICENSE_SHA256 = (
 )
 COPYRIGHT_NOTICE = "Copyright (c) 2025-2026 Assay Contributors"
 # The extraction anchor is the merge on `main`, not the working commit it
-# squashes. A working commit lives only as long as its branch survives cleanup;
-# the merge is what the upstream history keeps. Both must stay in the README:
-# the anchor so a reader can resolve the provenance, the superseded commit so
-# anyone holding the branch can still line the two up.
+# squashes: the merge is what `main` records. The superseded commit stays
+# reachable upstream through the merged pull request that carried it, so its
+# resolvability is not what decides this. What decides it is ROLE, and both must
+# stay in the README in their own role: the anchor named by the provenance
+# sentence, the superseded commit in the history that follows it.
 EXTRACTION_SHA = "49953e94d563db1d5e16b349cf7f84f09db91309"
 SUPERSEDED_WORKING_SHA = "78c792f574e882aad683b690bfbff5445774056e"
 EXTRACTION_REPO = "Rul1an/assay"
+# The provenance sentence, read on its own. A README that carries both SHAs but
+# exchanges their roles satisfies every presence assertion, so presence cannot be
+# the contract; the anchor is whichever SHA THIS sentence names.
+ANCHOR_SENTENCE_PREFIX = (
+    "Extracted from [`Rul1an/assay`](https://github.com/Rul1an/assay) at"
+)
+
+
+def _anchor_sentence_and_rest(text: str) -> tuple[str, str]:
+    """Split the README at the provenance sentence's own paragraph.
+
+    Returns (anchor_paragraph, everything_after_it). Raises if the sentence is
+    absent or unterminated, so a restructured README fails loudly rather than
+    silently degrading to a presence check.
+    """
+    start = text.index(ANCHOR_SENTENCE_PREFIX)
+    end = text.index("\n\n", start)
+    return text[start:end], text[end:]
 TRUSTED_MANIFEST_WARNING = (
     "A manifest is executable trusted input: an author declaration, not "
     "independent evidence."
@@ -79,6 +98,21 @@ class LicenseProvenance(unittest.TestCase):
     def test_the_anchor_and_the_working_commit_are_different_commits(self):
         """A positive control: if the two ever collapse, one of them is stale."""
         self.assertNotEqual(EXTRACTION_SHA, SUPERSEDED_WORKING_SHA)
+
+    def test_readme_assigns_each_commit_its_role_not_merely_its_presence(self):
+        """The swap counterexample must fail: both SHAs present, roles exchanged.
+
+        The presence assertions above cannot see that defect, because both
+        strings remain in the file and the constants remain unequal. This reads
+        the provenance sentence on its own, so the anchor is observed by the
+        position that defines it rather than by occurring anywhere.
+        """
+        anchor_paragraph, rest = _anchor_sentence_and_rest(
+            README.read_text(encoding="utf-8")
+        )
+        self.assertIn(EXTRACTION_SHA, anchor_paragraph)
+        self.assertNotIn(SUPERSEDED_WORKING_SHA, anchor_paragraph)
+        self.assertIn(SUPERSEDED_WORKING_SHA, rest)
 
     def test_readme_states_the_trusted_manifest_warning(self):
         text = README.read_text(encoding="utf-8")

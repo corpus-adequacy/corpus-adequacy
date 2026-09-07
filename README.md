@@ -337,11 +337,11 @@ including the copyright notice, copied without alteration.
 That commit is on `main`, and it is the one that completes the extraction: it
 stops vendoring the measurement upstream and consumes this repository instead.
 The working commit it squashes, `78c792f574e882aad683b690bfbff5445774056e`, was
-this document's anchor until 2026-09-07. It still resolves, but only for as long
-as the unmerged branch holding it survives branch cleanup, and its patch never
-landed on `main` in that form. An anchor that depends on a branch outliving its
-merge is not provenance a reader can rely on, so the anchor is the merge and the
-working commit is named beside it.
+this document's anchor until 2026-09-07. It is retained upstream: its patch never
+landed on `main` in that form, but the commit itself remains reachable through the
+merged pull request that carried it, independently of whether the branch is later
+deleted. The anchor is the merge because the merge is what `main` records, and the
+working commit is named beside it so a reader can line the two up.
 
 The move is an extraction rather than a copy: two implementations of a
 measurement drift, and the copy that drifts is the one that stops measuring.
