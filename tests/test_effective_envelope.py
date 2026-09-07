@@ -789,11 +789,12 @@ class PublicStrings(unittest.TestCase):
         self.assertIn("`report.v0` is unchanged", readme)
         self.assertIn("not a sandbox-completeness claim", readme)
 
-    def test_changelog_notes_the_fresh_prepare_requirement(self):
+    def test_v020_changelog_notes_the_fresh_prepare_requirement(self):
         changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = changelog.split("## ")[1]
-        self.assertIn("envelope.v0", unreleased)
-        self.assertIn("PREPARE", unreleased)
+        # Keep the feature's release note pinned after Unreleased becomes empty.
+        release = changelog.split("## 0.2.0 — ", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("envelope.v0", release)
+        self.assertIn("PREPARE", release)
 
 
 if __name__ == "__main__":
