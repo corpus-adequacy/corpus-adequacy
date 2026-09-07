@@ -18,12 +18,19 @@ README = REPO_ROOT / "README.md"
 GITATTRIBUTES = REPO_ROOT / ".gitattributes"
 LICENSE_EOL_LF = "LICENSE text eol=lf"
 
-# Exact upstream MIT at Rul1an/assay@78c792f574e882aad683b690bfbff5445774056e
+# Exact upstream MIT. Byte-identical at both commits named below, verified
+# 2026-09-07 against the public API, so moving the anchor does not move this.
 UPSTREAM_LICENSE_SHA256 = (
     "fa103e85c81b02db33f34ea4c59b1a4a7f18e0052042879906ce82f9597b1b7c"
 )
 COPYRIGHT_NOTICE = "Copyright (c) 2025-2026 Assay Contributors"
-EXTRACTION_SHA = "78c792f574e882aad683b690bfbff5445774056e"
+# The extraction anchor is the merge on `main`, not the working commit it
+# squashes. A working commit lives only as long as its branch survives cleanup;
+# the merge is what the upstream history keeps. Both must stay in the README:
+# the anchor so a reader can resolve the provenance, the superseded commit so
+# anyone holding the branch can still line the two up.
+EXTRACTION_SHA = "49953e94d563db1d5e16b349cf7f84f09db91309"
+SUPERSEDED_WORKING_SHA = "78c792f574e882aad683b690bfbff5445774056e"
 EXTRACTION_REPO = "Rul1an/assay"
 TRUSTED_MANIFEST_WARNING = (
     "A manifest is executable trusted input: an author declaration, not "
@@ -64,6 +71,14 @@ class LicenseProvenance(unittest.TestCase):
         text = README.read_text(encoding="utf-8")
         self.assertIn(EXTRACTION_REPO, text)
         self.assertIn(EXTRACTION_SHA, text)
+
+    def test_readme_still_names_the_superseded_working_commit(self):
+        """Repinning must not erase the commit the anchor replaced."""
+        self.assertIn(SUPERSEDED_WORKING_SHA, README.read_text(encoding="utf-8"))
+
+    def test_the_anchor_and_the_working_commit_are_different_commits(self):
+        """A positive control: if the two ever collapse, one of them is stale."""
+        self.assertNotEqual(EXTRACTION_SHA, SUPERSEDED_WORKING_SHA)
 
     def test_readme_states_the_trusted_manifest_warning(self):
         text = README.read_text(encoding="utf-8")
