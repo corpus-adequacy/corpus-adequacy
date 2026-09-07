@@ -20,6 +20,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import unittest.mock as mock
 from pathlib import Path
 
@@ -32,6 +33,7 @@ import aee_checker_sealed_oci as oci  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
 import bounded_run as br  # noqa: E402
 import contained_oci as contained  # noqa: E402
+from aee_checker_sealed_common import PrepareError  # noqa: E402
 
 PREREG = REPO_ROOT / "measurements" / "aee-checker-25b9dfa"
 ADAPTER = REPO_ROOT / "adapters" / "aee_checker_sealed.py"
@@ -818,7 +820,15 @@ class PublicStrings(unittest.TestCase):
         self.assertIn("cargo vendor --locked", joined)
         self.assertNotIn("entirely offline", joined)
         self.assertNotIn("--cpus", joined)
-        self.assertNotIn("nofile", joined)
+        # `nofile` is v2 codec vocabulary in contained_oci.py, not an applied limit, so a
+        # blanket substring ban over the module set rejects a legal inactive encoding. The
+        # invariant it stood for -- the v1 default applies no descriptor limit -- is asserted
+        # on the real argv in DockerArgvContract. Keep the word confined to the module that
+        # encodes it, and out of the v1 key tuple.
+        for rel, text in texts.items():
+            if rel != "measurements/contained_oci.py":
+                self.assertNotIn("nofile", text, rel)
+        self.assertNotIn("nofile", " ".join(contained.RESOURCE_PROFILE_KEYS))
         self.assertNotIn("cleanup_named_containers", joined)
         self.assertNotIn("load_prepare_request", joined)
         self.assertNotIn("REQUEST_SCHEMA", joined)
@@ -2558,3 +2568,131 @@ class ExplicitPrepareImage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrepareV2Codec(unittest.TestCase):
+    """prepare.v2 emits and loads exactly once through the shared canonical rules."""
+
+    def _parts(self):
+        parts = {**PrepareEvidence._parts(self),
+                 "candidate_profile": dict(contained.CANDIDATE_RESOURCE_PROFILE_V2)}
+        parts["image"] = {**parts["image"], "id_scope": "host-local",
+                          "platform": "linux/arm64"}
+        return parts
+
+    def test_emitted_v2_bytes_round_trip_through_the_canonical_loader(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "prepare.v2.json"
+            emitted = run.emit_prepare_v2(self._parts(), dest)
+            self.assertEqual(dest.read_bytes(), emitted)
+            doc = run.load_prepare_v2(emitted)
+        self.assertEqual(doc["schema"], run.PREPARE_V2_SCHEMA)
+        self.assertEqual(doc["candidate_profile"],
+                         contained.CANDIDATE_RESOURCE_PROFILE_V2)
+
+    def test_only_the_final_schema_is_written(self):
+        with tempfile.TemporaryDirectory() as raw:
+            emitted = run.emit_prepare_v2(self._parts(), Path(raw) / "p.json")
+        self.assertNotIn(run.PREPARE_SCHEMA.encode(), emitted)
+        self.assertNotIn(run.PREPARE_V1_SCHEMA.encode(), emitted)
+
+    def test_non_canonical_bytes_refuse(self):
+        with tempfile.TemporaryDirectory() as raw:
+            emitted = run.emit_prepare_v2(self._parts(), Path(raw) / "p.json")
+        with self.assertRaises(PrepareError):
+            run.load_prepare_v2(b" " + emitted)
+
+    def test_v1_profile_in_a_v2_prepare_refuses(self):
+        parts = self._parts()
+        parts["candidate_profile"] = dict(contained.CANDIDATE_RESOURCE_PROFILE)
+        with self.assertRaises(PrepareError):
+            run.emit_prepare_v2(parts, Path("/dev/null"))
+
+    def test_wellformed_but_non_fixture_v2_profile_refuses(self):
+        """The generic validator alone is not the equality check."""
+        parts = self._parts()
+        off_policy = dict(contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        off_policy["cpu_rate_millicpu"] = 2000
+        contained.require_resource_profile_v2(off_policy)   # well-formed
+        parts["candidate_profile"] = off_policy
+        with self.assertRaises(PrepareError):               # still refused as a PREPARE
+            run.emit_prepare_v2(parts, Path("/dev/null"))
+
+    def test_named_v1_loader_refuses_v2_bytes_and_the_reverse(self):
+        with tempfile.TemporaryDirectory() as raw:
+            v2 = run.emit_prepare_v2(self._parts(), Path(raw) / "p2.json")
+        with self.assertRaises(PrepareError):
+            run.load_prepare_v1(v2)
+
+    def test_production_prepare_dispatch_does_not_emit_v2(self):
+        """Codec infrastructure only: no CLI or production path produces prepare.v2 here."""
+        import inspect as _inspect
+        src = _inspect.getsource(run.prepare)
+        self.assertNotIn("PREPARE_V2_SCHEMA", src)
+        self.assertNotIn("emit_prepare_v2", src)
+
+    def test_execute_and_driver_refuse_v2_before_any_effect(self):
+        """F1: call the real funnels, do not search their source.
+
+        Every later boundary is a raising sentinel, so a refusal that arrives late would surface
+        as a sentinel rather than as a pass. Nothing runs a process, materializes, reads frozen
+        sites or computes an execution identity.
+        """
+        import aee_checker_sealed_authorize as auth
+        import aee_checker_sealed_execute as ex
+        import aee_checker_sealed_driver as driver
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prepare = run.emit_prepare_v2(self._parts(), root / "p.json")
+            authorize = auth.emit_authorize_v0(prepare, root / "a.json")
+
+            with mock.patch.object(
+                    ex, "load_frozen_sites",
+                    side_effect=AssertionError("funnel advanced past schema")) as sites, \
+                 mock.patch.object(
+                    ex.ca, "_run_process",
+                    side_effect=AssertionError("process boundary reached")) as process:
+                with self.assertRaises(ex.ExecuteError) as ctx:
+                    ex.run_execution_funnel(
+                        authorize_raw=authorize, prepare_raw=prepare, pins_dir=root,
+                        manifest={}, manifest_path=root / "manifest.json",
+                        execution_backend=None)
+                self.assertIn("prepare.v1", str(ctx.exception))
+                sites.assert_not_called()
+                process.assert_not_called()
+
+            with mock.patch.object(
+                    driver, "execution_identity",
+                    side_effect=AssertionError("driver advanced past schema")) as identity, \
+                 mock.patch.object(
+                    driver, "materialize_pinned",
+                    side_effect=AssertionError("materialization reached")) as materialize:
+                with self.assertRaises(driver.DriverError) as ctx:
+                    driver.run_authorized(
+                        authorize_raw=authorize, prepare_raw=prepare, pins_dir=root,
+                        materialize_dest=root / "never-created", root=root)
+                self.assertIn("prepare.v1", str(ctx.exception))
+                identity.assert_not_called()
+                materialize.assert_not_called()
+                self.assertFalse((root / "never-created").exists())
+
+    def test_v1_and_v2_share_one_image_validation_rule(self):
+        """F3: one malformed-image table, both versions, same refusal."""
+        for key, value in (("id_scope", "remote"), ("kind", "candidate"),
+                           ("platform", ""), ("id", "tag:latest")):
+            for version in (1, 2):
+                parts = self._parts()
+                if version == 1:
+                    parts["candidate_profile"] = dict(
+                        contained.CANDIDATE_RESOURCE_PROFILE)
+                parts["image"] = {**parts["image"], key: value}
+                with tempfile.TemporaryDirectory() as raw:
+                    with self.subTest(version=version, key=key), \
+                         self.assertRaises(PrepareError):
+                        getattr(run, "emit_prepare_v%d" % version)(
+                            parts, Path(raw) / "p.json")
+
+
+def _inspect_source(module):
+    import inspect as _i
+    return _i.getsource(module)

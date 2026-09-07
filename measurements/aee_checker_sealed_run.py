@@ -22,6 +22,12 @@ if str(_ROOT) not in sys.path:
 
 import bounded_run as br  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
+# v2 symbols come from their defining module: the common facade is not widened,
+# and a re-export would be a second place the same name could drift.
+from contained_oci import (  # noqa: E402
+    CANDIDATE_RESOURCE_PROFILE_V2,
+    require_resource_profile_v2,
+)
 from aee_checker_sealed_common import (  # noqa: E402
     DECLARED_CEILINGS,
     EMPTY_SHA256,
@@ -106,6 +112,7 @@ from aee_checker_sealed_oci import (  # noqa: E402
 
 PREPARE_SCHEMA = "corpus-adequacy.aee-checker-sealed.prepare.v0"
 PREPARE_V1_SCHEMA = "corpus-adequacy.aee-checker-sealed.prepare.v1"
+PREPARE_V2_SCHEMA = "corpus-adequacy.aee-checker-sealed.prepare.v2"
 PREPARE_PART_KEYS = (
     "ceilings", "execution", "image", "materialize_ceilings", "materialized",
     "network", "non_claims", "oci", "pins", "probe_evidence", "runtime",
@@ -121,6 +128,9 @@ SEALED_PROBE_PAIRS = {
 PREPARE_KEYS = ("phase", "schema") + PREPARE_PART_KEYS
 PREPARE_V1_PART_KEYS = PREPARE_PART_KEYS + ("candidate_profile",)
 PREPARE_V1_KEYS = ("phase", "schema") + PREPARE_V1_PART_KEYS
+# Same shape as v1; only the profile it pins is stronger.
+PREPARE_V2_PART_KEYS = PREPARE_V1_PART_KEYS
+PREPARE_V2_KEYS = ("phase", "schema") + PREPARE_V2_PART_KEYS
 PREPARE_IMAGE_KEYS = ("id", "id_scope", "kind", "platform")
 EXECUTION_PATHS = (
     "bounded_run.py",
@@ -428,13 +438,14 @@ def emit_prepare_v0(parts: dict, dest: Path) -> bytes:
     return raw
 
 
-def _prepare_v1_doc(parts: dict) -> dict:
-    exact_object(parts, PREPARE_V1_PART_KEYS, "prepare")
-    profile = require_resource_profile(parts["candidate_profile"])
-    if profile == INERT_RESOURCE_PROFILE:
-        raise PrepareError("candidate profile must not be the inert profile")
-    if profile != CANDIDATE_RESOURCE_PROFILE:
-        raise PrepareError("candidate profile must be the bounded fixture")
+def _require_prepare_image(parts: dict) -> None:
+    """The one image rule both versioned PREPARE codecs apply.
+
+    It was written twice and the copies were identical, so removing one half's scope condition
+    left every test green. Sharing removes that particular blind spot; it does not make future
+    divergence impossible, which is why the malformed-image control runs across both versions.
+    Error strings and refusal order are unchanged, so v1's bytes and messages are untouched.
+    """
     image = parts["image"]
     exact_object(image, PREPARE_IMAGE_KEYS, "prepare image")
     require_image_id(image.get("id"))
@@ -442,6 +453,16 @@ def _prepare_v1_doc(parts: dict) -> dict:
         raise PrepareError("prepare image must remain the host-local inert probe")
     if not isinstance(image.get("platform"), str) or not image["platform"]:
         raise PrepareError("prepare image platform")
+
+
+def _prepare_v1_doc(parts: dict) -> dict:
+    exact_object(parts, PREPARE_V1_PART_KEYS, "prepare")
+    profile = require_resource_profile(parts["candidate_profile"])
+    if profile == INERT_RESOURCE_PROFILE:
+        raise PrepareError("candidate profile must not be the inert profile")
+    if profile != CANDIDATE_RESOURCE_PROFILE:
+        raise PrepareError("candidate profile must be the bounded fixture")
+    _require_prepare_image(parts)
     doc = _prepare_v0_doc({key: parts[key] for key in PREPARE_PART_KEYS})
     doc["schema"] = PREPARE_V1_SCHEMA
     doc["candidate_profile"] = profile
@@ -455,6 +476,42 @@ def emit_prepare_v1(parts: dict, dest: Path) -> bytes:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(raw)
     return raw
+
+
+def _prepare_v2_doc(parts: dict) -> dict:
+    """v2 differs from v1 only in which profile it admits, so the shape rule is not restated.
+
+    The generic validator alone is not the equality check: a profile may be a well-formed v2 and
+    still not be the frozen candidate policy, which is what a PREPARE is allowed to pin.
+    """
+    exact_object(parts, PREPARE_V2_PART_KEYS, "prepare")
+    profile = require_resource_profile_v2(parts["candidate_profile"])
+    if profile != CANDIDATE_RESOURCE_PROFILE_V2:
+        raise PrepareError("candidate profile must be the bounded v2 fixture")
+    _require_prepare_image(parts)
+    doc = _prepare_v0_doc({key: parts[key] for key in PREPARE_PART_KEYS})
+    doc["schema"] = PREPARE_V2_SCHEMA
+    doc["candidate_profile"] = profile
+    exact_object(doc, PREPARE_V2_KEYS, "prepare.v2")
+    return doc
+
+
+def emit_prepare_v2(parts: dict, dest: Path) -> bytes:
+    raw = encode_json(_prepare_v2_doc(parts))
+    dest.write_bytes(raw)
+    return raw
+
+
+def load_prepare_v2(raw: bytes) -> dict:
+    doc = load_strict(raw)
+    if type(doc) is not dict or doc.get("schema") != PREPARE_V2_SCHEMA:
+        raise PrepareError("prepare.v2 schema")
+    exact_object(doc, PREPARE_V2_KEYS, "prepare.v2")
+    parts = {key: doc[key] for key in PREPARE_V2_PART_KEYS}
+    canonical = _prepare_v2_doc(parts)
+    if encode_json(canonical) != raw:
+        raise PrepareError("prepare.v2 is not canonical")
+    return canonical
 
 
 def load_prepare_v1(raw: bytes) -> dict:

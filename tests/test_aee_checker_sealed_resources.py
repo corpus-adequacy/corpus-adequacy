@@ -20,6 +20,7 @@ import aee_checker_sealed_candidate as cand  # noqa: E402
 import aee_checker_sealed_common as common  # noqa: E402
 import aee_checker_sealed_oci as oci  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
+import contained_oci as contained  # noqa: E402
 from aee_checker_sealed_common import PrepareError  # noqa: E402
 
 PROBE = "sha256:" + ("11" * 32)
@@ -582,3 +583,154 @@ class MutationReuseInertTmpfs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResourceProfileV2Codec(unittest.TestCase):
+    """The v2 profile is a sibling of v1, validated by the same rule under its own policy.
+
+    v1 keeps its exact keys, its exact fixture and its named loader; nothing here widens it.
+    """
+
+    def _v2(self, **over):
+        base = dict(contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        base.update(over)
+        return base
+
+    # --- v1 is untouched, and its named loader still refuses v2 ---
+    def test_v1_keys_and_fixture_are_unchanged(self):
+        self.assertEqual(contained.RESOURCE_PROFILE_KEYS, (
+            "schema", "work_bytes", "tmp_bytes", "work_inodes", "tmp_inodes",
+            "work_exec", "deadline_seconds", "output_bytes", "memory_bytes",
+            "memory_swap_bytes", "pids"))
+        self.assertNotIn("cpu_rate_millicpu", contained.CANDIDATE_RESOURCE_PROFILE)
+        self.assertNotIn("nofile_soft", contained.CANDIDATE_RESOURCE_PROFILE)
+
+    def test_named_v1_loader_refuses_a_v2_profile(self):
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile(self._v2())
+
+    def test_named_v2_loader_refuses_a_v1_profile(self):
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile_v2(
+                dict(contained.CANDIDATE_RESOURCE_PROFILE))
+
+    # --- the v2 policy values are the frozen constant, not merely a valid shape ---
+    def test_candidate_v2_equals_its_one_canonical_constant(self):
+        profile = contained.require_resource_profile_v2(
+            dict(contained.CANDIDATE_RESOURCE_PROFILE_V2))
+        self.assertEqual(profile, contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        self.assertEqual(profile["cpu_rate_millicpu"], 1000)
+        self.assertEqual(profile["nofile_soft"], 1024)
+        self.assertEqual(profile["nofile_hard"], 1024)
+        # Other ceilings are carried over unchanged from v1 policy.
+        for key in ("memory_bytes", "pids", "deadline_seconds", "work_bytes"):
+            self.assertEqual(profile[key], contained.CANDIDATE_RESOURCE_PROFILE[key])
+
+    # --- exact, bounded CPU and nofile: no float, NaN, bool or reordered pair ---
+    def test_cpu_rate_refuses_non_integer_and_non_positive(self):
+        for bad in (1000.0, float("nan"), float("inf"), True, "1000", None, 0, -1):
+            with self.assertRaises(PrepareError, msg=repr(bad)):
+                contained.require_resource_profile_v2(
+                    self._v2(cpu_rate_millicpu=bad))
+
+    def test_nofile_refuses_bad_types_and_soft_above_hard(self):
+        for over in ({"nofile_soft": 2048},            # soft > hard
+                     {"nofile_soft": True},
+                     {"nofile_hard": 1024.0},
+                     {"nofile_hard": 0},
+                     {"nofile_soft": "1024"}):
+            with self.assertRaises(PrepareError, msg=repr(over)):
+                contained.require_resource_profile_v2(self._v2(**over))
+
+    def test_unknown_and_missing_keys_refuse(self):
+        extra = self._v2()
+        extra["unexpected"] = 1
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile_v2(extra)
+        missing = self._v2()
+        del missing["nofile_hard"]
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile_v2(missing)
+
+    def test_wrong_schema_string_refuses(self):
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile_v2(
+                self._v2(schema=contained.RESOURCE_PROFILE_SCHEMA))
+
+    # --- argv: the effective arguments come from the validated profile ---
+    def test_v2_argv_emits_cpu_rate_and_nofile_from_the_profile(self):
+        argv = contained.docker_resource_argv_v2(
+            contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        # Exact integer mapping: quota/period, no float formatting anywhere.
+        self.assertIn("--cpu-period", argv)
+        self.assertIn("--cpu-quota", argv)
+        period = argv[argv.index("--cpu-period") + 1]
+        quota = argv[argv.index("--cpu-quota") + 1]
+        self.assertEqual(int(quota) * 1000, 1000 * int(period))
+        self.assertNotIn(".", quota + period)
+        self.assertIn("--ulimit", argv)
+        self.assertIn("nofile=1024:1024", argv)
+
+    def test_v2_argv_binds_alternate_values_not_only_the_default(self):
+        """F1: the frozen default cannot discriminate a hardcoded constant."""
+        argv = contained.docker_resource_argv_v2(
+            self._v2(cpu_rate_millicpu=2500, nofile_soft=512, nofile_hard=2048))
+        self.assertEqual(argv[argv.index("--cpu-quota") + 1], "250000")
+        self.assertEqual(argv[argv.index("--cpu-period") + 1], "100000")
+        self.assertEqual(argv[argv.index("--ulimit") + 1], "nofile=512:2048")
+
+    def test_cpu_rate_has_a_finite_representational_ceiling(self):
+        """F2: bounded, not merely positive. This is a wire-representation limit."""
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile_v2(
+                self._v2(cpu_rate_millicpu=10 ** 100))
+        with self.assertRaises(PrepareError):
+            contained.docker_resource_argv_v2(
+                self._v2(cpu_rate_millicpu=10 ** 100))
+
+    def test_cpu_rate_ceiling_boundary_is_exact(self):
+        at_bound = contained.MAX_CPU_RATE_MILLICPU
+        accepted = contained.require_resource_profile_v2(
+            self._v2(cpu_rate_millicpu=at_bound))
+        self.assertEqual(accepted["cpu_rate_millicpu"], at_bound)
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile_v2(
+                self._v2(cpu_rate_millicpu=at_bound + 1))
+
+    def test_nofile_has_a_finite_ceiling_too(self):
+        with self.assertRaises(PrepareError):
+            contained.require_resource_profile_v2(
+                self._v2(nofile_soft=1, nofile_hard=10 ** 100))
+
+    def test_v2_argv_is_independent_of_the_wall_deadline(self):
+        slower = dict(contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        slower["deadline_seconds"] = contained.CANDIDATE_RESOURCE_PROFILE_V2[
+            "deadline_seconds"] * 2
+        self.assertEqual(contained.docker_resource_argv_v2(slower),
+                         contained.docker_resource_argv_v2(
+                             contained.CANDIDATE_RESOURCE_PROFILE_V2))
+
+    def test_v2_argv_refuses_an_unvalidated_profile(self):
+        with self.assertRaises(PrepareError):
+            contained.docker_resource_argv_v2(
+                dict(contained.CANDIDATE_RESOURCE_PROFILE))
+
+    def test_v1_create_argv_still_carries_no_cpu_or_nofile(self):
+        """Behavioural, not lexical: the v1 argv the runner actually builds is unchanged.
+
+        This slice is codec infrastructure. Nothing here may start applying a limit on the
+        production v1 path.
+        """
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            keys = [k for k, _dest in contained.DEFAULT_MOUNT_SPEC]
+            for key in keys:
+                (base / key).mkdir()
+            argv = contained.docker_create_argv(
+                name="c", image_id=IMAGE, entrypoint="/entry", command=[],
+                resource_profile=contained.CANDIDATE_RESOURCE_PROFILE,
+                mounts={k: base / k for k in keys},
+                mount_spec=contained.DEFAULT_MOUNT_SPEC, sealed=True)
+        flat = " ".join(argv)
+        for token in ("--cpus", "--cpu-quota", "--cpu-period", "--ulimit"):
+            self.assertNotIn(token, flat)
