@@ -202,6 +202,24 @@ exclusions, and what the percentage is a percentage of.
   A missing manifest file takes the same catch: exit 2, the envelope on stdout,
   and the human `could not measure` line on stderr.
 
+## Attributing failed-test changes
+
+A non-control mutant may declare `"expected_mover": "test_name"` when using
+`runner: batch` with `outcome_parse: test-names`. The named test must change
+membership between the baseline and mutant failed-test tuples: it must be in
+their symmetric difference. For example, if only `neighbor_test` starts failing
+while the mutant declares `expected_mover: rule_test`, the mutant is `survived`.
+If `rule_test` changes, the mutant remains `killed`, including when a neighboring
+test also changes. A test failing in both runs does not witness a change.
+
+The existing `how` field names the expected and observed changed tests for this
+attribution; `moved` retains its existing batch-outcome meaning. No new report
+field is added. Manifests without `expected_mover` keep their existing results.
+Controls, module/process runners, JSON batch outcomes and empty or non-string
+names refuse the field. Identity is not inferred from messages, coverage or
+source. Termination kills remain unchanged because they have no parsed test-name
+tuple; this option makes no attribution claim for them.
+
 ## The silent class, and `diagnostic_from`
 
 A corpus pins outcomes. Whether a mutant is *seen* therefore depends on which

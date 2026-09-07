@@ -1008,6 +1008,18 @@ def _require_unique_labels(m: dict) -> None:
             seen_acknowledgements.add(ident)
 
 
+def _require_expected_mover(m: dict, mutant: dict) -> None:
+    if "expected_mover" not in mutant:
+        return
+    name = mutant["expected_mover"]
+    if (m["runner"] != "batch" or m.get("outcome_parse") != "test-names"
+            or mutant.get("control") or not isinstance(name, str)
+            or not name.strip()):
+        raise ManifestError(
+            "expected_mover requires a nonempty test name on a non-control "
+            "batch test-names mutant")
+
+
 def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
                         path_root: Path | None = None) -> dict:
     """Load exact manifest bytes while resolving logical paths at one root."""
@@ -1152,6 +1164,7 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
                 _req(e, key, "mutants[%s][%d]" % (group, i))
             e.setdefault("scope", "declared")
             e.setdefault("control", False)
+            _require_expected_mover(m, e)
             if "control_polarity" in e and e["control"] is not True:
                 raise ManifestError(
                     "mutants[%s][%d] %r: control_polarity requires control: true"
@@ -1977,6 +1990,13 @@ def _finalize_process_tally(tally: dict, m: dict, acknowledged: dict,
     }
 
 
+def _expected_mover_attribution(mutant: dict, baseline: dict, outcome: dict) -> tuple[bool, str]:
+    """Attribute only the failed-test tuples already parsed by child_outcome."""
+    name = mutant["expected_mover"]
+    observed = sorted(set(baseline["<batch>"]) ^ set(outcome["<batch>"]))
+    return name in observed, "expected mover %r; observed changed names %r" % (name, observed)
+
+
 def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) -> None:
     """One unique-anchor replacement, backend run, restore, and compare."""
     m = session.manifest
@@ -2117,8 +2137,18 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
                    "was never shown this mutant and said nothing about this rule" % how})
         tally["unproved"] += 1
         return
+    attribution_how = None
+    if not raised and "expected_mover" in mut:
+        attributed, attribution_how = _expected_mover_attribution(mut, baseline, out)
+        if moved and not attributed:
+            tally["results"].append({
+                "group": group, "label": mut["label"], "verdict": "survived",
+                "scope": scope, "moved": len(moved), "how": attribution_how})
+            tally["survived"] += 1
+            return
     if raised or moved:
         how = (", ".join(sorted(set(raised.values()))) if raised
+               else attribution_how if attribution_how is not None
                else "%d vector(s) moved" % len(moved))
         tally["results"].append({"group": group, "label": mut["label"], "verdict": "killed",
                                  "scope": scope, "moved": len(moved), "how": how})
