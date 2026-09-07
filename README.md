@@ -330,9 +330,18 @@ that rather than claiming more.
 ## Provenance
 
 Extracted from [`Rul1an/assay`](https://github.com/Rul1an/assay) at
-`78c792f574e882aad683b690bfbff5445774056e`, under that repository's MIT
-license. The root `LICENSE` is that upstream text, including the copyright
-notice, copied without alteration.
+[`49953e94d563db1d5e16b349cf7f84f09db91309`](https://github.com/Rul1an/assay/commit/49953e94d563db1d5e16b349cf7f84f09db91309),
+under that repository's MIT license. The root `LICENSE` is that upstream text,
+including the copyright notice, copied without alteration.
+
+That commit is on `main`, and it is the one that completes the extraction: it
+stops vendoring the measurement upstream and consumes this repository instead.
+The working commit it squashes, `78c792f574e882aad683b690bfbff5445774056e`, was
+this document's anchor until 2026-09-07. It still resolves, but only for as long
+as the unmerged branch holding it survives branch cleanup, and its patch never
+landed on `main` in that form. An anchor that depends on a branch outliving its
+merge is not provenance a reader can rely on, so the anchor is the merge and the
+working commit is named beside it.
 
 The move is an extraction rather than a copy: two implementations of a
 measurement drift, and the copy that drifts is the one that stops measuring.
