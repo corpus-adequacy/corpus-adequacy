@@ -630,6 +630,14 @@ class DockerTransport:
     def version(self):
         return require_docker_ready()
 
+    def daemon_info(self):
+        """Explicit bounded daemon observation; readiness does not invoke this."""
+        raw = docker_bounded(["info", "--format", "{{json .}}"] )
+        value = load_strict(raw)
+        if type(value) is not dict:
+            raise PrepareError("daemon")
+        return value
+
     def image_env_names(self, image_id):
         return image_env_names(image_id)
 
@@ -721,3 +729,11 @@ def run_contained(
         "process": process,
         "state": state,
     }
+
+
+def observe_daemon_info(transport):
+    """Explicit injected transport only; no readiness or emitter activation."""
+    value = transport.daemon_info()
+    if type(value) is not dict:
+        raise PrepareError("daemon")
+    return value

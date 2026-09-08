@@ -734,3 +734,28 @@ class ResourceProfileV2Codec(unittest.TestCase):
         flat = " ".join(argv)
         for token in ("--cpus", "--cpu-quota", "--cpu-period", "--ulimit"):
             self.assertNotIn(token, flat)
+
+
+class DaemonObservationV1(unittest.TestCase):
+    def test_explicit_daemon_observer_uses_bounded_injected_transport(self):
+        import contained_oci as c
+        from unittest.mock import patch
+        raw = b'{"KernelVersion":"synthetic","CgroupVersion":"2","CgroupDriver":"systemd","SecurityOptions":null}'
+        with patch.object(c, "docker_bounded", return_value=raw) as bounded:
+            result = c.observe_daemon_info(c.DockerTransport())
+        bounded.assert_called_once_with(["info", "--format", "{{json .}}"])
+        self.assertEqual(result["KernelVersion"], "synthetic")
+
+    def test_missing_or_malformed_daemon_output_is_not_defaulted(self):
+        import contained_oci as c
+        from unittest.mock import patch
+        for raw in (b'', b'[]', b'{"x":1,"x":2}', b'{'):
+            with self.subTest(raw=raw), patch.object(c, "docker_bounded", return_value=raw):
+                with self.assertRaises(c.PrepareError):
+                    c.observe_daemon_info(c.DockerTransport())
+
+    def test_existing_create_argv_and_readiness_do_not_activate_v1(self):
+        import contained_oci as c
+        from unittest.mock import patch
+        with patch.object(c.DockerTransport, "daemon_info", side_effect=AssertionError("activated")), patch.object(c, "require_docker_ready", return_value="fixture-version"):
+            self.assertEqual(c.DockerTransport().version(), "fixture-version")

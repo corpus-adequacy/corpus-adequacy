@@ -580,3 +580,63 @@ class MemberIsAReadRegularFile(unittest.TestCase):
             with self.assertRaises(collection.CollectionError) as ctx:
                 collection.load_collection(dest)
             self.assertEqual(str(ctx.exception), "collection member not a regular file")
+
+
+class DualEnvelopeVersions(unittest.TestCase):
+    def _v1(self):
+        from tests.test_effective_envelope import _wire_v1_record
+        return _wire_v1_record()
+
+    def test_mixed_v0_v1_round_trip_preserves_each_member_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"
+            _write_pair(dest, _valid_record(), self._v1())
+            collection.load_collection(dest)
+            docs = [json.loads(p.read_bytes()) for p in sorted(dest.glob("member-*.json"))]
+            self.assertEqual([r["schema"] for r in docs], list(envelope.ENVELOPE_SCHEMAS))
+
+    def test_report_binding_changes_only_the_binding_not_the_member_version(self):
+        record = self._v1(); before = dict(record)
+        bound = envelope.bind_report(record, "1" * 64)
+        before["report_sha256"] = "1" * 64
+        self.assertEqual(bound, before)
+
+    def test_v0_member_bytes_are_not_backfilled_or_normalized(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"; v0 = _valid_record()
+            expected = envelope.encode_envelope(envelope.bind_report(v0, None))
+            _write_pair(dest, v0, self._v1())
+            self.assertEqual(sorted(dest.glob("member-*.json"))[0].read_bytes(), expected)
+            collection.load_collection(dest)
+            self.assertEqual(sorted(dest.glob("member-*.json"))[0].read_bytes(), expected)
+
+    def _refuse_rehashed(self, mutate):
+        for position in (0, 1):
+            with self.subTest(position=position), tempfile.TemporaryDirectory() as d:
+                dest = Path(d) / "collection"; _write_pair(dest, self._v1(), self._v1())
+                member = sorted(dest.glob("member-*.json"))[position]
+                record = json.loads(member.read_bytes()); mutate(record)
+                raw = envelope.encode_envelope(record); member.write_bytes(raw)
+                index_path = dest / collection.INDEX_FILENAME
+                index = json.loads(index_path.read_bytes()); index["members"][position]["sha256"] = collection.member_digest(raw)
+                index_path.write_text(json.dumps(index))
+                with self.assertRaisesRegex(collection.CollectionError, "member semantics"):
+                    collection.load_collection(dest)
+
+    def test_rehashed_invalid_v1_first_and_last_are_refused(self):
+        for field, value in (("cpu_quota", -1), ("cpu_period", True),
+                             ("cpu_quota", "1"), ("cpu_period", 1.5),
+                             ("ulimit_nofile", {}),
+                             ("ulimit_nofile", {"soft": 2, "hard": 1}),
+                             ("ulimit_nofile", {"soft": True, "hard": 2})):
+            with self.subTest(field=field, value=value):
+                self._refuse_rehashed(lambda r: r["effective"].__setitem__(field, value))
+        for field, value in (("kernel_version", " "), ("security_options", [None]),
+                             ("security_options", ["z", "a"])):
+            with self.subTest(field=field, value=value):
+                self._refuse_rehashed(lambda r: r["effective"]["daemon"].__setitem__(field, value))
+        self._refuse_rehashed(lambda r: r["effective"]["daemon"].pop("cgroup_driver"))
+        self._refuse_rehashed(lambda r: r["effective"].__setitem__("surplus", 1))
+
+    def test_unknown_member_version_is_refused(self):
+        self._refuse_rehashed(lambda r: r.__setitem__("schema", "unknown"))
