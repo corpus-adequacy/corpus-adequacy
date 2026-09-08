@@ -2398,6 +2398,94 @@ class SilentClass(unittest.TestCase):
 # rule covers both selectors, or the newer one repeats the older one's bug.
 
 
+
+def _reason_token_manifest(tmp: Path, extra=None):
+    """A refusing implementation whose decision is a boolean and whose reason is a string.
+
+    Emits {"accepted": false, "wire_code": "refusal.a"}. The positive control flips only
+    the boolean. The ordinary mutant changes only the reason token. Which projection the
+    manifest declares decides what that change is: killed, survived, or silent.
+    """
+    (tmp / "check.py").write_text(
+        "import json\n"
+        "accepted = False\n"
+        'wire_code = "refusal.a"\n'
+        'print(json.dumps({"accepted": accepted, "wire_code": wire_code}))\n',
+        encoding="utf-8")
+    (tmp / "vec.json").write_text("{}\n", encoding="utf-8")
+    (tmp / "vectors.json").write_text(json.dumps({
+        "vectors": [{"vector_id": "v1", "path": "vec.json"}]}), encoding="utf-8")
+    raw = {
+        "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+        "implementation": "check.py", "implementation_sources": ["check.py"],
+        "build": [],
+        "entrypoint_command": [_batch_python(), "check.py", "{vector}"],
+        "outcome_from": ["accepted", "wire_code"], "vectors": "vectors.json",
+        "id_key": "vector_id", "vector_path_key": "path", "default_group": "g",
+        "mutants": {"g": [
+            {"label": "reason-token", "anchor": 'wire_code = "refusal.a"',
+             "replacement": 'wire_code = "refusal.b"'},
+            {"label": "CONTROL", "control": True,
+             "anchor": "accepted = False", "replacement": "accepted = True"}]}}
+    raw.update(dict(extra or {}))
+    p = tmp / "m.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    return p
+
+
+class ReasonTokenOnOutcome(unittest.TestCase):
+    """A string reason on ``outcome_from`` discriminates a same-decision substitution.
+
+    The boolean decision is a fixture choice, not a string-decision claim.
+    Three projections of one mutant. The general silent mechanism is SilentClass's;
+    the third case here is the contrast, not a second pin of that mechanism.
+    """
+
+    def _run(self, extra):
+        with tempfile.TemporaryDirectory() as d:
+            return ca.run(_reason_token_manifest(Path(d), extra),
+                          execution_profile="trusted-local")
+
+    def _valid_scored_run(self, r):
+        # Order matters: a barrier-blocked or unproved run must fail HERE, with a
+        # message that names the cause, never at the verdict assertion below.
+        self.assertEqual(r["control_status"], "killed", r["failures"])
+        v = {m["label"]: m for m in r["mutants"]}
+        self.assertEqual(v["CONTROL"]["verdict"], "control-killed")
+        self.assertIn("reason-token", v, "ordinary mutant was never scheduled")
+        self.assertEqual(r["unproved"], 0, r["failures"])
+        return v
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_reason_on_outcome_is_killed(self):
+        r = self._run({})
+        v = self._valid_scored_run(r)
+        self.assertEqual(v["reason-token"]["verdict"], "killed")
+        self.assertEqual(v["reason-token"]["moved"], 1)
+        self.assertEqual((r["killed"], r["survived"], r["silent"]), (1, 0, 0))
+        self.assertTrue(r["adequate"], r["failures"])
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_decision_only_projection_survives(self):
+        # The adapter-contract counterexample: an adapter that passes only the
+        # boolean has not lost a token in the engine; it never declared one.
+        r = self._run({"outcome_from": ["accepted"]})
+        v = self._valid_scored_run(r)
+        self.assertEqual(v["reason-token"]["verdict"], "survived")
+        self.assertEqual(v["reason-token"]["moved"], 0)
+        self.assertEqual((r["killed"], r["survived"], r["silent"]), (0, 1, 0))
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_reason_on_diagnostic_is_silent(self):
+        r = self._run({"outcome_from": ["accepted"], "diagnostic_from": ["wire_code"]})
+        v = self._valid_scored_run(r)
+        self.assertEqual(v["reason-token"]["verdict"], "silent")
+        self.assertEqual(v["reason-token"]["moved"], 0)
+        self.assertEqual(v["reason-token"]["moved_diagnostic"], 1)
+        self.assertEqual((r["killed"], r["survived"], r["silent"]), (0, 0, 1))
+        self.assertTrue(r["diagnostic_channel_declared"])
+
+
 class DeclaredSelectorMembersMustExist(unittest.TestCase):
     def _corpus(self, tmp: Path, outcome_from, diagnostic_from=None):
         (tmp / "check.py").write_text(
