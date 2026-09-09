@@ -7,7 +7,7 @@ are collected instead.
 
 Contract:
 
-- members are ordinary v0 records, built and validated by the shared `build_envelope_record` /
+- members explicitly admit v0 and v1 records, built and validated by the shared `build_envelope_record` /
   `validate_envelope_record`. Member semantics are not reimplemented here;
 - `publication_permission` stays the one derivation; this module only quantifies it universally;
 - no summary record exists: a folded artifact would validate on its own and become an alternative

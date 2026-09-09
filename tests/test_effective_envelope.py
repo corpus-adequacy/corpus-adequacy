@@ -797,5 +797,194 @@ class PublicStrings(unittest.TestCase):
         self.assertIn("PREPARE", release)
 
 
+
+def _wire_v1_record():
+    # Full legacy fixture, with literal additions independent of the v1 projector.
+    record = _verified_record()
+    record["schema"] = "corpus-adequacy.execution-envelope.v1"
+    record["effective"].update(cpu_period=100000, cpu_quota=250000,
+        ulimit_nofile={"soft": 512, "hard": 2048}, daemon={
+            "kernel_version": "synthetic-kernel", "cgroup_version": "2",
+            "cgroup_driver": "systemd", "security_options": ["name=seccomp"]})
+    return record
+
+
+class EnvelopeV1Validation(unittest.TestCase):
+    def test_explicit_valid_v1_survives_shared_validator_and_report_binding(self):
+        record = _wire_v1_record()
+        try:
+            result = env.validate_envelope_record(record)
+        except env.EnvelopeError as exc:
+            self.fail("valid explicit v1 refused by actual stored validator: " + str(exc))
+        self.assertEqual(result, record)
+        effective = _project_v1()
+        projected = copy.deepcopy(record); projected["effective"] = effective
+        env.require_envelope_matches_request(effective, projected["requested"], schema=env.ENVELOPE_SCHEMA_V1)
+        bound = env.bind_report(projected, REPORT_SHA256)
+        self.assertEqual(bound["effective"], effective)
+        self.assertEqual(env.validate_envelope_record(bound), bound)
+        import envelope_collection as collection
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = collection.Ledger(); ordinal = ledger.register(); ledger.recorded(ordinal, bound)
+            dest = Path(raw) / "collection"
+            collection.write_collection(ledger, dest, report_sha256=REPORT_SHA256)
+            collection.load_collection(dest)
+            stored = json.loads(next(dest.glob("member-*.json")).read_bytes())
+            self.assertEqual(stored, bound)
+
+
+    def test_direct_v1_negative_cpu_and_blank_daemon_refuse_at_shared_boundary(self):
+        for field, value in (("cpu_quota", -1), ("cpu_period", True),
+                             ("ulimit_nofile", {"soft": 5, "hard": 2})):
+            record = _wire_v1_record(); record["effective"][field] = value
+            with self.subTest(field=field), self.assertRaises(env.EnvelopeError):
+                env.validate_envelope_record(record)
+        record = _wire_v1_record(); record["effective"]["daemon"]["kernel_version"] = " "
+        with self.assertRaisesRegex(env.EnvelopeError, "daemon.kernel_version"):
+            env.bind_report(record, REPORT_SHA256)
+
+    def test_v1_observation_shape_matrix(self):
+        EnvelopeV1Observation().test_malformed_nested_observations_are_named_refusals()
+        record = _wire_v1_record()
+        for field, value in (("cpu_period", -1), ("cpu_quota", False),
+                             ("ulimit_nofile", {}), ("ulimit_nofile", {"soft": 0, "hard": True})):
+            bad = copy.deepcopy(record); bad["effective"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(env.EnvelopeError):
+                env.bind_report(bad, REPORT_SHA256)
+        for field, value in (("security_options", [None]), ("security_options", ["z", "a"]),
+                             ("cgroup_version", ""), ("cgroup_driver", 2)):
+            bad = copy.deepcopy(record); bad["effective"]["daemon"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(env.EnvelopeError):
+                env.validate_envelope_record(bad)
+
+    def test_v1_malformed_stored_subtree_is_not_reconstruction_success(self):
+        for value in (None, {}, {"kernel_version": "x"}):
+            record = _wire_v1_record(); record["effective"]["daemon"] = value
+            with self.assertRaises(env.EnvelopeError):
+                env.validate_envelope_record(record)
+
+    def test_unknown_or_shape_mismatched_schema_is_refused(self):
+        for schema in ("unknown", env.ENVELOPE_SCHEMA):
+            record = _wire_v1_record(); record["schema"] = schema
+            with self.assertRaises(env.EnvelopeError):
+                env.validate_envelope_record(record)
+        record = _verified_record(); record["schema"] = env.ENVELOPE_SCHEMA_V1
+        with self.assertRaisesRegex(env.EnvelopeError, "envelope_schema_shape"):
+            env.validate_envelope_record(record)
+
+    def test_v0_canonical_bytes_and_keysets_are_unchanged(self):
+        record = _verified_record()
+        encoded = env.encode_envelope(record)
+        import hashlib
+        # Historical v0 source at 540e9ea; full canonical bytes retained with writer evidence.
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(),
+                         "f1d985dba1183bfc7848e0db521afb6696b8992fb6c565bb9547f988adb0bc8d")
+        self.assertEqual(encoded, (json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode())
+        self.assertEqual(len(record), 14)
+        self.assertEqual(len(record["effective"]), 19)
+        self.assertEqual(env.encode_envelope(env.validate_envelope_record(record)), encoded)
+
+
+def _v1_inputs():
+    doc = _inspect()
+    doc["HostConfig"].update(CpuPeriod=100000, CpuQuota=250000,
+        Ulimits=[{"Name": "nofile", "Soft": 512, "Hard": 2048}])
+    daemon = {"KernelVersion": "synthetic-kernel", "CgroupVersion": "2",
+              "CgroupDriver": "systemd", "SecurityOptions": ["z", "a", "a"]}
+    return doc, daemon
+
+
+def _project_v1(doc=None, daemon=None):
+    default_doc, default_daemon = _v1_inputs()
+    return env.project_effective_envelope_v1(
+        default_doc if doc is None else doc, image_env_names=IMAGE_ENV_NAMES,
+        runtime_version=RUNTIME_VERSION,
+        daemon_info=default_daemon if daemon is None else daemon)
+
+
+class EnvelopeV1Observation(unittest.TestCase):
+    def test_explicit_v1_projects_daemon_and_inspect_observations(self):
+        value = _project_v1()
+        self.assertEqual(set(value), set(env.EFFECTIVE_KEYS_V1))
+        self.assertEqual(value["daemon"]["security_options"], ["a", "a", "z"])
+        self.assertEqual(value["daemon"]["kernel_version"], "synthetic-kernel")
+
+    def test_alternate_cpu_and_nofile_values_are_not_defaults(self):
+        value = _project_v1()
+        self.assertEqual((value["cpu_period"], value["cpu_quota"]), (100000, 250000))
+        self.assertEqual(value["ulimit_nofile"], {"soft": 512, "hard": 2048})
+
+    def test_missing_daemon_fields_is_named_unverified(self):
+        doc, daemon = _v1_inputs()
+        for key in daemon:
+            bad = dict(daemon); del bad[key]
+            with self.subTest(key=key), self.assertRaisesRegex(env.EnvelopeError, "daemon." + key):
+                _project_v1(doc, bad)
+
+    def test_builder_unverified_state_requires_named_field_and_null_effective(self):
+        good = _wire_v1_record()
+        good.update(envelope_status="unverified", unverified_field="daemon.KernelVersion",
+                    effective=None, publication_permission="withheld", withheld_reason="envelope_status")
+        self.assertEqual(env.validate_envelope_record(good), good)
+        good["effective"] = _project_v1()
+        with self.assertRaisesRegex(env.EnvelopeError, "effective"):
+            env.validate_envelope_record(good)
+
+    def test_observed_unset_is_not_missing_or_applied(self):
+        for limits in (None, [], [{"Name": "other"}]):
+            doc, daemon = _v1_inputs(); doc["HostConfig"].update(CpuPeriod=0, CpuQuota=0, Ulimits=limits)
+            value = _project_v1(doc, daemon)
+            self.assertEqual((value["cpu_period"], value["cpu_quota"], value["ulimit_nofile"]), (0, 0, None))
+        del doc["HostConfig"]["Ulimits"]
+        with self.assertRaisesRegex(env.EnvelopeError, "HostConfig.Ulimits"):
+            _project_v1(doc, daemon)
+
+    def test_malformed_nested_observations_are_named_refusals(self):
+        doc, daemon = _v1_inputs(); valid = doc["HostConfig"]["Ulimits"][0]
+        for limits in ([None], [valid, None], [None, valid], [{"Name": 1}],
+                       [valid, valid], [{"Name": "nofile", "Soft": True, "Hard": 10}],
+                       [{"Name": "nofile", "Soft": 20, "Hard": 10}], {}, ""):
+            bad = copy.deepcopy(doc); bad["HostConfig"]["Ulimits"] = limits
+            with self.subTest(limits=limits), self.assertRaises(env.EnvelopeError):
+                _project_v1(bad, daemon)
+        for wire in ("CpuPeriod", "CpuQuota"):
+            for value in (None, True, -1, 1.5, "1"):
+                bad = copy.deepcopy(doc); bad["HostConfig"][wire] = value
+                with self.subTest(wire=wire, value=value), self.assertRaisesRegex(env.EnvelopeError, "HostConfig." + wire):
+                    _project_v1(bad, daemon)
+        for wire in ("KernelVersion", "CgroupVersion", "CgroupDriver"):
+            for value in (None, 2, "", " "):
+                bad = dict(daemon); bad[wire] = value
+                with self.subTest(wire=wire, value=value), self.assertRaisesRegex(env.EnvelopeError, "daemon." + wire):
+                    _project_v1(doc, bad)
+        for value in (False, {}, [None], [""]):
+            bad = dict(daemon); bad["SecurityOptions"] = value
+            with self.assertRaisesRegex(env.EnvelopeError, "daemon.SecurityOptions"):
+                _project_v1(doc, bad)
+
+
+class InactiveV1Emission(unittest.TestCase):
+    def test_existing_default_builder_and_report_binding_remain_v0(self):
+        from unittest.mock import patch
+        with patch.object(env, "project_effective_envelope_v1", side_effect=AssertionError("v1 activated")):
+            record = _verified_record()
+            self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v0")
+            self.assertEqual(env.bind_report(record, REPORT_SHA256)["schema"], record["schema"])
+            self.assertEqual(len(record["effective"]), 19)
+
+    def test_existing_candidate_funnel_emits_v0_without_v1_observer(self):
+        from unittest.mock import patch
+        with patch.object(env, "project_effective_envelope_v1", side_effect=AssertionError("v1 activated")):
+            suite = CandidatePathBindsTheEnvelope()
+            record = suite._run(ContainedLifecycleRecordsCleanup._Transport(
+                inspect_doc=_inspect())).envelope_record
+            self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v0")
+
+    def test_unavailable_existing_route_does_not_select_v1_or_local_fallback(self):
+        from unittest.mock import patch
+        with patch.object(env, "project_effective_envelope_v1", side_effect=AssertionError("v1 activated")):
+            CandidatePathBindsTheEnvelope().test_docker_unavailable_records_unavailable_and_not_run()
+
+
 if __name__ == "__main__":
     unittest.main()

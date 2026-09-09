@@ -19,6 +19,8 @@ import corpus_adequacy as ca
 import contained_oci as contained
 
 ENVELOPE_SCHEMA = "corpus-adequacy.execution-envelope.v0"
+ENVELOPE_SCHEMA_V1 = "corpus-adequacy.execution-envelope.v1"
+ENVELOPE_SCHEMAS = (ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_V1)
 CONTAINED_PROFILE = "contained-oci-v0"
 CONTAINED_USER = contained.CONTAINED_USER
 OFFLINE_ENV_NAME = "CARGO_NET_OFFLINE"
@@ -38,6 +40,7 @@ EFFECTIVE_KEYS = (
     "pid_mode", "pids_limit", "privileged", "read_only_root",
     "runtime_version", "tmpfs", "user", "userns_mode",
 )
+EFFECTIVE_KEYS_V1 = EFFECTIVE_KEYS + ("cpu_period", "cpu_quota", "daemon", "ulimit_nofile")
 REQUESTED_KEYS = (
     "execution_profile", "image_id", "mount_spec", "resource_profile", "sealed",
 )
@@ -202,6 +205,94 @@ def project_effective_envelope(inspect, *, image_env_names, runtime_version) -> 
     }
 
 
+def _effective_keys(schema):
+    if schema == ENVELOPE_SCHEMA:
+        return EFFECTIVE_KEYS
+    if schema == ENVELOPE_SCHEMA_V1:
+        return EFFECTIVE_KEYS_V1
+    raise EnvelopeError("envelope_schema_shape")
+
+
+def _v1_integer(value, where):
+    if type(value) is not int or value < 0:
+        raise EnvelopeError(where)
+    return value
+
+
+def _v1_identity(value, where):
+    if not isinstance(value, str) or not value.strip():
+        raise EnvelopeError(where)
+    return value
+
+
+def _v1_options(value, where):
+    if type(value) is not list or any(not isinstance(x, str) or not x for x in value):
+        raise EnvelopeError(where)
+    return sorted(value)
+
+
+def _require_v1_values(effective):
+    """Shared stored-value rules; projection cannot stand in for reader validation."""
+    for key in ("cpu_period", "cpu_quota"):
+        _v1_integer(effective[key], key)
+    daemon = effective["daemon"]
+    _require_exact(daemon, ("kernel_version", "cgroup_version", "cgroup_driver",
+                            "security_options"), "daemon")
+    for key in ("kernel_version", "cgroup_version", "cgroup_driver"):
+        _v1_identity(daemon[key], "daemon." + key)
+    options = daemon["security_options"]
+    if options != _v1_options(options, "daemon.security_options"):
+        raise EnvelopeError("daemon.security_options")
+    nofile = effective["ulimit_nofile"]
+    if nofile is not None:
+        _require_exact(nofile, ("soft", "hard"), "ulimit_nofile")
+        if (type(nofile["soft"]) is not int or type(nofile["hard"]) is not int or
+                not 0 <= nofile["soft"] <= nofile["hard"]):
+            raise EnvelopeError("ulimit_nofile")
+
+
+def project_effective_envelope_v1(inspect, *, image_env_names, runtime_version,
+                                  daemon_info):
+    """Explicit synthetic/observed-input route; existing emitters still use v0."""
+    effective = project_effective_envelope(
+        inspect, image_env_names=image_env_names, runtime_version=runtime_version)
+    for stored, wire in (("cpu_period", "CpuPeriod"), ("cpu_quota", "CpuQuota")):
+        effective[stored] = _v1_integer(
+            _observed(inspect, "HostConfig", wire), "HostConfig." + wire)
+    limits = _observed(inspect, "HostConfig", "Ulimits")
+    nofile = None
+    if limits is not None:
+        if type(limits) is not list:
+            raise EnvelopeError("HostConfig.Ulimits")
+        for item in limits:
+            if type(item) is not dict or "Name" not in item or not isinstance(item["Name"], str):
+                raise EnvelopeError("HostConfig.Ulimits")
+            if item["Name"] != "nofile":
+                continue
+            if nofile is not None or "Soft" not in item or "Hard" not in item:
+                raise EnvelopeError("HostConfig.Ulimits")
+            nofile = {"soft": item["Soft"], "hard": item["Hard"]}
+    effective["ulimit_nofile"] = nofile
+    if type(daemon_info) is not dict:
+        raise EnvelopeError("daemon")
+    daemon = {}
+    for stored, wire in (("kernel_version", "KernelVersion"),
+                         ("cgroup_version", "CgroupVersion"),
+                         ("cgroup_driver", "CgroupDriver")):
+        if wire not in daemon_info:
+            raise EnvelopeError("daemon." + wire)
+        daemon[stored] = _v1_identity(daemon_info[wire], "daemon." + wire)
+    if "SecurityOptions" not in daemon_info:
+        raise EnvelopeError("daemon.SecurityOptions")
+    options = daemon_info["SecurityOptions"]
+    if options is None:
+        options = []
+    daemon["security_options"] = _v1_options(options, "daemon.SecurityOptions")
+    effective["daemon"] = daemon
+    _require_v1_values(effective)
+    return effective
+
+
 def requested_envelope(*, execution_profile, image_id, mount_spec,
                        resource_profile, sealed) -> dict:
     """The declaration side. These values are compared, never projected.
@@ -262,14 +353,17 @@ def require_requested_record(requested) -> dict:
     return requested
 
 
-def require_envelope_matches_request(effective, requested) -> None:
+def require_envelope_matches_request(effective, requested, *, schema=ENVELOPE_SCHEMA) -> None:
     """Hold one observation against one declaration. Observation cannot yield.
 
-    Every projected key is compared here, so a field cannot be recorded
-    without being checked and cannot be checked without being recorded.
+    The v0 fields retain their declaration comparisons. V1 CPU/nofile and
+    daemon fields are observations with shape checks, not requested limits.
     """
     require_requested_record(requested)
-    _require_exact(effective, EFFECTIVE_KEYS, "effective")
+    _require_exact(effective, _effective_keys(schema),
+                       "effective" if schema == ENVELOPE_SCHEMA else "envelope_schema_shape")
+    if schema == ENVELOPE_SCHEMA_V1:
+        _require_v1_values(effective)
     profile = requested["resource_profile"]
 
     if effective["image"] != requested["image_id"]:
@@ -396,13 +490,14 @@ def publication_permission(*, setup_status, envelope_status, candidate_outcome,
 def build_envelope_record(*, requested, setup_status, envelope_status,
                           unverified_field, effective, candidate_outcome,
                           cleanup, prepare_sha256, execution_commit,
-                          report_sha256) -> dict:
+                          report_sha256, schema=ENVELOPE_SCHEMA) -> dict:
     """Close the state model over one contained run.
 
     Setup, candidate and cleanup failures are preserved rather than folded
     together, and no combination manufactures a score. There is deliberately
     no `publication_permission` parameter: it cannot be caller-supplied.
     """
+    _effective_keys(schema)
     require_requested_record(requested)
     setup_status = _require_member(setup_status, SETUP_STATUSES, "setup_status")
     envelope_status = _require_member(
@@ -422,8 +517,9 @@ def build_envelope_record(*, requested, setup_status, envelope_status,
     if envelope_status == "verified":
         if unverified_field is not None:
             raise EnvelopeError("unverified_field")
-        _require_exact(effective, EFFECTIVE_KEYS, "effective")
-        require_envelope_matches_request(effective, requested)
+        _require_exact(effective, _effective_keys(schema),
+                       "effective" if schema == ENVELOPE_SCHEMA else "envelope_schema_shape")
+        require_envelope_matches_request(effective, requested, schema=schema)
     else:
         if not isinstance(unverified_field, str) or not unverified_field:
             raise EnvelopeError("unverified_field")
@@ -449,7 +545,7 @@ def build_envelope_record(*, requested, setup_status, envelope_status,
             None if report_sha256 is None
             else _require_hex(report_sha256, 64, "report_sha256")),
         "requested": dict(requested),
-        "schema": ENVELOPE_SCHEMA,
+        "schema": schema,
         "setup_status": setup_status,
         "unverified_field": unverified_field,
         "withheld_reason": reason,
@@ -461,7 +557,9 @@ def build_envelope_record(*, requested, setup_status, envelope_status,
 def bind_report(record: dict, report_sha256) -> dict:
     """Attach the produced report digest. Envelope to report, never back."""
     _require_exact(record, ENVELOPE_KEYS, "envelope")
+    _effective_keys(record["schema"])
     return build_envelope_record(
+        schema=record["schema"],
         requested=record["requested"],
         setup_status=record["setup_status"],
         envelope_status=record["envelope_status"],
@@ -490,6 +588,7 @@ def validate_envelope_record(record: dict) -> dict:
     if type(record) is not dict:
         raise EnvelopeError("envelope")
     _require_exact(record, ENVELOPE_KEYS, "envelope")
+    _effective_keys(record["schema"])
     rebuilt = bind_report(record, record["report_sha256"])
     if rebuilt != record:
         raise EnvelopeError("envelope_semantic_mismatch")
