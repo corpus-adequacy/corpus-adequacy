@@ -533,6 +533,17 @@ def _runner_specific_report_key(runner):
     return None
 
 
+def _scored_denominator(killed: int, survived: int, silent: int) -> int:
+    """The one denominator a score is a fraction of: killed, survived and silent.
+
+    `silent` sits beside `survived` and never in the numerator. Equivalent,
+    out-of-scope, unproved, acknowledged holes and controls stay outside it.
+    Every place that divides by the denominator or prints it calls this, so a
+    printed fraction cannot disagree with the percentage printed beside it.
+    """
+    return killed + survived + silent
+
+
 def _report_v0_document(manifest_path: Path, m: dict, *,
                         killed: int, survived: int, silent: int, equivalent: int,
                         out_of_scope: int, unproved: int, known_holes: int,
@@ -545,7 +556,7 @@ def _report_v0_document(manifest_path: Path, m: dict, *,
     when the caller supplies nothing). Module never emits it.
     Identity keys are present so `_with_tool_identity` only overwrites values.
     """
-    denom = killed + survived + silent
+    denom = _scored_denominator(killed, survived, silent)
     report = {
         "schema": REPORT_SCHEMA,
         "manifest": str(manifest_path),
@@ -1954,7 +1965,7 @@ def _finalize_process_tally(tally: dict, m: dict, acknowledged: dict,
     # implementer can delete while reproducing every pinned outcome, whatever the
     # diagnostics did; counting it killed would inflate the score by exactly the
     # rules the corpus fails to force.
-    denom = killed + survived + silent
+    denom = _scored_denominator(killed, survived, silent)
     # No denominator means no measurement. Printing 100% over zero is the same
     # defect as excluding everything and printing 100%. An unmutated or control
     # abnormality fail-closes the run: there is no adequacy score.
@@ -2643,7 +2654,7 @@ def run(manifest_path: Path, *, execution_profile) -> dict:
         failures.append("known_holes acknowledge rules that are no longer holes: %s. Remove "
                         "them; an acknowledgement pointing at nothing hides the next regression"
                         % sorted("%s (now %s)" % kv for kv in linger.items()))
-    denom = killed + survived + silent
+    denom = _scored_denominator(killed, survived, silent)
     score = _score_or_none(None if denom == 0 else round(100.0 * killed / denom, 1),
                            results, failures)
     if unproved:
@@ -2834,7 +2845,8 @@ def main() -> int:
                else "%.1f%%" % rep["score_percent"])
         print("%d of %d DECLARED in-scope rules killed (%s). %d declared equivalent, "
               "%d declared out of scope, %d unproved. %d rules declared in total."
-              % (rep["killed"], rep["killed"] + rep["survived"], pct,
+              % (rep["killed"],
+                 _scored_denominator(rep["killed"], rep["survived"], rep["silent"]), pct,
                  rep["equivalent"], rep["unexercised_out_of_scope"], rep["unproved"],
                  rep["declared_total"]))
         if rep["score_percent"] is not None:

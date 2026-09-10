@@ -1857,7 +1857,7 @@ class ChildExitRunSemantics(unittest.TestCase):
     def _text_report(self, **fields):
         rep = {
             "schema": "corpus-adequacy.report.v0", "manifest": "m.json",
-            "killed": 1, "survived": 0, "equivalent": 0,
+            "killed": 1, "survived": 0, "silent": 0, "equivalent": 0,
             "known_holes": 0, "unexercised_out_of_scope": 0, "unproved": 0,
             "declared_total": 1, "out_of_scope_ratio": 0.0, "hole_ratio": 0.0,
             "score_percent": 100.0, "score_means": "author-declared",
@@ -2338,6 +2338,24 @@ class SilentClass(unittest.TestCase):
         self.assertEqual(r["score_percent"], 0.0)
         self.assertFalse(r["adequate"])
         self.assertTrue(any("silent" in f for f in r["failures"]))
+
+    @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+    def test_cli_summary_fraction_uses_the_scored_denominator(self):
+        # The summary line printed killed + survived as its denominator while
+        # score_percent divides by killed + survived + silent, so on a run with a
+        # silent mutant the printed fraction and the printed percentage disagreed.
+        with tempfile.TemporaryDirectory() as d:
+            manifest = _silent_manifest(Path(d), {"diagnostic_from": ["reason"]})
+            stdout = io.StringIO()
+            with (mock.patch.object(sys, "argv", ["corpus_adequacy.py", str(manifest)]),
+                  mock.patch.object(sys, "stdout", stdout)):
+                rc = ca.main()
+        self.assertEqual(rc, 1)
+        summary = [line for line in stdout.getvalue().splitlines()
+                   if "DECLARED in-scope rules killed" in line]
+        self.assertEqual(len(summary), 1, stdout.getvalue())
+        self.assertTrue(summary[0].startswith("0 of 1 DECLARED in-scope rules killed (0.0%)."),
+                        summary[0])
 
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_without_the_channel_the_same_mutant_reads_as_survived(self):
@@ -5039,7 +5057,10 @@ class SharedMutationStep(unittest.TestCase):
         self.assertNotIn("score_percent", backend_src)
         self.assertNotIn("denom =", backend_src)
         closer = inspect.getsource(ca._finalize_process_tally)
-        self.assertIn("killed + survived + silent", closer)
+        # The denominator rule lives in one function, so the closer, the report
+        # builder, the module runner and the CLI summary cannot disagree about it.
+        self.assertIn("_scored_denominator(killed, survived, silent)", closer)
+        self.assertEqual(ca._scored_denominator(killed=2, survived=3, silent=5), 10)
         self.assertNotIn("_report_v0", closer)
         tree = ast.parse(Path(ca.__file__).read_text(encoding="utf-8"))
         names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
