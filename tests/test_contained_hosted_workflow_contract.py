@@ -19,6 +19,39 @@ sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
 import envelope_collection as collection  # noqa: E402
 import contained_hosted_publication as hosted  # noqa: E402
+import contained_oci as contained  # noqa: E402
+import hosted_packet  # noqa: E402
+import aee_checker_sealed_execute as sealed_execute  # noqa: E402
+from aee_checker_sealed_common import MATERIALIZE_CEILINGS, load_strict  # noqa: E402
+
+PREPARE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "contained-hosted-prepare.yml"
+HOSTED_INPUTS = (
+    "candidate_revision", "runner_revision", "image_digest",
+    "packet_release_tag", "packet_manifest_sha256",
+)
+RETIRED_INPUTS = ("packet_root", "authorize_path", "prepare_path", "pins_dir")
+PINS = REPO_ROOT / "measurements" / "aee-checker-25b9dfa"
+
+
+def candidate_invocations() -> int:
+    """Baseline plus every step of the authorized mutation order, from the pinned inputs.
+
+    Derived from the same functions the execution funnel calls, not restated, so a change to
+    the pinned sequence moves the required timeout with it.
+    """
+    sites = sealed_execute.load_frozen_sites(PINS)
+    control = load_strict((PINS / "control.json").read_bytes())
+    manifest = json.loads((PINS / "manifest.json").read_text(encoding="utf-8"))
+    order = sealed_execute.bind_authorized_mutation_order(
+        manifest=manifest, sites=sites, control=control,
+        steps=sealed_execute.required_sequence(sites))
+    return 1 + len(order)
+
+
+def worst_case_seconds() -> int:
+    """The materialize deadline plus one candidate deadline per invocation."""
+    return (MATERIALIZE_CEILINGS["deadline_seconds"]
+            + candidate_invocations() * contained.CANDIDATE_RESOURCE_PROFILE["deadline_seconds"])
 
 # Reuse the pinned record builder rather than restating it: a second fixture would be a second
 # definition of what a valid envelope is, and the two would drift.
@@ -28,146 +61,105 @@ from tests.test_envelope_collection import _valid_record as _inert_record  # noq
 def collection_dirname():
     return hosted.COLLECTION_DIRNAME
 
-ALLOWED_HOSTED_WORKFLOW = {'name': 'contained-hosted-publication',
- 'on': {'workflow_dispatch': {'inputs': {'candidate_revision': {'description': 'Immutable '
-                                                                               'candidate '
-                                                                               'revision '
-                                                                               '(40-hex)',
-                                                                'required': True,
-                                                                'type': 'string'},
-                                         'runner_revision': {'description': 'Generic '
-                                                                            'runner '
-                                                                            'revision '
-                                                                            '(40-hex)',
-                                                             'required': True,
-                                                             'type': 'string'},
-                                         'image_digest': {'description': 'Candidate/toolchain '
-                                                                         'image digest '
-                                                                         'B '
-                                                                         '(sha256:64hex)',
-                                                          'required': True,
-                                                          'type': 'string'},
-                                         'packet_root': {'description': 'Declared '
-                                                                        'packet root '
-                                                                        '(relative) '
-                                                                        'holding '
-                                                                        'authorize/prepare/pins/bindings',
-                                                         'required': True,
-                                                         'type': 'string'},
-                                         'authorize_path': {'description': 'Path to '
-                                                                           'authorize.v0 '
-                                                                           'bytes '
-                                                                           'relative '
-                                                                           'to packet '
-                                                                           'root',
-                                                            'required': True,
-                                                            'type': 'string'},
-                                         'prepare_path': {'description': 'Path to '
-                                                                         'prepare.v1 '
-                                                                         'bytes '
-                                                                         'relative to '
-                                                                         'packet root',
-                                                          'required': True,
-                                                          'type': 'string'},
-                                         'pins_dir': {'description': 'Path to frozen '
-                                                                     'pins directory '
-                                                                     'relative to '
-                                                                     'packet root',
-                                                      'required': True,
-                                                      'type': 'string'}}}},
- 'permissions': {'contents': 'read'},
- 'concurrency': {'group': 'contained-hosted-publication', 'cancel-in-progress': False},
- 'env': {'PYTHON_VERSION': '3.13',
-         'OPERATOR_EXECUTION_PROFILE': 'contained-oci-v0',
-         'MAX_ARTIFACT_BYTES': '5242880',
-         'ARTIFACT_RETENTION_DAYS': '14'},
- 'jobs': {'hosted-contained': {'runs-on': 'ubuntu-latest',
-                               'timeout-minutes': 15,
-                               'steps': [{'name': 'Checkout',
-                                          'uses': 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
-                                          'with': {'persist-credentials': False,
-                                                   'fetch-depth': 0,
-                                                   'ref': '${{ inputs.runner_revision '
-                                                          '}}'}},
-                                         {'name': 'Set up Python',
-                                          'uses': 'actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97',
-                                          'with': {'python-version': '${{ '
-                                                                     'env.PYTHON_VERSION '
-                                                                     '}}'}},
-                                         {'name': 'Gate hosted publication',
-                                          'id': 'gate',
-                                          'shell': 'bash',
-                                          'env': {'CANDIDATE_REVISION': '${{ '
-                                                                        'inputs.candidate_revision '
-                                                                        '}}',
-                                                  'RUNNER_REVISION': '${{ '
-                                                                     'inputs.runner_revision '
-                                                                     '}}',
-                                                  'IMAGE_DIGEST': '${{ '
-                                                                  'inputs.image_digest '
-                                                                  '}}',
-                                                  'PACKET_ROOT': '${{ '
-                                                                 'inputs.packet_root '
-                                                                 '}}',
-                                                  'AUTHORIZE_PATH': '${{ '
-                                                                    'inputs.authorize_path '
-                                                                    '}}',
-                                                  'PREPARE_PATH': '${{ '
-                                                                  'inputs.prepare_path '
-                                                                  '}}',
-                                                  'PINS_DIR': '${{ inputs.pins_dir }}',
-                                                  'GITHUB_RUN_ID': '${{ github.run_id '
-                                                                   '}}',
-                                                  'GITHUB_RUN_ATTEMPT': '${{ '
-                                                                        'github.run_attempt '
-                                                                        '}}'},
-                                          'run': 'python '
-                                                 'measurements/contained_hosted_publication.py '
-                                                 'gate --candidate-revision '
-                                                 '"$CANDIDATE_REVISION" '
-                                                 '--runner-revision "$RUNNER_REVISION" '
-                                                 '--image-digest "$IMAGE_DIGEST" '
-                                                 '--operator-profile '
-                                                 '"$OPERATOR_EXECUTION_PROFILE" '
-                                                 '--max-artifact-bytes '
-                                                 '"$MAX_ARTIFACT_BYTES" --out '
-                                                 'artifacts --workspace-root '
-                                                 '"$GITHUB_WORKSPACE" --packet-root '
-                                                 '"$PACKET_ROOT" --authorize '
-                                                 '"$AUTHORIZE_PATH" --prepare '
-                                                 '"$PREPARE_PATH" --pins-dir '
-                                                 '"$PINS_DIR" --rerun-log '
-                                                 'artifacts/rerun-evidence.jsonl'},
-                                         {'name': 'Upload setup',
-                                          'if': 'always() && !cancelled()',
-                                          'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
-                                          'with': {'name': 'setup',
-                                                   'path': 'artifacts/setup-status.json',
-                                                   'retention-days': 14,
-                                                   'if-no-files-found': 'error'}},
-                                         {'name': 'Upload effective-envelope',
-                                          'if': "steps.gate.outcome == 'success' && !cancelled()",
-                                          'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
-                                          'with': {'name': 'effective-envelope',
-                                                   'path': 'artifacts/effective-envelope-collection.v0/',
-                                                   'retention-days': 14,
-                                                   'if-no-files-found': 'error'}},
-                                         {'name': 'Upload candidate-result',
-                                          'if': 'always() && !cancelled()',
-                                          'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
-                                          'with': {'name': 'candidate-result',
-                                                   'path': 'artifacts/candidate-result.json',
-                                                   'retention-days': 14,
-                                                   'if-no-files-found': 'error'}},
-                                         {'name': 'Upload rerun-evidence',
-                                          'if': 'always() && !cancelled()',
-                                          'uses': 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
-                                          'with': {'name': 'rerun-evidence-${{ '
-                                                           'github.run_id }}-${{ '
-                                                           'github.run_attempt }}',
-                                                   'path': 'artifacts/rerun-evidence.jsonl',
-                                                   'retention-days': 14,
-                                                   'if-no-files-found': 'error'}}]}}}
+UPLOAD_ACTION = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+SETUP_PYTHON_ACTION = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
+PINNED_RUNS_ON = "ubuntu-24.04"
+
+FETCH_RUN = (
+    'python measurements/hosted_packet.py fetch --repository "$GITHUB_REPOSITORY" '
+    '--tag "$PACKET_RELEASE_TAG" --manifest-sha256 "$PACKET_MANIFEST_SHA256" '
+    '--workspace-root "$GITHUB_WORKSPACE" --dest hosted-packet'
+)
+GATE_RUN = (
+    'python measurements/contained_hosted_publication.py gate '
+    '--candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" '
+    '--image-digest "$IMAGE_DIGEST" --packet-manifest-sha256 "$PACKET_MANIFEST_SHA256" '
+    '--operator-profile "$OPERATOR_EXECUTION_PROFILE" '
+    '--max-artifact-bytes "$MAX_ARTIFACT_BYTES" --out artifacts '
+    '--workspace-root "$GITHUB_WORKSPACE" --packet-root hosted-packet '
+    '--authorize authorize.v0.json --prepare prepare.v1.json --pins-dir pins '
+    '--rerun-log artifacts/rerun-evidence.jsonl'
+)
+
+
+def _input(description):
+    return {"description": description, "required": True, "type": "string"}
+
+
+ALLOWED_HOSTED_WORKFLOW = {
+    'name': 'contained-hosted-publication',
+    'on': {'workflow_dispatch': {'inputs': {
+        'candidate_revision': _input('Immutable candidate revision (40-hex)'),
+        'runner_revision': _input('Generic runner revision (40-hex)'),
+        'image_digest': _input('Candidate/toolchain image digest B (sha256:64hex)'),
+        'packet_release_tag': _input(
+            'Release tag whose assets carry the owner-authorized packet'),
+        'packet_manifest_sha256': _input(
+            'SHA-256 of the packet manifest release asset (64-hex)'),
+    }}},
+    'permissions': {'contents': 'read'},
+    'concurrency': {'group': 'contained-hosted-publication', 'cancel-in-progress': False},
+    'env': {'PYTHON_VERSION': '3.13',
+            'OPERATOR_EXECUTION_PROFILE': 'contained-oci-v0',
+            'MAX_ARTIFACT_BYTES': '5242880',
+            'ARTIFACT_RETENTION_DAYS': '14'},
+    'jobs': {'hosted-contained': {
+        'runs-on': PINNED_RUNS_ON,
+        'timeout-minutes': 30,
+        'steps': [
+            {'name': 'Checkout',
+             'uses': CHECKOUT_ACTION,
+             'with': {'persist-credentials': False,
+                      'fetch-depth': 0,
+                      'ref': '${{ inputs.runner_revision }}'}},
+            {'name': 'Set up Python',
+             'uses': SETUP_PYTHON_ACTION,
+             'with': {'python-version': '${{ env.PYTHON_VERSION }}'}},
+            {'name': 'Fetch hosted packet',
+             'shell': 'bash',
+             'env': {'PACKET_RELEASE_TAG': '${{ inputs.packet_release_tag }}',
+                     'PACKET_MANIFEST_SHA256': '${{ inputs.packet_manifest_sha256 }}'},
+             'run': FETCH_RUN},
+            {'name': 'Gate hosted publication',
+             'id': 'gate',
+             'shell': 'bash',
+             'env': {'CANDIDATE_REVISION': '${{ inputs.candidate_revision }}',
+                     'RUNNER_REVISION': '${{ inputs.runner_revision }}',
+                     'IMAGE_DIGEST': '${{ inputs.image_digest }}',
+                     'PACKET_MANIFEST_SHA256': '${{ inputs.packet_manifest_sha256 }}',
+                     'GITHUB_RUN_ID': '${{ github.run_id }}',
+                     'GITHUB_RUN_ATTEMPT': '${{ github.run_attempt }}'},
+             'run': GATE_RUN},
+            {'name': 'Upload setup',
+             'if': 'always() && !cancelled()',
+             'uses': UPLOAD_ACTION,
+             'with': {'name': 'setup',
+                      'path': 'artifacts/setup-status.json',
+                      'retention-days': 14,
+                      'if-no-files-found': 'error'}},
+            {'name': 'Upload effective-envelope',
+             'if': "steps.gate.outcome == 'success' && !cancelled()",
+             'uses': UPLOAD_ACTION,
+             'with': {'name': 'effective-envelope',
+                      'path': 'artifacts/effective-envelope-collection.v0/',
+                      'retention-days': 14,
+                      'if-no-files-found': 'error'}},
+            {'name': 'Upload candidate-result',
+             'if': 'always() && !cancelled()',
+             'uses': UPLOAD_ACTION,
+             'with': {'name': 'candidate-result',
+                      'path': 'artifacts/candidate-result.json',
+                      'retention-days': 14,
+                      'if-no-files-found': 'error'}},
+            {'name': 'Upload rerun-evidence',
+             'if': 'always() && !cancelled()',
+             'uses': UPLOAD_ACTION,
+             'with': {'name': 'rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}',
+                      'path': 'artifacts/rerun-evidence.jsonl',
+                      'retention-days': 14,
+                      'if-no-files-found': 'error'}},
+        ]}}}
 
 def _strip_comment(line: str) -> str:
     in_single = in_double = escaped = False
@@ -283,17 +275,27 @@ def hosted_shape_violations(tree) -> list[str]:
         bad.append("HOSTED_FORWARDED_ENV_NAMES must not be runtime evidence")
     on = tree.get("on") or {}
     inputs = ((on.get("workflow_dispatch") or {}).get("inputs") or {})
-    for key in (
-        "candidate_revision", "runner_revision", "image_digest", "packet_root",
-        "authorize_path", "prepare_path", "pins_dir",
-    ):
+    for key in HOSTED_INPUTS:
         if key not in inputs:
             bad.append("missing binding input %s" % key)
+    for key in RETIRED_INPUTS:
+        # The packet location is fixed by the fetch step now; an operator-chosen root or path
+        # would reopen the choice of which bytes the gate reads.
+        if key in inputs:
+            bad.append("retired packet-location input %s must not return" % key)
     jobs = tree.get("jobs") or {}
     job = jobs.get("hosted-contained") or {}
-    if job.get("runs-on") != "ubuntu-latest":
-        bad.append("runs-on must be ubuntu-latest (no self-hosted/local)")
+    if job.get("runs-on") != PINNED_RUNS_ON:
+        bad.append("runs-on must be %s (pinned; no ubuntu-latest, self-hosted or local)"
+                   % PINNED_RUNS_ON)
+    timeout = job.get("timeout-minutes")
+    if type(timeout) is not int or timeout * 60 < worst_case_seconds():
+        bad.append("timeout-minutes must cover the worst case of %d s" % worst_case_seconds())
     steps = job.get("steps") or []
+    names = [step.get("name") for step in steps if isinstance(step, dict)]
+    if ("Fetch hosted packet" not in names or "Gate hosted publication" not in names
+            or names.index("Fetch hosted packet") > names.index("Gate hosted publication")):
+        bad.append("the packet fetch step must run before the gate")
     upload_names = []
     saw_write_facts = False
     for step in steps:
@@ -333,6 +335,11 @@ def hosted_shape_violations(tree) -> list[str]:
         if isinstance(run, str):
             if "${{ inputs." in run:
                 bad.append("workflow inputs must not appear in run: (shell breakout)")
+            if step.get("name") == "Fetch hosted packet":
+                if run != FETCH_RUN:
+                    bad.append("fetch run must fetch into the fixed fresh directory")
+                if "--dest %s" % hosted_packet.PACKET_DIRNAME not in run:
+                    bad.append("fetch destination must be %s" % hosted_packet.PACKET_DIRNAME)
             if step.get("name") == "Gate hosted publication":
                 if step.get("continue-on-error") is True:
                     bad.append("gate continue-on-error would turn refusal green")
@@ -342,19 +349,26 @@ def hosted_shape_violations(tree) -> list[str]:
                     bad.append("write-workflow-facts must not be runtime evidence path")
                 for binding in (
                     "$CANDIDATE_REVISION", "$RUNNER_REVISION", "$IMAGE_DIGEST",
-                    "$PACKET_ROOT", "$AUTHORIZE_PATH", "$PREPARE_PATH", "$PINS_DIR",
-                    "--packet-root",
+                    "--packet-manifest-sha256 \"$PACKET_MANIFEST_SHA256\"",
+                    "--packet-root %s" % hosted_packet.PACKET_DIRNAME,
+                    "--authorize %s" % hosted_packet.AUTHORIZE_FILENAME,
+                    "--prepare %s" % hosted_packet.PREPARE_FILENAME,
+                    "--pins-dir %s" % hosted_packet.PINS_DIRNAME,
                 ):
                     if binding not in run:
                         bad.append("gate run missing %s" % binding)
                 env_step = step.get("env") or {}
                 for key in (
                     "CANDIDATE_REVISION", "RUNNER_REVISION", "IMAGE_DIGEST",
-                    "PACKET_ROOT", "AUTHORIZE_PATH", "PREPARE_PATH", "PINS_DIR",
-                    "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
+                    "PACKET_MANIFEST_SHA256", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
                 ):
                     if key not in env_step:
                         bad.append("gate env missing %s" % key)
+                for key in ("GITHUB_SHA", "GITHUB_WORKFLOW_SHA"):
+                    # The gate reads these from the runner's own default environment; a step
+                    # value would let the workflow supply the identity it is checked against.
+                    if key in env_step:
+                        bad.append("gate env must not set %s" % key)
                 if "HOSTED_FORWARDED_ENV_NAMES" in env_step:
                     bad.append("HOSTED_FORWARDED_ENV_NAMES must not be runtime evidence")
                 if "RUNNER_ENVIRONMENT" in env_step:
@@ -401,7 +415,7 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
 
     def test_structural_pins_runs_on_and_persist_credentials(self):
         job = self.tree["jobs"]["hosted-contained"]
-        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["runs-on"], "ubuntu-24.04")
         checkout = job["steps"][0]
         self.assertIs(checkout["with"]["persist-credentials"], False)
 
@@ -416,7 +430,11 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         self.assertTrue(any("shell breakout" in h for h in hits), hits)
 
     def test_mutation_route_to_self_hosted_or_local_is_red(self):
-        hits = hosted_shape_violations(self._mutated("runs-on: ubuntu-latest", "runs-on: self-hosted"))
+        hits = hosted_shape_violations(self._mutated("runs-on: ubuntu-24.04", "runs-on: self-hosted"))
+        self.assertTrue(any("runs-on" in h for h in hits), hits)
+
+    def test_mutation_unpin_runs_on_to_ubuntu_latest_is_red(self):
+        hits = hosted_shape_violations(self._mutated("runs-on: ubuntu-24.04", "runs-on: ubuntu-latest"))
         self.assertTrue(any("runs-on" in h for h in hits), hits)
 
     def test_mutation_allow_trusted_local_profile_is_red(self):
@@ -511,7 +529,8 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
                 self.assertEqual(step.get("if"), "always() && !cancelled()")
                 diagnostics += 1
         self.assertEqual(diagnostics, 3, "setup, candidate and rerun must stay always-on")
-        gate = self.tree["jobs"]["hosted-contained"]["steps"][2]
+        gate = self.tree["jobs"]["hosted-contained"]["steps"][3]
+        self.assertEqual(gate.get("name"), "Gate hosted publication")
         self.assertNotEqual(gate.get("continue-on-error"), True)
 
     def test_mutation_drop_upload_always_is_red(self):
@@ -547,6 +566,78 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         hits = hosted_shape_violations(parse_workflow_yaml(poisoned))
         self.assertTrue(any("continue-on-error" in h or "diverges" in h for h in hits), hits)
 
+
+    def test_phase3_runs_on_is_pinned_and_timeout_covers_the_worst_case(self):
+        job = self.tree["jobs"]["hosted-contained"]
+        self.assertEqual(job["runs-on"], PINNED_RUNS_ON)
+        invocations = candidate_invocations()
+        worst = worst_case_seconds()
+        # The arithmetic the workflow comment states, recomputed from the pinned inputs.
+        self.assertEqual(invocations, 9)
+        self.assertEqual(MATERIALIZE_CEILINGS["deadline_seconds"], 300)
+        self.assertEqual(contained.CANDIDATE_RESOURCE_PROFILE["deadline_seconds"], 120)
+        self.assertEqual(worst, 1380)
+        self.assertGreaterEqual(job["timeout-minutes"] * 60, worst)
+        # The gate module's mirrors of these two facts must not go stale.
+        self.assertEqual(hosted.TIMEOUT_MINUTES, job["timeout-minutes"])
+        self.assertEqual(hosted.RUNS_ON, job["runs-on"])
+        for fragment in ("300 s", "9 x 120 s", "1380 s", "timeout-minutes: 30"):
+            self.assertIn(fragment, self.text)
+
+    def test_mutation_timeout_below_the_worst_case_is_red(self):
+        hits = hosted_shape_violations(self._mutated("timeout-minutes: 30", "timeout-minutes: 15"))
+        self.assertTrue(any("timeout-minutes" in h for h in hits), hits)
+
+    def test_fixed_packet_paths_are_the_packet_module_constants(self):
+        steps = {s["name"]: s for s in self.tree["jobs"]["hosted-contained"]["steps"]}
+        fetch = steps["Fetch hosted packet"]["run"]
+        gate = steps["Gate hosted publication"]["run"]
+        self.assertIn("--dest %s" % hosted_packet.PACKET_DIRNAME, fetch)
+        self.assertIn("--packet-root %s" % hosted_packet.PACKET_DIRNAME, gate)
+        self.assertIn("--authorize %s" % hosted_packet.AUTHORIZE_FILENAME, gate)
+        self.assertIn("--prepare %s" % hosted_packet.PREPARE_FILENAME, gate)
+        self.assertIn("--pins-dir %s" % hosted_packet.PINS_DIRNAME, gate)
+        self.assertEqual(hosted.DISPATCH_BINDINGS_FILENAME, hosted_packet.BINDINGS_FILENAME)
+        # The fixed directory must not exist in R's tree, or a fetched file could replace a
+        # tracked one.
+        self.assertFalse((REPO_ROOT / hosted_packet.PACKET_DIRNAME).exists())
+
+    def test_mutation_gate_before_fetch_is_red(self):
+        tree = parse_workflow_yaml(self.text)
+        steps = tree["jobs"]["hosted-contained"]["steps"]
+        steps[2], steps[3] = steps[3], steps[2]
+        hits = hosted_shape_violations(tree)
+        self.assertTrue(any("before the gate" in h for h in hits), hits)
+
+    def test_mutation_operator_chosen_packet_root_is_red(self):
+        hits = hosted_shape_violations(self._mutated(
+            "--packet-root hosted-packet", '--packet-root "$PACKET_ROOT"'))
+        self.assertTrue(any("--packet-root" in h for h in hits), hits)
+        block = (
+            "      packet_release_tag:\n"
+            "        description: Release tag whose assets carry the owner-authorized packet\n"
+            "        required: true\n"
+            "        type: string\n"
+        )
+        hits = hosted_shape_violations(self._mutated(
+            block, block + block.replace("packet_release_tag", "packet_root")))
+        self.assertTrue(any("retired" in h for h in hits), hits)
+
+    def test_mutation_drop_manifest_digest_from_gate_is_red(self):
+        hits = hosted_shape_violations(self._mutated(
+            ' --packet-manifest-sha256 "$PACKET_MANIFEST_SHA256"', ""))
+        self.assertTrue(any("packet-manifest-sha256" in h for h in hits), hits)
+
+    def test_mutation_step_supplied_workflow_sha_is_red(self):
+        poisoned = self.text.replace(
+            "          GITHUB_RUN_ID: ${{ github.run_id }}\n",
+            "          GITHUB_WORKFLOW_SHA: ${{ inputs.runner_revision }}\n"
+            "          GITHUB_RUN_ID: ${{ github.run_id }}\n",
+            1,
+        )
+        self.assertNotEqual(poisoned, self.text)
+        hits = hosted_shape_violations(parse_workflow_yaml(poisoned))
+        self.assertTrue(any("GITHUB_WORKFLOW_SHA" in h for h in hits), hits)
 
     def test_comment_only_noop_mutation_stays_green(self):
         mutated_text = "# noop comment\n" + self.text
@@ -714,3 +805,190 @@ class UploadSelectionRetainsEveryMember(unittest.TestCase):
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 hosted.load_envelope_collection(erased)
             self.assertEqual(str(ctx.exception), "envelope_collection_corrupt")
+
+
+PREPARE_RUN = (
+    "python measurements/aee_checker_sealed_run.py prepare-v1 "
+    "measurements/aee-checker-25b9dfa hosted-prepare"
+)
+RECORD_RUN = (
+    "python measurements/hosted_packet.py record-prepare "
+    "--prepare hosted-prepare/prepare.v1.json "
+    "--out hosted-prepare-record/hosted-prepare-record.v0.json"
+)
+
+ALLOWED_PREPARE_WORKFLOW = {
+    'name': 'contained-hosted-prepare',
+    'on': {'workflow_dispatch': None},
+    'permissions': {'contents': 'read'},
+    'concurrency': {'group': 'contained-hosted-prepare', 'cancel-in-progress': False},
+    'env': {'PYTHON_VERSION': '3.13', 'ARTIFACT_RETENTION_DAYS': '14'},
+    'jobs': {'hosted-prepare': {
+        'runs-on': PINNED_RUNS_ON,
+        'timeout-minutes': 30,
+        'steps': [
+            {'name': 'Checkout',
+             'uses': CHECKOUT_ACTION,
+             'with': {'persist-credentials': False}},
+            {'name': 'Set up Python',
+             'uses': SETUP_PYTHON_ACTION,
+             'with': {'python-version': '${{ env.PYTHON_VERSION }}'}},
+            {'name': 'Prepare', 'shell': 'bash', 'run': PREPARE_RUN},
+            {'name': 'Record prepare identity', 'shell': 'bash', 'run': RECORD_RUN},
+            {'name': 'Upload prepare',
+             'uses': UPLOAD_ACTION,
+             'with': {'name': 'hosted-prepare-v1-${{ github.run_id }}-${{ github.run_attempt }}',
+                      'path': 'hosted-prepare/prepare.v1.json',
+                      'retention-days': 14,
+                      'if-no-files-found': 'error'}},
+            {'name': 'Upload prepare record',
+             'uses': UPLOAD_ACTION,
+             'with': {'name': 'hosted-prepare-record-${{ github.run_id }}-${{ github.run_attempt }}',
+                      'path': 'hosted-prepare-record/hosted-prepare-record.v0.json',
+                      'retention-days': 14,
+                      'if-no-files-found': 'error'}},
+        ]}}}
+
+# Anything that would let the PREPARE phase reach candidate execution. PREPARE's own inert
+# probes run inside `prepare-v1`; no candidate container is created by that command.
+PREPARE_FORBIDDEN_RUN_TOKENS = (
+    "contained_hosted_publication", "aee_checker_sealed_driver", "aee_checker_sealed_execute",
+    "aee_checker_sealed_authorize", "aee_checker_sealed_candidate", "run_authorized",
+    " gate", "execute", "authorize", "docker ",
+)
+
+
+def prepare_shape_violations(tree) -> list[str]:
+    bad = []
+    if tree.get("permissions") != {"contents": "read"}:
+        bad.append("permissions must be exactly {contents: read}")
+    on = tree.get("on") or {}
+    if list(on) != ["workflow_dispatch"] or on.get("workflow_dispatch") is not None:
+        bad.append("PREPARE is a bare workflow_dispatch on the dispatched ref, with no inputs")
+    jobs = tree.get("jobs") or {}
+    if list(jobs) != ["hosted-prepare"]:
+        bad.append("PREPARE has exactly one job")
+    job = jobs.get("hosted-prepare") or {}
+    if job.get("runs-on") != PINNED_RUNS_ON:
+        bad.append("runs-on must be %s (pinned)" % PINNED_RUNS_ON)
+    upload_names = []
+    prepare_runs = []
+    for step in job.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        uses = str(step.get("uses") or "")
+        with_block = step.get("with") or {}
+        if uses.startswith("actions/checkout@"):
+            if with_block.get("persist-credentials") is not False:
+                bad.append("persist-credentials must be false")
+            if "ref" in with_block:
+                bad.append("PREPARE checks out the dispatched ref, not a chosen one")
+        if uses.startswith("actions/upload-artifact@"):
+            name = with_block.get("name")
+            upload_names.append(name)
+            if (not isinstance(name, str) or "github.run_id" not in name
+                    or "github.run_attempt" not in name):
+                bad.append("PREPARE artifacts must be attempt-scoped")
+            if with_block.get("retention-days") != 14:
+                bad.append("upload retention-days ceiling missing")
+            if with_block.get("if-no-files-found") != "error":
+                bad.append("upload if-no-files-found must be error")
+        run = step.get("run")
+        if isinstance(run, str):
+            if "${{" in run:
+                bad.append("expressions must not appear in run: (shell breakout)")
+            for token in PREPARE_FORBIDDEN_RUN_TOKENS:
+                if token in run:
+                    bad.append("PREPARE must not reach candidate execution (%r)" % token.strip())
+            if "aee_checker_sealed_run.py" in run:
+                prepare_runs.append(run)
+    if prepare_runs != [PREPARE_RUN]:
+        bad.append("PREPARE runs prepare-v1 exactly once against the in-tree pins")
+    if len(upload_names) != 2:
+        bad.append("PREPARE uploads the prepare bytes and their record, nothing else")
+    if tree != ALLOWED_PREPARE_WORKFLOW and not bad:
+        bad.append("workflow diverges from ALLOWED_PREPARE_WORKFLOW")
+    return bad
+
+
+class ContainedHostedPrepareWorkflowContract(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(PREPARE_WORKFLOW.is_file(), "missing hosted PREPARE workflow")
+        self.text = PREPARE_WORKFLOW.read_text(encoding="utf-8")
+        self.tree = parse_workflow_yaml(self.text)
+
+    def _mutated(self, old: str, new: str):
+        self.assertIn(old, self.text)
+        return parse_workflow_yaml(self.text.replace(old, new, 1))
+
+    def test_workflow_matches_allowlisted_prepare_shape(self):
+        self.assertEqual(self.tree, ALLOWED_PREPARE_WORKFLOW)
+        self.assertEqual(prepare_shape_violations(self.tree), [])
+
+    def test_prepare_has_no_gate_driver_or_execute_step(self):
+        for step in self.tree["jobs"]["hosted-prepare"]["steps"]:
+            text = json.dumps(step)
+            for token in ("contained_hosted_publication", "aee_checker_sealed_driver",
+                          "aee_checker_sealed_execute", "run_authorized"):
+                self.assertNotIn(token, text)
+            self.assertNotEqual(step.get("name"), "Gate hosted publication")
+        self.assertEqual(PREPARE_RUN.count("prepare-v1"), 1)
+
+    def test_mutation_add_gate_step_is_red(self):
+        poisoned = self.text.replace(
+            "      - name: Record prepare identity\n",
+            "      - name: Gate hosted publication\n"
+            "        shell: bash\n"
+            "        run: python measurements/contained_hosted_publication.py gate\n"
+            "      - name: Record prepare identity\n",
+            1,
+        )
+        self.assertNotEqual(poisoned, self.text)
+        hits = prepare_shape_violations(parse_workflow_yaml(poisoned))
+        self.assertTrue(any("candidate execution" in h for h in hits), hits)
+
+    def test_mutation_call_the_driver_is_red(self):
+        hits = prepare_shape_violations(self._mutated(
+            PREPARE_RUN,
+            PREPARE_RUN + " && python -c 'import aee_checker_sealed_driver'"))
+        self.assertTrue(any("candidate execution" in h for h in hits), hits)
+
+    def test_mutation_unpinned_or_self_hosted_runner_is_red(self):
+        for runner in ("ubuntu-latest", "self-hosted"):
+            with self.subTest(runner=runner):
+                hits = prepare_shape_violations(self._mutated(
+                    "runs-on: ubuntu-24.04", "runs-on: %s" % runner))
+                self.assertTrue(any("runs-on" in h for h in hits), hits)
+
+    def test_mutation_chosen_ref_or_credentials_is_red(self):
+        hits = prepare_shape_violations(self._mutated(
+            "          persist-credentials: false\n",
+            "          persist-credentials: false\n          ref: main\n"))
+        self.assertTrue(any("dispatched ref" in h for h in hits), hits)
+        hits = prepare_shape_violations(self._mutated(
+            "persist-credentials: false", "persist-credentials: true"))
+        self.assertTrue(any("persist-credentials" in h for h in hits), hits)
+
+    def test_mutation_write_permission_is_red(self):
+        hits = prepare_shape_violations(self._mutated("contents: read", "contents: write"))
+        self.assertTrue(any("permissions" in h for h in hits), hits)
+
+    def test_mutation_static_artifact_name_is_red(self):
+        hits = prepare_shape_violations(self._mutated(
+            "name: hosted-prepare-v1-${{ github.run_id }}-${{ github.run_attempt }}",
+            "name: hosted-prepare-v1"))
+        self.assertTrue(any("attempt-scoped" in h for h in hits), hits)
+
+    def test_mutation_prepare_v0_is_red(self):
+        hits = prepare_shape_violations(self._mutated(
+            "aee_checker_sealed_run.py prepare-v1", "aee_checker_sealed_run.py prepare"))
+        self.assertTrue(any("prepare-v1" in h for h in hits), hits)
+
+    def test_record_step_names_the_packet_module_constant(self):
+        self.assertIn(hosted_packet.PREPARE_RECORD_FILENAME, RECORD_RUN)
+        self.assertIn(hosted_packet.PREPARE_FILENAME, RECORD_RUN)
+
+    def test_comment_only_noop_mutation_stays_green(self):
+        mutated_text = "# noop comment\n" + self.text
+        self.assertEqual(parse_workflow_yaml(mutated_text), ALLOWED_PREPARE_WORKFLOW)
+        self.assertEqual(prepare_shape_violations(parse_workflow_yaml(mutated_text)), [])

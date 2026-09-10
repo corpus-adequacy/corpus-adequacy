@@ -7,10 +7,13 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -21,6 +24,9 @@ import envelope_collection as collection  # noqa: E402
 import contained_oci as contained  # noqa: E402
 import effective_envelope as env_mod  # noqa: E402
 from aee_checker_sealed_candidate import CANDIDATE_MOUNT_SPEC  # noqa: E402
+import aee_checker_sealed_run as sealed_run  # noqa: E402
+import hosted_packet as packet_mod  # noqa: E402
+from tests.test_aee_checker_sealed_run import _committed_execution_root  # noqa: E402
 
 CANDIDATE = "a" * 40
 RUNNER = "b" * 40
@@ -75,6 +81,21 @@ BINDINGS = {
     "runner_revision": RUNNER,
     "image_digest": IMAGE,
 }
+
+# The gate reads GITHUB_SHA and GITHUB_WORKFLOW_SHA from the process environment. Every run in
+# this module that is not about that binding is dispatched at R, so the module pins both to R;
+# the tests about the binding pass an explicit `environ` instead. A CI runner's own GITHUB_SHA
+# must never leak into these runs.
+_WORKFLOW_ENV = mock.patch.dict(
+    os.environ, {"GITHUB_SHA": RUNNER, "GITHUB_WORKFLOW_SHA": RUNNER})
+
+
+def setUpModule():
+    _WORKFLOW_ENV.start()
+
+
+def tearDownModule():
+    _WORKFLOW_ENV.stop()
 
 
 def _canonical(path):
@@ -236,7 +257,7 @@ def _write_packet(root: Path, *, bindings=None, prepare_commit=None,
     (root / hosted.DISPATCH_BINDINGS_FILENAME).write_text(
         json.dumps(bindings, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (root / "authorize.v0").write_bytes(
+    (root / packet_mod.AUTHORIZE_FILENAME).write_bytes(
         authorize.encode("utf-8") if isinstance(authorize, str) else authorize
     )
     raw = _prepare_raw(
@@ -247,17 +268,38 @@ def _write_packet(root: Path, *, bindings=None, prepare_commit=None,
         toolchain_image=toolchain_image,
         prepare_extra=prepare_extra,
     )
-    (root / "prepare.v1").write_bytes(raw)
-    pins = root / "pins"
+    (root / packet_mod.PREPARE_FILENAME).write_bytes(raw)
+    pins = root / packet_mod.PINS_DIRNAME
     pins.mkdir(exist_ok=True)
     (pins / "manifest.json").write_text("{}\n", encoding="utf-8")
     return {
-        "authorize": "authorize.v0",
-        "prepare": "prepare.v1",
-        "pins_dir": "pins",
+        "authorize": packet_mod.AUTHORIZE_FILENAME,
+        "prepare": packet_mod.PREPARE_FILENAME,
+        "pins_dir": packet_mod.PINS_DIRNAME,
         "prepare_sha256": hashlib.sha256(raw).hexdigest(),
         "packet_rel": root.name,
+        "manifest_sha256": _seal_packet(root),
     }
+
+
+def _manifest_bytes(root: Path) -> bytes:
+    files = {
+        name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+        for name in packet_mod.PACKET_FILENAMES
+    }
+    return (json.dumps({"files": files, "schema": packet_mod.MANIFEST_SCHEMA},
+                       indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _seal_packet(root: Path) -> str:
+    """Write the manifest over the packet's current bytes, as the owner does in phase 2.
+
+    A test that edits a packet file to exercise a later check reseals it, so the refusal it
+    asserts is the check under test and not the earlier manifest binding.
+    """
+    raw = _manifest_bytes(root)
+    (root / packet_mod.MANIFEST_FILENAME).write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _load_mutated_module(source: str, name: str):
@@ -348,6 +390,8 @@ def _run_ok(base, packet_name, rels, *, candidate=CANDIDATE, bindings=None,
         def execute(**kwargs):
             _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=sha))
 
+    over.setdefault("packet_manifest_sha256", rels["manifest_sha256"])
+    over.setdefault("docker_ready", lambda: "27.0.0")
     return hosted.run_gate(
         candidate_revision=candidate,
         runner_revision=bindings["runner_revision"],
@@ -359,7 +403,6 @@ def _run_ok(base, packet_name, rels, *, candidate=CANDIDATE, bindings=None,
         authorize_path=rels["authorize"],
         prepare_path=rels["prepare"],
         pins_dir=rels["pins_dir"],
-        docker_ready=lambda: "27.0.0",
         sealed_execute=execute,
         **over,
     )
@@ -655,7 +698,8 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             # Same prepare/authorize bytes; only candidate + sidecar swap to ffff.
             rels = _write_packet(packet)  # subject aaaa
             prepare_hash = rels["prepare_sha256"]
-            auth_hash = hashlib.sha256((packet / "authorize.v0").read_bytes()).hexdigest()
+            auth_hash = hashlib.sha256(
+                (packet / packet_mod.AUTHORIZE_FILENAME).read_bytes()).hexdigest()
 
             executed = []
 
@@ -676,6 +720,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             (packet / hosted.DISPATCH_BINDINGS_FILENAME).write_text(
                 json.dumps(bad_bindings, sort_keys=True) + "\n", encoding="utf-8"
             )
+            rels["manifest_sha256"] = _seal_packet(packet)
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(
                     base, "packet", rels, candidate=OTHER_CANDIDATE,
@@ -684,7 +729,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             self.assertEqual(str(ctx.exception), "candidate_revision_binding")
             # Prepare/authorize bytes unchanged; refusal is identity binding.
             self.assertEqual(
-                hashlib.sha256((packet / "prepare.v1").read_bytes()).hexdigest(),
+                hashlib.sha256((packet / packet_mod.PREPARE_FILENAME).read_bytes()).hexdigest(),
                 prepare_hash,
             )
 
@@ -784,6 +829,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
                     authorize_path=rels["authorize"],
                     prepare_path=rels["prepare"],
                     pins_dir=rels["pins_dir"],
+                    packet_manifest_sha256=rels["manifest_sha256"],
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=spy,
                 )
@@ -801,6 +847,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
                     authorize_path=str(secret),
                     prepare_path=rels["prepare"],
                     pins_dir=rels["pins_dir"],
+                    packet_manifest_sha256=rels["manifest_sha256"],
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=spy,
                 )
@@ -816,6 +863,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
                 b'{"candidate_revision":' + (b'"' + b"a" * 40 + b'"')
                 + b',"pad":"' + (b"x" * 200) + b'"}'
             )
+            rels["manifest_sha256"] = _seal_packet(packet)
             seen = []
 
             def spy(**kwargs):
@@ -833,6 +881,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
                     authorize_path=rels["authorize"],
                     prepare_path=rels["prepare"],
                     pins_dir=rels["pins_dir"],
+                    packet_manifest_sha256=rels["manifest_sha256"],
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=spy,
                     max_input_bytes=80,
@@ -1135,6 +1184,7 @@ class SourceMutations(unittest.TestCase):
                 authorize_path=rels["authorize"],
                 prepare_path=rels["prepare"],
                 pins_dir=rels["pins_dir"],
+                packet_manifest_sha256=rels["manifest_sha256"],
                 docker_ready=lambda: "27.0.0",
                 sealed_execute=execute_cred,
             )
@@ -1160,6 +1210,7 @@ class SourceMutations(unittest.TestCase):
             (packet / hosted.DISPATCH_BINDINGS_FILENAME).write_text(
                 json.dumps(bad_bindings, sort_keys=True) + "\n", encoding="utf-8"
             )
+            rels["manifest_sha256"] = _seal_packet(packet)
 
             def execute(**kwargs):
                 _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
@@ -1176,6 +1227,7 @@ class SourceMutations(unittest.TestCase):
                     authorize_path=rels["authorize"],
                     prepare_path=rels["prepare"],
                     pins_dir=rels["pins_dir"],
+                    packet_manifest_sha256=rels["manifest_sha256"],
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=execute,
                 )
@@ -1190,6 +1242,7 @@ class SourceMutations(unittest.TestCase):
                 authorize_path=rels["authorize"],
                 prepare_path=rels["prepare"],
                 pins_dir=rels["pins_dir"],
+                packet_manifest_sha256=rels["manifest_sha256"],
                 docker_ready=lambda: "27.0.0",
                 sealed_execute=execute,
             )
@@ -1225,6 +1278,7 @@ class SourceMutations(unittest.TestCase):
                 authorize_path=rels["authorize"],
                 prepare_path=rels["prepare"],
                 pins_dir=rels["pins_dir"],
+                packet_manifest_sha256=rels["manifest_sha256"],
                 docker_ready=lambda: "27.0.0",
                 sealed_execute=spy,
             )
@@ -1261,6 +1315,7 @@ class SourceMutations(unittest.TestCase):
                     authorize_path=rels["authorize"],
                     prepare_path=rels["prepare"],
                     pins_dir=rels["pins_dir"],
+                    packet_manifest_sha256=rels["manifest_sha256"],
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=execute,
                 )
@@ -1275,6 +1330,7 @@ class SourceMutations(unittest.TestCase):
                 authorize_path=rels["authorize"],
                 prepare_path=rels["prepare"],
                 pins_dir=rels["pins_dir"],
+                packet_manifest_sha256=rels["manifest_sha256"],
                 docker_ready=lambda: "27.0.0",
                 sealed_execute=execute,
             )
@@ -1362,6 +1418,7 @@ class SourceMutations(unittest.TestCase):
                     authorize_path=rels["authorize"],
                     prepare_path=rels["prepare"],
                     pins_dir=rels["pins_dir"],
+                    packet_manifest_sha256=rels["manifest_sha256"],
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=execute_cred,
                 )
@@ -1378,13 +1435,15 @@ class SourceMutations(unittest.TestCase):
         original = Path(hosted.__file__).read_text(encoding="utf-8")
         needle = (
             '    setup_doc = setup_status_doc(\n'
-            '        status="refused", reason=reason, bindings=bindings)\n'
+            '        status="refused", reason=reason, bindings=bindings,\n'
+            '        workflow_identity=workflow_identity)\n'
             '    envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)\n'
         )
         self.assertEqual(original.count(needle), 1)
         restored = (
             '    setup_doc = setup_status_doc(\n'
-            '        status="refused", reason=reason, bindings=bindings)\n'
+            '        status="refused", reason=reason, bindings=bindings,\n'
+            '        workflow_identity=workflow_identity)\n'
             '    envelope_doc = {\n'
             '        "schema": HOSTED_SCHEMA,\n'
             '        "kind": "stale-success-restored",\n'
@@ -1427,6 +1486,7 @@ class SourceMutations(unittest.TestCase):
                     authorize_path=rels["authorize"],
                     prepare_path=rels["prepare"],
                     pins_dir=rels["pins_dir"],
+                    packet_manifest_sha256=rels["manifest_sha256"],
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=execute_wrong_prep,
                 )
@@ -1511,6 +1571,7 @@ class SourceMutations(unittest.TestCase):
             )
             self.assertIn(huge_int, mutated_prep)
             prepare_file.write_text(mutated_prep, encoding="utf-8")
+            rels["manifest_sha256"] = _seal_packet(packet)
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(base, "packet", rels, out_name="out_prep_huge")
             self.assertEqual(str(ctx.exception), "json_input")
@@ -1694,8 +1755,11 @@ class QuarantineFailureKeepsThePrimaryRefusal(unittest.TestCase):
                     candidate_revision=CANDIDATE, runner_revision=RUNNER,
                     image_digest=IMAGE, operator_profile="contained-oci-v0",
                     out_dir=out, workspace_root=base, packet_root="packet",
-                    authorize_path="authorize.v0", prepare_path="prepare.v1",
-                    pins_dir="pins", docker_ready=lambda: "27.0.0",
+                    authorize_path=packet_mod.AUTHORIZE_FILENAME,
+                    prepare_path=packet_mod.PREPARE_FILENAME,
+                    pins_dir=packet_mod.PINS_DIRNAME,
+                    packet_manifest_sha256=rels["manifest_sha256"],
+                    docker_ready=lambda: "27.0.0",
                     sealed_execute=execute_cred)
             # The refusal reason survives; the cleanup failure is only its cause chain.
             self.assertEqual(str(ctx.exception), "credential_env")
@@ -1703,3 +1767,335 @@ class QuarantineFailureKeepsThePrimaryRefusal(unittest.TestCase):
             # And the permitted members are still on disk, which is exactly why the published
             # upload is authorized by gate success rather than by always().
             self.assertTrue((out / bad.COLLECTION_DIRNAME).is_dir())
+
+
+PINS_SOURCE = REPO_ROOT / "measurements" / "aee-checker-25b9dfa"
+RELEASE_REPOSITORY = "corpus-adequacy/corpus-adequacy"
+RELEASE_TAG = "hosted-packet-r1"
+
+
+def _git(root, *args):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True,
+                          text=True, env=env).stdout
+
+
+class _FakeRelease:
+    """Release assets by exact URL; no network."""
+
+    def __init__(self, assets):
+        self.assets = dict(assets)
+        self.prefix = "https://github.com/%s/releases/download/%s/" % (
+            RELEASE_REPOSITORY, RELEASE_TAG)
+
+    def __call__(self, url, max_bytes):
+        assert url.startswith(self.prefix), url
+        return self.assets[url[len(self.prefix):]]
+
+
+def _publish_and_fetch(workspace: Path, files: dict) -> str:
+    """Publish `files` as a release with a manifest, fetch it into the fixed directory, and
+    return the manifest digest the fetch was bound to."""
+    digests = {name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()}
+    manifest = (json.dumps({"files": digests, "schema": packet_mod.MANIFEST_SCHEMA},
+                           indent=2, sort_keys=True) + "\n").encode("utf-8")
+    sha = hashlib.sha256(manifest).hexdigest()
+    packet_mod.fetch_packet(
+        repository=RELEASE_REPOSITORY, tag=RELEASE_TAG, manifest_sha256=sha,
+        workspace_root=workspace, dest=packet_mod.PACKET_DIRNAME,
+        open_url=_FakeRelease({packet_mod.MANIFEST_FILENAME: manifest, **files}))
+    return sha
+
+
+def _packet_files(bindings, prepare_raw):
+    return {
+        packet_mod.AUTHORIZE_FILENAME: b"authorize-bytes",
+        packet_mod.BINDINGS_FILENAME: (json.dumps(bindings, sort_keys=True) + "\n").encode(),
+        packet_mod.PREPARE_FILENAME: prepare_raw,
+    }
+
+
+def _fetched_workspace(base: Path):
+    """A git workspace holding R's pins, with a packet fetched into the fixed directory."""
+    ws = base / "ws"
+    ws.mkdir()
+    _git(ws, "init", "-q")
+    pins = ws / "measurements" / "aee-checker-25b9dfa"
+    pins.mkdir(parents=True)
+    for name in os.listdir(PINS_SOURCE):
+        shutil.copyfile(PINS_SOURCE / name, pins / name)
+    prepare_raw = _prepare_raw()
+    sha = _publish_and_fetch(ws, _packet_files(BINDINGS, prepare_raw))
+    return ws, sha, hashlib.sha256(prepare_raw).hexdigest()
+
+
+def _gate_fetched(ws, sha, *, execute, out_name="artifacts", **over):
+    kwargs = dict(
+        candidate_revision=CANDIDATE, runner_revision=RUNNER, image_digest=IMAGE,
+        operator_profile=hosted.REQUIRED_PROFILE, out_dir=ws / out_name,
+        workspace_root=ws, packet_root=packet_mod.PACKET_DIRNAME,
+        authorize_path=packet_mod.AUTHORIZE_FILENAME,
+        prepare_path=packet_mod.PREPARE_FILENAME, pins_dir=packet_mod.PINS_DIRNAME,
+        packet_manifest_sha256=sha, docker_ready=lambda: "27.0.0", sealed_execute=execute)
+    kwargs.update(over)
+    return hosted.run_gate(**kwargs)
+
+
+class HostedPacketDelivery(unittest.TestCase):
+    """#107 packet delivery: the fetched packet is bound by its manifest digest in the gate."""
+
+    def test_untracked_packet_accepted_at_head_and_execution_identity_unchanged(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = _committed_execution_root(Path(raw))
+            # R carries its pins in-tree; the fetch copies them from the checked-out tree.
+            pins = root / "measurements" / "aee-checker-25b9dfa"
+            for name in os.listdir(PINS_SOURCE):
+                shutil.copyfile(PINS_SOURCE / name, pins / name)
+            _git(root, "add", "-A")
+            _git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "pins")
+            head = _git(root, "rev-parse", "HEAD").strip()
+            before = sealed_run.execution_identity(root)
+            self.assertEqual(before["commit"], head)
+
+            bindings = {"candidate_revision": CANDIDATE, "runner_revision": head,
+                        "image_digest": IMAGE}
+            prepare_raw = _prepare_raw(bindings=bindings, prepare_extra={"execution": before})
+            sha = _publish_and_fetch(root, _packet_files(bindings, prepare_raw))
+
+            status = _git(root, "status", "--porcelain", "--untracked-files=normal")
+            self.assertIn("?? %s/" % packet_mod.PACKET_DIRNAME, status.splitlines())
+            self.assertEqual(sealed_run.execution_identity(root), before,
+                             "an untracked packet changed the execution identity")
+
+            observed = []
+
+            def execute(**kwargs):
+                # The driver's own identity comparison, against the tree the packet sits in.
+                prepared = json.loads(Path(kwargs["prepare_path"]).read_bytes())
+                observed.append(
+                    sealed_run.execution_identity(Path(kwargs["root"])) == prepared["execution"])
+                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                    prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
+                    execution_commit=head))
+
+            decision = _gate_fetched(
+                root, sha, execute=execute, runner_revision=head, root=root,
+                environ={"GITHUB_SHA": head, "GITHUB_WORKFLOW_SHA": head})
+            self.assertEqual(decision["decision"], "publish")
+            self.assertEqual(observed, [True])
+            setup = json.loads((root / "artifacts" / hosted.SETUP_STATUS_FILENAME).read_text())
+            self.assertEqual(setup["workflow_identity"]["github_sha"], head)
+            self.assertEqual(setup["workflow_identity"]["github_workflow_sha"], head)
+            self.assertEqual(sealed_run.execution_identity(root), before)
+
+    def _refused_before_execute(self, ws, sha, reason, **over):
+        seen = []
+
+        def spy(**kwargs):
+            seen.append(True)
+
+        with self.assertRaises(hosted.HostedPublicationError) as ctx:
+            _gate_fetched(ws, sha, execute=spy, **over)
+        self.assertEqual(str(ctx.exception), reason)
+        self.assertEqual(seen, [], "a packet refusal reached execution")
+
+    def test_fetched_packet_publishes_at_its_bound_digest(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ws, sha, prepare_sha = _fetched_workspace(Path(raw))
+
+            def execute(**kwargs):
+                _write_collection(kwargs["envelope_dest"],
+                                  _permitted_envelope(prepare_sha256=prepare_sha))
+
+            self.assertEqual(_gate_fetched(ws, sha, execute=execute)["decision"], "publish")
+
+    def test_gate_refuses_other_manifest_digest_even_though_the_fetch_passed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ws, sha, _ = _fetched_workspace(Path(raw))
+            other = hashlib.sha256(b"a different manifest").hexdigest()
+            self.assertNotEqual(other, sha)
+            self._refused_before_execute(ws, other, "packet_manifest_binding")
+
+    def test_gate_refuses_manifest_rewritten_after_the_fetch(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ws, sha, _ = _fetched_workspace(Path(raw))
+            path = ws / packet_mod.PACKET_DIRNAME / packet_mod.MANIFEST_FILENAME
+            path.write_bytes(path.read_bytes() + b"\n")
+            self._refused_before_execute(ws, sha, "packet_manifest_binding")
+
+    def test_gate_compares_the_manifest_digest_before_parsing_it(self):
+        """Unparseable bytes under the manifest name refuse for their digest, not their syntax."""
+        with tempfile.TemporaryDirectory() as raw:
+            ws, sha, _ = _fetched_workspace(Path(raw))
+            path = ws / packet_mod.PACKET_DIRNAME / packet_mod.MANIFEST_FILENAME
+            path.write_bytes(b"{not json")
+            self._refused_before_execute(ws, sha, "packet_manifest_binding")
+
+    def test_gate_refuses_a_packet_file_changed_after_the_fetch(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ws, sha, _ = _fetched_workspace(Path(raw))
+            path = ws / packet_mod.PACKET_DIRNAME / packet_mod.AUTHORIZE_FILENAME
+            path.write_bytes(b"other-authorize-bytes")
+            self._refused_before_execute(ws, sha, "packet_file_binding")
+
+    def test_gate_refuses_an_extra_packet_entry(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ws, sha, _ = _fetched_workspace(Path(raw))
+            (ws / packet_mod.PACKET_DIRNAME / "extra.json").write_bytes(b"{}\n")
+            self._refused_before_execute(ws, sha, "packet_entries")
+
+    def test_gate_refuses_a_symlinked_packet_file(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ws, sha, _ = _fetched_workspace(Path(raw))
+            path = ws / packet_mod.PACKET_DIRNAME / packet_mod.PREPARE_FILENAME
+            elsewhere = Path(raw) / "prepare-elsewhere"
+            elsewhere.write_bytes(path.read_bytes())
+            path.unlink()
+            path.symlink_to(elsewhere)
+            self._refused_before_execute(ws, sha, "confined_path")
+
+    def test_gate_refuses_swapped_roles_even_with_every_digest_intact(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ws, sha, _ = _fetched_workspace(Path(raw))
+            self._refused_before_execute(
+                ws, sha, "packet_role_binding",
+                authorize_path=packet_mod.PREPARE_FILENAME,
+                prepare_path=packet_mod.AUTHORIZE_FILENAME)
+
+    def test_gate_names_a_manifest_the_shared_parser_refuses(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ws, _sha, _ = _fetched_workspace(Path(raw))
+            path = ws / packet_mod.PACKET_DIRNAME / packet_mod.MANIFEST_FILENAME
+            doc = json.loads(path.read_bytes())
+            text = json.dumps(doc, sort_keys=True)
+            dup = text.replace('"schema":', '"schema": "x", "schema":', 1).encode("utf-8")
+            path.write_bytes(dup)
+            self._refused_before_execute(
+                ws, hashlib.sha256(dup).hexdigest(),
+                "packet_manifest:manifest_duplicate_key")
+
+    def test_gate_requires_a_well_formed_manifest_digest_when_a_packet_is_present(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ws, sha, _ = _fetched_workspace(Path(raw))
+            for bad in (None, "", sha.upper(), sha[:-1]):
+                with self.subTest(bad=bad):
+                    self._refused_before_execute(
+                        ws, bad, "packet_manifest_sha256",
+                        out_name="out-%s" % (bad or "none")[:8])
+
+    def test_cli_carries_the_packet_manifest_flag_to_the_gate(self):
+        seen = {}
+
+        def fake_gate(**kwargs):
+            seen.update(kwargs)
+            return {}
+
+        with mock.patch.object(hosted, "run_gate", fake_gate):
+            code = hosted.main([
+                "gate", "--candidate-revision", CANDIDATE, "--runner-revision", RUNNER,
+                "--image-digest", IMAGE, "--out", "x", "--packet-manifest-sha256", "0" * 64,
+                "--packet-root", packet_mod.PACKET_DIRNAME])
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["packet_manifest_sha256"], "0" * 64)
+        self.assertEqual(seen["packet_root"], packet_mod.PACKET_DIRNAME)
+
+
+class WorkflowIdentityBinding(unittest.TestCase):
+    """GITHUB_SHA == GITHUB_WORKFLOW_SHA == runner_revision, read from the environment."""
+
+    def _refused(self, environ, reason):
+        probed, executed = [], []
+
+        def probe():
+            probed.append(True)
+            return "27.0.0"
+
+        def spy(**kwargs):
+            executed.append(True)
+
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                _run_ok(base, "packet", rels, execute=spy, docker_ready=probe,
+                        environ=environ)
+            self.assertEqual(str(ctx.exception), reason)
+            self.assertEqual((probed, executed), ([], []),
+                             "the workflow identity must refuse before containment is probed")
+            entries = [json.loads(line) for line in
+                       (base / "artifacts" / hosted.RERUN_EVIDENCE_FILENAME)
+                       .read_text(encoding="utf-8").splitlines() if line.strip()]
+            start = [e for e in entries if e.get("kind") == "run-attempt-start"]
+            self.assertEqual(len(start), 1)
+            recorded = start[0]["workflow_identity"]
+            self.assertEqual(recorded["github_sha"], environ.get("GITHUB_SHA"))
+            self.assertEqual(recorded["github_workflow_sha"],
+                             environ.get("GITHUB_WORKFLOW_SHA"))
+
+    def test_workflow_sha_other_than_runner_revision_refuses(self):
+        self._refused({"GITHUB_SHA": RUNNER, "GITHUB_WORKFLOW_SHA": OTHER_RUNNER},
+                      "workflow_sha_binding")
+
+    def test_github_sha_other_than_runner_revision_refuses(self):
+        self._refused({"GITHUB_SHA": OTHER_RUNNER, "GITHUB_WORKFLOW_SHA": RUNNER},
+                      "github_sha_binding")
+
+    def test_both_equal_to_each_other_but_not_to_runner_revision_refuses(self):
+        self._refused({"GITHUB_SHA": OTHER_RUNNER, "GITHUB_WORKFLOW_SHA": OTHER_RUNNER},
+                      "github_sha_binding")
+
+    def test_absent_workflow_sha_refuses(self):
+        self._refused({"GITHUB_SHA": RUNNER}, "workflow_identity_absent")
+
+    def test_absent_github_sha_refuses(self):
+        self._refused({"GITHUB_WORKFLOW_SHA": RUNNER}, "workflow_identity_absent")
+
+    def test_empty_values_refuse(self):
+        self._refused({"GITHUB_SHA": "", "GITHUB_WORKFLOW_SHA": ""},
+                      "workflow_identity_absent")
+
+    def test_default_reads_the_process_environment(self):
+        with mock.patch.dict(os.environ, {"GITHUB_WORKFLOW_SHA": OTHER_RUNNER}):
+            with tempfile.TemporaryDirectory() as raw:
+                base = Path(raw)
+                packet = base / "packet"
+                packet.mkdir()
+                rels = _write_packet(packet)
+                with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                    _run_ok(base, "packet", rels)
+                self.assertEqual(str(ctx.exception), "workflow_sha_binding")
+
+    def test_success_records_both_in_the_setup_artifact(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+            environ = {"GITHUB_SHA": RUNNER, "GITHUB_WORKFLOW_SHA": RUNNER,
+                       "ImageOS": "ubuntu24", "ImageVersion": "20260901.1.0"}
+            decision = _run_ok(base, "packet", rels, environ=environ)
+            self.assertEqual(decision["decision"], "publish")
+            setup = json.loads(
+                (base / "artifacts" / hosted.SETUP_STATUS_FILENAME).read_text())
+            self.assertEqual(setup["workflow_identity"], {
+                "github_sha": RUNNER, "github_workflow_sha": RUNNER,
+                "image_os": "ubuntu24", "image_version": "20260901.1.0"})
+
+    def test_refused_post_execute_setup_also_records_the_identity(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def execute_wrong_prep(**kwargs):
+                _write_collection(kwargs["envelope_dest"],
+                                  _permitted_envelope(prepare_sha256="ab" * 32))
+
+            with self.assertRaises(hosted.HostedPublicationError):
+                _run_ok(base, "packet", rels, execute=execute_wrong_prep, out_name="o")
+            setup = json.loads((base / "o" / hosted.SETUP_STATUS_FILENAME).read_text())
+            self.assertEqual(setup["setup_status"], "refused")
+            self.assertEqual(setup["workflow_identity"]["github_workflow_sha"], RUNNER)

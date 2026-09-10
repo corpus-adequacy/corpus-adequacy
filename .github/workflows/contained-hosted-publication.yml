@@ -15,20 +15,12 @@ on:
         description: Candidate/toolchain image digest B (sha256:64hex)
         required: true
         type: string
-      packet_root:
-        description: Declared packet root (relative) holding authorize/prepare/pins/bindings
+      packet_release_tag:
+        description: Release tag whose assets carry the owner-authorized packet
         required: true
         type: string
-      authorize_path:
-        description: Path to authorize.v0 bytes relative to packet root
-        required: true
-        type: string
-      prepare_path:
-        description: Path to prepare.v1 bytes relative to packet root
-        required: true
-        type: string
-      pins_dir:
-        description: Path to frozen pins directory relative to packet root
+      packet_manifest_sha256:
+        description: SHA-256 of the packet manifest release asset (64-hex)
         required: true
         type: string
 
@@ -47,8 +39,13 @@ env:
 
 jobs:
   hosted-contained:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Pinned, not ubuntu-latest: PREPARE (contained-hosted-prepare) runs on the same image, and
+    # the driver's toolchain equality refuses if the image store or platform moved between them.
+    runs-on: ubuntu-24.04
+    # Worst case: 300 s materialize deadline + 9 x 120 s candidate invocations (baseline plus
+    # eight authorized mutation steps) = 1380 s = 23 min; the other 7 min cover checkout,
+    # Python setup, the packet fetch and the uploads.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -60,6 +57,16 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+      # Manifest first, digest before parse, then each listed asset individually into a fresh
+      # directory that does not exist in R's tree; pins are copied from the checkout.
+      - name: Fetch hosted packet
+        shell: bash
+        env:
+          PACKET_RELEASE_TAG: ${{ inputs.packet_release_tag }}
+          PACKET_MANIFEST_SHA256: ${{ inputs.packet_manifest_sha256 }}
+        run: python measurements/hosted_packet.py fetch --repository "$GITHUB_REPOSITORY" --tag "$PACKET_RELEASE_TAG" --manifest-sha256 "$PACKET_MANIFEST_SHA256" --workspace-root "$GITHUB_WORKSPACE" --dest hosted-packet
+      # The gate binds the manifest digest again itself and requires GITHUB_SHA ==
+      # GITHUB_WORKFLOW_SHA == runner_revision from the runner's own environment.
       - name: Gate hosted publication
         id: gate
         shell: bash
@@ -67,13 +74,10 @@ jobs:
           CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
           RUNNER_REVISION: ${{ inputs.runner_revision }}
           IMAGE_DIGEST: ${{ inputs.image_digest }}
-          PACKET_ROOT: ${{ inputs.packet_root }}
-          AUTHORIZE_PATH: ${{ inputs.authorize_path }}
-          PREPARE_PATH: ${{ inputs.prepare_path }}
-          PINS_DIR: ${{ inputs.pins_dir }}
+          PACKET_MANIFEST_SHA256: ${{ inputs.packet_manifest_sha256 }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --operator-profile "$OPERATOR_EXECUTION_PROFILE" --max-artifact-bytes "$MAX_ARTIFACT_BYTES" --out artifacts --workspace-root "$GITHUB_WORKSPACE" --packet-root "$PACKET_ROOT" --authorize "$AUTHORIZE_PATH" --prepare "$PREPARE_PATH" --pins-dir "$PINS_DIR" --rerun-log artifacts/rerun-evidence.jsonl
+        run: python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --packet-manifest-sha256 "$PACKET_MANIFEST_SHA256" --operator-profile "$OPERATOR_EXECUTION_PROFILE" --max-artifact-bytes "$MAX_ARTIFACT_BYTES" --out artifacts --workspace-root "$GITHUB_WORKSPACE" --packet-root hosted-packet --authorize authorize.v0.json --prepare prepare.v1.json --pins-dir pins --rerun-log artifacts/rerun-evidence.jsonl
       - name: Upload setup
         if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

@@ -22,6 +22,7 @@ import contained_hosted_publication as hosted  # noqa: E402
 import contained_oci as contained  # noqa: E402
 import effective_envelope as env_mod  # noqa: E402
 import envelope_collection as collection_mod  # noqa: E402
+import hosted_packet as packet_mod  # noqa: E402
 
 CANDIDATE = "a" * 40
 RUNNER = "b" * 40
@@ -33,6 +34,9 @@ BINDINGS = {
     "runner_revision": RUNNER,
     "image_digest": IMAGE,
 }
+# The gate refuses unless GITHUB_SHA == GITHUB_WORKFLOW_SHA == runner_revision (#107); the gate
+# runs here are dispatched at R, and pass this explicitly so a CI runner's own values never leak.
+WORKFLOW_ENVIRON = {"GITHUB_SHA": RUNNER, "GITHUB_WORKFLOW_SHA": RUNNER}
 
 
 def _requested(*, image=IMAGE, sealed=True):
@@ -150,18 +154,28 @@ def _write_packet(root: Path, *, bindings=None):
     (root / hosted.DISPATCH_BINDINGS_FILENAME).write_text(
         json.dumps(bindings, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (root / "authorize.v0").write_bytes(b"authorize-bytes")
+    (root / packet_mod.AUTHORIZE_FILENAME).write_bytes(b"authorize-bytes")
     raw = (json.dumps(_prepare_doc(bindings=bindings)) + "\n").encode("utf-8")
-    (root / "prepare.v1").write_bytes(raw)
-    pins = root / "pins"
+    (root / packet_mod.PREPARE_FILENAME).write_bytes(raw)
+    pins = root / packet_mod.PINS_DIRNAME
     pins.mkdir(exist_ok=True)
     (pins / "manifest.json").write_text("{}\n", encoding="utf-8")
+    # Seal the packet as the owner does in phase 2: the gate binds it by this digest (#107).
+    manifest = (json.dumps({
+        "files": {
+            name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+            for name in packet_mod.PACKET_FILENAMES
+        },
+        "schema": packet_mod.MANIFEST_SCHEMA,
+    }, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    (root / packet_mod.MANIFEST_FILENAME).write_bytes(manifest)
     return {
-        "authorize": "authorize.v0",
-        "prepare": "prepare.v1",
-        "pins_dir": "pins",
+        "authorize": packet_mod.AUTHORIZE_FILENAME,
+        "prepare": packet_mod.PREPARE_FILENAME,
+        "pins_dir": packet_mod.PINS_DIRNAME,
         "prepare_sha256": hashlib.sha256(raw).hexdigest(),
         "packet_rel": root.name,
+        "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
     }
 
 
@@ -310,9 +324,11 @@ class ConsumerMemberValidationTests(unittest.TestCase):
                     out_dir=out_dir,
                     workspace_root=base,
                     packet_root="packet",
-                    authorize_path="authorize.v0",
-                    prepare_path="prepare.v1",
-                    pins_dir="pins",
+                    authorize_path=rels["authorize"],
+                    prepare_path=rels["prepare"],
+                    pins_dir=rels["pins_dir"],
+                    packet_manifest_sha256=rels["manifest_sha256"],
+                    environ=WORKFLOW_ENVIRON,
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=mock_execute,
                 )
@@ -421,9 +437,11 @@ class ConsumerMemberValidationTests(unittest.TestCase):
                     out_dir=out_dir,
                     workspace_root=base,
                     packet_root="packet",
-                    authorize_path="authorize.v0",
-                    prepare_path="prepare.v1",
-                    pins_dir="pins",
+                    authorize_path=rels["authorize"],
+                    prepare_path=rels["prepare"],
+                    pins_dir=rels["pins_dir"],
+                    packet_manifest_sha256=rels["manifest_sha256"],
+                    environ=WORKFLOW_ENVIRON,
                     docker_ready=lambda: "27.0.0",
                     sealed_execute=mock_execute,
                 )

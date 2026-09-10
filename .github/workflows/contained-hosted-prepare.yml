@@ -1,0 +1,56 @@
+name: contained-hosted-prepare
+
+# Phase 1 of the hosted route (#107): PREPARE on the runner, from the dispatched ref, against
+# R's in-tree pins. No candidate, baseline, control or mutant runs here; the driver, execution
+# funnel and publication gate are never called. Owner authorization and release publication
+# happen off the runner (phase 2); execution is contained-hosted-publication (phase 3).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contained-hosted-prepare
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.13"
+  ARTIFACT_RETENTION_DAYS: "14"
+
+jobs:
+  hosted-prepare:
+    # Pinned to the image phase 3 executes on, so the recorded toolchain can match there.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Prepare
+        shell: bash
+        run: python measurements/aee_checker_sealed_run.py prepare-v1 measurements/aee-checker-25b9dfa hosted-prepare
+      - name: Record prepare identity
+        # GITHUB_SHA, GITHUB_WORKFLOW_SHA, ImageOS and ImageVersion from the runner, next to the
+        # SHA-256 of the prepare bytes. The same job computed that digest: it proves transport.
+        shell: bash
+        run: python measurements/hosted_packet.py record-prepare --prepare hosted-prepare/prepare.v1.json --out hosted-prepare-record/hosted-prepare-record.v0.json
+      - name: Upload prepare
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hosted-prepare-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: hosted-prepare/prepare.v1.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Upload prepare record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hosted-prepare-record-${{ github.run_id }}-${{ github.run_attempt }}
+          path: hosted-prepare-record/hosted-prepare-record.v0.json
+          retention-days: 14
+          if-no-files-found: error

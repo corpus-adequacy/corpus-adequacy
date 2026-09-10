@@ -20,6 +20,16 @@ resolve only as confined regular files under that packet root with byte
 ceilings before parse. Child-environment observation comes only from the
 contained OCI effective envelope (env_names/mounts); runner.environment,
 runs-on, and persist-credentials remain structural workflow facts.
+
+Packet delivery (#107): the packet is fetched from release assets into a fixed
+directory by `hosted_packet.py`, and the gate binds it again itself. Before it
+parses anything in the packet it compares the manifest bytes' SHA-256 with
+`--packet-manifest-sha256`, then holds every listed file, and the authorize and
+prepare roles it reads, to the manifest's digests; an entry the manifest does
+not list refuses. The dispatch is bound to R as well: GITHUB_SHA and
+GITHUB_WORKFLOW_SHA, read from the runner's environment, must both equal
+runner_revision, and both are recorded in the rerun evidence and the setup
+artifact. This is transport and revision binding, not authentication.
 """
 
 from __future__ import annotations
@@ -43,6 +53,7 @@ import contained_oci as contained  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
 import envelope_collection as collection  # noqa: E402
 import effective_envelope  # noqa: E402
+import hosted_packet as packet_delivery  # noqa: E402
 from aee_checker_sealed_candidate import (  # noqa: E402
     CANDIDATE_MOUNT_SPEC,
     require_candidate_image,
@@ -65,14 +76,24 @@ QUARANTINE_ATTEMPT_TEMPLATE = "attempt-%04d"
 MAX_QUARANTINE_ATTEMPTS = 256
 CANDIDATE_RESULT_FILENAME = "candidate-result.json"
 RERUN_EVIDENCE_FILENAME = "rerun-evidence.jsonl"
-DISPATCH_BINDINGS_FILENAME = "hosted-dispatch-bindings.v0.json"
+# One name for the bindings file: the packet module's closed file-name set carries it.
+DISPATCH_BINDINGS_FILENAME = packet_delivery.BINDINGS_FILENAME
 CONCURRENCY_GROUP = "contained-hosted-publication"
 CANCEL_IN_PROGRESS = False
 RETENTION_DAYS = 14
 MAX_ARTIFACT_BYTES = 5242880
 MAX_INPUT_BYTES = MAX_ARTIFACT_BYTES
-TIMEOUT_MINUTES = 15
-RUNS_ON = "ubuntu-latest"
+# 300 s materialize deadline + 9 x 120 s candidate invocations = 1380 s, plus setup.
+TIMEOUT_MINUTES = 30
+RUNS_ON = "ubuntu-24.04"
+# (record key, environment variable). The first two are bound to runner_revision; the image
+# labels are recorded so a runner-image change between PREPARE and execution is visible.
+WORKFLOW_IDENTITY_ENV = (
+    ("github_sha", "GITHUB_SHA"),
+    ("github_workflow_sha", "GITHUB_WORKFLOW_SHA"),
+    ("image_os", "ImageOS"),
+    ("image_version", "ImageVersion"),
+)
 HOSTED_SCHEMA = "corpus-adequacy.hosted-publication.v0"
 DISPATCH_BINDING_KEYS = (
     "candidate_revision", "runner_revision", "image_digest",
@@ -130,6 +151,68 @@ def require_operator_profile(profile) -> str:
     if profile != REQUIRED_PROFILE:
         raise HostedPublicationError("operator_profile")
     return profile
+
+
+def observe_workflow_identity(environ=None) -> dict:
+    """What the runner says this run is: read, not checked (see check_workflow_identity)."""
+    env = os.environ if environ is None else environ
+    return {key: env.get(name) for key, name in WORKFLOW_IDENTITY_ENV}
+
+
+def check_workflow_identity(identity, *, runner_revision) -> None:
+    """GITHUB_SHA == GITHUB_WORKFLOW_SHA == runner_revision, or refuse.
+
+    A dispatch whose workflow definition is not R's is refused while R's gate still runs. Absent
+    or empty values refuse: an unobserved identity is not a matching one.
+    """
+    github_sha = identity.get("github_sha")
+    workflow_sha = identity.get("github_workflow_sha")
+    if not isinstance(github_sha, str) or not github_sha:
+        raise HostedPublicationError("workflow_identity_absent")
+    if not isinstance(workflow_sha, str) or not workflow_sha:
+        raise HostedPublicationError("workflow_identity_absent")
+    if github_sha != runner_revision:
+        raise HostedPublicationError("github_sha_binding")
+    if workflow_sha != runner_revision:
+        raise HostedPublicationError("workflow_sha_binding")
+
+
+def check_packet_manifest(packet, expected_sha256, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
+    """Bind the packet under `packet` to the dispatched manifest digest, in the gate itself.
+
+    The manifest's digest is compared before it is parsed; parsing is the packet module's one
+    rule; the packet directory must hold exactly the listed files, the manifest and the pins
+    directory; and each listed file is read as a confined regular file and held to its digest.
+    Returns {file name: sha256}.
+    """
+    if (not isinstance(expected_sha256, str) or len(expected_sha256) != 64 or
+            any(ch not in "0123456789abcdef" for ch in expected_sha256)):
+        raise HostedPublicationError("packet_manifest_sha256")
+    manifest_path = resolve_confined_input(
+        packet, packet_delivery.MANIFEST_FILENAME,
+        max_bytes=packet_delivery.MAX_MANIFEST_BYTES)
+    try:
+        manifest_raw = ca.read_bounded_regular_file(
+            manifest_path, cap=packet_delivery.MAX_MANIFEST_BYTES)
+    except ca.ManifestError as exc:
+        raise HostedPublicationError("max_input_bytes") from exc
+    if hashlib.sha256(manifest_raw).hexdigest() != expected_sha256:
+        raise HostedPublicationError("packet_manifest_binding")
+    try:
+        files = packet_delivery.parse_manifest(manifest_raw)
+    except packet_delivery.PacketError as exc:
+        raise HostedPublicationError("packet_manifest:%s" % exc) from exc
+    if tuple(sorted(os.listdir(packet))) != packet_delivery.PACKET_ENTRIES:
+        raise HostedPublicationError("packet_entries")
+    for name, digest in files.items():
+        path = resolve_confined_input(packet, name, max_bytes=max_bytes)
+        try:
+            raw = ca.read_bounded_regular_file(path, cap=max_bytes)
+        except ca.ManifestError as exc:
+            raise HostedPublicationError("max_input_bytes") from exc
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise HostedPublicationError("packet_file_binding")
+    return files
 
 
 def _is_credential_env(name: str) -> bool:
@@ -545,7 +628,7 @@ def withheld_envelope_stub(*, reason, bindings) -> dict:
     }
 
 
-def setup_status_doc(*, status, reason, bindings) -> dict:
+def setup_status_doc(*, status, reason, bindings, workflow_identity=None) -> dict:
     return {
         "schema": HOSTED_SCHEMA,
         "kind": "setup-status",
@@ -554,6 +637,8 @@ def setup_status_doc(*, status, reason, bindings) -> dict:
         "bindings": dict(bindings),
         "dispatch_bindings": dict(bindings),
         "operator_profile": REQUIRED_PROFILE,
+        "workflow_identity": (
+            dict(workflow_identity) if workflow_identity is not None else None),
         "non_claims": list(NON_CLAIMS),
     }
 
@@ -678,7 +763,8 @@ def _record_cleanup_failure(rerun_log, primary_reason, cleanup_exc, identity, bi
 
 
 def materialize_post_execute_refusal(*, out, reason, bindings, rerun_log,
-                                         identity, max_artifact_bytes=MAX_ARTIFACT_BYTES):
+                                         identity, max_artifact_bytes=MAX_ARTIFACT_BYTES,
+                                         workflow_identity=None):
     """Overwrite success-shaped post-execute artifacts, then caller re-raises.
 
     Sealed execute may already have written a permitted/verified envelope.
@@ -687,7 +773,8 @@ def materialize_post_execute_refusal(*, out, reason, bindings, rerun_log,
     Does not convert refusal into success.
     """
     setup_doc = setup_status_doc(
-        status="refused", reason=reason, bindings=bindings)
+        status="refused", reason=reason, bindings=bindings,
+        workflow_identity=workflow_identity)
     envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
     candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
     append_rerun_evidence(rerun_log, {
@@ -704,10 +791,12 @@ def materialize_post_execute_refusal(*, out, reason, bindings, rerun_log,
 
 
 def _materialize_void(*, out, reason, setup_status, bindings, rerun_log,
-                      identity, max_artifact_bytes, kind="infrastructure-failure"):
+                      identity, max_artifact_bytes, kind="infrastructure-failure",
+                      workflow_identity=None):
     decision = publication_decision(None, setup_status=setup_status)
     setup_doc = setup_status_doc(
-        status=setup_status, reason=reason, bindings=bindings)
+        status=setup_status, reason=reason, bindings=bindings,
+        workflow_identity=workflow_identity)
     envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
     candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
     append_rerun_evidence(rerun_log, {
@@ -730,7 +819,8 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
              pins_dir=None, root=None, workspace_root=None, rerun_log=None,
              max_artifact_bytes=MAX_ARTIFACT_BYTES,
              max_input_bytes=MAX_INPUT_BYTES,
-             docker_ready=None, sealed_execute=None) -> dict:
+             docker_ready=None, sealed_execute=None,
+             packet_manifest_sha256=None, environ=None) -> dict:
     bindings = require_bindings(
         candidate_revision, runner_revision, image_digest)
     require_operator_profile(operator_profile)
@@ -744,12 +834,17 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         rerun_log = Path(rerun_log)
 
     identity = _run_attempt_identity()
+    workflow_identity = observe_workflow_identity(environ)
     append_rerun_evidence(rerun_log, {
         "kind": "run-attempt-start",
         "bindings": bindings,
         "dispatch_bindings": bindings,
+        "workflow_identity": dict(workflow_identity),
         **{k: v for k, v in identity.items() if v is not None},
     })
+    # Recorded above whatever it says; refused here before containment is even probed.
+    check_workflow_identity(
+        workflow_identity, runner_revision=bindings["runner_revision"])
 
     probe = docker_ready or default_docker_ready
     execute = sealed_execute or default_sealed_execute
@@ -765,24 +860,29 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         return _materialize_void(
             out=out, reason=reason, setup_status="unavailable",
             bindings=bindings, rerun_log=rerun_log, identity=identity,
-            max_artifact_bytes=max_artifact_bytes)
+            max_artifact_bytes=max_artifact_bytes,
+            workflow_identity=workflow_identity)
     except contained.PrepareError as exc:
         reason = "containment-refused:%s" % exc
         return _materialize_void(
             out=out, reason=reason, setup_status="refused",
             bindings=bindings, rerun_log=rerun_log, identity=identity,
-            max_artifact_bytes=max_artifact_bytes)
+            max_artifact_bytes=max_artifact_bytes,
+            workflow_identity=workflow_identity)
 
     if not (packet_root and authorize_path and prepare_path and pins_dir):
         reason = "execution-packets-required"
         return _materialize_void(
             out=out, reason=reason, setup_status="refused",
             bindings=bindings, rerun_log=rerun_log, identity=identity,
-            max_artifact_bytes=max_artifact_bytes)
+            max_artifact_bytes=max_artifact_bytes,
+            workflow_identity=workflow_identity)
 
     if workspace_root is None:
         workspace_root = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
     packet = resolve_packet_root(workspace_root, packet_root)
+    packet_files = check_packet_manifest(
+        packet, packet_manifest_sha256, max_bytes=max_input_bytes)
     load_dispatch_bindings(
         packet, expected=bindings, max_bytes=max_input_bytes)
     authorize_resolved = resolve_confined_input(
@@ -793,9 +893,17 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     try:
         prepare_raw = ca.read_bounded_regular_file(
             prepare_resolved, cap=max_input_bytes)
+        authorize_raw = ca.read_bounded_regular_file(
+            authorize_resolved, cap=max_input_bytes)
     except ca.ManifestError as exc:
         raise HostedPublicationError("max_input_bytes") from exc
     prepare_sha256 = hashlib.sha256(prepare_raw).hexdigest()
+    # Every file matched some digest above; this binds each ROLE to its own, so the authorize
+    # and prepare paths cannot be swapped between two files the manifest lists.
+    if (prepare_sha256 != packet_files[packet_delivery.PREPARE_FILENAME] or
+            hashlib.sha256(authorize_raw).hexdigest()
+            != packet_files[packet_delivery.AUTHORIZE_FILENAME]):
+        raise HostedPublicationError("packet_role_binding")
     try:
         prepare_doc = json.loads(prepare_raw.decode("utf-8"))
     except (UnicodeError, ValueError) as exc:
@@ -841,6 +949,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
                     rerun_log=rerun_log,
                     identity=identity,
                     max_artifact_bytes=max_artifact_bytes,
+                    workflow_identity=workflow_identity,
                 )
             except BaseException as cleanup_exc:
                 # A sanitization failure must not replace the reason the run was refused: the
@@ -873,6 +982,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             else "unavailable",
             reason=reason,
             bindings=bindings,
+            workflow_identity=workflow_identity,
         )
         envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
         candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
@@ -880,14 +990,16 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         setup_doc = setup_status_doc(
             status="ready" if setup_status == "ready" else setup_status,
             reason="publication-withheld",
-            bindings=bindings)
+            bindings=bindings,
+            workflow_identity=workflow_identity)
         envelope_doc = withheld_envelope_stub(
             reason="publication-withheld", bindings=bindings)
         candidate_doc = void_candidate_result(
             reason="publication-withheld", bindings=bindings)
     else:
         setup_doc = setup_status_doc(
-            status="ready", reason="publication-permitted", bindings=bindings)
+            status="ready", reason="publication-permitted", bindings=bindings,
+            workflow_identity=workflow_identity)
         # The collection directory is the authoritative artifact. Writing a derived aggregate
         # to the legacy single-envelope path would be a second, weaker authority for the same
         # facts, so nothing is written there on the success path.
@@ -920,6 +1032,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--candidate-revision", required=True)
     gate.add_argument("--runner-revision", required=True)
     gate.add_argument("--image-digest", required=True)
+    gate.add_argument("--packet-manifest-sha256", default=None)
     gate.add_argument("--operator-profile", default=REQUIRED_PROFILE)
     gate.add_argument("--out", required=True)
     gate.add_argument("--packet-root", default=None)
@@ -957,6 +1070,7 @@ def main(argv=None) -> int:
             rerun_log=args.rerun_log,
             max_artifact_bytes=args.max_artifact_bytes,
             max_input_bytes=args.max_input_bytes,
+            packet_manifest_sha256=args.packet_manifest_sha256,
         )
     except HostedPublicationError as exc:
         print("hosted publication refused: %s" % exc, file=sys.stderr)
