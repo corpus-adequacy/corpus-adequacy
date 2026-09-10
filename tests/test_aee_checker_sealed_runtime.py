@@ -230,12 +230,19 @@ class RuntimeDeclaresAndAdmitsByProfile(unittest.TestCase):
                 execution_profile="contained-oci-v0", transport=NoEffectTransport(),
                 envelope_sink=[].append)
             backend.execution_profile = "contained-oci-v1"
+            manifest = {
+                "_repo_root": subject,
+                "accepted_exit_codes": [0], "unproved_exit_codes": [75],
+                "runner": "batch", "outcome_from": ["rows"],
+                "build": list(runtime.candidate.CONTAINER_BUILD),
+                "entrypoint_command": list(runtime.candidate.CONTAINER_ENTRYPOINT),
+            }
             with mock.patch.object(
                     runtime.candidate, "run_sealed_candidate",
                     wraps=runtime.candidate.run_sealed_candidate) as sealed, \
                     self.assertRaisesRegex(
                         common.PrepareError, "contained-oci-v1 admits only prepare.v2"):
-                backend({"_repo_root": subject}, [{"vector_id": "<batch>"}], rebuild=True)
+                backend(manifest, [{"vector_id": "<batch>"}], rebuild=True)
         self.assertEqual(sealed.call_args.kwargs["execution_profile"], "contained-oci-v1")
 
     def test_binding_prepare_goes_through_the_dispatcher(self):

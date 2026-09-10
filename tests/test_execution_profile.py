@@ -601,12 +601,21 @@ class ContainedV1ExecutesOnlyThroughADeclaringBackend(unittest.TestCase):
         lock.assert_not_called()
 
     def _refused_before_call(self, backend, profile):
+        # Every later boundary is a raising sentinel, so an engine that let the backend through
+        # fails on the boundary it reached rather than on some incidental mock behaviour.
         with tempfile.TemporaryDirectory() as d:
             path = _process_kill_manifest(Path(d))
             loaded = ca.load_manifest(path)
-            with mock.patch.object(ca, "_build") as build, \
-                    mock.patch.object(ca, "IsolatedMutationTree") as iso, \
-                    mock.patch.object(ca, "_TreeLock") as lock:
+            with mock.patch.object(
+                    ca, "ordered_declared_mutants",
+                    side_effect=AssertionError("engine advanced past its gate")), \
+                    mock.patch.object(
+                        ca, "_build", side_effect=AssertionError("build reached")) as build, \
+                    mock.patch.object(
+                        ca, "IsolatedMutationTree",
+                        side_effect=AssertionError("tree reached")) as iso, \
+                    mock.patch.object(
+                        ca, "_TreeLock", side_effect=AssertionError("lock reached")) as lock:
                 with self.assertRaises(ca.ManifestError) as ctx:
                     ca._run_process(
                         loaded, path, execution_backend=backend,
@@ -652,7 +661,11 @@ class ContainedV1ExecutesOnlyThroughADeclaringBackend(unittest.TestCase):
             path = _process_kill_manifest(Path(d))
             loaded = ca.load_manifest(path)
             loaded[ca.MINIMUM_PROFILE_KEY] = CONTAINED
-            with mock.patch.object(ca, "_TreeLock") as lock:
+            with mock.patch.object(
+                    ca, "ordered_declared_mutants",
+                    side_effect=AssertionError("engine advanced past its gate")), \
+                    mock.patch.object(
+                        ca, "_TreeLock", side_effect=AssertionError("lock reached")) as lock:
                 with self.assertRaises(ca.ManifestError):
                     ca._run_process(
                         loaded, path, execution_backend=_declaring(CONTAINED, called),
