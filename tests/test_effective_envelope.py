@@ -692,6 +692,7 @@ class CandidatePathBindsTheEnvelope(unittest.TestCase):
                 image_id=IMAGE,
                 mounts=mounts,
                 resource_profile=_profile(),
+                execution_profile="contained-oci-v0",
                 transport=transport,
                 binding=candidate.envelope_binding(
                     prepare_sha256=PREPARE_SHA256,
@@ -984,6 +985,176 @@ class InactiveV1Emission(unittest.TestCase):
         from unittest.mock import patch
         with patch.object(env, "project_effective_envelope_v1", side_effect=AssertionError("v1 activated")):
             CandidatePathBindsTheEnvelope().test_docker_unavailable_records_unavailable_and_not_run()
+
+
+# --- #102 A2: the requested pairing and the v2 comparator --------------------------------------
+
+V1_PROFILE = "contained-oci-v1"
+
+
+def _v2_profile(**over):
+    return {**contained.CANDIDATE_RESOURCE_PROFILE_V2, **over}
+
+
+def _requested_v2(profile=None):
+    return env.requested_envelope(
+        execution_profile=V1_PROFILE, image_id=IMAGE,
+        mount_spec=candidate.CANDIDATE_MOUNT_SPEC,
+        resource_profile=profile or _v2_profile(), sealed=True)
+
+
+_FROZEN_NOFILE = [{"Name": "nofile", "Soft": 1024, "Hard": 1024}]
+
+
+def _v2_effective(*, period=100000, quota=100000, limits=_FROZEN_NOFILE, profile=None):
+    doc = _inspect(profile=profile or _v2_profile())
+    doc["HostConfig"].update(CpuPeriod=period, CpuQuota=quota, Ulimits=copy.deepcopy(limits))
+    return env.project_effective_envelope_v1(
+        doc, image_env_names=IMAGE_ENV_NAMES, runtime_version=RUNTIME_VERSION,
+        daemon_info={"KernelVersion": "synthetic-kernel", "CgroupVersion": "2",
+                     "CgroupDriver": "systemd", "SecurityOptions": None})
+
+
+class RequestedProfilePairing(unittest.TestCase):
+    """contained-oci-v0 pairs only with a v1 resource profile, contained-oci-v1 only with v2."""
+
+    def test_v1_profile_is_accepted_with_a_v2_resource_profile(self):
+        requested = _requested_v2()
+        self.assertEqual(requested["execution_profile"], V1_PROFILE)
+        self.assertEqual(requested["resource_profile"], contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        self.assertIs(env.require_requested_record(requested), requested)
+
+    def test_v1_profile_with_a_v1_resource_profile_refuses(self):
+        with self.assertRaises(contained.PrepareError):
+            env.requested_envelope(
+                execution_profile=V1_PROFILE, image_id=IMAGE,
+                mount_spec=candidate.CANDIDATE_MOUNT_SPEC,
+                resource_profile=_profile(), sealed=True)
+        stored = dict(_requested_v2())
+        stored["resource_profile"] = dict(_profile())
+        with self.assertRaisesRegex(env.EnvelopeError, "^resource_profile$"):
+            env.require_requested_record(stored)
+
+    def test_v0_profile_with_a_v2_resource_profile_refuses(self):
+        with self.assertRaises(contained.PrepareError):
+            env.requested_envelope(
+                execution_profile="contained-oci-v0", image_id=IMAGE,
+                mount_spec=candidate.CANDIDATE_MOUNT_SPEC,
+                resource_profile=_v2_profile(), sealed=True)
+        stored = dict(_requested())
+        stored["resource_profile"] = _v2_profile()
+        with self.assertRaisesRegex(env.EnvelopeError, "^resource_profile$"):
+            env.require_requested_record(stored)
+
+    def test_every_other_profile_refuses(self):
+        for profile in ("trusted-local", "contained-oci-v2", "", None, ["contained-oci-v0"]):
+            with self.subTest(profile=profile):
+                with self.assertRaisesRegex(env.EnvelopeError, "^execution_profile$"):
+                    env.requested_envelope(
+                        execution_profile=profile, image_id=IMAGE,
+                        mount_spec=candidate.CANDIDATE_MOUNT_SPEC,
+                        resource_profile=_profile(), sealed=True)
+                stored = dict(_requested())
+                stored["execution_profile"] = profile
+                with self.assertRaisesRegex(env.EnvelopeError, "^execution_profile$"):
+                    env.require_requested_record(stored)
+
+    def test_pairing_vocabulary_is_exactly_the_contained_profiles(self):
+        self.assertEqual(set(env.ENVELOPE_SCHEMA_BY_PROFILE), set(ca._CONTAINED_PROFILES))
+        self.assertEqual(env.envelope_schema_for_profile("contained-oci-v0"), env.ENVELOPE_SCHEMA)
+        self.assertEqual(env.envelope_schema_for_profile(V1_PROFILE), env.ENVELOPE_SCHEMA_V1)
+        for profile in ("trusted-local", None, ["x"]):
+            with self.subTest(profile=profile), self.assertRaises(env.EnvelopeError):
+                env.envelope_schema_for_profile(profile)
+
+
+class V2RequestComparator(unittest.TestCase):
+    """A v2 request's CPU and nofile are compared exactly; a v1 request's stay shape-checked."""
+
+    def _check(self, effective, requested=None):
+        env.require_envelope_matches_request(
+            effective, requested or _requested_v2(), schema=env.ENVELOPE_SCHEMA_V1)
+
+    def test_matching_observation_verifies(self):
+        self._check(_v2_effective())
+
+    def test_each_mismatch_is_named(self):
+        cases = {
+            "cpu_period": dict(period=50000),
+            "cpu_quota": dict(quota=250000),
+        }
+        for field, over in cases.items():
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    env.EnvelopeError, "^%s$" % field):
+                self._check(_v2_effective(**over))
+        for limits in ([{"Name": "nofile", "Soft": 512, "Hard": 1024}],
+                       [{"Name": "nofile", "Soft": 1024, "Hard": 2048}],
+                       None, [], [{"Name": "nproc", "Soft": 1, "Hard": 1}]):
+            with self.subTest(limits=limits), self.assertRaisesRegex(
+                    env.EnvelopeError, "^ulimit_nofile$"):
+                self._check(_v2_effective(limits=limits))
+
+    def test_daemon_discarded_limits_stored_unset_are_mismatches(self):
+        for over, field in ((dict(period=0), "cpu_period"), (dict(quota=0), "cpu_quota")):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    env.EnvelopeError, "^%s$" % field):
+                self._check(_v2_effective(**over))
+
+    def test_the_quota_follows_the_requested_rate(self):
+        profile = _v2_profile(cpu_rate_millicpu=2500, nofile_soft=512, nofile_hard=2048)
+        requested = _requested_v2(profile)
+        self._check(_v2_effective(
+            quota=250000, limits=[{"Name": "nofile", "Soft": 512, "Hard": 2048}],
+            profile=profile), requested)
+        with self.assertRaisesRegex(env.EnvelopeError, "^cpu_quota$"):
+            self._check(_v2_effective(
+                limits=[{"Name": "nofile", "Soft": 512, "Hard": 2048}], profile=profile),
+                requested)
+
+    def test_a_v0_envelope_cannot_verify_a_v2_request(self):
+        doc = _inspect(profile=_v2_profile())
+        effective = _effective(doc)
+        with self.assertRaisesRegex(env.EnvelopeError, "^envelope_schema_profile$"):
+            env.require_envelope_matches_request(
+                effective, _requested_v2(), schema=env.ENVELOPE_SCHEMA)
+
+    def test_a_v1_request_keeps_shape_only_cpu_and_nofile(self):
+        """O fixtures pair a v1 envelope with a v0 request; its CPU values are not compared."""
+        env.require_envelope_matches_request(
+            _v2_effective(period=0, quota=0, limits=[]), _requested(),
+            schema=env.ENVELOPE_SCHEMA_V1)
+
+
+class V1ProfileRecordSchema(unittest.TestCase):
+    def _fields(self, schema, **over):
+        fields = dict(
+            requested=_requested_v2(), setup_status="ready",
+            envelope_status="verified", unverified_field=None,
+            effective=_v2_effective(), candidate_outcome="completed",
+            cleanup="removed-and-absent", prepare_sha256=PREPARE_SHA256,
+            execution_commit=EXECUTION_COMMIT, report_sha256=None, schema=schema)
+        fields.update(over)
+        return fields
+
+    def test_v1_profile_record_is_built_and_validated_as_v1(self):
+        record = env.build_envelope_record(**self._fields(env.ENVELOPE_SCHEMA_V1))
+        self.assertEqual(record["publication_permission"], "permitted")
+        self.assertEqual(env.validate_envelope_record(record), record)
+
+    def test_v1_profile_record_cannot_use_the_v0_schema(self):
+        for over in ({}, dict(envelope_status="unverified", unverified_field="cpu_quota",
+                              effective=None),
+                     dict(setup_status="refused", envelope_status="unverified",
+                          unverified_field="create", effective=None,
+                          candidate_outcome="not-run")):
+            with self.subTest(over=sorted(over)), self.assertRaisesRegex(
+                    env.EnvelopeError, "^envelope_schema_profile$"):
+                env.build_envelope_record(**self._fields(env.ENVELOPE_SCHEMA, **over))
+
+    def test_v1_envelope_with_a_v0_request_stays_valid(self):
+        record = _wire_v1_record()
+        self.assertEqual(record["requested"]["execution_profile"], "contained-oci-v0")
+        self.assertEqual(env.validate_envelope_record(record), record)
 
 
 if __name__ == "__main__":

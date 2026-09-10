@@ -46,8 +46,11 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, transport=Non
         # observe an invocation that raised.
         ordinal = None if ledger is None else ledger.register()
         try:
+            # A literal, not the engine's resolved profile: this route admits prepare.v1 only,
+            # and threading the resolved profile through the runtime is #102 A3's.
             completed = candidate.run_sealed_candidate(
                 prepare_raw=prepare_raw,
+                execution_profile="contained-oci-v0",
                 mounts=mounts,
                 execution_contract=execution_manifest,
                 transport=transport,

@@ -116,6 +116,60 @@ class SealedRuntimeBackend(unittest.TestCase):
 
 
 
+class RuntimeReachesTheRealCandidate(unittest.TestCase):
+    """#102 A2: the real backend calls the real `run_sealed_candidate` with a literal v0 profile.
+
+    Nothing at or above admission is mocked. The transport is fake, and `_run_sealed_candidate`
+    (below admission) is observed with `wraps`, so the real funnel still runs underneath it.
+    Threading the engine's resolved profile through the runtime is A3's, not this slice's.
+    """
+
+    def test_runtime_passes_contained_oci_v0_to_the_real_candidate(self):
+        from tests.test_aee_checker_sealed_candidate import (
+            ObservingTransport, _observed_inspect)
+        prepare_raw = _prepare_v1()
+        toolchain = json.loads(prepare_raw)["toolchain"]["image_id"]
+        transport = ObservingTransport(
+            stdout="",
+            inspect=_observed_inspect(common.CANDIDATE_RESOURCE_PROFILE, image=toolchain))
+        records = []
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            materialized = {key: root / key for key in ("corpus", "vendor", "tool")}
+            for path in materialized.values():
+                path.mkdir()
+            subject = root / "subject"
+            subject.mkdir()
+            manifest = {
+                "_repo_root": subject,
+                "accepted_exit_codes": [0], "unproved_exit_codes": [75],
+                "runner": "batch", "outcome_from": ["rows"],
+                "build": list(runtime.candidate.CONTAINER_BUILD),
+                "entrypoint_command": list(runtime.candidate.CONTAINER_ENTRYPOINT),
+            }
+            with mock.patch.object(
+                    runtime.candidate, "_run_sealed_candidate",
+                    wraps=runtime.candidate._run_sealed_candidate) as below:
+                result = runtime.make_sealed_backend(
+                    prepare_raw=prepare_raw, materialized=materialized,
+                    transport=transport, envelope_sink=records.append,
+                )(manifest, [{"vector_id": "<batch>"}], rebuild=True)
+
+        self.assertEqual(below.call_count, 1)
+        self.assertEqual(below.call_args.kwargs["execution_profile"], "contained-oci-v0")
+        self.assertEqual(below.call_args.kwargs["resource_profile"],
+                         common.CANDIDATE_RESOURCE_PROFILE)
+        self.assertEqual(len(transport.created), 1)
+        for flag in ("--cpu-period", "--cpu-quota", "--ulimit", "--cpus"):
+            self.assertNotIn(flag, transport.created[0])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["requested"]["execution_profile"], "contained-oci-v0")
+        self.assertEqual(records[0]["schema"], "corpus-adequacy.execution-envelope.v0")
+        self.assertEqual(records[0]["envelope_status"], "verified",
+                         records[0]["unverified_field"])
+        self.assertEqual(result.raised, {"<batch>": "unproved"})
+
+
 class ClosedUnprovedRuntime(unittest.TestCase):
     def _backend_result(self, completed):
         with tempfile.TemporaryDirectory() as d:

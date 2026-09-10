@@ -213,15 +213,35 @@ def require_resource_profile_v2(profile) -> dict:
     return _require_profile(profile, schema=RESOURCE_PROFILE_V2_SCHEMA)
 
 
+def require_versioned_resource_profile(profile) -> dict:
+    """Admit a v1 or a v2 profile, selected by its own schema field, through the one shared rule.
+
+    For the container funnel only, which serves both versions. Which version a run may use is
+    decided upstream by the resolved execution profile; this selects the validator, not the policy.
+    """
+    schema = profile.get("schema") if type(profile) is dict else None
+    if type(schema) is not str or schema not in _PROFILE_POLICIES:
+        raise PrepareError("resource profile schema")
+    return _require_profile(profile, schema=schema)
+
+
+def cpu_quota_usec(profile) -> int:
+    """The one mapping from a v2 rate to the CFS quota, shared by the argv and the comparator."""
+    checked = require_resource_profile_v2(profile)
+    return checked["cpu_rate_millicpu"] * CPU_PERIOD_USEC // MILLICPU_PER_CPU
+
+
 def docker_resource_argv_v2(profile) -> list[str]:
     """The CPU rate and descriptor arguments implied by a validated v2 profile.
 
-    Encoding an argument is not applying or observing a limit, and these are not applied by the
-    v1 path this slice leaves untouched. The rate is a cgroup aggregate quota over a period; the
-    wall deadline remains a separate, independently enforced bound and does not appear here.
+    Encoding an argument is not applying or observing a limit. `docker_create_argv` emits these
+    for a v2 profile only, so a v1 argv never gains them. The rate is a cgroup aggregate quota
+    over a period, kept in period/quota form because the CPU-count flag would store `NanoCpus`
+    and leave both observed fields unset; the wall deadline remains a separate, independently
+    enforced bound and does not appear here.
     """
     checked = require_resource_profile_v2(profile)
-    quota = checked["cpu_rate_millicpu"] * CPU_PERIOD_USEC // MILLICPU_PER_CPU
+    quota = cpu_quota_usec(checked)
     return [
         "--cpu-period", str(CPU_PERIOD_USEC),
         "--cpu-quota", str(quota),
@@ -348,7 +368,14 @@ def _require_tmpfs_match(parsed: dict, *, dest: str, size: int, inodes: int) -> 
 def validate_inspect_contract(
         inspect, *, sealed: bool, mount_spec=DEFAULT_MOUNT_SPEC,
         resource_profile=None) -> dict:
-    profile = require_resource_profile(
+    """Refuse a container whose stored configuration contradicts the v1 fields of the profile.
+
+    A v2 profile is admitted and read through the same v1 fields only. Its CPU and nofile values
+    are deliberately not checked here: this runs after the container started, so a raise would
+    record a run that happened as refused/not-run. They are compared by the envelope comparator,
+    where a mismatch makes the envelope unverified and keeps the candidate outcome.
+    """
+    profile = require_versioned_resource_profile(
         INERT_RESOURCE_PROFILE if resource_profile is None else resource_profile)
     if type(inspect) is not dict:
         raise PrepareError("inspect missing")
@@ -515,7 +542,7 @@ def docker_create_argv(
         sealed: bool = True, mount_spec=DEFAULT_MOUNT_SPEC,
         entrypoint: str = "/probe", resource_profile=None) -> list[str]:
     image_id = require_image_id(image_id)
-    profile = require_resource_profile(
+    profile = require_versioned_resource_profile(
         INERT_RESOURCE_PROFILE if resource_profile is None else resource_profile)
     normalized_mount_spec = _require_mount_spec(mount_spec)
     expected_mounts = {key for key, _destination in normalized_mount_spec}
@@ -541,6 +568,9 @@ def docker_create_argv(
         "--tmpfs", "/tmp:%s" % tmp_tmpfs,
         "--tmpfs", "/work:%s" % work_tmpfs,
     ]
+    # Only a v2 profile carries CPU and descriptor limits; a v1 argv is byte-identical to before.
+    if profile["schema"] == RESOURCE_PROFILE_V2_SCHEMA:
+        argv.extend(docker_resource_argv_v2(profile))
     if sealed:
         argv.extend(["--env", "CARGO_NET_OFFLINE=true"])
     for key, destination in normalized_mount_spec:
@@ -676,7 +706,7 @@ def run_contained(
     keep no record leave it false and a cleanup failure still refuses.
     """
     image_id = require_image_id(image_id)
-    profile = require_resource_profile(resource_profile)
+    profile = require_versioned_resource_profile(resource_profile)
     if transport is None:
         require_local_image(image_id)
         transport = DockerTransport()

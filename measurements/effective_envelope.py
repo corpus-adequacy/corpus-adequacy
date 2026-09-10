@@ -22,6 +22,19 @@ ENVELOPE_SCHEMA = "corpus-adequacy.execution-envelope.v0"
 ENVELOPE_SCHEMA_V1 = "corpus-adequacy.execution-envelope.v1"
 ENVELOPE_SCHEMAS = (ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_V1)
 CONTAINED_PROFILE = "contained-oci-v0"
+CONTAINED_PROFILE_V1 = "contained-oci-v1"
+# The one pairing rule for a request: the resource-profile loader each contained execution
+# profile admits. contained-oci-v0 pairs only with a v1 profile, contained-oci-v1 only with v2.
+_REQUESTED_RESOURCE_PROFILE = {
+    CONTAINED_PROFILE: contained.require_resource_profile,
+    CONTAINED_PROFILE_V1: contained.require_resource_profile_v2,
+}
+# The envelope schema a candidate run under each profile emits. The builder holds only the
+# v1 direction (a contained-oci-v1 record is v1); a v1 envelope may still carry a v0 request.
+ENVELOPE_SCHEMA_BY_PROFILE = {
+    CONTAINED_PROFILE: ENVELOPE_SCHEMA,
+    CONTAINED_PROFILE_V1: ENVELOPE_SCHEMA_V1,
+}
 CONTAINED_USER = contained.CONTAINED_USER
 OFFLINE_ENV_NAME = "CARGO_NET_OFFLINE"
 
@@ -293,6 +306,23 @@ def project_effective_envelope_v1(inspect, *, image_env_names, runtime_version,
     return effective
 
 
+def _resource_profile_loader(execution_profile):
+    """The resource-profile loader a requested execution profile admits; any other refuses."""
+    if (type(execution_profile) is not str or
+            execution_profile not in ca.CLOSED_EXECUTION_PROFILES or
+            execution_profile not in _REQUESTED_RESOURCE_PROFILE):
+        raise EnvelopeError("execution_profile")
+    return _REQUESTED_RESOURCE_PROFILE[execution_profile]
+
+
+def envelope_schema_for_profile(execution_profile) -> str:
+    """The envelope schema a candidate run under `execution_profile` emits."""
+    if (type(execution_profile) is not str or
+            execution_profile not in ENVELOPE_SCHEMA_BY_PROFILE):
+        raise EnvelopeError("execution_profile")
+    return ENVELOPE_SCHEMA_BY_PROFILE[execution_profile]
+
+
 def requested_envelope(*, execution_profile, image_id, mount_spec,
                        resource_profile, sealed) -> dict:
     """The declaration side. These values are compared, never projected.
@@ -301,10 +331,7 @@ def requested_envelope(*, execution_profile, image_id, mount_spec,
     an immutable artifact, so it sits in `effective` and the environment
     check is observation against observation, with no declaration involved.
     """
-    if execution_profile not in ca.CLOSED_EXECUTION_PROFILES:
-        raise EnvelopeError("execution_profile")
-    if execution_profile != CONTAINED_PROFILE:
-        raise EnvelopeError("execution_profile")
+    loader = _resource_profile_loader(execution_profile)
     if type(sealed) is not bool:
         raise EnvelopeError("sealed")
     return {
@@ -313,7 +340,7 @@ def requested_envelope(*, execution_profile, image_id, mount_spec,
         "mount_spec": sorted(
             destination for _key, destination
             in contained._require_mount_spec(mount_spec)),
-        "resource_profile": contained.require_resource_profile(resource_profile),
+        "resource_profile": loader(resource_profile),
         "sealed": sealed,
     }
 
@@ -326,15 +353,15 @@ def _require_exact(doc, keys, where: str) -> None:
 def require_requested_record(requested) -> dict:
     """Validate that a stored requested declaration conforms to the closed schema.
 
-    Enforces that execution_profile is contained-oci-v0, image_id is a valid
-    sha256 digest, sealed is strictly a bool, resource_profile conforms to
-    RESOURCE_PROFILE_SCHEMA with positive integer limits and bool work_exec,
-    and mount_spec is a strictly sorted list of unique destination strings
-    starting with '/'.
+    Enforces that execution_profile is a contained profile paired with its own
+    resource-profile version (contained-oci-v0 with RESOURCE_PROFILE_SCHEMA,
+    contained-oci-v1 with RESOURCE_PROFILE_V2_SCHEMA), image_id is a valid
+    sha256 digest, sealed is strictly a bool, resource_profile has positive
+    integer limits and bool work_exec, and mount_spec is a strictly sorted
+    list of unique destination strings starting with '/'.
     """
     _require_exact(requested, REQUESTED_KEYS, "requested")
-    if requested["execution_profile"] != CONTAINED_PROFILE:
-        raise EnvelopeError("execution_profile")
+    loader = _resource_profile_loader(requested["execution_profile"])
     try:
         contained.require_image_id(requested["image_id"])
     except contained.PrepareError as exc:
@@ -342,7 +369,7 @@ def require_requested_record(requested) -> dict:
     if type(requested["sealed"]) is not bool:
         raise EnvelopeError("sealed")
     try:
-        contained.require_resource_profile(requested["resource_profile"])
+        loader(requested["resource_profile"])
     except contained.PrepareError as exc:
         raise EnvelopeError("resource_profile") from exc
     mount_spec = requested["mount_spec"]
@@ -353,11 +380,39 @@ def require_requested_record(requested) -> dict:
     return requested
 
 
+def _requests_cpu_and_nofile(requested) -> bool:
+    """A v2 resource profile is a request for CPU and nofile limits; a v1 one is not.
+
+    After `require_requested_record` this is exactly a contained-oci-v1 request, since that
+    profile pairs only with a v2 resource profile.
+    """
+    return requested["resource_profile"]["schema"] == contained.RESOURCE_PROFILE_V2_SCHEMA
+
+
+def _require_cpu_and_nofile_match(effective, profile) -> None:
+    """Exact comparison of daemon-stored CPU and nofile against a v2 request.
+
+    The daemon may discard a limit and store it unset (0, or no nofile entry); that reads as a
+    mismatch here, never as satisfied. This compares configuration the daemon reports, not a
+    limit the kernel applied.
+    """
+    if effective["cpu_period"] != contained.CPU_PERIOD_USEC:
+        raise EnvelopeError("cpu_period")
+    if effective["cpu_quota"] != contained.cpu_quota_usec(profile):
+        raise EnvelopeError("cpu_quota")
+    if effective["ulimit_nofile"] != {
+            "soft": profile["nofile_soft"], "hard": profile["nofile_hard"]}:
+        raise EnvelopeError("ulimit_nofile")
+
+
 def require_envelope_matches_request(effective, requested, *, schema=ENVELOPE_SCHEMA) -> None:
     """Hold one observation against one declaration. Observation cannot yield.
 
-    The v0 fields retain their declaration comparisons. V1 CPU/nofile and
-    daemon fields are observations with shape checks, not requested limits.
+    The v0 fields retain their declaration comparisons. For a v2 request the
+    observed CPU period, quota and nofile soft/hard are compared exactly, so a
+    v2 request needs a v1 envelope. For a v1 request those fields, and the
+    daemon fields always, are observations with shape checks, not requested
+    limits.
     """
     require_requested_record(requested)
     _require_exact(effective, _effective_keys(schema),
@@ -365,6 +420,8 @@ def require_envelope_matches_request(effective, requested, *, schema=ENVELOPE_SC
     if schema == ENVELOPE_SCHEMA_V1:
         _require_v1_values(effective)
     profile = requested["resource_profile"]
+    if _requests_cpu_and_nofile(requested) and schema != ENVELOPE_SCHEMA_V1:
+        raise EnvelopeError("envelope_schema_profile")
 
     if effective["image"] != requested["image_id"]:
         raise EnvelopeError("image")
@@ -458,6 +515,9 @@ def require_envelope_matches_request(effective, requested, *, schema=ENVELOPE_SC
     if effective["mounts"] != expected_mounts:
         raise EnvelopeError("mounts")
 
+    if _requests_cpu_and_nofile(requested):
+        _require_cpu_and_nofile_match(effective, profile)
+
 
 def _require_member(value, members, where: str) -> str:
     for member in members:
@@ -499,6 +559,11 @@ def build_envelope_record(*, requested, setup_status, envelope_status,
     """
     _effective_keys(schema)
     require_requested_record(requested)
+    # A contained-oci-v1 record is v1 whatever its states: a v0 record has nowhere to hold the
+    # CPU and nofile its request names. The reverse is not held, so a v1 envelope may still
+    # carry a v0 request.
+    if _requests_cpu_and_nofile(requested) and schema != ENVELOPE_SCHEMA_V1:
+        raise EnvelopeError("envelope_schema_profile")
     setup_status = _require_member(setup_status, SETUP_STATUSES, "setup_status")
     envelope_status = _require_member(
         envelope_status, ENVELOPE_STATUSES, "envelope_status")

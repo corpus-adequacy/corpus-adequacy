@@ -493,6 +493,11 @@ class CandidatePrepareBinding(unittest.TestCase):
         self.assertNotIn("image_id", parameters)
         self.assertNotIn("resource_profile", parameters)
         self.assertNotIn("sealed", parameters)
+        # The resolved profile is the one input besides the bytes, and it has no default:
+        # omission is TypeError, never an implied contained-oci-v0.
+        profile = parameters["execution_profile"]
+        self.assertIs(profile.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIs(profile.default, inspect.Parameter.empty)
 
     def test_public_candidate_derives_toolchain_image_and_profile_from_prepare(self):
         profile = common.CANDIDATE_RESOURCE_PROFILE
@@ -520,7 +525,8 @@ class CandidatePrepareBinding(unittest.TestCase):
         transport = Capture()
         with tempfile.TemporaryDirectory() as d:
             cand.run_sealed_candidate(
-                prepare_raw=self._raw(), mounts=_mounts(Path(d)), transport=transport)
+                prepare_raw=self._raw(), mounts=_mounts(Path(d)), transport=transport,
+                execution_profile="contained-oci-v0")
         self.assertIn(TOOLCHAIN, transport.argv)
         self.assertNotIn(PROBE, transport.argv)
         self.assertEqual(transport.deadline, profile["deadline_seconds"])
@@ -532,7 +538,8 @@ class CandidatePrepareBinding(unittest.TestCase):
             mounts = _mounts(Path(d))
             with self.assertRaises(PrepareError):
                 cand.run_sealed_candidate(
-                    prepare_raw=self._raw(parts), mounts=mounts, transport=object())
+                    prepare_raw=self._raw(parts), mounts=mounts, transport=object(),
+                    execution_profile="contained-oci-v0")
 
 class ExecutionIdentity(unittest.TestCase):
     def test_profile_helpers_live_on_listed_execution_paths(self):
@@ -759,3 +766,188 @@ class DaemonObservationV1(unittest.TestCase):
         from unittest.mock import patch
         with patch.object(c.DockerTransport, "daemon_info", side_effect=AssertionError("activated")), patch.object(c, "require_docker_ready", return_value="fixture-version"):
             self.assertEqual(c.DockerTransport().version(), "fixture-version")
+
+
+# --- #102 A2: v2 resource flags at create, and the one PREPARE dispatcher ----------------------
+
+V2_FLAGS = ["--cpu-period", "100000", "--cpu-quota", "100000", "--ulimit", "nofile=1024:1024"]
+_INT64_MAX = 2 ** 63 - 1
+
+
+def _contains_run(argv, run_tokens) -> bool:
+    return any(argv[i:i + len(run_tokens)] == run_tokens for i in range(len(argv)))
+
+
+def _create_argv(profile, root: Path):
+    keys = [k for k, _dest in contained.DEFAULT_MOUNT_SPEC]
+    for key in keys:
+        (root / key).mkdir(exist_ok=True)
+    return contained.docker_create_argv(
+        name="c", image_id=IMAGE, entrypoint="/entry", command=[],
+        resource_profile=profile, mounts={k: root / k for k in keys},
+        mount_spec=contained.DEFAULT_MOUNT_SPEC, sealed=True)
+
+
+class V2FlagsAtCreate(unittest.TestCase):
+    def _v2(self, **over):
+        return {**contained.CANDIDATE_RESOURCE_PROFILE_V2, **over}
+
+    def test_v2_profile_adds_exactly_the_flags_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as raw:
+            v1 = _create_argv(contained.CANDIDATE_RESOURCE_PROFILE, Path(raw))
+            v2 = _create_argv(contained.CANDIDATE_RESOURCE_PROFILE_V2, Path(raw))
+        self.assertTrue(_contains_run(v2, V2_FLAGS), v2)
+        start = next(i for i in range(len(v2)) if v2[i:i + len(V2_FLAGS)] == V2_FLAGS)
+        # Removing the six v2 tokens leaves the v1 argv of the same ceilings, byte for byte.
+        self.assertEqual(v2[:start] + v2[start + len(V2_FLAGS):], v1)
+        self.assertNotIn("--cpus", v2)
+
+    def test_representational_cpu_maximum_passes_create_and_one_more_refuses(self):
+        at_bound = contained.MAX_CPU_RATE_MILLICPU
+        with tempfile.TemporaryDirectory() as raw:
+            argv = _create_argv(self._v2(cpu_rate_millicpu=at_bound), Path(raw))
+            quota = int(argv[argv.index("--cpu-quota") + 1])
+            self.assertEqual(quota, at_bound * 100000 // 1000)
+            self.assertLessEqual(quota, _INT64_MAX)
+            with self.assertRaises(PrepareError):
+                _create_argv(self._v2(cpu_rate_millicpu=at_bound + 1), Path(raw))
+
+    def test_representational_nofile_maximum_passes_create_and_one_more_refuses(self):
+        self.assertEqual(contained.MAX_NOFILE, _INT64_MAX)
+        with tempfile.TemporaryDirectory() as raw:
+            argv = _create_argv(
+                self._v2(nofile_soft=_INT64_MAX, nofile_hard=_INT64_MAX), Path(raw))
+            self.assertEqual(argv[argv.index("--ulimit") + 1],
+                             "nofile=%d:%d" % (_INT64_MAX, _INT64_MAX))
+            with self.assertRaises(PrepareError):
+                _create_argv(
+                    self._v2(nofile_soft=1024, nofile_hard=_INT64_MAX + 1), Path(raw))
+
+    def test_run_contained_admits_a_v2_profile_with_alternate_values(self):
+        profile = self._v2(cpu_rate_millicpu=2500, nofile_soft=512, nofile_hard=2048)
+
+        class Capture:
+            skip_absent = False
+
+            def create(self, argv):
+                self.argv = argv
+
+            def start(self, name, deadline_seconds):
+                return subprocess.CompletedProcess([], 0, "{}\n", "")
+
+            def inspect(self, name):
+                # No CpuPeriod/CpuQuota/Ulimits at all: the inspect contract is not where CPU
+                # or nofile is compared, so a completed container is never turned into refused.
+                return _inspect(("/input", "/vendor", "/tool"), profile=profile)
+
+            def remove(self, name):
+                return None
+
+            def require_absent(self, name):
+                return None
+
+        transport = Capture()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for key, _dest in contained.DEFAULT_MOUNT_SPEC:
+                (root / key).mkdir()
+            result = contained.run_contained(
+                image_id=IMAGE, mounts={k: root / k for k, _ in contained.DEFAULT_MOUNT_SPEC},
+                command=[], entrypoint="/entry", mount_spec=contained.DEFAULT_MOUNT_SPEC,
+                resource_profile=profile, sealed=True, name_prefix="a2-",
+                transport=transport)
+        self.assertEqual(result["state"], "completed")
+        self.assertTrue(_contains_run(transport.argv, [
+            "--cpu-period", "100000", "--cpu-quota", "250000",
+            "--ulimit", "nofile=512:2048"]), transport.argv)
+
+    def test_inspect_contract_reads_the_same_fields_for_v1_and_v2(self):
+        doc = _inspect(("/input", "/vendor", "/tool"), profile=contained.CANDIDATE_RESOURCE_PROFILE)
+        v1 = oci.validate_inspect_contract(
+            doc, sealed=True, resource_profile=contained.CANDIDATE_RESOURCE_PROFILE)
+        v2 = oci.validate_inspect_contract(
+            doc, sealed=True, resource_profile=contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        self.assertEqual(v1, v2)
+
+    def test_unknown_resource_profile_schema_refuses_at_create(self):
+        for schema in ("corpus-adequacy.aee-checker-sealed.resource-profile.v3", None, ["x"]):
+            with self.subTest(schema=schema), tempfile.TemporaryDirectory() as raw:
+                with self.assertRaises(PrepareError):
+                    _create_argv(self._v2(schema=schema), Path(raw))
+
+
+class PrepareDispatcher(unittest.TestCase):
+    def _raw(self, profile):
+        from tests.test_aee_checker_sealed_run import PrepareEvidence
+        parts = PrepareEvidence._parts(self)
+        parts["candidate_profile"] = dict(profile)
+        parts["image"] = {**parts["image"], "id_scope": "host-local", "platform": "linux/arm64"}
+        emit = (run.emit_prepare_v2 if profile is contained.CANDIDATE_RESOURCE_PROFILE_V2
+                else run.emit_prepare_v1)
+        with tempfile.TemporaryDirectory() as d:
+            return emit(parts, Path(d) / "prepare.json")
+
+    def test_dispatcher_vocabulary_is_exactly_the_contained_profiles(self):
+        import corpus_adequacy as ca
+        self.assertEqual(set(run.PREPARE_SCHEMA_BY_PROFILE), set(ca._CONTAINED_PROFILES))
+        self.assertEqual(run.PREPARE_SCHEMA_BY_PROFILE, {
+            "contained-oci-v0": run.PREPARE_V1_SCHEMA,
+            "contained-oci-v1": run.PREPARE_V2_SCHEMA,
+        })
+
+    def test_dispatcher_returns_exactly_the_named_loader_result(self):
+        v1_raw = self._raw(contained.CANDIDATE_RESOURCE_PROFILE)
+        v2_raw = self._raw(contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        self.assertEqual(
+            run.load_prepare_for_profile(v1_raw, execution_profile="contained-oci-v0"),
+            run.load_prepare_v1(v1_raw))
+        self.assertEqual(
+            run.load_prepare_for_profile(v2_raw, execution_profile="contained-oci-v1"),
+            run.load_prepare_v2(v2_raw))
+
+    def test_each_loader_is_reached_only_for_its_profile(self):
+        for profile, resource, reached, untouched in (
+                ("contained-oci-v0", contained.CANDIDATE_RESOURCE_PROFILE,
+                 "load_prepare_v1", "load_prepare_v2"),
+                ("contained-oci-v1", contained.CANDIDATE_RESOURCE_PROFILE_V2,
+                 "load_prepare_v2", "load_prepare_v1")):
+            raw = self._raw(resource)
+            with self.subTest(profile=profile), \
+                    mock.patch.object(run, reached, wraps=getattr(run, reached)) as used, \
+                    mock.patch.object(
+                        run, untouched, side_effect=AssertionError("wrong loader")) as other:
+                run.load_prepare_for_profile(raw, execution_profile=profile)
+            used.assert_called_once_with(raw)
+            other.assert_not_called()
+
+    def test_crossed_versions_refuse_under_their_own_names(self):
+        v1_raw = self._raw(contained.CANDIDATE_RESOURCE_PROFILE)
+        v2_raw = self._raw(contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        with self.assertRaisesRegex(
+                PrepareError, "^prepare.v2 requires contained-oci-v1; "
+                              "contained-oci-v0 admits only prepare.v1$"):
+            run.load_prepare_for_profile(v2_raw, execution_profile="contained-oci-v0")
+        with self.assertRaisesRegex(
+                PrepareError, "^contained-oci-v1 admits only prepare.v2; a prepare.v1 is "
+                              "never reinterpreted as CPU- or descriptor-limited$"):
+            run.load_prepare_for_profile(v1_raw, execution_profile="contained-oci-v1")
+
+    def test_other_refusals_keep_the_loader_message(self):
+        v1_raw = self._raw(contained.CANDIDATE_RESOURCE_PROFILE)
+        with self.assertRaisesRegex(PrepareError, "prepare.v1 is not canonical"):
+            run.load_prepare_for_profile(v1_raw + b"\n", execution_profile="contained-oci-v0")
+        for garbage in (b"", b"[]", b'{"schema": ["x"]}'):
+            with self.subTest(raw=garbage), self.assertRaises(PrepareError):
+                run.load_prepare_for_profile(garbage, execution_profile="contained-oci-v1")
+
+    def test_every_other_profile_has_no_loader(self):
+        raw = self._raw(contained.CANDIDATE_RESOURCE_PROFILE)
+        for profile in ("trusted-local", "contained-oci-v2", "", None, ["contained-oci-v0"]):
+            with self.subTest(profile=profile), mock.patch.object(
+                    run, "load_prepare_v1", side_effect=AssertionError("loader reached")):
+                with self.assertRaisesRegex(PrepareError, "no PREPARE loader"):
+                    run.load_prepare_for_profile(raw, execution_profile=profile)
+
+    def test_execution_profile_is_required(self):
+        with self.assertRaises(TypeError):
+            run.load_prepare_for_profile(self._raw(contained.CANDIDATE_RESOURCE_PROFILE))
