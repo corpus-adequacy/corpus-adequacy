@@ -526,6 +526,54 @@ def load_prepare_v1(raw: bytes) -> dict:
     return canonical
 
 
+# Closed: the one PREPARE schema each contained execution profile admits. A profile outside this
+# map has no loader, so it refuses rather than defaulting to either version, and a historical
+# prepare.v1 is never read as CPU- or descriptor-limited because only contained-oci-v1 reaches v2.
+PREPARE_SCHEMA_BY_PROFILE = {
+    "contained-oci-v0": PREPARE_V1_SCHEMA,
+    "contained-oci-v1": PREPARE_V2_SCHEMA,
+}
+# Refusal names for the two crossed pairs, so each says which profile the bytes need. Naming is
+# all this does: the named loader has already refused before a name is chosen.
+_CROSSED_PREPARE = {
+    ("contained-oci-v0", PREPARE_V2_SCHEMA):
+        "prepare.v2 requires contained-oci-v1; contained-oci-v0 admits only prepare.v1",
+    ("contained-oci-v1", PREPARE_V1_SCHEMA):
+        "contained-oci-v1 admits only prepare.v2; "
+        "a prepare.v1 is never reinterpreted as CPU- or descriptor-limited",
+}
+
+
+def _declared_schema(raw: bytes):
+    try:
+        doc = load_strict(raw)
+    except PrepareError:
+        return None
+    schema = doc.get("schema") if type(doc) is dict else None
+    return schema if type(schema) is str else None
+
+
+def load_prepare_for_profile(raw: bytes, *, execution_profile) -> dict:
+    """The one PREPARE admission rule, keyed by the resolved execution profile.
+
+    Selection only: validation stays in `load_prepare_v1` / `load_prepare_v2`, reached here and
+    nowhere else on the candidate path. `execution_profile` has no default, so omitting it is
+    TypeError rather than an implied contained-oci-v0.
+    """
+    if (type(execution_profile) is not str or
+            execution_profile not in PREPARE_SCHEMA_BY_PROFILE):
+        raise PrepareError("execution profile has no PREPARE loader")
+    schema = PREPARE_SCHEMA_BY_PROFILE[execution_profile]
+    loader = {PREPARE_V1_SCHEMA: load_prepare_v1, PREPARE_V2_SCHEMA: load_prepare_v2}[schema]
+    try:
+        return loader(raw)
+    except PrepareError as exc:
+        crossed = _CROSSED_PREPARE.get((execution_profile, _declared_schema(raw)))
+        if crossed is None:
+            raise
+        raise PrepareError(crossed) from exc
+
+
 def main(argv: list[str]) -> int:
     pins_default = _ROOT / "measurements" / "aee-checker-25b9dfa"
     adapter = _ROOT / "adapters" / "aee_checker_sealed.py"

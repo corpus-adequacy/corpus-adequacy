@@ -387,14 +387,18 @@ class SealedLifecycle(unittest.TestCase):
             "candidate_profile": INERT_RESOURCE_PROFILE,
         }
         completed = subprocess.CompletedProcess([], 0, "", "")
-        with mock.patch.object(cand, "load_prepare_v1", return_value=prepare), \
+        with mock.patch.object(
+                    cand, "load_prepare_for_profile", return_value=prepare) as admit, \
                 mock.patch.object(
                     cand, "_run_sealed_candidate", return_value=completed) as inner:
             actual = cand.run_sealed_candidate(
-                prepare_raw=b"prepare", mounts={"input": Path("input")})
+                prepare_raw=b"prepare", mounts={"input": Path("input")},
+                execution_profile="contained-oci-v0")
 
         self.assertIs(actual, completed)
         self.assertIs(inner.call_args.kwargs["sealed"], True)
+        admit.assert_called_once_with(b"prepare", execution_profile="contained-oci-v0")
+        self.assertEqual(inner.call_args.kwargs["execution_profile"], "contained-oci-v0")
 
     def test_absence_proof_runs_on_success_and_error(self):
         with tempfile.TemporaryDirectory() as d:
@@ -968,6 +972,394 @@ class ClosedInnerProtocol(unittest.TestCase):
         self.assertIsNot(module, cand)
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(getattr(timed, "unproved_reason", None), "timeout")
+
+
+# --- #102 A2: candidate admission keyed by the resolved execution profile ----------------------
+
+V0_PROFILE = "contained-oci-v0"
+V1_PROFILE = "contained-oci-v1"
+TOOLCHAIN_IMAGE = "sha256:" + ("cd" * 32)
+A2_BINDING = {"execution_commit": "f" * 40, "prepare_sha256": "e" * 64}
+A2_IMAGE_ENV = ("CARGO_HOME", "PATH")
+A2_DAEMON = {
+    "KernelVersion": "synthetic-kernel", "CgroupVersion": "2",
+    "CgroupDriver": "systemd", "SecurityOptions": ["name=seccomp"],
+}
+# The frozen v2 policy (one CPU, 1024:1024) written as literals, not derived from the codec.
+FROZEN_V2_FLAGS = [
+    "--cpu-period", "100000", "--cpu-quota", "100000", "--ulimit", "nofile=1024:1024",
+]
+V2_FLAG_NAMES = ("--cpu-period", "--cpu-quota", "--ulimit", "--cpus")
+
+
+def _prepare_raw(profile) -> bytes:
+    """Canonical PREPARE bytes pinning `profile`, emitted by the real codec for its version."""
+    import aee_checker_sealed_run as run
+    from tests.test_aee_checker_sealed_run import PrepareEvidence
+    parts = PrepareEvidence._parts(None)
+    parts["candidate_profile"] = dict(profile)
+    parts["image"] = {**parts["image"], "id_scope": "host-local", "platform": "linux/arm64"}
+    emit = (run.emit_prepare_v2
+            if profile["schema"] == contained.RESOURCE_PROFILE_V2_SCHEMA
+            else run.emit_prepare_v1)
+    with tempfile.TemporaryDirectory() as d:
+        return emit(parts, Path(d) / "prepare.json")
+
+
+def _observed_inspect(profile, *, image=TOOLCHAIN_IMAGE) -> dict:
+    """What a daemon that honoured `profile` stores. Tests then take pieces away."""
+    work = "rw,size=%d,nr_inodes=%d,mode=1777" % (
+        profile["work_bytes"], profile["work_inodes"])
+    if profile["work_exec"]:
+        work += ",exec"
+    host = {
+        "CapAdd": None, "CapDrop": ["ALL"], "Devices": None,
+        "Memory": profile["memory_bytes"], "MemorySwap": profile["memory_swap_bytes"],
+        "NetworkMode": "none", "PidMode": "", "PidsLimit": profile["pids"],
+        "Privileged": False, "ReadonlyRootfs": True,
+        "SecurityOpt": ["no-new-privileges:true"],
+        "Tmpfs": {
+            "/tmp": "rw,size=%d,nr_inodes=%d,mode=1777" % (
+                profile["tmp_bytes"], profile["tmp_inodes"]),
+            "/work": work,
+        },
+        "UsernsMode": "",
+    }
+    if "cpu_rate_millicpu" in profile:
+        host["CpuPeriod"] = 100000
+        host["CpuQuota"] = profile["cpu_rate_millicpu"] * 100
+        host["Ulimits"] = [{
+            "Name": "nofile", "Soft": profile["nofile_soft"], "Hard": profile["nofile_hard"]}]
+    return {
+        "Image": image,
+        "Config": {
+            "User": "65532:65532",
+            "Env": ["PATH=/usr/local/cargo/bin", "CARGO_HOME=/tool", "CARGO_NET_OFFLINE=true"],
+        },
+        "HostConfig": host,
+        "Mounts": [
+            {"Type": "bind", "Destination": dest, "RW": False}
+            for _key, dest in cand.CANDIDATE_MOUNT_SPEC
+        ],
+        "State": {"Error": "", "ExitCode": 0, "Running": False, "Status": "exited"},
+    }
+
+
+class ObservingTransport(FakeTransport):
+    """A fake daemon that also answers the observations an envelope record reads."""
+
+    def __init__(self, *, daemon=None, **kwargs):
+        kwargs.setdefault("stdout", json.dumps(RICH_REPORT) + "\n")
+        super().__init__(**kwargs)
+        self.daemon = dict(A2_DAEMON) if daemon is None else daemon
+
+    def inspect(self, name):
+        return json.loads(json.dumps(self.inspect_doc))
+
+    def version(self):
+        return "27.1.1"
+
+    def image_env_names(self, _image_id):
+        return A2_IMAGE_ENV
+
+    def daemon_info(self):
+        return dict(self.daemon)
+
+
+class NoEffectTransport:
+    """Every attribute is a sentinel, so a refusal that arrives after admission surfaces here."""
+
+    def __getattr__(self, name):
+        raise AssertionError("transport.%s reached before the refusal" % name)
+
+
+def _contains_run(argv, run_tokens) -> bool:
+    return any(argv[i:i + len(run_tokens)] == run_tokens for i in range(len(argv)))
+
+
+def _base_v1_argv(name: str, mounts: dict) -> list[str]:
+    """The v1 candidate argv as the pre-A2 base (69fbc40) builds it, written out by hand."""
+    argv = [
+        "docker", "create", "--name", name, "--network", "none", "--read-only",
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+        "--user", "65532:65532", "--memory", "4g", "--memory-swap", "4g",
+        "--pids-limit", "512",
+        "--tmpfs", "/tmp:rw,size=16777216,nr_inodes=2048,mode=1777",
+        "--tmpfs", "/work:rw,size=268435456,nr_inodes=16384,mode=1777,exec",
+        "--env", "CARGO_NET_OFFLINE=true",
+    ]
+    for key, dest in cand.CANDIDATE_MOUNT_SPEC:
+        argv.extend([
+            "--mount", "type=bind,source=%s,destination=%s,readonly" % (
+                Path(mounts[key]).resolve(), dest)])
+    return argv + [TOOLCHAIN_IMAGE, "/bin/sh", "-lc", cand.CANDIDATE_SCRIPT]
+
+
+class ProfileDispatchedCandidateAdmission(unittest.TestCase):
+    """The resolved execution profile, not the PREPARE schema, selects what is admitted."""
+
+    def _admit(self, prepare_raw, profile, transport, **over):
+        with tempfile.TemporaryDirectory() as d:
+            mounts = _mounts(Path(d))
+            completed = cand.run_sealed_candidate(
+                prepare_raw=prepare_raw, mounts=mounts, execution_profile=profile,
+                transport=transport, binding=over.pop("binding", A2_BINDING), **over)
+        return completed, mounts
+
+    def _v1_record(self, mutate=None, **transport_kwargs):
+        doc = _observed_inspect(contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        if mutate is not None:
+            mutate(doc)
+        transport = ObservingTransport(inspect=doc, **transport_kwargs)
+        completed, _mounts_used = self._admit(
+            _prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2), V1_PROFILE, transport)
+        return transport, completed.envelope_record
+
+    def test_v2_prepare_under_v1_reaches_create_with_exactly_the_v2_flags(self):
+        transport = ObservingTransport(
+            inspect=_observed_inspect(contained.CANDIDATE_RESOURCE_PROFILE_V2))
+        completed, _ = self._admit(
+            _prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2), V1_PROFILE, transport)
+        self.assertEqual(len(transport.created), 1)
+        argv = transport.created[0]
+        self.assertTrue(_contains_run(argv, FROZEN_V2_FLAGS), argv)
+        for flag in ("--cpu-period", "--cpu-quota", "--ulimit"):
+            self.assertEqual(argv.count(flag), 1, flag)
+        self.assertNotIn("--cpus", argv)
+        record = completed.envelope_record
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v1")
+        self.assertEqual(record["envelope_status"], "verified", record["unverified_field"])
+        self.assertEqual(record["requested"]["execution_profile"], V1_PROFILE)
+        self.assertEqual(record["requested"]["resource_profile"],
+                         contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        self.assertEqual(record["candidate_outcome"], "completed")
+        self.assertEqual(
+            (record["effective"]["cpu_period"], record["effective"]["cpu_quota"],
+             record["effective"]["ulimit_nofile"]),
+            (100000, 100000, {"soft": 1024, "hard": 1024}))
+        self.assertEqual(record["effective"]["daemon"]["kernel_version"], "synthetic-kernel")
+
+    def test_v2_prepare_under_v0_refuses_before_create(self):
+        with self.assertRaisesRegex(PrepareError, "prepare.v2 requires contained-oci-v1"):
+            self._admit(_prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2),
+                        V0_PROFILE, NoEffectTransport())
+
+    def test_v1_prepare_under_v1_refuses_before_create(self):
+        with self.assertRaisesRegex(
+                PrepareError, "contained-oci-v1 admits only prepare.v2"):
+            self._admit(_prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE),
+                        V1_PROFILE, NoEffectTransport())
+
+    def test_every_other_profile_refuses_before_create(self):
+        for raw in (_prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE),
+                    _prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2)):
+            for profile in ("trusted-local", "contained-oci-v2", "", None,
+                            ["contained-oci-v0"], b"contained-oci-v0"):
+                with self.subTest(profile=profile), self.assertRaisesRegex(
+                        PrepareError, "no PREPARE loader"):
+                    self._admit(raw, profile, NoEffectTransport())
+
+    def test_execution_profile_is_a_required_keyword_without_default(self):
+        import inspect as inspect_mod
+        parameter = inspect_mod.signature(cand.run_sealed_candidate).parameters.get(
+            "execution_profile")
+        self.assertIsNotNone(parameter)
+        self.assertIs(parameter.kind, inspect_mod.Parameter.KEYWORD_ONLY)
+        self.assertIs(parameter.default, inspect_mod.Parameter.empty)
+        with self.assertRaises(TypeError):
+            cand.run_sealed_candidate(
+                prepare_raw=_prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE),
+                mounts={}, transport=NoEffectTransport())
+
+    def test_a_recorded_run_below_admission_without_a_profile_refuses_before_create(self):
+        """A record names the profile it ran under; there is no default to fill it in."""
+        for profile in (None, "trusted-local"):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(PrepareError, "^execution_profile$"):
+                    cand._run_sealed_candidate(
+                        image_id=TOOLCHAIN_IMAGE, mounts=_mounts(Path(d)),
+                        resource_profile=contained.CANDIDATE_RESOURCE_PROFILE,
+                        execution_profile=profile, transport=NoEffectTransport(),
+                        binding=A2_BINDING)
+
+    def test_base_v1_argv_literal_is_what_create_argv_builds(self):
+        """Anchor: the hand-written base argv equals the argv builder for a v1 profile."""
+        with tempfile.TemporaryDirectory() as d:
+            mounts = _mounts(Path(d))
+            argv = cand.candidate_create_argv(
+                image_id=TOOLCHAIN_IMAGE, name="c", mounts=mounts,
+                resource_profile=contained.CANDIDATE_RESOURCE_PROFILE)
+            self.assertEqual(argv, _base_v1_argv("c", mounts))
+
+    def test_v1_prepare_under_v0_argv_is_byte_identical_and_the_record_stays_v0(self):
+        transport = ObservingTransport(
+            inspect=_observed_inspect(contained.CANDIDATE_RESOURCE_PROFILE))
+        with mock.patch.object(
+                cand.envelope, "project_effective_envelope_v1",
+                side_effect=AssertionError("v1 projector on the v0 route")):
+            completed, mounts = self._admit(
+                _prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE), V0_PROFILE, transport)
+        argv = transport.created[0]
+        self.assertEqual(argv, _base_v1_argv(argv[3], mounts))
+        for flag in V2_FLAG_NAMES:
+            self.assertNotIn(flag, argv)
+        record = completed.envelope_record
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v0")
+        self.assertEqual(record["envelope_status"], "verified", record["unverified_field"])
+        self.assertEqual(record["requested"]["execution_profile"], V0_PROFILE)
+        self.assertEqual(len(record["effective"]), 19)
+
+    def test_mismatched_cpu_quota_is_unverified_and_the_outcome_is_kept(self):
+        transport, record = self._v1_record(
+            lambda d: d["HostConfig"].__setitem__("CpuQuota", 50000))
+        self.assertEqual(len(transport.started), 1)
+        self.assertEqual(record["setup_status"], "ready")
+        self.assertEqual(record["envelope_status"], "unverified")
+        self.assertEqual(record["unverified_field"], "cpu_quota")
+        self.assertEqual(record["candidate_outcome"], "completed")
+        self.assertIsNone(record["effective"])
+        self.assertEqual(record["publication_permission"], "withheld")
+        self.assertEqual(record["withheld_reason"], "envelope_status")
+
+    def test_unset_or_absent_cpu_values_are_unverified(self):
+        cases = {
+            "cpu_quota": lambda d: d["HostConfig"].__setitem__("CpuQuota", 0),
+            "cpu_period": lambda d: d["HostConfig"].__setitem__("CpuPeriod", 0),
+            "HostConfig.CpuQuota": lambda d: d["HostConfig"].pop("CpuQuota"),
+            "HostConfig.CpuPeriod": lambda d: d["HostConfig"].pop("CpuPeriod"),
+        }
+        for field, mutate in cases.items():
+            with self.subTest(field=field):
+                _transport, record = self._v1_record(mutate)
+                self.assertEqual(record["envelope_status"], "unverified")
+                self.assertEqual(record["unverified_field"], field)
+                self.assertEqual(record["candidate_outcome"], "completed")
+
+    def test_nofile_mismatch_or_discard_is_unverified(self):
+        def limit(soft, hard):
+            return lambda d: d["HostConfig"].__setitem__(
+                "Ulimits", [{"Name": "nofile", "Soft": soft, "Hard": hard}])
+        cases = {
+            "soft": limit(512, 1024),
+            "hard": limit(1024, 2048),
+            "discarded-null": lambda d: d["HostConfig"].__setitem__("Ulimits", None),
+            "discarded-empty": lambda d: d["HostConfig"].__setitem__("Ulimits", []),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name):
+                _transport, record = self._v1_record(mutate)
+                self.assertEqual(record["envelope_status"], "unverified")
+                self.assertEqual(record["unverified_field"], "ulimit_nofile")
+                self.assertEqual(record["candidate_outcome"], "completed")
+
+    def test_missing_daemon_kernel_fields_are_unverified(self):
+        for wire in ("KernelVersion", "CgroupVersion"):
+            with self.subTest(missing=wire):
+                daemon = dict(A2_DAEMON)
+                del daemon[wire]
+                _transport, record = self._v1_record(daemon=daemon)
+                self.assertEqual(record["envelope_status"], "unverified")
+                self.assertEqual(record["unverified_field"], "daemon." + wire)
+                self.assertEqual(record["candidate_outcome"], "completed")
+
+    def test_a_transport_without_a_daemon_reader_is_unverified(self):
+        class NoDaemon(ObservingTransport):
+            daemon_info = None
+
+        transport = NoDaemon(inspect=_observed_inspect(contained.CANDIDATE_RESOURCE_PROFILE_V2))
+        completed, _ = self._admit(
+            _prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2), V1_PROFILE, transport)
+        record = completed.envelope_record
+        self.assertEqual(record["envelope_status"], "unverified")
+        self.assertEqual(record["unverified_field"], "daemon_info")
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v1")
+
+    def test_refused_setup_under_v1_still_records_the_v1_schema(self):
+        transport = ObservingTransport(
+            inspect=_observed_inspect(contained.CANDIDATE_RESOURCE_PROFILE_V2),
+            create_error=contained.DockerUnavailable("docker missing"))
+        completed, _ = self._admit(
+            _prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2), V1_PROFILE, transport)
+        record = completed.envelope_record
+        self.assertEqual(record["setup_status"], "unavailable")
+        self.assertEqual(record["candidate_outcome"], "not-run")
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v1")
+        self.assertEqual(record["requested"]["execution_profile"], V1_PROFILE)
+
+    def test_alternate_values_below_admission_match_argv_and_verify(self):
+        profile = {**contained.CANDIDATE_RESOURCE_PROFILE_V2,
+                   "cpu_rate_millicpu": 2500, "nofile_soft": 512, "nofile_hard": 2048}
+        transport = ObservingTransport(inspect=_observed_inspect(profile))
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand._run_sealed_candidate(
+                image_id=TOOLCHAIN_IMAGE, mounts=_mounts(Path(d)),
+                resource_profile=profile, execution_profile=V1_PROFILE,
+                transport=transport, binding=A2_BINDING)
+        self.assertTrue(_contains_run(transport.created[0], [
+            "--cpu-period", "100000", "--cpu-quota", "250000",
+            "--ulimit", "nofile=512:2048"]), transport.created[0])
+        record = completed.envelope_record
+        self.assertEqual(record["envelope_status"], "verified", record["unverified_field"])
+        self.assertEqual(record["effective"]["cpu_quota"], 250000)
+        self.assertEqual(record["effective"]["ulimit_nofile"], {"soft": 512, "hard": 2048})
+        self.assertEqual(record["requested"]["resource_profile"], profile)
+
+    def test_alternate_values_are_compared_not_defaulted_to_the_frozen_policy(self):
+        """The inspect that verifies the frozen profile must not verify the alternate one."""
+        profile = {**contained.CANDIDATE_RESOURCE_PROFILE_V2,
+                   "cpu_rate_millicpu": 2500, "nofile_soft": 512, "nofile_hard": 2048}
+        transport = ObservingTransport(
+            inspect=_observed_inspect(contained.CANDIDATE_RESOURCE_PROFILE_V2))
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand._run_sealed_candidate(
+                image_id=TOOLCHAIN_IMAGE, mounts=_mounts(Path(d)),
+                resource_profile=profile, execution_profile=V1_PROFILE,
+                transport=transport, binding=A2_BINDING)
+        record = completed.envelope_record
+        self.assertEqual(record["envelope_status"], "unverified")
+        self.assertEqual(record["unverified_field"], "cpu_quota")
+
+    def test_loaders_are_reached_only_through_the_dispatcher_for_their_profile(self):
+        import aee_checker_sealed_run as run
+        cases = (
+            (V0_PROFILE, contained.CANDIDATE_RESOURCE_PROFILE, "load_prepare_v1",
+             "load_prepare_v2"),
+            (V1_PROFILE, contained.CANDIDATE_RESOURCE_PROFILE_V2, "load_prepare_v2",
+             "load_prepare_v1"),
+        )
+        for profile, resource, reached, untouched in cases:
+            with self.subTest(profile=profile):
+                raw = _prepare_raw(resource)
+                transport = ObservingTransport(inspect=_observed_inspect(resource))
+                with mock.patch.object(
+                        run, reached, wraps=getattr(run, reached)) as used, \
+                        mock.patch.object(
+                            run, untouched,
+                            side_effect=AssertionError("other loader reached")) as other:
+                    completed, _ = self._admit(raw, profile, transport)
+                used.assert_called_once_with(raw)
+                other.assert_not_called()
+                self.assertEqual(completed.envelope_record["envelope_status"], "verified")
+
+    def test_noop_loaded_copy_keeps_both_profile_routes(self):
+        src = Path(cand.__file__).read_text()
+        with tempfile.TemporaryDirectory() as d:
+            module = _load_mutated(src, Path(d))
+            for profile, resource in (
+                    (V0_PROFILE, contained.CANDIDATE_RESOURCE_PROFILE),
+                    (V1_PROFILE, contained.CANDIDATE_RESOURCE_PROFILE_V2)):
+                transport = ObservingTransport(inspect=_observed_inspect(resource))
+                completed = module.run_sealed_candidate(
+                    prepare_raw=_prepare_raw(resource), mounts=_mounts(Path(d)),
+                    execution_profile=profile, transport=transport, binding=A2_BINDING)
+                with self.subTest(profile=profile):
+                    self.assertEqual(
+                        completed.envelope_record["envelope_status"], "verified")
+                    self.assertEqual(
+                        _contains_run(transport.created[0], FROZEN_V2_FLAGS),
+                        profile == V1_PROFILE)
+        self.assertIsNot(module, cand)
+
 
 if __name__ == "__main__":
     unittest.main()

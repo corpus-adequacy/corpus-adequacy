@@ -32,7 +32,7 @@ from aee_checker_sealed_oci import (
     require_local_image,
     validate_inspect_contract,
 )
-from aee_checker_sealed_run import load_prepare_v1
+from aee_checker_sealed_run import load_prepare_for_profile
 import bounded_run as br
 import contained_oci as contained
 import effective_envelope as envelope
@@ -211,12 +211,13 @@ def _candidate_outcome(state: str, completed) -> str:
 
 
 def _refused_envelope(binding: dict, requested, status: str,
-                      field: str) -> subprocess.CompletedProcess:
+                      field: str, schema: str) -> subprocess.CompletedProcess:
     """Setup never became ready, so no candidate outcome may be claimed."""
     completed = _unproved("setup")
     if requested is None:
         return completed
     completed.envelope_record = envelope.build_envelope_record(
+        schema=schema,
         requested=requested,
         setup_status=status,
         envelope_status="unverified",
@@ -231,11 +232,15 @@ def _refused_envelope(binding: dict, requested, status: str,
     return completed
 
 
-def _requested_envelope(*, image_id: str, resource_profile,
+def _requested_envelope(*, execution_profile, image_id: str, resource_profile,
                         sealed: bool) -> dict:
-    """Pure declaration, so a record always exists to hold what happened."""
+    """Pure declaration, so a record always exists to hold what happened.
+
+    The profile is the one admission resolved, never a constant: a request that named a
+    different profile than the run was admitted under would be a silent downgrade.
+    """
     return envelope.requested_envelope(
-        execution_profile=envelope.CONTAINED_PROFILE,
+        execution_profile=execution_profile,
         image_id=image_id,
         mount_spec=CANDIDATE_MOUNT_SPEC,
         resource_profile=resource_profile,
@@ -249,6 +254,22 @@ def _observed(transport, name: str, *args):
     if not callable(reader):
         raise envelope.EnvelopeError(name)
     return reader(*args)
+
+
+def _project_effective(transport, inspect, *, image_id: str, schema: str) -> dict:
+    """Project this run's envelope with the projector its schema names.
+
+    A v1 envelope adds this run's daemon observation, read from the transport's own daemon
+    reader; a missing reader or field raises and the envelope is unverified.
+    """
+    image_env_names = _observed(transport, "image_env_names", image_id)
+    runtime_version = _observed(transport, "version")
+    if schema == envelope.ENVELOPE_SCHEMA_V1:
+        return envelope.project_effective_envelope_v1(
+            inspect, image_env_names=image_env_names, runtime_version=runtime_version,
+            daemon_info=_observed(transport, "daemon_info"))
+    return envelope.project_effective_envelope(
+        inspect, image_env_names=image_env_names, runtime_version=runtime_version)
 
 
 def _contained_candidate_run(*, image_id: str, mounts: dict, resource_profile,
@@ -271,17 +292,20 @@ def _contained_candidate_run(*, image_id: str, mounts: dict, resource_profile,
 
 
 def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
-                               name_prefix, sealed, transport,
+                               execution_profile, name_prefix, sealed, transport,
                                execution_contract, binding,
                                ) -> subprocess.CompletedProcess:
     """Run the candidate and keep one envelope record whatever happens.
 
     The envelope is projected from this run's own inspect output and this
     run's own runtime version. PREPARE's inert-probe evidence describes a
-    different image and profile and cannot stand in for either.
+    different image and profile and cannot stand in for either. The record's
+    schema follows the execution profile: contained-oci-v1 records v1.
     """
     requested = _requested_envelope(
-        image_id=image_id, resource_profile=resource_profile, sealed=sealed)
+        execution_profile=execution_profile, image_id=image_id,
+        resource_profile=resource_profile, sealed=sealed)
+    schema = envelope.envelope_schema_for_profile(execution_profile)
     try:
         raw = _contained_candidate_run(
             image_id=image_id, mounts=mounts,
@@ -289,9 +313,9 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
             sealed=sealed, transport=transport,
             execution_contract=execution_contract, record_cleanup=True)
     except DockerUnavailable as exc:
-        return _refused_envelope(binding, requested, "unavailable", str(exc))
+        return _refused_envelope(binding, requested, "unavailable", str(exc), schema)
     except PrepareError as exc:
-        return _refused_envelope(binding, requested, "refused", str(exc))
+        return _refused_envelope(binding, requested, "refused", str(exc), schema)
 
     if raw["state"] == "completed":
         proc = raw["process"]
@@ -306,15 +330,14 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
     effective = None
     unverified_field = None
     try:
-        effective = envelope.project_effective_envelope(
-            raw["inspect"],
-            image_env_names=_observed(transport, "image_env_names", image_id),
-            runtime_version=_observed(transport, "version"))
-        envelope.require_envelope_matches_request(effective, requested)
+        effective = _project_effective(
+            transport, raw["inspect"], image_id=image_id, schema=schema)
+        envelope.require_envelope_matches_request(effective, requested, schema=schema)
     except (envelope.EnvelopeError, PrepareError) as exc:
         effective, unverified_field = None, str(exc) or "effective"
 
     completed.envelope_record = envelope.build_envelope_record(
+        schema=schema,
         requested=requested,
         setup_status="ready",
         envelope_status="unverified" if effective is None else "verified",
@@ -334,16 +357,20 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
                           name_prefix: str = "aee-cand-",
                           sealed: bool = True, transport=None,
                           execution_contract=None, binding=None,
+                          execution_profile=None,
                           ) -> subprocess.CompletedProcess:
     """Without a binding this is the legacy unrecorded run, unchanged.
 
     A record binds itself to PREPARE and execution digests, so it exists
-    only where those digests do.
+    only where those digests do. A recorded run also names its execution
+    profile; one without a contained profile refuses before any effect.
+    Below admission: the profile/PREPARE pairing is `run_sealed_candidate`'s.
     """
     if binding is not None:
         return _recorded_sealed_candidate(
             image_id=image_id, mounts=mounts,
-            resource_profile=resource_profile, name_prefix=name_prefix,
+            resource_profile=resource_profile,
+            execution_profile=execution_profile, name_prefix=name_prefix,
             sealed=sealed, transport=transport,
             execution_contract=execution_contract, binding=binding)
     raw = _contained_candidate_run(
@@ -360,11 +387,17 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
     )
 
 
-def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,
+def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict, execution_profile,
                          name_prefix: str = "aee-cand-",
                          transport=None, execution_contract=None,
                          binding=None) -> subprocess.CompletedProcess:
-    prepare = load_prepare_v1(prepare_raw)
+    """Admit PREPARE bytes under the resolved execution profile, then run them.
+
+    `execution_profile` has no default: omission is TypeError, never an implied
+    contained-oci-v0. The shared dispatcher admits prepare.v1 only under
+    contained-oci-v0 and prepare.v2 only under contained-oci-v1, before any effect.
+    """
+    prepare = load_prepare_for_profile(prepare_raw, execution_profile=execution_profile)
     image_id = require_candidate_image(
         image_id=prepare["toolchain"]["image_id"],
         toolchain_image_id=prepare["toolchain"]["image_id"],
@@ -374,6 +407,7 @@ def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict,
         image_id=image_id,
         mounts=mounts,
         resource_profile=prepare["candidate_profile"],
+        execution_profile=execution_profile,
         name_prefix=name_prefix,
         sealed=True,
         transport=transport,
