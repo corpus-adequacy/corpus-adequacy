@@ -491,5 +491,150 @@ class DocsNonClaims(unittest.TestCase):
                         "%s overclaims sandbox: %s" % (source, line))
 
 
+CONTAINED_V1 = "contained-oci-v1"
+
+
+class ContainedV1RecognisedNotExecutable(unittest.TestCase):
+    """#102 A1: v1 resolves, orders and refuses; it cannot execute yet.
+
+    Admission downstream is keyed on the PREPARE schema, not on the resolved
+    profile, so recognising v1 without an engine refusal would let a v1 run
+    reach a v1-PREPARE backend and record a profile it was not run under.
+    """
+
+    def test_v1_is_a_closed_member(self):
+        self.assertEqual(
+            ca.resolve_execution_profile(operator=CONTAINED_V1, manifest={}),
+            _closed_member(CONTAINED_V1))
+
+    def test_v1_operator_above_v0_minimum_resolves(self):
+        self.assertEqual(
+            ca.resolve_execution_profile(
+                operator=CONTAINED_V1,
+                manifest={ca.MINIMUM_PROFILE_KEY: CONTAINED}),
+            CONTAINED_V1)
+
+    def test_v0_below_v1_minimum_is_downgrade(self):
+        with self.assertRaises(ca.ManifestError) as ctx:
+            ca.resolve_execution_profile(
+                operator=CONTAINED,
+                manifest={ca.MINIMUM_PROFILE_KEY: CONTAINED_V1})
+        self.assertIn("downgrade", str(ctx.exception))
+
+    def test_trusted_local_below_v1_minimum_is_downgrade(self):
+        with self.assertRaises(ca.ManifestError) as ctx:
+            ca.resolve_execution_profile(
+                operator=TRUSTED,
+                manifest={ca.MINIMUM_PROFILE_KEY: CONTAINED_V1})
+        self.assertIn("downgrade", str(ctx.exception))
+
+    def test_vocabulary_and_strength_have_identical_keys(self):
+        self.assertEqual(set(ca.CLOSED_EXECUTION_PROFILES),
+                         set(ca._PROFILE_STRENGTH))
+
+    def test_executable_profiles_are_a_subset_that_excludes_v1(self):
+        self.assertLessEqual(set(ca._EXECUTABLE_PROFILES),
+                             set(ca.CLOSED_EXECUTION_PROFILES))
+        self.assertNotIn(CONTAINED_V1, ca._EXECUTABLE_PROFILES)
+        self.assertIn(CONTAINED, ca._EXECUTABLE_PROFILES)
+
+    def test_v1_module_runner_refuses_before_implementation_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _manifest(tmp, {"a": [KILLABLE]})
+            impl = (tmp / "impl.py").resolve()
+            reads = []
+            original = Path.read_text
+
+            def tracing_read(self, *args, **kwargs):
+                if self.resolve() == impl:
+                    reads.append(True)
+                return original(self, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", tracing_read):
+                with self.assertRaises(ca.ManifestError) as ctx:
+                    ca.run(path, execution_profile=CONTAINED_V1)
+        self.assertIn(CONTAINED_V1, str(ctx.exception))
+        self.assertIn("module", str(ctx.exception))
+        self.assertEqual(reads, [])
+
+    def test_v1_omitted_backend_is_the_local_fallback_refusal(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _process_kill_manifest(Path(d))
+            with mock.patch.multiple(
+                    ca, _build=mock.DEFAULT, IsolatedMutationTree=mock.DEFAULT,
+                    _TreeLock=mock.DEFAULT,
+                    _default_execution_backend=mock.DEFAULT) as patches:
+                with self.assertRaises(ca.ManifestError) as ctx:
+                    ca.run(path, execution_profile=CONTAINED_V1)
+        self.assertIn(CONTAINED_V1, str(ctx.exception))
+        self.assertIn("contained-to-local fallback is refused", str(ctx.exception))
+        for name in ("_TreeLock", "IsolatedMutationTree", "_build",
+                     "_default_execution_backend"):
+            patches[name].assert_not_called()
+
+    def test_v1_explicit_default_backend_is_the_local_fallback_refusal(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _process_kill_manifest(Path(d))
+            loaded = ca.load_manifest(path)
+            with mock.patch.object(ca, "_TreeLock") as lock:
+                with self.assertRaises(ca.ManifestError) as ctx:
+                    ca._run_process(
+                        loaded, path,
+                        execution_backend=ca._default_execution_backend,
+                        execution_profile=CONTAINED_V1)
+        self.assertIn("contained-to-local fallback is refused", str(ctx.exception))
+        lock.assert_not_called()
+
+    def test_v1_explicit_backend_is_refused_before_it_is_called(self):
+        called = []
+
+        def sentinel(m, vectors=None, *, rebuild=True):
+            called.append(True)
+            return _inert_backend(m, vectors, rebuild=rebuild)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = _process_kill_manifest(Path(d))
+            loaded = ca.load_manifest(path)
+            with mock.patch.object(ca, "_build") as build, \
+                    mock.patch.object(ca, "IsolatedMutationTree") as iso, \
+                    mock.patch.object(ca, "_TreeLock") as lock:
+                with self.assertRaises(ca.ManifestError) as ctx:
+                    ca._run_process(
+                        loaded, path, execution_backend=sentinel,
+                        execution_profile=CONTAINED_V1)
+        self.assertIn(CONTAINED_V1, str(ctx.exception))
+        self.assertIn("not yet executable", str(ctx.exception))
+        self.assertEqual(called, [])
+        build.assert_not_called()
+        iso.assert_not_called()
+        lock.assert_not_called()
+
+    @unittest.skipIf(ca.fcntl is None, "process scoring requires an advisory lock")
+    def test_v0_explicit_backend_still_reaches_it(self):
+        seen = []
+
+        def recording(m, vectors=None, *, rebuild=True):
+            seen.append(True)
+            return _inert_backend(m, vectors, rebuild=rebuild)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = _process_kill_manifest(Path(d))
+            loaded = ca.load_manifest(path)
+            ca._run_process(loaded, path, execution_backend=recording,
+                            execution_profile=CONTAINED)
+        self.assertTrue(seen)
+
+    def test_docs_state_v1_is_recognised_and_not_executable(self):
+        root = Path(__file__).resolve().parent.parent
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        unreleased = (root / "CHANGELOG.md").read_text(
+            encoding="utf-8").split("## 0.2.0", 1)[0]
+        for text in (readme, unreleased):
+            self.assertIn(CONTAINED_V1, text)
+            self.assertIn("not yet executable", text)
+        self.assertNotIn("kernel observation is not implemented", readme)
+
+
 if __name__ == "__main__":
     unittest.main()

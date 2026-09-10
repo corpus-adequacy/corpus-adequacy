@@ -124,8 +124,18 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 OPERATOR_PROFILE_KEY = "execution_profile"
 MINIMUM_PROFILE_KEY = "minimum_execution_profile"
-CLOSED_EXECUTION_PROFILES = frozenset({"trusted-local", "contained-oci-v0"})
-_PROFILE_STRENGTH = {"trusted-local": 0, "contained-oci-v0": 1}
+CLOSED_EXECUTION_PROFILES = frozenset(
+    {"trusted-local", "contained-oci-v0", "contained-oci-v1"})
+_PROFILE_STRENGTH = {"trusted-local": 0, "contained-oci-v0": 1, "contained-oci-v1": 2}
+# Profiles that must never reach a local backend or the module runner.
+_CONTAINED_PROFILES = frozenset({"contained-oci-v0", "contained-oci-v1"})
+# Profiles the engine may execute today. contained-oci-v1 resolves, orders
+# and refuses like any closed member, but is refused before any backend is
+# called: admission downstream is keyed on the PREPARE schema, not on this
+# profile, so a v1 run would otherwise reach a v1-PREPARE backend and record
+# a profile it was not run under. #102 A3 lifts this once its PREPARE, argv
+# and envelope consumers select by the resolved profile.
+_EXECUTABLE_PROFILES = frozenset({"trusted-local", "contained-oci-v0"})
 
 
 class ManifestError(Exception):
@@ -2247,17 +2257,21 @@ def resolve_execution_profile(*, operator, manifest) -> str:
 
 
 def _require_contained_execution(*, profile, runner, execution_backend) -> None:
-    contained = _canonical_execution_profile(
-        "contained-oci-v0", which=OPERATOR_PROFILE_KEY)
-    if profile != contained:
-        return
-    if runner == "module":
+    if profile in _CONTAINED_PROFILES:
+        if runner == "module":
+            raise ManifestError(
+                "execution_profile %s cannot be used with runner module" % profile)
+        if (execution_backend is None
+                or execution_backend is _default_execution_backend):
+            raise ManifestError(
+                "execution_profile %s requires an explicitly supplied "
+                "contained backend; contained-to-local fallback is refused"
+                % profile)
+    if profile not in _EXECUTABLE_PROFILES:
         raise ManifestError(
-            "execution_profile contained-oci-v0 cannot be used with runner module")
-    if execution_backend is None or execution_backend is _default_execution_backend:
-        raise ManifestError(
-            "execution_profile contained-oci-v0 requires an explicitly supplied "
-            "contained backend; contained-to-local fallback is refused")
+            "execution_profile %s is recognised but not yet executable: its "
+            "PREPARE, Docker argv and envelope consumers do not select by "
+            "this profile, so no backend is called" % profile)
 
 
 def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
