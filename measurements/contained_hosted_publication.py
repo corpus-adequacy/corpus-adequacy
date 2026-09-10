@@ -743,6 +743,8 @@ def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
         materialize_dest=Path(materialize_dest),
         root=Path(root),
         envelope_dest=Path(envelope_dest),
+        # Explicit: the driver has no default profile, and this lane stays v0 (#107).
+        execution_profile=REQUIRED_PROFILE,
     )
 
 

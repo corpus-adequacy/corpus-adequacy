@@ -33,7 +33,7 @@ from aee_checker_sealed_common import (  # noqa: E402
 )
 from aee_checker_sealed_run import (  # noqa: E402
     PHASE_A_PIN_DIGESTS,
-    PREPARE_V1_SCHEMA,
+    load_prepare_for_profile,
 )
 
 NON_CLAIMS = (
@@ -96,12 +96,16 @@ def bind_authorized_mutation_order(*, manifest: dict, sites: dict,
 
 def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
                          pins_dir: Path, manifest: dict, manifest_path: Path,
-                         execution_backend,
-                         execution_profile="contained-oci-v0") -> dict:
+                         execution_backend, execution_profile) -> dict:
+    """Admit the authorized PREPARE under the resolved profile, then run the engine.
+
+    `execution_profile` has no default, so omitting it is TypeError rather than an implied
+    contained-oci-v0. Admission is the shared dispatcher's, after authorization: prepare.v1
+    only under contained-oci-v0, prepare.v2 only under contained-oci-v1, before any effect.
+    """
     try:
-        validated = validate_authorize(authorize_raw, prepare_raw)
-        if validated["prepare"].get("schema") != PREPARE_V1_SCHEMA:
-            raise ExecuteError("production funnel requires prepare.v1")
+        validate_authorize(authorize_raw, prepare_raw)
+        load_prepare_for_profile(prepare_raw, execution_profile=execution_profile)
         sites = load_frozen_sites(Path(pins_dir))
         control_raw = verify_file_digest(
             Path(pins_dir) / "control.json", PHASE_A_PIN_DIGESTS["control.json"])

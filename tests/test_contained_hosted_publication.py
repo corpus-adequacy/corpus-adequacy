@@ -426,6 +426,31 @@ class BindingsAndProfile(unittest.TestCase):
         with self.assertRaises(hosted.HostedPublicationError):
             hosted.require_operator_profile("trusted-local")
 
+    def test_default_sealed_execute_passes_the_required_profile_to_the_driver(self):
+        """#102 A3: the lane stays v0 by passing it, not by leaning on a driver default.
+
+        `autospec` keeps `run_authorized`'s real signature, so a call that omitted the required
+        keyword would raise TypeError here instead of being accepted by a permissive mock.
+        """
+        import aee_checker_sealed_driver as driver
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            (base / "authorize.json").write_bytes(b"authorize-bytes")
+            (base / "prepare.json").write_bytes(b"prepare-bytes")
+            with mock.patch.object(driver, "run_authorized", autospec=True) as run_authorized:
+                hosted.default_sealed_execute(
+                    authorize_path=base / "authorize.json",
+                    prepare_path=base / "prepare.json",
+                    pins_dir=base / "pins", root=base,
+                    envelope_dest=base / "envelope", materialize_dest=base / "mat")
+        run_authorized.assert_called_once()
+        kwargs = run_authorized.call_args.kwargs
+        self.assertIn("execution_profile", kwargs)
+        self.assertEqual(kwargs["execution_profile"], hosted.REQUIRED_PROFILE)
+        self.assertEqual(kwargs["execution_profile"], "contained-oci-v0")
+        self.assertEqual(kwargs["authorize_raw"], b"authorize-bytes")
+        self.assertEqual(kwargs["prepare_raw"], b"prepare-bytes")
+
 
 class ConfinedInputResolver(unittest.TestCase):
     def test_resolve_rejects_absolute_traversal_symlink_and_oversize(self):

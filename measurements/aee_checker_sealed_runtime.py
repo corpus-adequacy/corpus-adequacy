@@ -8,12 +8,17 @@ from pathlib import Path
 import corpus_adequacy as ca
 import aee_checker_sealed_candidate as candidate
 from aee_checker_sealed_common import PrepareError
-from aee_checker_sealed_run import load_prepare_v1
+from aee_checker_sealed_run import load_prepare_for_profile
 
 
-def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, transport=None,
-                        envelope_sink=None, ledger=None):
+def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_profile,
+                        transport=None, envelope_sink=None, ledger=None):
     """Return a backend that executes only the PREPARE-bound sealed candidate.
+
+    `execution_profile` has no default. The backend declares it (as its
+    `execution_profile` attribute) so the generic engine can refuse it before
+    the first call when it differs from the profile the engine resolved, and
+    passes it to `run_sealed_candidate`, whose dispatcher admits the PREPARE.
 
     `envelope_sink` receives the execution-envelope record for each contained
     run. The record is a sibling artifact: it never enters the report the
@@ -25,7 +30,8 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, transport=Non
         raise PrepareError("sealed runtime materialization")
     binding = None
     if envelope_sink is not None:
-        prepare = load_prepare_v1(prepare_raw)
+        prepare = load_prepare_for_profile(
+            prepare_raw, execution_profile=execution_profile)
         binding = candidate.envelope_binding(
             prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
             execution_commit=prepare["execution"]["commit"],
@@ -46,11 +52,12 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, transport=Non
         # observe an invocation that raised.
         ordinal = None if ledger is None else ledger.register()
         try:
-            # A literal, not the engine's resolved profile: this route admits prepare.v1 only,
-            # and threading the resolved profile through the runtime is #102 A3's.
+            # The profile this backend declares, read at call time: the value the engine
+            # compared with the one it resolved is the value admission runs under, even if
+            # the declaration was reassigned after construction.
             completed = candidate.run_sealed_candidate(
                 prepare_raw=prepare_raw,
-                execution_profile="contained-oci-v0",
+                execution_profile=getattr(backend, ca.BACKEND_PROFILE_ATTRIBUTE),
                 mounts=mounts,
                 execution_contract=execution_manifest,
                 transport=transport,
@@ -79,4 +86,5 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, transport=Non
             True, "sealed candidate completed",
             {"<batch>": outcome}, {"<batch>": diagnostic}, {}, seen)
 
+    setattr(backend, ca.BACKEND_PROFILE_ATTRIBUTE, execution_profile)
     return backend
