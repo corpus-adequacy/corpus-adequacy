@@ -270,6 +270,29 @@ class RuntimeDeclaresAndAdmitsByProfile(unittest.TestCase):
                         prepare_raw=raw, materialized=materialized,
                         execution_profile=profile, envelope_sink=[].append)
 
+    def test_an_unrecorded_v1_backend_is_refused_at_construction(self):
+        """Without an envelope sink there is no binding, so no v1 record; the backend is
+        refused before it exists rather than failing at its first call."""
+        with tempfile.TemporaryDirectory() as d:
+            materialized = self._materialized(Path(d))
+            with mock.patch.object(
+                    runtime.candidate, "require_recording",
+                    wraps=runtime.candidate.require_recording) as rule, \
+                    self.assertRaisesRegex(
+                        common.PrepareError, "^contained-oci-v1 requires a recorded run"):
+                runtime.make_sealed_backend(
+                    prepare_raw=_prepare_v2(), materialized=materialized,
+                    execution_profile="contained-oci-v1")
+        rule.assert_called_once_with(execution_profile="contained-oci-v1", binding=None)
+
+    def test_an_unrecorded_v0_backend_is_still_built(self):
+        with tempfile.TemporaryDirectory() as d:
+            materialized = self._materialized(Path(d))
+            backend = runtime.make_sealed_backend(
+                prepare_raw=_prepare_v1(), materialized=materialized,
+                execution_profile="contained-oci-v0")
+        self.assertEqual(backend.execution_profile, "contained-oci-v0")
+
     def test_omitting_execution_profile_is_typeerror(self):
         import inspect
         parameter = inspect.signature(runtime.make_sealed_backend).parameters[

@@ -1150,6 +1150,22 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
             self._admit(_prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE),
                         V1_PROFILE, NoEffectTransport())
 
+    def test_an_unrecorded_run_under_v1_refuses_before_create(self):
+        """contained-oci-v1 has no legacy unrecorded form: without a binding there is no
+        envelope, and a v1 run without one would carry the profile name and none of its
+        evidence."""
+        with self.assertRaisesRegex(
+                PrepareError, "^contained-oci-v1 requires a recorded run"):
+            self._admit(_prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2),
+                        V1_PROFILE, NoEffectTransport(), binding=None)
+
+    def test_an_unrecorded_run_under_v0_still_reaches_create(self):
+        transport = ObservingTransport(
+            inspect=_observed_inspect(contained.CANDIDATE_RESOURCE_PROFILE))
+        self._admit(_prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE),
+                    V0_PROFILE, transport, binding=None)
+        self.assertEqual(len(transport.created), 1)
+
     def test_every_other_profile_refuses_before_create(self):
         for raw in (_prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE),
                     _prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2)):

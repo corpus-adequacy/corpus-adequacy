@@ -36,6 +36,9 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
             prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
             execution_commit=prepare["execution"]["commit"],
         )
+    # The candidate's own rule, applied here too so an unrecorded backend under a profile that
+    # must be recorded is refused before it exists, not at its first call.
+    candidate.require_recording(execution_profile=execution_profile, binding=binding)
 
     def backend(execution_manifest: dict, vectors, *, rebuild=True):
         if vectors is None or rebuild is not True:

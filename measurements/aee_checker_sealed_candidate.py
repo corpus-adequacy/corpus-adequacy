@@ -387,6 +387,24 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
     )
 
 
+# The one profile with a legacy unrecorded run: contained-oci-v0 predates the envelope record.
+# An allowlist, so a profile added later is recorded unless it is listed here.
+UNRECORDED_PROFILES = frozenset({"contained-oci-v0"})
+
+
+def require_recording(*, execution_profile, binding) -> None:
+    """Refuse an unrecorded run under any profile but the legacy one, before any effect.
+
+    Without a binding there is no envelope record, and a run under a profile whose evidence
+    is that record would carry the profile's name and none of what it stands for.
+    """
+    if binding is None and (type(execution_profile) is not str
+                            or execution_profile not in UNRECORDED_PROFILES):
+        raise PrepareError(
+            "%s requires a recorded run; an unrecorded run has no envelope and is refused"
+            % (execution_profile,))
+
+
 def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict, execution_profile,
                          name_prefix: str = "aee-cand-",
                          transport=None, execution_contract=None,
@@ -398,6 +416,7 @@ def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict, execution_profile,
     contained-oci-v0 and prepare.v2 only under contained-oci-v1, before any effect.
     """
     prepare = load_prepare_for_profile(prepare_raw, execution_profile=execution_profile)
+    require_recording(execution_profile=execution_profile, binding=binding)
     image_id = require_candidate_image(
         image_id=prepare["toolchain"]["image_id"],
         toolchain_image_id=prepare["toolchain"]["image_id"],
