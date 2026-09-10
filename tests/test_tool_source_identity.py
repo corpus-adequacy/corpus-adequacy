@@ -545,7 +545,7 @@ class OneProducerFeedsEveryRenderer(unittest.TestCase):
     def test_text_report_renders_the_reports_own_identity(self):
         report = {
             "schema": "corpus-adequacy.report.v0", "manifest": "m.json",
-            "killed": 1, "survived": 0, "equivalent": 0, "known_holes": 0,
+            "killed": 1, "survived": 0, "silent": 0, "equivalent": 0, "known_holes": 0,
             "unexercised_out_of_scope": 0, "unproved": 0, "declared_total": 1,
             "out_of_scope_ratio": 0.0, "hole_ratio": 0.0, "score_percent": 100.0,
             "score_means": "author-declared", "adequate": True, "failures": [],
