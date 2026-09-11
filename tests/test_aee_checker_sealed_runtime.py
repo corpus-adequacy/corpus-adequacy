@@ -311,12 +311,17 @@ class RuntimeDeclaresAndAdmitsByProfile(unittest.TestCase):
                 else:
                     backend.execution_profile = relabel
                 manifest = {"_repo_root": subject}
+                # The candidate is a sentinel, and any exception is caught and then typed, so a
+                # regression fails on these assertions rather than on an incidental error.
                 with mock.patch.object(
-                        runtime.candidate, "run_sealed_candidate") as sealed, \
-                        self.assertRaisesRegex(
-                            common.PrepareError,
-                            "^sealed backend has no execution profile declaration"):
+                        runtime.candidate, "run_sealed_candidate",
+                        side_effect=AssertionError("candidate reached")) as sealed, \
+                        self.assertRaises(Exception) as caught:
                     backend(manifest, [{"vector_id": "<batch>"}], rebuild=True)
+                self.assertIsInstance(caught.exception, common.PrepareError)
+                self.assertRegex(
+                    str(caught.exception),
+                    "^sealed backend has no execution profile declaration")
                 sealed.assert_not_called()
 
     def test_omitting_execution_profile_is_typeerror(self):
