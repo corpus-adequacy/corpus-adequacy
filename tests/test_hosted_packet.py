@@ -444,7 +444,8 @@ class InputsAndNetworkLayer(unittest.TestCase):
                 self.assertEqual(str(ctx.exception), "fetch_scheme")
 
     def test_default_open_url_refuses_a_host_other_than_github_before_the_network(self):
-        with mock.patch.object(packet.urllib.request, "build_opener") as opener:
+        with mock.patch.object(packet.urllib.request, "build_opener",
+                               side_effect=AssertionError("network reached")) as opener:
             for url in ("https://evil.example/x", "https://github.com.evil.example/x",
                         "https://user@github.com/x", "https://github.com:8443/x"):
                 with self.subTest(url=url):
