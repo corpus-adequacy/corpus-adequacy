@@ -803,7 +803,7 @@ def _wire_v1_record():
     # Full legacy fixture, with literal additions independent of the v1 projector.
     record = _verified_record()
     record["schema"] = "corpus-adequacy.execution-envelope.v1"
-    record["effective"].update(cpu_period=100000, cpu_quota=250000,
+    record["effective"].update(cpu_period=100000, cpu_quota=250000, nano_cpus=0,
         ulimit_nofile={"soft": 512, "hard": 2048}, daemon={
             "kernel_version": "synthetic-kernel", "cgroup_version": "2",
             "cgroup_driver": "systemd", "security_options": ["name=seccomp"]})
@@ -858,6 +858,20 @@ class EnvelopeV1Validation(unittest.TestCase):
             with self.subTest(field=field, value=value), self.assertRaises(env.EnvelopeError):
                 env.validate_envelope_record(bad)
 
+    def test_stored_nano_cpus_must_be_a_non_negative_integer(self):
+        """Stored-value validation, not the v2 comparison: this record carries a v0 request,
+        which compares no CPU value, so only the shared stored-value rule can refuse."""
+        for value in (-1, True, False, "0", 1.5, 0.0, None):
+            record = _wire_v1_record(); record["effective"]["nano_cpus"] = value
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(env.EnvelopeError, "^nano_cpus$"):
+                    env.validate_envelope_record(record)
+                with self.assertRaisesRegex(env.EnvelopeError, "^nano_cpus$"):
+                    env.bind_report(record, REPORT_SHA256)
+        record = _wire_v1_record(); del record["effective"]["nano_cpus"]
+        with self.assertRaisesRegex(env.EnvelopeError, "^envelope_schema_shape$"):
+            env.validate_envelope_record(record)
+
     def test_v1_malformed_stored_subtree_is_not_reconstruction_success(self):
         for value in (None, {}, {"kernel_version": "x"}):
             record = _wire_v1_record(); record["effective"]["daemon"] = value
@@ -888,7 +902,7 @@ class EnvelopeV1Validation(unittest.TestCase):
 
 def _v1_inputs():
     doc = _inspect()
-    doc["HostConfig"].update(CpuPeriod=100000, CpuQuota=250000,
+    doc["HostConfig"].update(CpuPeriod=100000, CpuQuota=250000, NanoCpus=0,
         Ulimits=[{"Name": "nofile", "Soft": 512, "Hard": 2048}])
     daemon = {"KernelVersion": "synthetic-kernel", "CgroupVersion": "2",
               "CgroupDriver": "systemd", "SecurityOptions": ["z", "a", "a"]}
@@ -914,6 +928,17 @@ class EnvelopeV1Observation(unittest.TestCase):
         value = _project_v1()
         self.assertEqual((value["cpu_period"], value["cpu_quota"]), (100000, 250000))
         self.assertEqual(value["ulimit_nofile"], {"soft": 512, "hard": 2048})
+
+    def test_nano_cpus_is_stored_as_the_daemon_reported_it(self):
+        """The projector stores the observation; comparing it is the comparator's job."""
+        self.assertEqual(_project_v1()["nano_cpus"], 0)
+        doc, daemon = _v1_inputs(); doc["HostConfig"]["NanoCpus"] = 1000000000
+        self.assertEqual(_project_v1(doc, daemon)["nano_cpus"], 1000000000)
+
+    def test_absent_nano_cpus_is_unverified_not_unset(self):
+        doc, daemon = _v1_inputs(); del doc["HostConfig"]["NanoCpus"]
+        with self.assertRaisesRegex(env.EnvelopeError, "^HostConfig.NanoCpus$"):
+            _project_v1(doc, daemon)
 
     def test_missing_daemon_fields_is_named_unverified(self):
         doc, daemon = _v1_inputs()
@@ -948,7 +973,7 @@ class EnvelopeV1Observation(unittest.TestCase):
             bad = copy.deepcopy(doc); bad["HostConfig"]["Ulimits"] = limits
             with self.subTest(limits=limits), self.assertRaises(env.EnvelopeError):
                 _project_v1(bad, daemon)
-        for wire in ("CpuPeriod", "CpuQuota"):
+        for wire in ("CpuPeriod", "CpuQuota", "NanoCpus"):
             for value in (None, True, -1, 1.5, "1"):
                 bad = copy.deepcopy(doc); bad["HostConfig"][wire] = value
                 with self.subTest(wire=wire, value=value), self.assertRaisesRegex(env.EnvelopeError, "HostConfig." + wire):
@@ -1006,9 +1031,11 @@ def _requested_v2(profile=None):
 _FROZEN_NOFILE = [{"Name": "nofile", "Soft": 1024, "Hard": 1024}]
 
 
-def _v2_effective(*, period=100000, quota=100000, limits=_FROZEN_NOFILE, profile=None):
+def _v2_effective(*, period=100000, quota=100000, nano=0, limits=_FROZEN_NOFILE,
+                  profile=None):
     doc = _inspect(profile=profile or _v2_profile())
-    doc["HostConfig"].update(CpuPeriod=period, CpuQuota=quota, Ulimits=copy.deepcopy(limits))
+    doc["HostConfig"].update(CpuPeriod=period, CpuQuota=quota, NanoCpus=nano,
+                             Ulimits=copy.deepcopy(limits))
     return env.project_effective_envelope_v1(
         doc, image_env_names=IMAGE_ENV_NAMES, runtime_version=RUNTIME_VERSION,
         daemon_info={"KernelVersion": "synthetic-kernel", "CgroupVersion": "2",
@@ -1094,6 +1121,23 @@ class V2RequestComparator(unittest.TestCase):
                     env.EnvelopeError, "^ulimit_nofile$"):
                 self._check(_v2_effective(limits=limits))
 
+    def test_a_nonzero_nano_cpus_next_to_period_and_quota_is_a_mismatch(self):
+        """moby refuses NanoCpus with a CFS period, so a nonzero value beside the requested
+        period/quota is not what the v2 codec asked for (#102, freeze section 3)."""
+        self._check(_v2_effective(nano=0))
+        for nano in (1, 1000000000):
+            with self.subTest(nano=nano), self.assertRaisesRegex(
+                    env.EnvelopeError, "^nano_cpus$"):
+                self._check(_v2_effective(nano=nano))
+
+    def test_nano_cpus_is_compared_after_quota_and_before_nofile(self):
+        with self.assertRaisesRegex(env.EnvelopeError, "^cpu_period$"):
+            self._check(_v2_effective(period=50000, nano=1000000000))
+        with self.assertRaisesRegex(env.EnvelopeError, "^cpu_quota$"):
+            self._check(_v2_effective(quota=250000, nano=1000000000))
+        with self.assertRaisesRegex(env.EnvelopeError, "^nano_cpus$"):
+            self._check(_v2_effective(nano=1000000000, limits=[]))
+
     def test_daemon_discarded_limits_stored_unset_are_mismatches(self):
         for over, field in ((dict(period=0), "cpu_period"), (dict(quota=0), "cpu_quota")):
             with self.subTest(field=field), self.assertRaisesRegex(
@@ -1124,6 +1168,20 @@ class V2RequestComparator(unittest.TestCase):
             _v2_effective(period=0, quota=0, limits=[]), _requested(),
             schema=env.ENVELOPE_SCHEMA_V1)
 
+    def test_a_v1_request_does_not_compare_nano_cpus(self):
+        """A v0 request makes no CPU claim, so a nonzero NanoCpus beside it stays valid."""
+        effective = _v2_effective(nano=1000000000)
+        self.assertEqual(effective["nano_cpus"], 1000000000)
+        record = _wire_v1_record(); record["effective"]["nano_cpus"] = 1000000000
+        self.assertEqual(record["requested"]["execution_profile"], "contained-oci-v0")
+        try:
+            env.require_envelope_matches_request(
+                effective, _requested(), schema=env.ENVELOPE_SCHEMA_V1)
+            validated = env.validate_envelope_record(record)
+        except env.EnvelopeError as exc:
+            self.fail("a v0 request compared nano_cpus: refused as " + str(exc))
+        self.assertEqual(validated, record)
+
 
 class V1ProfileRecordSchema(unittest.TestCase):
     def _fields(self, schema, **over):
@@ -1139,7 +1197,17 @@ class V1ProfileRecordSchema(unittest.TestCase):
     def test_v1_profile_record_is_built_and_validated_as_v1(self):
         record = env.build_envelope_record(**self._fields(env.ENVELOPE_SCHEMA_V1))
         self.assertEqual(record["publication_permission"], "permitted")
+        self.assertEqual(record["effective"]["nano_cpus"], 0)
         self.assertEqual(env.validate_envelope_record(record), record)
+
+    def test_a_stored_v2_record_refuses_a_nano_cpus_the_comparison_alone_would_admit(self):
+        """False == 0 and 0.0 == 0, so the stored-value rule, not `!= 0`, refuses these."""
+        record = env.build_envelope_record(**self._fields(env.ENVELOPE_SCHEMA_V1))
+        for value in (False, 0.0):
+            bad = copy.deepcopy(record); bad["effective"]["nano_cpus"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    env.EnvelopeError, "^nano_cpus$"):
+                env.validate_envelope_record(bad)
 
     def test_v1_profile_record_cannot_use_the_v0_schema(self):
         for over in ({}, dict(envelope_status="unverified", unverified_field="cpu_quota",

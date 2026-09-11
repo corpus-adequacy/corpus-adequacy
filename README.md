@@ -468,8 +468,12 @@ Observe O adds an explicitly selected `execution-envelope.v1` reader and builder
 Default construction and every `contained-oci-v0` run still emit v0; only a
 `contained-oci-v1` run emits v1 (#102 A2/A3). `report.v0` is unchanged. Collections accept both versions through the same semantic validator
 and preserve member bytes/version when binding a report. V1 records inspect CPU
-period/quota and nofile settings plus daemon kernel/cgroup/security observations;
-these additional observations are shape-checked, not compared to v0 requested limits.
+period/quota, `NanoCpus` and nofile settings plus daemon kernel/cgroup/security observations;
+under a v0 request these additional observations are shape-checked, not compared to v0 requested limits.
+Under a `contained-oci-v1` (`resource-profile.v2`) request the daemon-stored `CpuPeriod`,
+`CpuQuota` and nofile soft/hard are compared exactly against the request, and `NanoCpus` must
+also be stored unset (0), since moby refuses it beside a CFS period; this is still
+daemon-reported configuration, not a limit the kernel applied.
 Zero CPU values or null nofile mean only those named settings were reported unset,
 not that inherited or other limits are absent. Missing observations refuse rather
 than borrowing requested values. Synthetic fixtures establish expected daemon wire

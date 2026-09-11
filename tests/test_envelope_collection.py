@@ -626,6 +626,8 @@ class DualEnvelopeVersions(unittest.TestCase):
     def test_rehashed_invalid_v1_first_and_last_are_refused(self):
         for field, value in (("cpu_quota", -1), ("cpu_period", True),
                              ("cpu_quota", "1"), ("cpu_period", 1.5),
+                             ("nano_cpus", -1), ("nano_cpus", True),
+                             ("nano_cpus", "0"), ("nano_cpus", 1.5),
                              ("ulimit_nofile", {}),
                              ("ulimit_nofile", {"soft": 2, "hard": 1}),
                              ("ulimit_nofile", {"soft": True, "hard": 2})):
@@ -636,6 +638,7 @@ class DualEnvelopeVersions(unittest.TestCase):
             with self.subTest(field=field, value=value):
                 self._refuse_rehashed(lambda r: r["effective"]["daemon"].__setitem__(field, value))
         self._refuse_rehashed(lambda r: r["effective"]["daemon"].pop("cgroup_driver"))
+        self._refuse_rehashed(lambda r: r["effective"].pop("nano_cpus"))
         self._refuse_rehashed(lambda r: r["effective"].__setitem__("surplus", 1))
 
     def test_unknown_member_version_is_refused(self):

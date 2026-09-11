@@ -53,7 +53,8 @@ EFFECTIVE_KEYS = (
     "pid_mode", "pids_limit", "privileged", "read_only_root",
     "runtime_version", "tmpfs", "user", "userns_mode",
 )
-EFFECTIVE_KEYS_V1 = EFFECTIVE_KEYS + ("cpu_period", "cpu_quota", "daemon", "ulimit_nofile")
+EFFECTIVE_KEYS_V1 = EFFECTIVE_KEYS + (
+    "cpu_period", "cpu_quota", "daemon", "nano_cpus", "ulimit_nofile")
 REQUESTED_KEYS = (
     "execution_profile", "image_id", "mount_spec", "resource_profile", "sealed",
 )
@@ -246,7 +247,7 @@ def _v1_options(value, where):
 
 def _require_v1_values(effective):
     """Shared stored-value rules; projection cannot stand in for reader validation."""
-    for key in ("cpu_period", "cpu_quota"):
+    for key in ("cpu_period", "cpu_quota", "nano_cpus"):
         _v1_integer(effective[key], key)
     daemon = effective["daemon"]
     _require_exact(daemon, ("kernel_version", "cgroup_version", "cgroup_driver",
@@ -269,7 +270,8 @@ def project_effective_envelope_v1(inspect, *, image_env_names, runtime_version,
     """Explicit synthetic/observed-input route; existing emitters still use v0."""
     effective = project_effective_envelope(
         inspect, image_env_names=image_env_names, runtime_version=runtime_version)
-    for stored, wire in (("cpu_period", "CpuPeriod"), ("cpu_quota", "CpuQuota")):
+    for stored, wire in (("cpu_period", "CpuPeriod"), ("cpu_quota", "CpuQuota"),
+                         ("nano_cpus", "NanoCpus")):
         effective[stored] = _v1_integer(
             _observed(inspect, "HostConfig", wire), "HostConfig." + wire)
     limits = _observed(inspect, "HostConfig", "Ulimits")
@@ -393,13 +395,16 @@ def _require_cpu_and_nofile_match(effective, profile) -> None:
     """Exact comparison of daemon-stored CPU and nofile against a v2 request.
 
     The daemon may discard a limit and store it unset (0, or no nofile entry); that reads as a
-    mismatch here, never as satisfied. This compares configuration the daemon reports, not a
-    limit the kernel applied.
+    mismatch here, never as satisfied. `NanoCpus` must be stored unset: moby refuses it beside a
+    CFS period, so a nonzero value next to the requested period/quota is not what the v2 codec
+    asked for. This compares configuration the daemon reports, not a limit the kernel applied.
     """
     if effective["cpu_period"] != contained.CPU_PERIOD_USEC:
         raise EnvelopeError("cpu_period")
     if effective["cpu_quota"] != contained.cpu_quota_usec(profile):
         raise EnvelopeError("cpu_quota")
+    if effective["nano_cpus"] != 0:
+        raise EnvelopeError("nano_cpus")
     if effective["ulimit_nofile"] != {
             "soft": profile["nofile_soft"], "hard": profile["nofile_hard"]}:
         raise EnvelopeError("ulimit_nofile")
@@ -409,10 +414,10 @@ def require_envelope_matches_request(effective, requested, *, schema=ENVELOPE_SC
     """Hold one observation against one declaration. Observation cannot yield.
 
     The v0 fields retain their declaration comparisons. For a v2 request the
-    observed CPU period, quota and nofile soft/hard are compared exactly, so a
-    v2 request needs a v1 envelope. For a v1 request those fields, and the
-    daemon fields always, are observations with shape checks, not requested
-    limits.
+    observed CPU period, quota and nofile soft/hard are compared exactly and
+    NanoCpus must be stored unset (0), so a v2 request needs a v1 envelope.
+    For a v1 request those fields, and the daemon fields always, are
+    observations with shape checks, not requested limits.
     """
     require_requested_record(requested)
     _require_exact(effective, _effective_keys(schema),
