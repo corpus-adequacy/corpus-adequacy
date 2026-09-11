@@ -58,6 +58,11 @@ MAX_PIN_FILES = 16
 FETCH_TIMEOUT_SECONDS = 60
 GIT_TIMEOUT_SECONDS = 30
 RELEASE_ASSET_URL = "https://github.com/%s/releases/download/%s/%s"
+RELEASE_HOST = "github.com"
+# The only host a release download may be redirected to: GitHub's hosted-runner docs list it as
+# "Needed for downloading release assets". A move by GitHub refuses (fail closed) until this
+# changes; it never widens to another host on its own.
+REDIRECT_HOSTS = ("release-assets.githubusercontent.com",)
 PREPARE_RECORD_SCHEMA = "corpus-adequacy.hosted-prepare-record.v0"
 PREPARE_RECORD_FILENAME = "hosted-prepare-record.v0.json"
 PREPARE_RECORD_ENV = (
@@ -169,10 +174,34 @@ def release_asset_url(repository: str, tag: str, name: str) -> str:
         repository, urllib.parse.quote(tag, safe=""), urllib.parse.quote(name, safe=""))
 
 
-class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+def _plain_host(parts) -> str | None:
+    """The host of an https URL with no userinfo and no explicit port, else None."""
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.username is not None or parts.password is not None or port is not None:
+        return None
+    return parts.hostname
+
+
+class _PinnedRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only over HTTPS to the release-asset host GitHub documents.
+
+    The manifest digest already binds every byte, so this does not add integrity. It bounds
+    where the runner can be sent: GitHub's hosted-runner documentation names
+    `release-assets.githubusercontent.com` as the host needed for downloading release assets,
+    and a release download is one redirect from github.com to it.
+    """
+
+    max_redirections = 2
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urllib.parse.urlsplit(newurl).scheme != "https":
+        parts = urllib.parse.urlsplit(newurl)
+        if parts.scheme != "https":
             raise PacketError("fetch_redirect_scheme")
+        if _plain_host(parts) not in REDIRECT_HOSTS:
+            raise PacketError("fetch_redirect_host")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -180,7 +209,9 @@ def default_open_url(url: str, max_bytes: int) -> bytes:
     """Fetch one public release asset over HTTPS, reading at most max_bytes + 1 bytes."""
     if not isinstance(url, str) or urllib.parse.urlsplit(url).scheme != "https":
         raise PacketError("fetch_scheme")
-    opener = urllib.request.build_opener(_HttpsOnlyRedirect())
+    if _plain_host(urllib.parse.urlsplit(url)) != RELEASE_HOST:
+        raise PacketError("fetch_host")
+    opener = urllib.request.build_opener(_PinnedRedirect())
     request = urllib.request.Request(url, headers={
         "Accept": "application/octet-stream",
         "User-Agent": "corpus-adequacy-hosted-packet",
@@ -189,8 +220,11 @@ def default_open_url(url: str, max_bytes: int) -> bytes:
     total = 0
     try:
         with opener.open(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
-            if urllib.parse.urlsplit(response.geturl()).scheme != "https":
+            final = urllib.parse.urlsplit(response.geturl())
+            if final.scheme != "https":
                 raise PacketError("fetch_redirect_scheme")
+            if _plain_host(final) not in (RELEASE_HOST,) + REDIRECT_HOSTS:
+                raise PacketError("fetch_redirect_host")
             if getattr(response, "status", 200) != 200:
                 raise PacketError("fetch_status")
             declared = response.headers.get("Content-Length")
