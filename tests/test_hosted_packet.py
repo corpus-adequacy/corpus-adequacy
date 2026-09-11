@@ -19,6 +19,7 @@ import tempfile
 import unittest
 import urllib.parse
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -441,6 +442,86 @@ class InputsAndNetworkLayer(unittest.TestCase):
                 with self.assertRaises(packet.PacketError) as ctx:
                     packet.default_open_url(url, 16)
                 self.assertEqual(str(ctx.exception), "fetch_scheme")
+
+    def test_default_open_url_refuses_a_host_other_than_github_before_the_network(self):
+        with mock.patch.object(packet.urllib.request, "build_opener",
+                               side_effect=AssertionError("network reached")) as opener:
+            for url in ("https://evil.example/x", "https://github.com.evil.example/x",
+                        "https://user@github.com/x", "https://github.com:8443/x"):
+                with self.subTest(url=url):
+                    with self.assertRaises(packet.PacketError) as ctx:
+                        packet.default_open_url(url, 16)
+                    self.assertEqual(str(ctx.exception), "fetch_host")
+        opener.assert_not_called()
+
+    def test_redirects_are_followed_only_to_the_documented_release_asset_host(self):
+        """GitHub's hosted-runner docs name release-assets.githubusercontent.com as the host
+        needed for downloading release assets; the digest binds the bytes, the pin bounds
+        where the runner is sent."""
+        import urllib.request
+        handler = packet._PinnedRedirect()
+        req = urllib.request.Request("https://github.com/o/r/releases/download/t/f")
+        ok = "https://release-assets.githubusercontent.com/github-production-release-asset/1/2?x=y"
+        self.assertIsNotNone(handler.redirect_request(req, None, 302, "Found", {}, ok))
+        for bad, reason in (
+                ("http://release-assets.githubusercontent.com/a", "fetch_redirect_scheme"),
+                ("https://objects.githubusercontent.com/a", "fetch_redirect_host"),
+                ("https://release-assets.githubusercontent.com.evil.example/a",
+                 "fetch_redirect_host"),
+                ("https://evil.example/release-assets.githubusercontent.com",
+                 "fetch_redirect_host"),
+                ("https://user@release-assets.githubusercontent.com/a", "fetch_redirect_host"),
+                ("https://release-assets.githubusercontent.com:8443/a", "fetch_redirect_host"),
+                # A same-host redirect (for example after a repository rename) is refused too:
+                # the release is fetched from the exact repository it was dispatched with.
+                ("https://github.com/other/repo/releases/download/t/f", "fetch_redirect_host")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(packet.PacketError) as ctx:
+                    handler.redirect_request(req, None, 302, "Found", {}, bad)
+                self.assertEqual(str(ctx.exception), reason)
+        self.assertLessEqual(packet._PinnedRedirect.max_redirections, 2)
+
+    def test_the_final_url_must_be_github_or_the_release_asset_host(self):
+        class Response:
+            status = 200
+            headers = {}
+
+            def __init__(self, final):
+                self.final = final
+
+            def geturl(self):
+                return self.final
+
+            def read(self, _n):
+                return b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        for final, reason in (("https://evil.example/a", "fetch_redirect_host"),
+                              ("http://release-assets.githubusercontent.com/a",
+                               "fetch_redirect_scheme")):
+            with self.subTest(final=final):
+                opener = mock.Mock()
+                opener.open.return_value = Response(final)
+                with mock.patch.object(packet.urllib.request, "build_opener",
+                                       return_value=opener):
+                    with self.assertRaises(packet.PacketError) as ctx:
+                        packet.default_open_url("https://github.com/o/r/releases/download/t/f", 16)
+                self.assertEqual(str(ctx.exception), reason)
+        for final in ("https://github.com/o/r/releases/download/t/f",
+                      "https://release-assets.githubusercontent.com/github-production-release-asset/1/2"):
+            with self.subTest(final=final):
+                opener = mock.Mock()
+                opener.open.return_value = Response(final)
+                with mock.patch.object(packet.urllib.request, "build_opener",
+                                       return_value=opener):
+                    self.assertEqual(
+                        packet.default_open_url(
+                            "https://github.com/o/r/releases/download/t/f", 16), b"")
 
     def test_cli_refuses_existing_destination_with_exit_2(self):
         with tempfile.TemporaryDirectory() as raw:

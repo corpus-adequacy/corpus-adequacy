@@ -324,11 +324,34 @@ def docker_ok(args, *, cwd: Path | None = None, timeout: int = 60):
     return proc
 
 
-def docker_bounded(args, *, cwd: Path | None = None, timeout: int = 60) -> bytes:
-    text = docker_ok(args, cwd=cwd, timeout=timeout).stdout or ""
+def _required_stdout(proc) -> bytes:
+    text = proc.stdout or ""
     if not str(text).strip():
         raise PrepareError("docker output empty")
     return text.encode("utf-8")
+
+
+def docker_bounded(args, *, cwd: Path | None = None, timeout: int = 60) -> bytes:
+    return _required_stdout(docker_ok(args, cwd=cwd, timeout=timeout))
+
+
+def create_warnings_from_stderr(stderr) -> tuple:
+    """Every non-empty stderr line of `docker create`, stripped, `WARNING: ` removed.
+
+    moby (v28.0.4 daemon/daemon_unix.go `verifyPlatformContainerResources`) can discard a
+    requested limit, store the changed config and say so only in the create response's
+    warnings; docker/cli (v28.0.4 cli/command/container/create.go) prints each on stderr as
+    `WARNING: <text>`. Every line counts, not only WARNING lines or lines naming a discard:
+    moby's swap warning ends "Memory limited without swap." and never says "discarded".
+    """
+    warnings = []
+    for line in str(stderr or "").splitlines():
+        line = line.strip()
+        if line.startswith("WARNING: "):
+            line = line[len("WARNING: "):]
+        if line:
+            warnings.append(line)
+    return tuple(warnings)
 
 
 def parse_inspect_payload(raw: bytes) -> dict:
@@ -640,7 +663,10 @@ class DockerTransport:
     skip_absent = False
 
     def create(self, argv):
-        docker_bounded(argv[1:])
+        """Create under docker_bounded's success rule; return the create-time warnings."""
+        proc = docker_ok(argv[1:])
+        _required_stdout(proc)
+        return create_warnings_from_stderr(proc.stderr)
 
     def start(self, name, deadline_seconds):
         if type(deadline_seconds) is not int or deadline_seconds <= 0:
@@ -704,6 +730,9 @@ def run_contained(
     a cleanup failure after the candidate already ran becomes a recorded
     `cleanup` state instead of an exception that loses the run. Callers that
     keep no record leave it false and a cleanup failure still refuses.
+
+    `create_warnings` is whatever `transport.create` returned, unjudged here:
+    a tuple of warning lines, or None from a transport that observes none.
     """
     image_id = require_image_id(image_id)
     profile = require_versioned_resource_profile(resource_profile)
@@ -726,7 +755,7 @@ def run_contained(
             entrypoint=entrypoint,
             resource_profile=profile,
         )
-        transport.create(argv)
+        create_warnings = transport.create(argv)
         try:
             process = transport.start(name, profile["deadline_seconds"])
             state = "completed"
@@ -754,6 +783,7 @@ def run_contained(
         "cleanup": cleanup,
         "container_absent_after": cleanup == "removed-and-absent",
         "contract": envelope,
+        "create_warnings": create_warnings,
         "inspect": observed,
         "name": name,
         "process": process,

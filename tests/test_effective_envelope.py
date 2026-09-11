@@ -591,7 +591,9 @@ class ContainedLifecycleRecordsCleanup(unittest.TestCase):
             self._inspect = inspect_doc
 
         def create(self, _argv):
-            return None
+            # Observed: no create-time warnings. None would mean "not observed" and leave the
+            # recorded envelope unverified as create_warnings.
+            return ()
 
         def start(self, _name, _deadline):
             return subprocess.CompletedProcess([], 0, "{}\n", "")
