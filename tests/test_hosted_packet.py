@@ -471,7 +471,10 @@ class InputsAndNetworkLayer(unittest.TestCase):
                 ("https://evil.example/release-assets.githubusercontent.com",
                  "fetch_redirect_host"),
                 ("https://user@release-assets.githubusercontent.com/a", "fetch_redirect_host"),
-                ("https://release-assets.githubusercontent.com:8443/a", "fetch_redirect_host")):
+                ("https://release-assets.githubusercontent.com:8443/a", "fetch_redirect_host"),
+                # A same-host redirect (for example after a repository rename) is refused too:
+                # the release is fetched from the exact repository it was dispatched with.
+                ("https://github.com/other/repo/releases/download/t/f", "fetch_redirect_host")):
             with self.subTest(bad=bad):
                 with self.assertRaises(packet.PacketError) as ctx:
                     handler.redirect_request(req, None, 302, "Found", {}, bad)
