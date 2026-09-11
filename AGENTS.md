@@ -30,6 +30,7 @@ Mark each item *enforced* or *judgment*. Prefer citing refusal vs run-failure.
 | *judgment* | Does each control declare `control_polarity` explicitly? | Legacy controls default to **positive**. If the field is present, `load_manifest_bytes` **refuses** (exit 2) unless `control: true` and the value is `positive` or `inert`. |
 | *enforced* (exit 2) | Does every `equivalent` carry a **non-blank reason**? | `load_manifest_bytes` requires `label` + `reason` and refuses a blank reason (`ManifestError` → CLI exit 2). |
 | *judgment* | Does that reason name the declared **`outcome_from` projection**? | Equivalence is only meaningful relative to that projection; the tool does not parse the prose. |
+| *judgment* | Process and batch runners with a JSON outcome: does **`outcome_from`** cover every channel the corpus pins (for example a reason token, not only the decision)? | Apart from termination kills (timeout, output cap, an exit in neither `accepted_exit_codes` nor `unproved_exit_codes`, a signal), these runners compare only declared members (`child_outcome` reads only the keys each selector names), so a pinned channel left out of `outcome_from` cannot kill a row. `ReasonTokenOnOutcome` shows one substitution as `killed`, `silent` or `survived` depending only on where the reason token is declared. A channel the checker reports but the corpus does not pin belongs in `diagnostic_from`. Which channels the corpus pins is its author's call; the tool cannot check it. Not applicable to the module runner (entrypoint return value) or test-names (failed-test names). |
 | *enforced* (exit 2, narrow) | Does every known-hole entry carry **`label`**, **`reason`**, and **`recorded`**, keyed under the digest string read from the named digest file? | `load_manifest_bytes` requires those keys and a non-blank `reason` when `known_holes` is non-empty; `_acknowledged_holes` matches the **file-read** digest string. **Not** enforced: ISO date format of `recorded`, or recomputing the digest from vectors (author-declared file honesty is *judgment*). |
 | *enforced* (runner-scoped) | Are `outcome_from` / `diagnostic_from` usable for this runner? | `outcome_from` required for process/batch (unless `outcome_parse: test-names`). `diagnostic_from` is **refused** on `runner: module` and beside `test-names`. Overlap between the two selectors is refused. Missing declared outcome members **fail the run** when those channels are read — not a silent green. |
 | *judgment* | Does the PR cite one **real run** (`report.v0` digest + public evidence), as the publish-measurement template already asks? | Not checked by the tool. |
@@ -42,6 +43,12 @@ Mark each item *enforced* or *judgment*. Prefer citing refusal vs run-failure.
   in the implementation — and that reading applies only when the run actually
   produced a score (healthy positive control, not `control-error` / unproved /
   barrier abort).
+- On process and batch runners with a JSON outcome, the `survived` and silent-only
+  readings also presume that `outcome_from` covers every channel the corpus pins. A
+  pinned channel left out of `outcome_from` cannot kill a row, so that row's
+  `survived` or `silent` belongs to the manifest, not the corpus. A channel the checker reports but the corpus
+  does not pin belongs in `diagnostic_from`, where the row reads `silent` (README,
+  "The silent class, and `diagnostic_from`").
 
 ## Exit codes (do not conflate)
 
