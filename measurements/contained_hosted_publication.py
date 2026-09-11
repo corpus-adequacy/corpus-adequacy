@@ -1057,7 +1057,7 @@ def main(argv=None) -> int:
     try:
         if args.command != "gate":
             parser.error("unsupported command")
-        run_gate(
+        decision = run_gate(
             candidate_revision=args.candidate_revision,
             runner_revision=args.runner_revision,
             image_digest=args.image_digest,
@@ -1077,6 +1077,15 @@ def main(argv=None) -> int:
     except HostedPublicationError as exc:
         print("hosted publication refused: %s" % exc, file=sys.stderr)
         return 2
+    # The workflow uploads the collection only when this step succeeds, so success must mean
+    # publication is permitted. A withheld or unavailable run has already written its stubs
+    # and moved its collection out of the upload path; it exits 3, never 0. Anything but an
+    # explicit publish decision is not permitted.
+    outcome = decision.get("decision") if type(decision) is dict else None
+    if outcome != "publish":
+        shown = outcome if type(outcome) is str and outcome else "no decision"
+        print("hosted publication not permitted: %s" % shown, file=sys.stderr)
+        return 3
     return 0
 
 

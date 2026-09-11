@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -2013,7 +2014,7 @@ class HostedPacketDelivery(unittest.TestCase):
 
         def fake_gate(**kwargs):
             seen.update(kwargs)
-            return {}
+            return {"decision": "publish"}
 
         with mock.patch.object(hosted, "run_gate", fake_gate):
             code = hosted.main([
@@ -2023,6 +2024,50 @@ class HostedPacketDelivery(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(seen["packet_manifest_sha256"], "0" * 64)
         self.assertEqual(seen["packet_root"], packet_mod.PACKET_DIRNAME)
+
+
+class GateExitCodeIsThePublicationDecision(unittest.TestCase):
+    """The workflow publishes the collection only when the gate step succeeds, so exit 0 must
+    mean publication is permitted. A withheld or unavailable run used to exit 0 after moving its
+    collection out of the upload path, and the upload then failed on a missing directory."""
+
+    ARGV = ["gate", "--candidate-revision", CANDIDATE, "--runner-revision", RUNNER,
+            "--image-digest", IMAGE, "--out", "x"]
+
+    def _main(self, returned):
+        err = io.StringIO()
+        with mock.patch.object(hosted, "run_gate", return_value=returned), \
+                mock.patch.object(sys, "stderr", err):
+            code = hosted.main(list(self.ARGV))
+        return code, err.getvalue()
+
+    def test_publish_exits_zero(self):
+        self.assertEqual(self._main({"decision": "publish"}), (0, ""))
+
+    def test_withheld_and_unavailable_exit_three_with_a_named_reason(self):
+        for decision in ("withhold", "unavailable"):
+            with self.subTest(decision=decision):
+                code, err = self._main({"decision": decision, "reason": "r"})
+                self.assertEqual(code, 3)
+                self.assertEqual(
+                    err, "hosted publication not permitted: %s\n" % decision)
+
+    def test_anything_but_an_explicit_publish_is_not_permitted(self):
+        for returned in ({}, None, {"decision": "PUBLISH"}, {"decision": ["publish"]}, "publish"):
+            with self.subTest(returned=returned):
+                code, err = self._main(returned)
+                self.assertEqual(code, 3)
+                self.assertTrue(err.startswith("hosted publication not permitted: "), err)
+
+    def test_a_refusal_still_exits_two(self):
+        err = io.StringIO()
+        with mock.patch.object(
+                hosted, "run_gate",
+                side_effect=hosted.HostedPublicationError("packet_manifest")), \
+                mock.patch.object(sys, "stderr", err):
+            code = hosted.main(list(self.ARGV))
+        self.assertEqual(code, 2)
+        self.assertEqual(err.getvalue(), "hosted publication refused: packet_manifest\n")
 
 
 class WorkflowIdentityBinding(unittest.TestCase):

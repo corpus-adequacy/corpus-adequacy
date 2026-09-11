@@ -293,6 +293,32 @@ class RuntimeDeclaresAndAdmitsByProfile(unittest.TestCase):
                 execution_profile="contained-oci-v0")
         self.assertEqual(backend.execution_profile, "contained-oci-v0")
 
+    def test_a_backend_without_a_str_declaration_at_call_time_is_refused_by_name(self):
+        """Deleting or replacing the declaration after construction is refused with a named
+        PrepareError before the candidate is reached, not with a bare AttributeError."""
+        from tests.test_aee_checker_sealed_candidate import NoEffectTransport
+        for relabel in ("delete", None, 123, b"x"):
+            with self.subTest(relabel=relabel), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                subject = root / "subject"
+                subject.mkdir()
+                backend = runtime.make_sealed_backend(
+                    prepare_raw=_prepare_v1(), materialized=self._materialized(root),
+                    execution_profile="contained-oci-v0", transport=NoEffectTransport(),
+                    envelope_sink=[].append)
+                if relabel == "delete":
+                    del backend.execution_profile
+                else:
+                    backend.execution_profile = relabel
+                manifest = {"_repo_root": subject}
+                with mock.patch.object(
+                        runtime.candidate, "run_sealed_candidate") as sealed, \
+                        self.assertRaisesRegex(
+                            common.PrepareError,
+                            "^sealed backend has no execution profile declaration"):
+                    backend(manifest, [{"vector_id": "<batch>"}], rebuild=True)
+                sealed.assert_not_called()
+
     def test_omitting_execution_profile_is_typeerror(self):
         import inspect
         parameter = inspect.signature(runtime.make_sealed_backend).parameters[
