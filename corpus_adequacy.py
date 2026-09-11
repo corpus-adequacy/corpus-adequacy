@@ -1431,6 +1431,9 @@ CLOSED_UNPROVED_REASONS = (
     # The daemon reported an OOM kill in the contained candidate's cgroup (#102 C): named,
     # not scored, and not a claim that the measured process was the one killed.
     "oom-killed-reported",
+    # Contained setup never became ready (unavailable or refused), so no candidate ran to
+    # an outcome. Without this token the sanitizer reported such a run as "malformed".
+    "setup",
 )
 
 

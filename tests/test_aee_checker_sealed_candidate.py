@@ -1498,6 +1498,25 @@ class CreateTimeWarnings(unittest.TestCase):
                     record["unverified_field"], "defense-in-depth inspect mismatch")
                 self.assertEqual(record["candidate_outcome"], "not-run")
 
+    def test_a_refused_setup_is_named_setup_not_malformed(self):
+        """`_refused_envelope` asks for the reason "setup". Before it was a closed reason the
+        sanitizer turned it into "malformed", which points at the candidate's output for a run
+        whose setup never became ready."""
+        for profile, resource in self.ROUTES:
+            with self.subTest(profile=profile):
+                doc = _observed_inspect(resource)
+                doc["HostConfig"]["PidsLimit"] = None
+                transport = ObservingTransport(inspect=doc, create_warnings=(PIDS_DISCARDED,))
+                with tempfile.TemporaryDirectory() as d:
+                    completed = cand.run_sealed_candidate(
+                        prepare_raw=_prepare_raw(resource), mounts=_mounts(Path(d)),
+                        execution_profile=profile, transport=transport, binding=A2_BINDING)
+                self.assertEqual(completed.envelope_record["setup_status"], "refused")
+                self.assertEqual(completed.unproved_reason, "setup")
+        self.assertEqual(ca.sanitize_unproved_reason("setup"), "setup")
+        self.assertEqual(cand._refused_envelope(
+            None, None, "unavailable", "docker", "unused").unproved_reason, "setup")
+
 
 # --- #102 C: a daemon-reported OOM kill is named, never scored ---------------------------------
 
