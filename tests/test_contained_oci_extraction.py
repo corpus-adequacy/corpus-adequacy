@@ -19,6 +19,15 @@ import aee_checker_sealed_common as common  # noqa: E402
 import aee_checker_sealed_materialize as materialize  # noqa: E402
 import aee_checker_sealed_oci as aee_oci  # noqa: E402
 
+# moby v28.0.4 daemon/daemon_unix.go `verifyPlatformContainerResources`, verbatim.
+PIDS_DISCARDED = (
+    "Your kernel does not support PIDs limit capabilities or the cgroup is not mounted. "
+    "PIDs limit discarded.")
+CFS_DISCARDED = "Your kernel does not support CPU CFS scheduler. CPU period/quota discarded."
+SWAP_WITHOUT = (
+    "Your kernel does not support swap limit capabilities or the cgroup is not mounted. "
+    "Memory limited without swap.")
+
 
 def _inspect_fixture(contained, *, process_returncode=0, state_over=None):
     profile = contained.INERT_RESOURCE_PROFILE
@@ -695,6 +704,101 @@ class SharedEnvelopeOwnership(unittest.TestCase):
                     resource_profile=common.CANDIDATE_RESOURCE_PROFILE,
                     transport=UnexpectedCreate(),
                 )
+
+    def test_create_returns_every_create_time_stderr_line_as_a_warning(self):
+        """#102 §3: moby can discard a requested limit and say so only at create time.
+
+        moby v28.0.4 `verifyPlatformContainerResources` returns the warnings and docker/cli
+        v28.0.4 `container/create.go` prints each on stderr as `WARNING: <text>`. The swap
+        warning never says "discarded", so every non-empty line counts.
+        """
+        contained = self._contained_oci()
+        argv = ["docker", "create", "--name", "candidate", "sha256:" + ("ab" * 32)]
+        stderr = (
+            "WARNING: %s\n"
+            "\n"
+            "  WARNING: %s  \n"
+            "   \n"
+            "WARNING: %s\n"
+            "a line in no docker wording\n" % (PIDS_DISCARDED, CFS_DISCARDED, SWAP_WITHOUT)
+        )
+        proc = subprocess.CompletedProcess(argv[1:], 0, "0123abcd\n", stderr)
+        with mock.patch.object(contained, "docker_ok", return_value=proc) as ok:
+            warnings = contained.DockerTransport().create(argv)
+        ok.assert_called_once_with(argv[1:])
+        self.assertIs(type(warnings), tuple)
+        self.assertEqual(
+            warnings,
+            (PIDS_DISCARDED, CFS_DISCARDED, SWAP_WITHOUT, "a line in no docker wording"),
+        )
+
+    def test_create_without_stderr_returns_no_warnings(self):
+        contained = self._contained_oci()
+        argv = ["docker", "create", "--name", "candidate", "sha256:" + ("ab" * 32)]
+        proc = subprocess.CompletedProcess(argv[1:], 0, "0123abcd\n", "")
+        with mock.patch.object(contained, "docker_ok", return_value=proc):
+            self.assertEqual(contained.DockerTransport().create(argv), ())
+
+    def test_create_with_empty_stdout_still_refuses_whatever_stderr_says(self):
+        contained = self._contained_oci()
+        argv = ["docker", "create", "--name", "candidate", "sha256:" + ("ab" * 32)]
+        for stdout in ("", "  \n"):
+            for stderr in ("", "WARNING: %s\n" % PIDS_DISCARDED):
+                with self.subTest(stdout=stdout, stderr=stderr):
+                    proc = subprocess.CompletedProcess(argv[1:], 0, stdout, stderr)
+                    with mock.patch.object(contained, "docker_ok", return_value=proc):
+                        with self.assertRaisesRegex(
+                                contained.PrepareError, "^docker output empty$"):
+                            contained.DockerTransport().create(argv)
+
+    def test_run_contained_keeps_what_create_returned_as_create_warnings(self):
+        contained = self._contained_oci()
+
+        class Warned:
+            skip_absent = False
+
+            def __init__(self, returned):
+                self.returned = returned
+
+            def create(self, _argv):
+                return self.returned
+
+            def start(self, _name, _deadline):
+                return subprocess.CompletedProcess([], 0, "", "")
+
+            def inspect(self, _name):
+                return _inspect_fixture(contained)
+
+            def remove(self, _name):
+                pass
+
+            def require_absent(self, _name):
+                pass
+
+        for returned in ((), (PIDS_DISCARDED,), None):
+            with self.subTest(returned=returned), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                mounts = {}
+                for key, _destination in contained.DEFAULT_MOUNT_SPEC:
+                    path = root / key
+                    path.mkdir()
+                    mounts[key] = path
+                result = contained.run_contained(
+                    image_id="sha256:" + ("ab" * 32),
+                    mounts=mounts,
+                    command=["ok"],
+                    entrypoint="/probe",
+                    mount_spec=contained.DEFAULT_MOUNT_SPEC,
+                    resource_profile=contained.INERT_RESOURCE_PROFILE,
+                    sealed=True,
+                    name_prefix="probe-",
+                    transport=Warned(returned),
+                )
+                self.assertEqual(sorted(result), [
+                    "cleanup", "container_absent_after", "contract", "create_warnings",
+                    "inspect", "name", "process", "state"])
+                self.assertIs(result["create_warnings"], returned)
+                self.assertEqual(result["state"], "completed")
 
     def test_validate_mount_destinations_shared_predicate(self):
         contained = self._contained_oci()

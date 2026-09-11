@@ -101,7 +101,7 @@ class FakeTransport:
             timeout=False, output_too_large=False,
             skip_absent=False,
             leave_present=False, fail_create=False, create_error=None,
-            remove_error=None, absent_error=None):
+            remove_error=None, absent_error=None, create_warnings=()):
         self.returncode = returncode
         self.stdout = stdout
         self.inspect_doc = inspect
@@ -113,6 +113,7 @@ class FakeTransport:
         self.create_error = create_error
         self.remove_error = remove_error
         self.absent_error = absent_error
+        self.create_warnings = create_warnings
         self.created = []
         self.removed = []
         self.absent_checked = []
@@ -124,6 +125,7 @@ class FakeTransport:
             raise self.create_error
         if self.fail_create:
             raise PrepareError("partial create")
+        return self.create_warnings
 
     def start(self, name, deadline_seconds=None):
         self.started.append(name)
@@ -1398,6 +1400,103 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
                         _contains_run(transport.created[0], FROZEN_V2_FLAGS),
                         profile == V1_PROFILE)
         self.assertIsNot(module, cand)
+
+
+# moby v28.0.4 daemon/daemon_unix.go `verifyPlatformContainerResources`, verbatim.
+PIDS_DISCARDED = (
+    "Your kernel does not support PIDs limit capabilities or the cgroup is not mounted. "
+    "PIDs limit discarded.")
+CFS_DISCARDED = "Your kernel does not support CPU CFS scheduler. CPU period/quota discarded."
+SWAP_WITHOUT = (
+    "Your kernel does not support swap limit capabilities or the cgroup is not mounted. "
+    "Memory limited without swap.")
+
+
+class CreateTimeWarnings(unittest.TestCase):
+    """#102 §3: a create-time warning is a second signal beside the stored config.
+
+    moby can discard a requested limit, store the changed config and say so only as a
+    create-time warning. The comparator reads the stored config; this reads what the daemon
+    said, runs after the comparator, and never stores the warning text.
+    """
+
+    ROUTES = (
+        (V0_PROFILE, contained.CANDIDATE_RESOURCE_PROFILE),
+        (V1_PROFILE, contained.CANDIDATE_RESOURCE_PROFILE_V2),
+    )
+
+    def _record(self, profile, resource, create_warnings, mutate=None):
+        doc = _observed_inspect(resource)
+        if mutate is not None:
+            mutate(doc)
+        transport = ObservingTransport(inspect=doc, create_warnings=create_warnings)
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.run_sealed_candidate(
+                prepare_raw=_prepare_raw(resource), mounts=_mounts(Path(d)),
+                execution_profile=profile, transport=transport, binding=A2_BINDING)
+        return transport, completed.envelope_record
+
+    def test_one_warning_beside_a_matching_inspect_is_unverified_and_the_outcome_is_kept(self):
+        for profile, resource in self.ROUTES:
+            with self.subTest(profile=profile):
+                transport, record = self._record(profile, resource, (SWAP_WITHOUT,))
+                self.assertEqual(len(transport.started), 1)
+                self.assertEqual(record["setup_status"], "ready")
+                self.assertEqual(record["envelope_status"], "unverified")
+                self.assertEqual(record["unverified_field"], "create_warnings")
+                self.assertIsNone(record["effective"])
+                self.assertEqual(record["candidate_outcome"], "completed")
+                self.assertEqual(record["publication_permission"], "withheld")
+                self.assertEqual(record["withheld_reason"], "envelope_status")
+                self.assertNotIn(SWAP_WITHOUT, json.dumps(record))
+                self.assertNotIn("Your kernel", json.dumps(record))
+
+    def test_create_warnings_the_transport_did_not_observe_are_not_an_empty_tuple(self):
+        """None is a transport that did not observe create warnings; absence is not a value."""
+        for profile, resource in self.ROUTES:
+            for returned in (None, []):
+                with self.subTest(profile=profile, returned=returned):
+                    _transport, record = self._record(profile, resource, returned)
+                    self.assertEqual(record["envelope_status"], "unverified")
+                    self.assertEqual(record["unverified_field"], "create_warnings")
+                    self.assertEqual(record["candidate_outcome"], "completed")
+
+    def test_no_create_warnings_verifies(self):
+        for profile, resource in self.ROUTES:
+            with self.subTest(profile=profile):
+                _transport, record = self._record(profile, resource, ())
+                self.assertEqual(
+                    record["envelope_status"], "verified", record["unverified_field"])
+
+    def test_the_comparator_field_keeps_precedence_over_create_warnings(self):
+        """A discarded CFS period/quota: moby stores both 0 and warns. The stored value is the
+        more specific finding, so the comparator's field is recorded, not create_warnings."""
+        def discarded(doc):
+            doc["HostConfig"]["CpuPeriod"] = 0
+            doc["HostConfig"]["CpuQuota"] = 0
+
+        resource = contained.CANDIDATE_RESOURCE_PROFILE_V2
+        _transport, silent = self._record(V1_PROFILE, resource, (), discarded)
+        _transport, warned = self._record(
+            V1_PROFILE, resource, (CFS_DISCARDED,), discarded)
+        self.assertEqual(silent["unverified_field"], "cpu_period")
+        self.assertEqual(warned["envelope_status"], "unverified")
+        self.assertEqual(warned["unverified_field"], "cpu_period")
+        self.assertEqual(warned["candidate_outcome"], "completed")
+
+    def test_a_discarded_pids_limit_is_refused_by_the_inspect_contract_first(self):
+        """moby stores a discarded PIDs limit unset, and the inspect contract inside
+        `run_contained` refuses that before either envelope check is reached."""
+        for profile, resource in self.ROUTES:
+            with self.subTest(profile=profile):
+                transport, record = self._record(
+                    profile, resource, (PIDS_DISCARDED,),
+                    lambda d: d["HostConfig"].__setitem__("PidsLimit", None))
+                self.assertEqual(len(transport.started), 1)
+                self.assertEqual(record["setup_status"], "refused")
+                self.assertEqual(
+                    record["unverified_field"], "defense-in-depth inspect mismatch")
+                self.assertEqual(record["candidate_outcome"], "not-run")
 
 
 if __name__ == "__main__":

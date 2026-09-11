@@ -272,6 +272,19 @@ def _project_effective(transport, inspect, *, image_id: str, schema: str) -> dic
         inspect, image_env_names=image_env_names, runtime_version=runtime_version)
 
 
+def _require_no_create_warnings(create_warnings) -> None:
+    """A second signal beside the stored config: the daemon said it changed the request.
+
+    moby can discard a requested limit, store the changed config and report it only as a
+    create-time warning (#102 §3). The comparator already catches a discard it can see in the
+    stored config; this runs after it, so a more specific field keeps precedence. Only an
+    empty tuple verifies: None is a transport that did not observe create warnings, and
+    absence is not a value. The warning text is not recorded.
+    """
+    if type(create_warnings) is not tuple or create_warnings:
+        raise envelope.EnvelopeError("create_warnings")
+
+
 def _contained_candidate_run(*, image_id: str, mounts: dict, resource_profile,
                              name_prefix: str, sealed: bool, transport,
                              execution_contract, record_cleanup: bool) -> dict:
@@ -333,6 +346,7 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
         effective = _project_effective(
             transport, raw["inspect"], image_id=image_id, schema=schema)
         envelope.require_envelope_matches_request(effective, requested, schema=schema)
+        _require_no_create_warnings(raw["create_warnings"])
     except (envelope.EnvelopeError, PrepareError) as exc:
         effective, unverified_field = None, str(exc) or "effective"
 
