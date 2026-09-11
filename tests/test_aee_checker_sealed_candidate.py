@@ -1028,6 +1028,9 @@ def _observed_inspect(profile, *, image=TOOLCHAIN_IMAGE) -> dict:
     if "cpu_rate_millicpu" in profile:
         host["CpuPeriod"] = 100000
         host["CpuQuota"] = profile["cpu_rate_millicpu"] * 100
+        # moby refuses NanoCpus beside a CFS period, so a daemon that honoured the period/quota
+        # form stores it unset.
+        host["NanoCpus"] = 0
         host["Ulimits"] = [{
             "Name": "nofile", "Soft": profile["nofile_soft"], "Hard": profile["nofile_hard"]}]
     return {
@@ -1135,8 +1138,8 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
         self.assertEqual(record["candidate_outcome"], "completed")
         self.assertEqual(
             (record["effective"]["cpu_period"], record["effective"]["cpu_quota"],
-             record["effective"]["ulimit_nofile"]),
-            (100000, 100000, {"soft": 1024, "hard": 1024}))
+             record["effective"]["nano_cpus"], record["effective"]["ulimit_nofile"]),
+            (100000, 100000, 0, {"soft": 1024, "hard": 1024}))
         self.assertEqual(record["effective"]["daemon"]["kernel_version"], "synthetic-kernel")
 
     def test_v2_prepare_under_v0_refuses_before_create(self):
@@ -1250,6 +1253,26 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
                 self.assertEqual(record["envelope_status"], "unverified")
                 self.assertEqual(record["unverified_field"], field)
                 self.assertEqual(record["candidate_outcome"], "completed")
+
+    def test_a_nonzero_nano_cpus_beside_the_requested_period_and_quota_is_unverified(self):
+        """Period, quota and nofile all match; the daemon also stores a CPU count, which moby
+        refuses beside a CFS period, so the inspect is not what the v2 codec asked for."""
+        transport, record = self._v1_record(
+            lambda d: d["HostConfig"].__setitem__("NanoCpus", 1000000000))
+        self.assertEqual(len(transport.started), 1)
+        self.assertEqual(record["setup_status"], "ready")
+        self.assertEqual(record["envelope_status"], "unverified")
+        self.assertEqual(record["unverified_field"], "nano_cpus")
+        self.assertEqual(record["candidate_outcome"], "completed")
+        self.assertIsNone(record["effective"])
+        self.assertEqual(record["publication_permission"], "withheld")
+        self.assertEqual(record["withheld_reason"], "envelope_status")
+
+    def test_an_absent_nano_cpus_is_unverified(self):
+        _transport, record = self._v1_record(lambda d: d["HostConfig"].pop("NanoCpus"))
+        self.assertEqual(record["envelope_status"], "unverified")
+        self.assertEqual(record["unverified_field"], "HostConfig.NanoCpus")
+        self.assertEqual(record["candidate_outcome"], "completed")
 
     def test_nofile_mismatch_or_discard_is_unverified(self):
         def limit(soft, hard):

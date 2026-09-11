@@ -90,7 +90,9 @@ jobs:
         # Fail-closed upload authorization, not a cleanliness claim: the collection is published
         # only when the gate step itself succeeded. Quarantine is a filesystem move and can fail;
         # if it does, the gate exits nonzero and this step never runs, so permitted members
-        # cannot reach the artifact even when sanitization did not complete. The setup,
+        # cannot reach the artifact even when sanitization did not complete. The gate exits 0
+        # only on a publish decision; a withheld or unavailable run exits 3, so this step
+        # does not run for it either. The setup,
         # candidate and rerun diagnostics stay always-on so a refusal remains observable.
         if: steps.gate.outcome == 'success' && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

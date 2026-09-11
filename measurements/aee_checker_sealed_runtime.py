@@ -57,10 +57,16 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
         try:
             # The profile this backend declares, read at call time: the value the engine
             # compared with the one it resolved is the value admission runs under, even if
-            # the declaration was reassigned after construction.
+            # the declaration was reassigned after construction. A declaration that was
+            # deleted or replaced by a non-string is refused here by name.
+            declared = getattr(backend, ca.BACKEND_PROFILE_ATTRIBUTE, None)
+            if type(declared) is not str:
+                raise PrepareError(
+                    "sealed backend has no execution profile declaration at call time; "
+                    "it is not called")
             completed = candidate.run_sealed_candidate(
                 prepare_raw=prepare_raw,
-                execution_profile=getattr(backend, ca.BACKEND_PROFILE_ATTRIBUTE),
+                execution_profile=declared,
                 mounts=mounts,
                 execution_contract=execution_manifest,
                 transport=transport,
