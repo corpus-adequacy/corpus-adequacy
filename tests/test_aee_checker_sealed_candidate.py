@@ -1499,5 +1499,181 @@ class CreateTimeWarnings(unittest.TestCase):
                 self.assertEqual(record["candidate_outcome"], "not-run")
 
 
+# --- #102 C: a daemon-reported OOM kill is named, never scored ---------------------------------
+
+OOM_TOKEN = "oom-killed-reported"
+CANDIDATE_DESTS = ("/input", "/vendor", "/tool", "/subject")
+_ABSENT = object()
+# Values that are not a daemon-reported bool, so they are not observed. 1 and "true" are
+# truthy: a truthiness check instead of `is True` would read them as an OOM kill.
+NOT_OBSERVED = (_ABSENT, None, "true", "True", 1, 0, [], {})
+
+
+class OomKilledReported(unittest.TestCase):
+    """#102 C: `State.OOMKilled` true makes a completed run unproved by name, on both paths.
+
+    The daemon reported an OOM kill in the container's cgroup during the run (its own limit or a
+    host-wide OOM). That is not proof the measured process was killed, so the token names the
+    observation and never scores it; exit 137, stderr or any other candidate-controlled exit
+    alone never establishes it, and a deadline stays `timeout`.
+    """
+
+    ROUTES = (
+        (V0_PROFILE, contained.CANDIDATE_RESOURCE_PROFILE),
+        (V1_PROFILE, contained.CANDIDATE_RESOURCE_PROFILE_V2),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.prepare = {
+            profile: _prepare_raw(resource) for profile, resource in cls.ROUTES}
+
+    def _unrecorded(self, *, returncode, oom, timeout=False, output_too_large=False):
+        doc = _inspect(CANDIDATE_DESTS, exit_code=returncode)
+        if oom is not _ABSENT:
+            doc["State"]["OOMKilled"] = oom
+        with tempfile.TemporaryDirectory() as d:
+            return cand._run_sealed_candidate(
+                image_id=IMAGE, mounts=_mounts(Path(d)),
+                resource_profile=INERT_RESOURCE_PROFILE,
+                transport=FakeTransport(
+                    returncode=returncode, stdout=json.dumps(RICH_REPORT) + "\n",
+                    inspect=doc, timeout=timeout, output_too_large=output_too_large))
+
+    def _recorded(self, profile, resource, *, returncode, oom, timeout=False):
+        doc = _observed_inspect(resource)
+        doc["State"]["ExitCode"] = returncode
+        if oom is not _ABSENT:
+            doc["State"]["OOMKilled"] = oom
+        transport = ObservingTransport(inspect=doc, returncode=returncode, timeout=timeout)
+        with tempfile.TemporaryDirectory() as d:
+            completed = cand.run_sealed_candidate(
+                prepare_raw=self.prepare[profile], mounts=_mounts(Path(d)),
+                execution_profile=profile, transport=transport, binding=A2_BINDING)
+        self.assertEqual(len(transport.started), 1)
+        return completed
+
+    def _every_path(self, *, returncode, oom):
+        """The unrecorded run and each recorded route, labelled."""
+        yield "unrecorded", self._unrecorded(returncode=returncode, oom=oom)
+        for profile, resource in self.ROUTES:
+            yield profile, self._recorded(profile, resource, returncode=returncode, oom=oom)
+
+    def assertUnprovedAs(self, completed, reason, label):
+        self.assertEqual(getattr(completed, "unproved_reason", None), reason, label)
+        self.assertEqual(completed.returncode, cand.UNPROVED_EXIT, label)
+        self.assertEqual(_classify(completed), "unproved", label)
+        self.assertEqual(completed.stdout, "", label)
+
+    def test_exit_137_with_oom_killed_false_stays_inner_exit(self):
+        """False licenses no inference: exit 137 is also docker stop's SIGKILL."""
+        for label, completed in self._every_path(returncode=137, oom=False):
+            with self.subTest(path=label):
+                self.assertUnprovedAs(completed, "inner-exit", label)
+
+    def test_exit_0_with_oom_killed_true_is_oom_killed_reported(self):
+        for label, completed in self._every_path(returncode=0, oom=True):
+            with self.subTest(path=label):
+                self.assertUnprovedAs(completed, OOM_TOKEN, label)
+
+    def test_exit_0_with_oom_killed_false_still_projects(self):
+        for label, completed in self._every_path(returncode=0, oom=False):
+            with self.subTest(path=label):
+                self.assertEqual(completed.returncode, 0, label)
+                self.assertIsNone(getattr(completed, "unproved_reason", None), label)
+                self.assertEqual(_classify(completed), "ok", label)
+
+    def test_exit_137_with_oom_killed_true_is_oom_killed_reported(self):
+        for label, completed in self._every_path(returncode=137, oom=True):
+            with self.subTest(path=label):
+                self.assertUnprovedAs(completed, OOM_TOKEN, label)
+
+    def test_a_normal_complete_exit_1_with_oom_killed_true_is_oom_killed_reported(self):
+        self.assertIn(1, cand.COMPLETE_RETURNCODES)
+        for label, completed in self._every_path(returncode=1, oom=True):
+            with self.subTest(path=label):
+                self.assertUnprovedAs(completed, OOM_TOKEN, label)
+        for label, completed in self._every_path(returncode=1, oom=False):
+            with self.subTest(path=label, control="exit 1 without an OOM kill"):
+                self.assertEqual(completed.returncode, 0, label)
+                self.assertIsNone(getattr(completed, "unproved_reason", None), label)
+
+    def test_another_exit_with_oom_killed_true_is_oom_killed_reported(self):
+        for label, completed in self._every_path(returncode=2, oom=True):
+            with self.subTest(path=label):
+                self.assertUnprovedAs(completed, OOM_TOKEN, label)
+
+    def test_an_absent_or_non_bool_oom_killed_leaves_the_classification_unchanged(self):
+        for oom in NOT_OBSERVED:
+            name = "absent" if oom is _ABSENT else repr(oom)
+            for label, completed in self._every_path(returncode=0, oom=oom):
+                with self.subTest(oom=name, path=label, exit=0):
+                    self.assertEqual(completed.returncode, 0, label)
+                    self.assertIsNone(getattr(completed, "unproved_reason", None), label)
+            for label, completed in self._every_path(returncode=137, oom=oom):
+                with self.subTest(oom=name, path=label, exit=137):
+                    self.assertUnprovedAs(completed, "inner-exit", label)
+
+    def test_a_deadline_or_output_cap_keeps_its_state_with_oom_killed_true(self):
+        timed = self._unrecorded(returncode=0, oom=True, timeout=True)
+        self.assertUnprovedAs(timed, "timeout", "unrecorded timeout")
+        capped = self._unrecorded(returncode=0, oom=True, output_too_large=True)
+        self.assertUnprovedAs(capped, "output-cap", "unrecorded output-cap")
+        for profile, resource in self.ROUTES:
+            with self.subTest(profile=profile):
+                completed = self._recorded(
+                    profile, resource, returncode=0, oom=True, timeout=True)
+                self.assertUnprovedAs(completed, "timeout", profile)
+                self.assertEqual(completed.envelope_record["candidate_outcome"], "timeout")
+
+    def test_the_recorded_envelope_is_built_as_before_and_does_not_carry_the_observation(self):
+        for profile, resource in self.ROUTES:
+            with self.subTest(profile=profile):
+                oom = self._recorded(profile, resource, returncode=137, oom=True)
+                plain = self._recorded(profile, resource, returncode=137, oom=False)
+                self.assertEqual(oom.unproved_reason, OOM_TOKEN)
+                self.assertEqual(plain.unproved_reason, "inner-exit")
+                record = oom.envelope_record
+                # Both runs are unproved, so the records are identical: the envelope keyset is
+                # unchanged and the report's unproved reason carries the observation.
+                self.assertEqual(record, plain.envelope_record)
+                self.assertEqual(record["setup_status"], "ready")
+                self.assertEqual(
+                    record["envelope_status"], "verified", record["unverified_field"])
+                self.assertEqual(record["candidate_outcome"], "unproved")
+                self.assertEqual(record["publication_permission"], "withheld")
+                self.assertEqual(record["withheld_reason"], "candidate_outcome")
+                self.assertNotIn("oom", json.dumps(record).lower())
+
+                oom0 = self._recorded(profile, resource, returncode=0, oom=True)
+                clean0 = self._recorded(profile, resource, returncode=0, oom=False)
+                self.assertEqual(oom0.unproved_reason, OOM_TOKEN)
+                self.assertEqual(sorted(oom0.envelope_record), sorted(clean0.envelope_record))
+                self.assertEqual(oom0.envelope_record["candidate_outcome"], "unproved")
+                self.assertEqual(clean0.envelope_record["candidate_outcome"], "completed")
+                self.assertEqual(
+                    oom0.envelope_record["effective"], clean0.envelope_record["effective"])
+                self.assertEqual(oom0.envelope_record["envelope_status"], "verified")
+
+    def test_the_token_survives_the_closed_reason_sanitizer(self):
+        self.assertIn(OOM_TOKEN, ca.CLOSED_UNPROVED_REASONS)
+        self.assertEqual(ca.sanitize_unproved_reason(OOM_TOKEN), OOM_TOKEN)
+        self.assertEqual(cand._unproved(OOM_TOKEN).unproved_reason, OOM_TOKEN)
+
+    def test_noop_loaded_copy_keeps_the_rule_on_both_paths(self):
+        src = Path(cand.__file__).read_text()
+        doc = _inspect(CANDIDATE_DESTS, exit_code=0)
+        doc["State"]["OOMKilled"] = True
+        with tempfile.TemporaryDirectory() as d:
+            module = _load_mutated(src, Path(d))
+            unrecorded = module._run_sealed_candidate(
+                image_id=IMAGE, mounts=_mounts(Path(d)),
+                resource_profile=INERT_RESOURCE_PROFILE,
+                transport=FakeTransport(
+                    stdout=json.dumps(RICH_REPORT) + "\n", inspect=doc))
+        self.assertIsNot(module, cand)
+        self.assertEqual(getattr(unrecorded, "unproved_reason", None), OOM_TOKEN)
+
+
 if __name__ == "__main__":
     unittest.main()

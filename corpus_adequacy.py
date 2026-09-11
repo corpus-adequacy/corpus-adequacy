@@ -1428,6 +1428,9 @@ CLOSED_UNPROVED_REASONS = (
     "empty-or-missing",
     "malformed",
     "projection",
+    # The daemon reported an OOM kill in the contained candidate's cgroup (#102 C): named,
+    # not scored, and not a claim that the measured process was the one killed.
+    "oom-killed-reported",
 )
 
 

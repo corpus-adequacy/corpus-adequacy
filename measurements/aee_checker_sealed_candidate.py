@@ -173,6 +173,36 @@ def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.Complete
     )
 
 
+OOM_KILLED_REPORTED = "oom-killed-reported"
+
+
+def candidate_result(raw: dict, *, mounts: dict) -> subprocess.CompletedProcess:
+    """The candidate's result from one contained run's raw outcome, on both paths.
+
+    A run that did not complete keeps its own state: a deadline remains `timeout` and an
+    output cap remains `output-cap`, even when the daemon also reported an OOM kill.
+
+    For a completed run, `oom_killed` True is `oom-killed-reported`, whatever the exit code
+    (0, 1, 137 or any other), and the inner report is not read. The daemon reported an OOM
+    kill in this container's cgroup during the run (the container's memory limit or a
+    host-wide OOM), so the result was not produced under clean conditions: it is named, not
+    scored, and never a mutant kill. It does not claim the measured process was the one
+    killed. False or None (not observed) changes nothing, so exit 137 stays `inner-exit`:
+    exit 137 is also `docker stop`'s SIGKILL, and no exit code, stderr text or other
+    candidate-controlled signal alone establishes a resource cause.
+    """
+    if raw["state"] != "completed":
+        return _unproved(raw["state"])
+    if raw["oom_killed"] is True:
+        return _unproved(OOM_KILLED_REPORTED)
+    proc = raw["process"]
+    return normalize_inner_event(
+        returncode=proc.returncode,
+        stdout=proc.stdout or "",
+        vectors=host_vectors_path(mounts),
+    )
+
+
 def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
                           sealed: bool = True, resource_profile=None,
                           execution_contract=None) -> list[str]:
@@ -330,15 +360,7 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
     except PrepareError as exc:
         return _refused_envelope(binding, requested, "refused", str(exc), schema)
 
-    if raw["state"] == "completed":
-        proc = raw["process"]
-        completed = normalize_inner_event(
-            returncode=proc.returncode,
-            stdout=proc.stdout or "",
-            vectors=host_vectors_path(mounts),
-        )
-    else:
-        completed = _unproved(raw["state"])
+    completed = candidate_result(raw, mounts=mounts)
 
     effective = None
     unverified_field = None
@@ -391,14 +413,7 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
         image_id=image_id, mounts=mounts, resource_profile=resource_profile,
         name_prefix=name_prefix, sealed=sealed, transport=transport,
         execution_contract=execution_contract, record_cleanup=False)
-    if raw["state"] != "completed":
-        return _unproved(raw["state"])
-    proc = raw["process"]
-    return normalize_inner_event(
-        returncode=proc.returncode,
-        stdout=proc.stdout or "",
-        vectors=host_vectors_path(mounts),
-    )
+    return candidate_result(raw, mounts=mounts)
 
 
 # The one profile with a legacy unrecorded run: contained-oci-v0 predates the envelope record.
