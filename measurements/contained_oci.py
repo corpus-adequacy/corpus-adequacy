@@ -719,6 +719,20 @@ def require_observed_start(inspect, outcome: str, process) -> None:
         raise ContainerSetupError("container start state was not proved")
 
 
+def observed_oom_killed(inspect):
+    """`State.OOMKilled` as the daemon reported it: True or False, else None (not observed).
+
+    An absent field, a missing or malformed State, or any value that is not a bool (the
+    string "true", 1, 0) is None, never read as either answer. This is an observation, not a
+    cause: containerd publishes TaskOOM when the cgroup's `memory.events` `oom_kill` counter
+    rises, which counts processes killed by any OOM killer in that cgroup, a host-wide OOM
+    included, and moby then sets the field. It does not say which process was killed.
+    """
+    state = inspect.get("State") if type(inspect) is dict else None
+    value = state.get("OOMKilled") if type(state) is dict else None
+    return value if type(value) is bool else None
+
+
 def run_contained(
         *, image_id: str, mounts: dict, command: list[str], entrypoint: str,
         mount_spec, resource_profile, sealed: bool,
@@ -733,6 +747,8 @@ def run_contained(
 
     `create_warnings` is whatever `transport.create` returned, unjudged here:
     a tuple of warning lines, or None from a transport that observes none.
+    `oom_killed` is `observed_oom_killed` of the same inspect, unjudged here too:
+    no state or exit code is refused or reclassified because of it.
     """
     image_id = require_image_id(image_id)
     profile = require_versioned_resource_profile(resource_profile)
@@ -786,6 +802,7 @@ def run_contained(
         "create_warnings": create_warnings,
         "inspect": observed,
         "name": name,
+        "oom_killed": observed_oom_killed(observed),
         "process": process,
         "state": state,
     }

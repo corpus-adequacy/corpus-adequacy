@@ -91,6 +91,7 @@ class SharedEnvelopeOwnership(unittest.TestCase):
             "contract": {},
             "inspect": {},
             "name": "candidate",
+            "oom_killed": None,
             "process": None,
             "state": "timeout",
         }
@@ -796,9 +797,112 @@ class SharedEnvelopeOwnership(unittest.TestCase):
                 )
                 self.assertEqual(sorted(result), [
                     "cleanup", "container_absent_after", "contract", "create_warnings",
-                    "inspect", "name", "process", "state"])
+                    "inspect", "name", "oom_killed", "process", "state"])
                 self.assertIs(result["create_warnings"], returned)
                 self.assertEqual(result["state"], "completed")
+
+    def test_oom_killed_reader_reports_only_a_bool_the_daemon_reported(self):
+        """#102 C: `State.OOMKilled` is True or False as the daemon reported it, else None.
+
+        None means not observed: an absent field, a missing or malformed State, or a value
+        that is not a bool (the string "true", 1, 0) is never read as either answer.
+        """
+        contained = self._contained_oci()
+        reader = getattr(contained, "observed_oom_killed", None)
+        self.assertTrue(callable(reader), "contained_oci has no State.OOMKilled reader")
+        cases = (
+            (True, True), (False, False),
+            ("true", None), ("True", None), ("false", None),
+            (1, None), (0, None), (None, None), ([], None), ({}, None),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                doc = _inspect_fixture(contained, state_over={"OOMKilled": value})
+                self.assertIs(reader(doc), expected)
+        absent = _inspect_fixture(contained)
+        self.assertNotIn("OOMKilled", absent["State"])
+        self.assertIs(reader(absent), None)
+        for state in (None, [], "exited", {"OOMKilled": True}.items()):
+            with self.subTest(state=state):
+                doc = _inspect_fixture(contained)
+                doc["State"] = state
+                self.assertIs(reader(doc), None)
+        no_state = _inspect_fixture(contained)
+        del no_state["State"]
+        self.assertIs(reader(no_state), None)
+        for inspect in (None, [], [{"State": {"OOMKilled": True}}], "inspect"):
+            with self.subTest(inspect=inspect):
+                self.assertIs(reader(inspect), None)
+
+    def test_run_contained_carries_the_oom_observation_from_its_own_inspect(self):
+        """`oom_killed` is read from the inspect run_contained already reads; no refusal there,
+        whatever the exit code or outcome."""
+        contained = self._contained_oci()
+
+        class Observed:
+            skip_absent = False
+
+            def __init__(self, returncode, state_over, timeout=False):
+                self.returncode = returncode
+                self.state_over = state_over
+                self.timeout = timeout
+                self.inspected = 0
+
+            def create(self, _argv):
+                return ()
+
+            def start(self, name, _deadline):
+                if self.timeout:
+                    raise subprocess.TimeoutExpired(["docker", "start", "-a", name], 1)
+                return subprocess.CompletedProcess([], self.returncode, "", "")
+
+            def inspect(self, _name):
+                self.inspected += 1
+                return _inspect_fixture(
+                    contained, process_returncode=self.returncode,
+                    state_over=self.state_over)
+
+            def remove(self, _name):
+                pass
+
+            def require_absent(self, _name):
+                pass
+
+        cases = (
+            (0, {"OOMKilled": True}, False, True, "completed"),
+            (137, {"OOMKilled": True}, False, True, "completed"),
+            (137, {"OOMKilled": False}, False, False, "completed"),
+            (1, {"OOMKilled": False}, False, False, "completed"),
+            (0, {}, False, None, "completed"),
+            (0, {"OOMKilled": "true"}, False, None, "completed"),
+            (0, {"OOMKilled": 1}, False, None, "completed"),
+            (0, {"OOMKilled": True}, True, True, "timeout"),
+        )
+        for returncode, state_over, timeout, expected, state in cases:
+            with self.subTest(returncode=returncode, state_over=state_over, timeout=timeout), \
+                    tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                mounts = {}
+                for key, _destination in contained.DEFAULT_MOUNT_SPEC:
+                    path = root / key
+                    path.mkdir()
+                    mounts[key] = path
+                transport = Observed(returncode, state_over, timeout)
+                result = contained.run_contained(
+                    image_id="sha256:" + ("ab" * 32),
+                    mounts=mounts,
+                    command=["ok"],
+                    entrypoint="/probe",
+                    mount_spec=contained.DEFAULT_MOUNT_SPEC,
+                    resource_profile=contained.INERT_RESOURCE_PROFILE,
+                    sealed=True,
+                    name_prefix="probe-",
+                    transport=transport,
+                )
+                self.assertIn("oom_killed", result)
+                self.assertIs(result["oom_killed"], expected)
+                self.assertEqual(result["state"], state)
+                self.assertEqual(transport.inspected, 1)
 
     def test_validate_mount_destinations_shared_predicate(self):
         contained = self._contained_oci()

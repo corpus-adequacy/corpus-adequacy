@@ -393,6 +393,17 @@ class ClosedUnprovedRuntime(unittest.TestCase):
         self.assertEqual(result.detail, "sealed candidate completed")
         self.assertNotIn("/host", result.detail)
 
+    def test_oom_killed_reported_reason_becomes_execution_detail(self):
+        """#102 C: the candidate's own token survives the closed sanitizer into the detail."""
+        self.assertEqual(
+            ca.sanitize_unproved_reason("oom-killed-reported"), "oom-killed-reported")
+        completed = runtime.candidate._unproved("oom-killed-reported")
+        self.assertEqual(completed.unproved_reason, "oom-killed-reported")
+        result = self._backend_result(completed)
+        self.assertEqual(result.raised, {"<batch>": "unproved"})
+        self.assertEqual(result.detail, "oom-killed-reported")
+        self.assertEqual(result.outcomes, {})
+
     def test_ok_completion_does_not_take_unproved_reason(self):
         completed = subprocess.CompletedProcess(
             args=[], returncode=0,
@@ -447,6 +458,53 @@ class ClosedUnprovedVoidSuffix(unittest.TestCase):
         self.assertTrue(
             any(
                 "failed (unproved) [timeout] on" in item
+                for item in report["failures"]),
+            report["failures"])
+
+    @unittest.skipIf(ca.fcntl is None, "process scoring requires an advisory lock")
+    def test_unmutated_oom_killed_reported_suffix_keeps_its_reason(self):
+        """#102 C: an unmutated run the daemon reported OOM-killed is named in the report."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "check.py").write_text("print('x')\n", encoding="utf-8")
+            (tmp / "v1.json").write_text("{}\n", encoding="utf-8")
+            (tmp / "vectors.json").write_text(json.dumps({
+                "vectors": [{"vector_id": "v1", "path": "v1.json"}],
+            }), encoding="utf-8")
+            raw = {
+                "schema": ca.SCHEMA, "runner": "process", "repo_root": ".",
+                "implementation": "check.py",
+                "implementation_sources": ["check.py"],
+                "build": [],
+                "entrypoint_command": [sys.executable, "check.py", "{vector}"],
+                "outcome_from": ["ok"], "vectors": "vectors.json",
+                "id_key": "vector_id", "vector_path_key": "path",
+                "default_group": "g",
+                "unproved_exit_codes": [75],
+                "mutants": {"g": [
+                    {"label": "threshold",
+                     "anchor": "print('x')", "replacement": "print('y')"},
+                    {"label": "CONTROL", "control": True,
+                     "anchor": "print", "replacement": "print  # c"},
+                ]},
+            }
+            manifest_path = tmp / "m.json"
+            manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+            loaded = ca.load_manifest(manifest_path)
+
+            def backend(manifest, vectors, rebuild=True):
+                if not vectors:
+                    return ca._ProcessExecution(True, "built", {}, {}, {}, {})
+                return ca._ProcessExecution(
+                    True, "oom-killed-reported", {}, {}, {"<batch>": "unproved"}, {})
+
+            report = ca._run_process(
+                loaded, manifest_path, execution_backend=backend,
+                separate_build_phase=True,
+                execution_profile="trusted-local")
+        self.assertTrue(
+            any(
+                "failed (unproved) [oom-killed-reported] on" in item
                 for item in report["failures"]),
             report["failures"])
 
