@@ -91,6 +91,7 @@ class SharedEnvelopeOwnership(unittest.TestCase):
             "contract": {},
             "inspect": {},
             "name": "candidate",
+            "oom_killed": None,
             "process": None,
             "state": "timeout",
         }

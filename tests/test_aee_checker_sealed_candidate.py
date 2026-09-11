@@ -1614,6 +1614,33 @@ class OomKilledReported(unittest.TestCase):
                 with self.subTest(oom=name, path=label, exit=137):
                     self.assertUnprovedAs(completed, "inner-exit", label)
 
+    def test_the_rule_needs_true_itself_not_a_truthy_raw_value(self):
+        """The candidate's rule does not lean on the reader's normalization: a raw
+        `oom_killed` that is truthy but not True changes nothing, on both paths."""
+        real = contained.run_contained
+
+        def carrying(value):
+            def run(**kwargs):
+                raw = real(**kwargs)
+                raw["oom_killed"] = value
+                return raw
+            return run
+
+        for value in (1, "true", "True", [0], {"OOMKilled": True}):
+            with mock.patch.object(contained, "run_contained", carrying(value)):
+                for label, completed in self._every_path(returncode=0, oom=_ABSENT):
+                    with self.subTest(value=value, path=label, exit=0):
+                        self.assertEqual(completed.returncode, 0, label)
+                        self.assertIsNone(
+                            getattr(completed, "unproved_reason", None), label)
+                for label, completed in self._every_path(returncode=137, oom=_ABSENT):
+                    with self.subTest(value=value, path=label, exit=137):
+                        self.assertUnprovedAs(completed, "inner-exit", label)
+        with mock.patch.object(contained, "run_contained", carrying(True)):
+            for label, completed in self._every_path(returncode=0, oom=_ABSENT):
+                with self.subTest(value=True, path=label, control="True itself"):
+                    self.assertUnprovedAs(completed, OOM_TOKEN, label)
+
     def test_a_deadline_or_output_cap_keeps_its_state_with_oom_killed_true(self):
         timed = self._unrecorded(returncode=0, oom=True, timeout=True)
         self.assertUnprovedAs(timed, "timeout", "unrecorded timeout")
