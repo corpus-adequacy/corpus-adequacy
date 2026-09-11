@@ -50,10 +50,17 @@ def _prepare_v1() -> bytes:
     return common.encode_json(doc)
 
 
+def _prepare_v2() -> bytes:
+    """Canonical prepare.v2 bytes from the real codec, pinning the frozen v2 fixture."""
+    from tests.test_aee_checker_sealed_candidate import _prepare_raw
+    import contained_oci as contained
+    return _prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2)
+
+
 def _authorize(prepare_raw: bytes) -> bytes:
     return common.encode_json({
         "phase": auth.AUTHORIZE_PHASE,
-        "prepare_schema": run.PREPARE_V1_SCHEMA,
+        "prepare_schema": json.loads(prepare_raw)["schema"],
         "prepare_sha256": hashlib.sha256(prepare_raw).hexdigest(),
         "schema": auth.AUTHORIZE_SCHEMA,
     })
@@ -110,6 +117,7 @@ class FunnelUsesTheGenericEngine(unittest.TestCase):
                 manifest=manifest,
                 manifest_path=MANIFEST_PATH,
                 execution_backend=backend,
+                execution_profile="contained-oci-v0",
             )
         self.assertIs(result, expected)
         process.assert_called_once_with(
@@ -129,7 +137,8 @@ class FunnelUsesTheGenericEngine(unittest.TestCase):
             exe.run_execution_funnel(
                 authorize_raw=authorize_raw, prepare_raw=prepare_raw,
                 pins_dir=PREREG, manifest=_manifest(),
-                manifest_path=MANIFEST_PATH, execution_backend=object())
+                manifest_path=MANIFEST_PATH, execution_backend=object(),
+                execution_profile="contained-oci-v0")
         process.assert_not_called()
 
     def test_production_funnel_has_no_observation_classifier_or_private_report(self):
@@ -139,6 +148,92 @@ class FunnelUsesTheGenericEngine(unittest.TestCase):
         self.assertNotIn("_report_v0", source)
         self.assertNotIn("score_percent", source)
         self.assertNotIn("for ", funnel)
+
+
+class FunnelAdmitsPrepareByProfile(unittest.TestCase):
+    """#102 A3: the funnel admits through the shared dispatcher, keyed by the resolved profile.
+
+    Authorization is validated first; then `load_prepare_for_profile` admits prepare.v1 only
+    under contained-oci-v0 and prepare.v2 only under contained-oci-v1. Every later boundary is
+    a raising sentinel on the refusal paths, so a refusal that arrives late cannot pass.
+    """
+
+    def _funnel(self, prepare_raw, profile):
+        return exe.run_execution_funnel(
+            authorize_raw=_authorize(prepare_raw), prepare_raw=prepare_raw,
+            pins_dir=PREREG, manifest=_manifest(), manifest_path=MANIFEST_PATH,
+            execution_backend=object(), execution_profile=profile)
+
+    def test_v2_under_v1_passes_the_dispatcher_and_reaches_the_engine_with_v1(self):
+        prepare_raw = _prepare_v2()
+        expected = {"schema": ca.REPORT_SCHEMA, "marker": "v1-report"}
+        with mock.patch.object(
+                exe, "load_prepare_for_profile",
+                wraps=run.load_prepare_for_profile) as dispatcher, \
+                mock.patch.object(ca, "_run_process", return_value=expected) as process:
+            result = self._funnel(prepare_raw, "contained-oci-v1")
+        self.assertIs(result, expected)
+        dispatcher.assert_called_once_with(
+            prepare_raw, execution_profile="contained-oci-v1")
+        process.assert_called_once()
+        self.assertEqual(process.call_args.kwargs["execution_profile"], "contained-oci-v1")
+        self.assertEqual(process.call_args.kwargs["mutation_order"], EXPECTED_LABELS)
+
+    def test_v1_under_v0_passes_the_dispatcher_and_reaches_the_engine_with_v0(self):
+        prepare_raw = _prepare_v1()
+        with mock.patch.object(ca, "_run_process", return_value={}) as process:
+            self._funnel(prepare_raw, "contained-oci-v0")
+        self.assertEqual(process.call_args.kwargs["execution_profile"], "contained-oci-v0")
+
+    def _refused(self, prepare_raw, profile):
+        with mock.patch.object(
+                exe, "load_frozen_sites",
+                side_effect=AssertionError("funnel advanced past admission")) as sites, \
+                mock.patch.object(
+                    ca, "_run_process",
+                    side_effect=AssertionError("engine reached")) as process, \
+                self.assertRaises(exe.ExecuteError) as ctx:
+            self._funnel(prepare_raw, profile)
+        sites.assert_not_called()
+        process.assert_not_called()
+        return str(ctx.exception)
+
+    def test_prepare_v1_under_v1_is_refused_before_any_effect(self):
+        self.assertIn("contained-oci-v1 admits only prepare.v2",
+                      self._refused(_prepare_v1(), "contained-oci-v1"))
+
+    def test_prepare_v2_under_v0_is_refused_before_any_effect(self):
+        self.assertIn("prepare.v2 requires contained-oci-v1",
+                      self._refused(_prepare_v2(), "contained-oci-v0"))
+
+    def test_trusted_local_has_no_prepare_loader(self):
+        self.assertIn("no PREPARE loader", self._refused(_prepare_v1(), "trusted-local"))
+
+    def test_authorization_is_validated_before_admission(self):
+        prepare_raw = _prepare_v2()
+        with mock.patch.object(
+                exe, "load_prepare_for_profile",
+                side_effect=AssertionError("admission before authorization")) as dispatcher, \
+                self.assertRaises(exe.ExecuteError):
+            exe.run_execution_funnel(
+                authorize_raw=b"{}", prepare_raw=prepare_raw, pins_dir=PREREG,
+                manifest=_manifest(), manifest_path=MANIFEST_PATH,
+                execution_backend=object(), execution_profile="contained-oci-v1")
+        dispatcher.assert_not_called()
+
+    def test_omitting_execution_profile_is_typeerror_not_an_implied_v0(self):
+        parameter = inspect.signature(exe.run_execution_funnel).parameters[
+            "execution_profile"]
+        self.assertIs(parameter.default, inspect.Parameter.empty)
+        prepare_raw = _prepare_v1()
+        with mock.patch.object(
+                exe, "validate_authorize",
+                side_effect=AssertionError("omission reached authorization")), \
+                self.assertRaises(TypeError):
+            exe.run_execution_funnel(
+                authorize_raw=_authorize(prepare_raw), prepare_raw=prepare_raw,
+                pins_dir=PREREG, manifest=_manifest(), manifest_path=MANIFEST_PATH,
+                execution_backend=object())
 
 
 class PublicBoundary(unittest.TestCase):

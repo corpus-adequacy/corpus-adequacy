@@ -2631,12 +2631,15 @@ class PrepareV2Codec(unittest.TestCase):
         self.assertNotIn("PREPARE_V2_SCHEMA", src)
         self.assertNotIn("emit_prepare_v2", src)
 
-    def test_execute_and_driver_refuse_v2_before_any_effect(self):
+    def test_execute_and_driver_refuse_v2_under_v0_before_any_effect(self):
         """F1: call the real funnels, do not search their source.
 
-        Every later boundary is a raising sentinel, so a refusal that arrives late would surface
-        as a sentinel rather than as a pass. Nothing runs a process, materializes, reads frozen
-        sites or computes an execution identity.
+        Since #102 A3 both funnels admit by the resolved profile through the shared dispatcher,
+        so a v2 PREPARE is refused under contained-oci-v0 (and admitted only under
+        contained-oci-v1, which the execute and driver tests cover). Every later boundary is a
+        raising sentinel, so a refusal that arrives late would surface as a sentinel rather than
+        as a pass. Nothing runs a process, materializes, reads frozen sites or computes an
+        execution identity.
         """
         import aee_checker_sealed_authorize as auth
         import aee_checker_sealed_execute as ex
@@ -2656,8 +2659,8 @@ class PrepareV2Codec(unittest.TestCase):
                     ex.run_execution_funnel(
                         authorize_raw=authorize, prepare_raw=prepare, pins_dir=root,
                         manifest={}, manifest_path=root / "manifest.json",
-                        execution_backend=None)
-                self.assertIn("prepare.v1", str(ctx.exception))
+                        execution_backend=None, execution_profile="contained-oci-v0")
+                self.assertIn("prepare.v2 requires contained-oci-v1", str(ctx.exception))
                 sites.assert_not_called()
                 process.assert_not_called()
 
@@ -2670,8 +2673,9 @@ class PrepareV2Codec(unittest.TestCase):
                 with self.assertRaises(driver.DriverError) as ctx:
                     driver.run_authorized(
                         authorize_raw=authorize, prepare_raw=prepare, pins_dir=root,
-                        materialize_dest=root / "never-created", root=root)
-                self.assertIn("prepare.v1", str(ctx.exception))
+                        materialize_dest=root / "never-created", root=root,
+                        execution_profile="contained-oci-v0")
+                self.assertIn("prepare.v2 requires contained-oci-v1", str(ctx.exception))
                 identity.assert_not_called()
                 materialize.assert_not_called()
                 self.assertFalse((root / "never-created").exists())

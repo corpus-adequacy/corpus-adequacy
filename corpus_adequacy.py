@@ -129,13 +129,20 @@ CLOSED_EXECUTION_PROFILES = frozenset(
 _PROFILE_STRENGTH = {"trusted-local": 0, "contained-oci-v0": 1, "contained-oci-v1": 2}
 # Profiles that must never reach a local backend or the module runner.
 _CONTAINED_PROFILES = frozenset({"contained-oci-v0", "contained-oci-v1"})
-# Profiles the engine may execute today. contained-oci-v1 resolves, orders
-# and refuses like any closed member, but is refused before any backend is
-# called: admission downstream is keyed on the PREPARE schema, not on this
-# profile, so a v1 run would otherwise reach a v1-PREPARE backend and record
-# a profile it was not run under. #102 A3 lifts this once its PREPARE, argv
-# and envelope consumers select by the resolved profile.
-_EXECUTABLE_PROFILES = frozenset({"trusted-local", "contained-oci-v0"})
+# Profiles the engine may execute. A closed member left out of this set
+# resolves, orders and refuses like any other but is refused before a backend
+# is called. contained-oci-v1 is in it (#102 A3) because its consumers now
+# select by the resolved profile, and it executes only through a backend
+# that declares its profile (see _require_contained_execution).
+_EXECUTABLE_PROFILES = frozenset(
+    {"trusted-local", "contained-oci-v0", "contained-oci-v1"})
+# Contained profiles whose backend must declare the profile it was built for.
+# A contained-oci-v0 backend may still be undeclared, as every v0 caller was
+# before backends declared anything; a declared one must still match.
+_DECLARATION_REQUIRED_PROFILES = frozenset({"contained-oci-v1"})
+# The attribute a contained backend declares its profile on.
+BACKEND_PROFILE_ATTRIBUTE = "execution_profile"
+_UNDECLARED = object()
 
 
 class ManifestError(Exception):
@@ -2267,6 +2274,24 @@ def _require_contained_execution(*, profile, runner, execution_backend) -> None:
                 "execution_profile %s requires an explicitly supplied "
                 "contained backend; contained-to-local fallback is refused"
                 % profile)
+        # The engine never tells a backend which profile it resolved, so the
+        # backend declares the one it was built for and the two are compared
+        # here, before the first call. Otherwise a backend built for another
+        # profile would run and record that profile under this one.
+        declared = getattr(execution_backend, BACKEND_PROFILE_ATTRIBUTE, _UNDECLARED)
+        if declared is _UNDECLARED:
+            if profile in _DECLARATION_REQUIRED_PROFILES:
+                raise ManifestError(
+                    "%s requires a backend that declares its profile; "
+                    "the supplied backend declares none, so it is not called"
+                    % profile)
+        elif declared != profile:
+            shown = (declared if isinstance(declared, str)
+                     else type(declared).__name__)
+            raise ManifestError(
+                "execution_profile %s was resolved but the supplied backend "
+                "declares %r; a backend built for another profile is not called"
+                % (profile, shown))
     if profile not in _EXECUTABLE_PROFILES:
         raise ManifestError(
             "execution_profile %s is recognised but not yet executable: its "

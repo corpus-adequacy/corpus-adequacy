@@ -2,8 +2,9 @@
 """Provenance-bound production driver for the frozen AEE measurement rail.
 
 This module authorizes and materializes a candidate run. It does not score,
-classify mutations, or construct reports. No experiment runs without explicit
-PREPARE-v1 and authorize-v0 bytes supplied by the caller.
+classify mutations, or construct reports. No experiment runs without an explicit
+execution profile and the PREPARE (v1 under contained-oci-v0, v2 under
+contained-oci-v1) and authorize-v0 bytes supplied by the caller.
 """
 
 from __future__ import annotations
@@ -38,8 +39,8 @@ from aee_checker_sealed_materialize import materialize_pinned  # noqa: E402
 from aee_checker_sealed_run import (  # noqa: E402
     MATERIALIZED_KEYS,
     PHASE_A_PIN_DIGESTS,
-    PREPARE_V1_SCHEMA,
     execution_identity,
+    load_prepare_for_profile,
     verify_phase_a_frozen,
 )
 
@@ -84,13 +85,19 @@ def emit_envelope(records, dest: Path, report) -> bytes:
 
 def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
                    pins_dir: Path, materialize_dest: Path, root: Path,
-                   transport=None, envelope_dest: Path | None = None) -> dict:
-    """Validate, rematerialize, then invoke the sole generic process engine."""
+                   execution_profile, transport=None,
+                   envelope_dest: Path | None = None) -> dict:
+    """Validate, rematerialize, then invoke the sole generic process engine.
+
+    `execution_profile` has no default, so omitting it is TypeError rather than an implied
+    contained-oci-v0. The shared dispatcher admits the PREPARE under it after authorization
+    and before the execution identity; the same profile then builds the backend and reaches
+    the funnel, and the engine refuses a backend that declares any other.
+    """
     try:
-        validated = validate_authorize(authorize_raw, prepare_raw)
-        prepare = validated["prepare"]
-        if prepare.get("schema") != PREPARE_V1_SCHEMA:
-            raise DriverError("authorized driver requires prepare.v1")
+        validate_authorize(authorize_raw, prepare_raw)
+        prepare = load_prepare_for_profile(
+            prepare_raw, execution_profile=execution_profile)
         if execution_identity(Path(root)) != prepare.get("execution"):
             raise DriverError("execution identity drift")
         pins = verify_phase_a_frozen(Path(pins_dir))
@@ -120,6 +127,7 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
         ledger = collection.Ledger()
         backend = runtime.make_sealed_backend(
             prepare_raw=prepare_raw, materialized=materialized,
+            execution_profile=execution_profile,
             transport=transport, envelope_sink=records.append, ledger=ledger)
         try:
             report = execute.run_execution_funnel(
@@ -129,7 +137,7 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
                 manifest=manifest,
                 manifest_path=manifest_path,
                 execution_backend=backend,
-                execution_profile="contained-oci-v0",
+                execution_profile=execution_profile,
             )
         except BaseException as primary:
             # The run failed, but the collection is the record of that failure. Emitting it must
