@@ -255,7 +255,8 @@ class RuntimeDeclaresAndAdmitsByProfile(unittest.TestCase):
                     prepare_raw=_prepare_v2(), materialized=materialized,
                     execution_profile="contained-oci-v1", envelope_sink=[].append)
         dispatcher.assert_called_once_with(
-            _prepare_v2(), execution_profile="contained-oci-v1")
+            _prepare_v2(), execution_profile="contained-oci-v1",
+            contract=runtime.AEE_CHECKER_SEALED_CONTRACT)
 
     def test_crossed_binding_prepare_refuses_at_construction(self):
         with tempfile.TemporaryDirectory() as d:

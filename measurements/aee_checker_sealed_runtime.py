@@ -9,10 +9,12 @@ import corpus_adequacy as ca
 import aee_checker_sealed_candidate as candidate
 from aee_checker_sealed_common import PrepareError
 from aee_checker_sealed_run import load_prepare_for_profile
+from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT
 
 
 def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_profile,
-                        transport=None, envelope_sink=None, ledger=None):
+                        transport=None, envelope_sink=None, ledger=None,
+                        contract=AEE_CHECKER_SEALED_CONTRACT):
     """Return a backend that executes only the PREPARE-bound sealed candidate.
 
     `execution_profile` has no default. The backend declares it (as its
@@ -31,7 +33,7 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
     binding = None
     if envelope_sink is not None:
         prepare = load_prepare_for_profile(
-            prepare_raw, execution_profile=execution_profile)
+            prepare_raw, execution_profile=execution_profile, contract=contract)
         binding = candidate.envelope_binding(
             prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
             execution_commit=prepare["execution"]["commit"],
@@ -71,6 +73,7 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
                 execution_contract=execution_manifest,
                 transport=transport,
                 binding=binding,
+                contract=contract,
             )
         except BaseException as exc:
             if ledger is not None:

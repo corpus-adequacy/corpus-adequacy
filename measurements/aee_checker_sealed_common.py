@@ -9,6 +9,7 @@ from pathlib import Path
 
 import bounded_run as br
 import corpus_adequacy as ca
+from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT
 
 from contained_oci import (
     CANDIDATE_RESOURCE_PROFILE,
@@ -28,15 +29,9 @@ from contained_oci import (
     require_resource_profile,
 )
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
-FROZEN_CORPUS_MANIFEST_SHA256 = (
-    "aaee0241d5f92a65ecfa603113f5c313b3f0593aa97ce8a54732287f0dc26c67"
-)
-FROZEN_SUBJECT_TREE_SHA256 = (
-    "393d742154918f640593fe9962cf87a273a28c93b24c0569ee4bef3a039fdc3d"
-)
-FROZEN_CORPUS_TREE_SHA256 = (
-    "4bd2f2bf1208beb613fef0e6cc4728483cecae1097b74b54baaf54ce22569c42"
-)
+FROZEN_CORPUS_MANIFEST_SHA256 = AEE_CHECKER_SEALED_CONTRACT.corpus_manifest_sha256
+FROZEN_SUBJECT_TREE_SHA256 = AEE_CHECKER_SEALED_CONTRACT.subject_tree_sha256
+FROZEN_CORPUS_TREE_SHA256 = AEE_CHECKER_SEALED_CONTRACT.corpus_tree_sha256
 MATERIALIZE_CEILINGS = {
     "deadline_seconds": 300,
     "disk_bytes": 64 * 1024 * 1024,

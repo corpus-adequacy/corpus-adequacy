@@ -43,6 +43,7 @@ from aee_checker_sealed_run import (  # noqa: E402
     load_prepare_for_profile,
     verify_phase_a_frozen,
 )
+from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT  # noqa: E402
 
 
 class DriverError(Exception):
@@ -86,7 +87,8 @@ def emit_envelope(records, dest: Path, report) -> bytes:
 def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
                    pins_dir: Path, materialize_dest: Path, root: Path,
                    execution_profile, transport=None,
-                   envelope_dest: Path | None = None) -> dict:
+                   envelope_dest: Path | None = None,
+                   contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     """Validate, rematerialize, then invoke the sole generic process engine.
 
     `execution_profile` has no default, so omitting it is TypeError rather than an implied
@@ -95,12 +97,12 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
     the funnel, and the engine refuses a backend that declares any other.
     """
     try:
-        validate_authorize(authorize_raw, prepare_raw)
+        validate_authorize(authorize_raw, prepare_raw, contract=contract)
         prepare = load_prepare_for_profile(
-            prepare_raw, execution_profile=execution_profile)
-        if execution_identity(Path(root)) != prepare.get("execution"):
+            prepare_raw, execution_profile=execution_profile, contract=contract)
+        if execution_identity(Path(root), contract=contract) != prepare.get("execution"):
             raise DriverError("execution identity drift")
-        pins = verify_phase_a_frozen(Path(pins_dir))
+        pins = verify_phase_a_frozen(Path(pins_dir), contract=contract)
     except (AuthorizeError, PrepareError, ca.ManifestError) as exc:
         raise DriverError(str(exc)) from exc
 
@@ -114,11 +116,12 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
             pins, dest,
             template=Path(root) / "execution" / "aee-checker-sealed" / "cargo-config.toml",
             budget=budget,
+            contract=contract,
         )
         _require_materialization(prepare, materialized, dest)
         manifest_path = Path(pins_dir) / "manifest.json"
         manifest_raw = verify_file_digest(
-            manifest_path, PHASE_A_PIN_DIGESTS["manifest.json"])
+            manifest_path, contract.pin_digest("manifest.json"))
         manifest = ca.load_manifest_bytes(
             manifest_raw, manifest_path, path_root=dest)
         records = []
@@ -128,7 +131,8 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
         backend = runtime.make_sealed_backend(
             prepare_raw=prepare_raw, materialized=materialized,
             execution_profile=execution_profile,
-            transport=transport, envelope_sink=records.append, ledger=ledger)
+            transport=transport, envelope_sink=records.append, ledger=ledger,
+            contract=contract)
         try:
             report = execute.run_execution_funnel(
                 authorize_raw=authorize_raw,
@@ -138,6 +142,7 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
                 manifest_path=manifest_path,
                 execution_backend=backend,
                 execution_profile=execution_profile,
+                contract=contract,
             )
         except BaseException as primary:
             # The run failed, but the collection is the record of that failure. Emitting it must

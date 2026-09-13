@@ -58,6 +58,7 @@ from aee_checker_sealed_candidate import (  # noqa: E402
     CANDIDATE_MOUNT_SPEC,
     require_candidate_image,
 )
+from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT  # noqa: E402
 
 REQUIRED_PROFILE = "contained-oci-v0"
 REQUIRED_RUNNER_ENVIRONMENT = "github-hosted"
@@ -745,6 +746,7 @@ def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
         envelope_dest=Path(envelope_dest),
         # Explicit: the driver has no default profile, and this lane stays v0 (#107).
         execution_profile=REQUIRED_PROFILE,
+        contract=AEE_CHECKER_SEALED_CONTRACT,
     )
 
 

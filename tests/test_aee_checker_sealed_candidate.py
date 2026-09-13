@@ -399,7 +399,9 @@ class SealedLifecycle(unittest.TestCase):
 
         self.assertIs(actual, completed)
         self.assertIs(inner.call_args.kwargs["sealed"], True)
-        admit.assert_called_once_with(b"prepare", execution_profile="contained-oci-v0")
+        admit.assert_called_once_with(
+            b"prepare", execution_profile="contained-oci-v0",
+            contract=cand.AEE_CHECKER_SEALED_CONTRACT)
         self.assertEqual(inner.call_args.kwargs["execution_profile"], "contained-oci-v0")
 
     def test_absence_proof_runs_on_success_and_error(self):
@@ -1378,7 +1380,8 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
                             run, untouched,
                             side_effect=AssertionError("other loader reached")) as other:
                     completed, _ = self._admit(raw, profile, transport)
-                used.assert_called_once_with(raw)
+                used.assert_called_once_with(
+                    raw, contract=cand.AEE_CHECKER_SEALED_CONTRACT)
                 other.assert_not_called()
                 self.assertEqual(completed.envelope_record["envelope_status"], "verified")
 

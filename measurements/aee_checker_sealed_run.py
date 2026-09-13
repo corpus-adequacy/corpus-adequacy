@@ -109,6 +109,7 @@ from aee_checker_sealed_oci import (  # noqa: E402
     run_inert_probe,
     validate_inspect_contract,
 )
+from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT  # noqa: E402
 
 PREPARE_SCHEMA = "corpus-adequacy.aee-checker-sealed.prepare.v0"
 PREPARE_V1_SCHEMA = "corpus-adequacy.aee-checker-sealed.prepare.v1"
@@ -132,45 +133,16 @@ PREPARE_V1_KEYS = ("phase", "schema") + PREPARE_V1_PART_KEYS
 PREPARE_V2_PART_KEYS = PREPARE_V1_PART_KEYS
 PREPARE_V2_KEYS = ("phase", "schema") + PREPARE_V2_PART_KEYS
 PREPARE_IMAGE_KEYS = ("id", "id_scope", "kind", "platform")
-EXECUTION_PATHS = (
-    "bounded_run.py",
-    "corpus_adequacy.py",
-    "isolated_tree.py",
-    "module_child.py",
-    "adapters/aee_checker_sealed.py",
-    "measurements/aee-checker-25b9dfa/manifest.json",
-    "measurements/aee_checker_sealed_run.py",
-    "measurements/aee_checker_sealed_common.py",
-    "measurements/contained_oci.py",
-    "measurements/effective_envelope.py",
-    # The sealed driver imports and calls this; a module the execution runs must sit
-    # inside the identity boundary or it can change between PREPARE and the run unseen.
-    "measurements/envelope_collection.py",
-    "measurements/aee_checker_sealed_oci.py",
-    "measurements/aee_checker_sealed_candidate.py",
-    "measurements/aee_checker_sealed_materialize.py",
-    "measurements/aee_checker_sealed_authorize.py",
-    "measurements/aee_checker_sealed_execute.py",
-    "measurements/aee_checker_sealed_driver.py",
-    "measurements/aee_checker_sealed_runtime.py",
-    "execution/aee-checker-sealed/Containerfile",
-    "execution/aee-checker-sealed/probe.sh",
-    "execution/aee-checker-sealed/cargo-config.toml",
-)
+EXECUTION_PATHS = AEE_CHECKER_SEALED_CONTRACT.execution_paths
 MATERIALIZED_KEYS = (
     "corpus_digest", "corpus_id_count", "corpus_id_set_sha256",
     "corpus_manifest_sha256", "corpus_tree_sha256", "subject_binary",
     "subject_check_rs_sha256", "subject_tree_sha256", "tool_config_sha256",
     "vendor_outside_subject", "vendor_sha256",
 )
-PHASE_A_INSTRUMENT_COMMIT = "1347651c2087cbd5c2e958a758b380a9a6cfc67d"
-PHASE_A_PIN_DIGESTS = {
-    "control.json": "5a85c46054240a4470da7c6a82e3f13b5f1c30ea301809a2500a47a6e2f91f71",
-    "manifest.json": "d21f4831c48a633009cafb0672c2d4e986bffda21a2c82508c1b32486d414eee",
-    "pins.json": "e2456cbfcbbda17800318703e296e72fcaf138037178bad1fe237bc2c460c7e4",
-    "sites.json": "6223a15c5db5a7c19c4633474875615ec61f3d710e092939f46b80ee986e0c4c",
-}
-ADAPTER_DIGEST = "130b36d50df8a286954649771c9d65f35541ecd2f7007918ce5b261ace3aa769"
+PHASE_A_INSTRUMENT_COMMIT = AEE_CHECKER_SEALED_CONTRACT.instrument_commit
+PHASE_A_PIN_DIGESTS = dict(AEE_CHECKER_SEALED_CONTRACT.pin_digests)
+ADAPTER_DIGEST = AEE_CHECKER_SEALED_CONTRACT.adapter_sha256
 _TIMING_KEYS = frozenset({
     "built_at", "created", "created_at", "ctime", "duration", "elapsed",
     "elapsed_seconds", "host_path", "mtime", "timestamp", "timing", "wall_ms",
@@ -206,10 +178,11 @@ NON_CLAIMS = (
 _OUTCOME_KEYS = frozenset({"outcomes", "result", "rows", "score", "vectors", "verdict"})
 
 
-def verify_phase_a_frozen(pins_dir: Path, *, adapter: Path | None = None) -> dict:
+def verify_phase_a_frozen(pins_dir: Path, *, adapter: Path | None = None,
+                          contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     pins_dir = Path(pins_dir)
     pins_raw = None
-    for name, digest in PHASE_A_PIN_DIGESTS.items():
+    for name, digest in contract.pin_digests:
         try:
             raw = verify_file_digest(pins_dir / name, digest)
         except PrepareError as exc:
@@ -217,10 +190,10 @@ def verify_phase_a_frozen(pins_dir: Path, *, adapter: Path | None = None) -> dic
         if name == "pins.json":
             pins_raw = raw
     pins = load_strict(pins_raw)
-    if pins.get("instrument", {}).get("commit") != PHASE_A_INSTRUMENT_COMMIT:
+    if pins.get("instrument", {}).get("commit") != contract.instrument_commit:
         raise PrepareError("phase-a instrument.commit drift")
     if adapter is not None:
-        verify_file_digest(adapter, ADAPTER_DIGEST)
+        verify_file_digest(adapter, contract.adapter_sha256)
     return pins
 
 
@@ -231,8 +204,9 @@ def _git_ok(args, cwd: Path, timeout: int = 60) -> str:
     return (proc.stdout or "").strip()
 
 
-def _distinct_identities(pins: dict, execution: dict) -> None:
-    if pins.get("instrument_commit") != PHASE_A_INSTRUMENT_COMMIT:
+def _distinct_identities(pins: dict, execution: dict,
+                         *, contract=AEE_CHECKER_SEALED_CONTRACT) -> None:
+    if pins.get("instrument_commit") != contract.instrument_commit:
         raise PrepareError("phase-a instrument.commit drift")
     if "instrument_commit" in execution:
         raise PrepareError("execution must not carry instrument.commit")
@@ -240,16 +214,17 @@ def _distinct_identities(pins: dict, execution: dict) -> None:
         raise PrepareError("execution commit conflated with instrument")
 
 
-def execution_identity(root: Path) -> dict:
+def execution_identity(root: Path, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     root = Path(root)
+    execution_paths = contract.execution_paths
     status = _git_ok(
         ["-C", str(root), "status", "--porcelain", "--untracked-files=normal",
-         "--", *EXECUTION_PATHS],
+         "--", *execution_paths],
         root, 10)
     if status:
         raise PrepareError("dirty execution path")
     digest = hashlib.sha256()
-    for rel in EXECUTION_PATHS:
+    for rel in execution_paths:
         head_blob = _git_ok(["-C", str(root), "rev-parse", "HEAD:%s" % rel], root, 10)
         disk_blob = _git_ok(["-C", str(root), "hash-object", rel], root, 10)
         if head_blob != disk_blob:
@@ -266,9 +241,10 @@ def execution_identity(root: Path) -> dict:
     identity = {
         "commit": commit,
         "content_sha256": digest.hexdigest(),
-        "paths": list(EXECUTION_PATHS),
+        "paths": list(execution_paths),
     }
-    _distinct_identities({"instrument_commit": PHASE_A_INSTRUMENT_COMMIT}, identity)
+    _distinct_identities({"instrument_commit": contract.instrument_commit}, identity,
+                         contract=contract)
     return identity
 
 
@@ -285,9 +261,10 @@ def resolve_prepare_image(image_id, *, root: Path) -> str:
 
 
 def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = None,
-            image_id=None, schema=PREPARE_SCHEMA) -> bytes:
+            image_id=None, schema=PREPARE_SCHEMA,
+            contract=AEE_CHECKER_SEALED_CONTRACT) -> bytes:
     dest = Path(dest)
-    pins_doc = verify_phase_a_frozen(Path(pins_dir), adapter=adapter)
+    pins_doc = verify_phase_a_frozen(Path(pins_dir), adapter=adapter, contract=contract)
     require_docker_ready()
     image_id = resolve_prepare_image(image_id, root=root)
     template = Path(root) / "execution" / "aee-checker-sealed" / "cargo-config.toml"
@@ -300,7 +277,8 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
             name_prefix="aee-sealed-prep-", sealed=False)
     state = begin_atomic_dest(dest)
     try:
-        mats = materialize_pinned(pins_doc, state["staging"], template=template)
+        mats = materialize_pinned(
+            pins_doc, state["staging"], template=template, contract=contract)
         mounts = {
             "input": mats["corpus"],
             "vendor": mats["vendor"],
@@ -329,7 +307,7 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
             ))
         parts = {
             "ceilings": dict(DECLARED_CEILINGS),
-            "execution": execution_identity(root),
+            "execution": execution_identity(root, contract=contract),
             "image": {
                 "id": image_id,
                 "id_scope": "host-local",
@@ -346,9 +324,9 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
                 "corpus_digest": pins_doc["corpus"]["corpusDigest"],
                 "instrument_commit": pins_doc["instrument"]["commit"],
                 "phase_a": {
-                    "adapters/aee_checker_sealed.py": ADAPTER_DIGEST,
-                    **{"measurements/aee-checker-25b9dfa/%s" % name: digest
-                       for name, digest in PHASE_A_PIN_DIGESTS.items()},
+                    contract.adapter_relpath: contract.adapter_sha256,
+                    **{"/".join((*contract.pins_relpath, name)): digest
+                       for name, digest in contract.pin_digests},
                 },
                 "subject_commit": pins_doc["subject"]["commit"],
             },
@@ -361,16 +339,17 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
             "toolchain": record_toolchain(mats["toolchain"]),
         }
         if schema == PREPARE_SCHEMA:
-            raw = emit_prepare_v0(parts, state["staging"] / "prepare.v0.json")
+            raw = emit_prepare_v0(
+                parts, state["staging"] / "prepare.v0.json", contract=contract)
         elif schema == PREPARE_V1_SCHEMA:
             raw = emit_prepare_v1(
                 {**parts, "candidate_profile": dict(CANDIDATE_RESOURCE_PROFILE)},
-                state["staging"] / "prepare.v1.json",
+                state["staging"] / "prepare.v1.json", contract=contract,
             )
         elif schema == PREPARE_V2_SCHEMA:
             raw = emit_prepare_v2(
                 {**parts, "candidate_profile": dict(CANDIDATE_RESOURCE_PROFILE_V2)},
-                state["staging"] / "prepare.v2.json",
+                state["staging"] / "prepare.v2.json", contract=contract,
             )
         else:
             raise PrepareError("prepare schema")
@@ -399,9 +378,9 @@ def _refuse_timings(doc) -> None:
                 raise PrepareError("prepare must not store host paths")
 
 
-def _prepare_v0_doc(parts: dict) -> dict:
+def _prepare_v0_doc(parts: dict, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     exact_object(parts, PREPARE_PART_KEYS, "prepare")
-    _distinct_identities(parts["pins"], parts["execution"])
+    _distinct_identities(parts["pins"], parts["execution"], contract=contract)
     if parts["ceilings"] != DECLARED_CEILINGS:
         raise PrepareError("ceilings must be the declared portable limits")
     if parts["materialize_ceilings"] != MATERIALIZE_CEILINGS:
@@ -413,6 +392,7 @@ def _prepare_v0_doc(parts: dict) -> dict:
     require_frozen_trees(
         materialized.get("subject_tree_sha256"),
         materialized.get("corpus_tree_sha256"),
+        contract=contract,
     )
     if _OUTCOME_KEYS.intersection(materialized):
         raise PrepareError("prepare must not record per-vector outcomes")
@@ -420,9 +400,10 @@ def _prepare_v0_doc(parts: dict) -> dict:
         raise PrepareError("subject binary is not produced here")
     if materialized.get("vendor_sha256") == EMPTY_SHA256:
         raise PrepareError("empty vendor")
-    if materialized.get("corpus_id_count") != CORPUS_ID_COUNT:
-        raise PrepareError("corpus must list exactly %d unique ids" % CORPUS_ID_COUNT)
-    if materialized.get("corpus_manifest_sha256") != FROZEN_CORPUS_MANIFEST_SHA256:
+    if materialized.get("corpus_id_count") != contract.corpus_id_count:
+        raise PrepareError(
+            "corpus must list exactly %d unique ids" % contract.corpus_id_count)
+    if materialized.get("corpus_manifest_sha256") != contract.corpus_manifest_sha256:
         raise PrepareError("corpus manifest sha mismatch")
     require_probe_evidence(parts["probe_evidence"])
     require_vendor_toolchain(parts["toolchain"])
@@ -435,8 +416,9 @@ def _prepare_v0_doc(parts: dict) -> dict:
     return doc
 
 
-def emit_prepare_v0(parts: dict, dest: Path) -> bytes:
-    raw = encode_json(_prepare_v0_doc(parts))
+def emit_prepare_v0(parts: dict, dest: Path,
+                    *, contract=AEE_CHECKER_SEALED_CONTRACT) -> bytes:
+    raw = encode_json(_prepare_v0_doc(parts, contract=contract))
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(raw)
@@ -460,7 +442,7 @@ def _require_prepare_image(parts: dict) -> None:
         raise PrepareError("prepare image platform")
 
 
-def _prepare_v1_doc(parts: dict) -> dict:
+def _prepare_v1_doc(parts: dict, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     exact_object(parts, PREPARE_V1_PART_KEYS, "prepare")
     profile = require_resource_profile(parts["candidate_profile"])
     if profile == INERT_RESOURCE_PROFILE:
@@ -468,22 +450,24 @@ def _prepare_v1_doc(parts: dict) -> dict:
     if profile != CANDIDATE_RESOURCE_PROFILE:
         raise PrepareError("candidate profile must be the bounded fixture")
     _require_prepare_image(parts)
-    doc = _prepare_v0_doc({key: parts[key] for key in PREPARE_PART_KEYS})
+    doc = _prepare_v0_doc(
+        {key: parts[key] for key in PREPARE_PART_KEYS}, contract=contract)
     doc["schema"] = PREPARE_V1_SCHEMA
     doc["candidate_profile"] = profile
     exact_object(doc, PREPARE_V1_KEYS, "prepare.v1")
     return doc
 
 
-def emit_prepare_v1(parts: dict, dest: Path) -> bytes:
-    raw = encode_json(_prepare_v1_doc(parts))
+def emit_prepare_v1(parts: dict, dest: Path,
+                    *, contract=AEE_CHECKER_SEALED_CONTRACT) -> bytes:
+    raw = encode_json(_prepare_v1_doc(parts, contract=contract))
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(raw)
     return raw
 
 
-def _prepare_v2_doc(parts: dict) -> dict:
+def _prepare_v2_doc(parts: dict, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     """v2 differs from v1 only in which profile it admits, so the shape rule is not restated.
 
     The generic validator alone is not the equality check: a profile may be a well-formed v2 and
@@ -494,38 +478,40 @@ def _prepare_v2_doc(parts: dict) -> dict:
     if profile != CANDIDATE_RESOURCE_PROFILE_V2:
         raise PrepareError("candidate profile must be the bounded v2 fixture")
     _require_prepare_image(parts)
-    doc = _prepare_v0_doc({key: parts[key] for key in PREPARE_PART_KEYS})
+    doc = _prepare_v0_doc(
+        {key: parts[key] for key in PREPARE_PART_KEYS}, contract=contract)
     doc["schema"] = PREPARE_V2_SCHEMA
     doc["candidate_profile"] = profile
     exact_object(doc, PREPARE_V2_KEYS, "prepare.v2")
     return doc
 
 
-def emit_prepare_v2(parts: dict, dest: Path) -> bytes:
-    raw = encode_json(_prepare_v2_doc(parts))
+def emit_prepare_v2(parts: dict, dest: Path,
+                    *, contract=AEE_CHECKER_SEALED_CONTRACT) -> bytes:
+    raw = encode_json(_prepare_v2_doc(parts, contract=contract))
     dest.write_bytes(raw)
     return raw
 
 
-def load_prepare_v2(raw: bytes) -> dict:
+def load_prepare_v2(raw: bytes, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     doc = load_strict(raw)
     if type(doc) is not dict or doc.get("schema") != PREPARE_V2_SCHEMA:
         raise PrepareError("prepare.v2 schema")
     exact_object(doc, PREPARE_V2_KEYS, "prepare.v2")
     parts = {key: doc[key] for key in PREPARE_V2_PART_KEYS}
-    canonical = _prepare_v2_doc(parts)
+    canonical = _prepare_v2_doc(parts, contract=contract)
     if encode_json(canonical) != raw:
         raise PrepareError("prepare.v2 is not canonical")
     return canonical
 
 
-def load_prepare_v1(raw: bytes) -> dict:
+def load_prepare_v1(raw: bytes, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     doc = load_strict(raw)
     if type(doc) is not dict or doc.get("schema") != PREPARE_V1_SCHEMA:
         raise PrepareError("prepare.v1 schema")
     exact_object(doc, PREPARE_V1_KEYS, "prepare.v1")
     parts = {key: doc[key] for key in PREPARE_V1_PART_KEYS}
-    canonical = _prepare_v1_doc(parts)
+    canonical = _prepare_v1_doc(parts, contract=contract)
     if encode_json(canonical) != raw:
         raise PrepareError("prepare.v1 is not canonical")
     return canonical
@@ -558,7 +544,8 @@ def _declared_schema(raw: bytes):
     return schema if type(schema) is str else None
 
 
-def load_prepare_for_profile(raw: bytes, *, execution_profile) -> dict:
+def load_prepare_for_profile(raw: bytes, *, execution_profile,
+                             contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     """The one PREPARE admission rule, keyed by the resolved execution profile.
 
     Selection only: validation stays in `load_prepare_v1` / `load_prepare_v2`, reached here and
@@ -571,7 +558,7 @@ def load_prepare_for_profile(raw: bytes, *, execution_profile) -> dict:
     schema = PREPARE_SCHEMA_BY_PROFILE[execution_profile]
     loader = {PREPARE_V1_SCHEMA: load_prepare_v1, PREPARE_V2_SCHEMA: load_prepare_v2}[schema]
     try:
-        return loader(raw)
+        return loader(raw, contract=contract)
     except PrepareError as exc:
         crossed = _CROSSED_PREPARE.get((execution_profile, _declared_schema(raw)))
         if crossed is None:

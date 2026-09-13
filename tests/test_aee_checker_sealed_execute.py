@@ -174,7 +174,8 @@ class FunnelAdmitsPrepareByProfile(unittest.TestCase):
             result = self._funnel(prepare_raw, "contained-oci-v1")
         self.assertIs(result, expected)
         dispatcher.assert_called_once_with(
-            prepare_raw, execution_profile="contained-oci-v1")
+            prepare_raw, execution_profile="contained-oci-v1",
+            contract=exe.AEE_CHECKER_SEALED_CONTRACT)
         process.assert_called_once()
         self.assertEqual(process.call_args.kwargs["execution_profile"], "contained-oci-v1")
         self.assertEqual(process.call_args.kwargs["mutation_order"], EXPECTED_LABELS)

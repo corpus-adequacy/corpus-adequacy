@@ -40,12 +40,13 @@ from aee_checker_sealed_run import (  # noqa: E402
     load_prepare_v1,
     load_prepare_v2,
 )
+from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT  # noqa: E402
 
 AUTHORIZE_SCHEMA = "corpus-adequacy.aee-checker-sealed.authorize.v0"
 AUTHORIZE_PHASE = "authorize"
 AUTHORIZE_KEYS = ("phase", "prepare_schema", "prepare_sha256", "schema")
-GO_RUN_OPERATOR = "whole-condition-to-false"
-SEALED_IDS = tuple("sealed-%d" % i for i in range(1, 8))
+GO_RUN_OPERATOR = AEE_CHECKER_SEALED_CONTRACT.operator
+SEALED_IDS = AEE_CHECKER_SEALED_CONTRACT.site_ids
 UNPROVED_STATES = frozenset({
     "wrapper-75", "timeout", "signal", "output-cap", "protocol",
 })
@@ -104,7 +105,7 @@ def _refuse_host_timing(doc) -> None:
                 raise AuthorizeError("authorize must not store host paths")
 
 
-def load_prepare(raw: bytes) -> dict:
+def load_prepare(raw: bytes, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     try:
         doc = load_strict(raw)
     except PrepareError as exc:
@@ -115,7 +116,7 @@ def load_prepare(raw: bytes) -> dict:
                            (PREPARE_V2_SCHEMA, load_prepare_v2)):
         if doc.get("schema") == schema:
             try:
-                return loader(raw)
+                return loader(raw, contract=contract)
             except PrepareError as exc:
                 raise _wrap(exc) from exc
     if doc.get("schema") != PREPARE_SCHEMA:
@@ -124,7 +125,8 @@ def load_prepare(raw: bytes) -> dict:
     parts = {key: doc[key] for key in PREPARE_PART_KEYS}
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            emitted = emit_prepare_v0(parts, Path(tmp) / "prepare.v0.json")
+            emitted = emit_prepare_v0(
+                parts, Path(tmp) / "prepare.v0.json", contract=contract)
         except PrepareError as exc:
             raise _wrap(exc) from exc
     if emitted != raw:
@@ -132,13 +134,13 @@ def load_prepare(raw: bytes) -> dict:
     return doc
 
 
-def require_bound_prepare(doc: dict) -> dict:
+def require_bound_prepare(doc: dict, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     execution = doc.get("execution")
     if type(execution) is not dict:
         raise AuthorizeError("execution missing")
     if not execution.get("commit") or not execution.get("content_sha256"):
         raise AuthorizeError("execution.commit/content_sha256 required")
-    if execution.get("commit") == PHASE_A_INSTRUMENT_COMMIT:
+    if execution.get("commit") == contract.instrument_commit:
         raise AuthorizeError("execution commit conflated with instrument")
     image = doc.get("image")
     if type(image) is not dict:
@@ -148,26 +150,27 @@ def require_bound_prepare(doc: dict) -> dict:
     return doc
 
 
-def load_frozen_sites(pins_dir: Path) -> dict:
-    raw = verify_file_digest(Path(pins_dir) / "sites.json", PHASE_A_PIN_DIGESTS["sites.json"])
+def load_frozen_sites(pins_dir: Path, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
+    raw = verify_file_digest(
+        Path(pins_dir) / "sites.json", contract.pin_digest("sites.json"))
     try:
         return load_strict(raw)
     except PrepareError as exc:
         raise _wrap(exc) from exc
 
 
-def authorized_step_spec() -> tuple:
+def authorized_step_spec(*, contract=AEE_CHECKER_SEALED_CONTRACT) -> tuple:
     return (
         {"id": "baseline", "kind": "baseline", "scored": False},
-        {"id": "control", "kind": "must-die", "scored": False},
+        {"id": contract.control_id, "kind": "must-die", "scored": False},
     ) + tuple(
-        {"id": site_id, "kind": "mutant", "operator": GO_RUN_OPERATOR}
-        for site_id in SEALED_IDS
+        {"id": site_id, "kind": "mutant", "operator": contract.operator}
+        for site_id in contract.site_ids
     )
 
 
-def require_authorized_sequence(steps) -> tuple:
-    spec = authorized_step_spec()
+def require_authorized_sequence(steps, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> tuple:
+    spec = authorized_step_spec(contract=contract)
     if type(steps) is not tuple and type(steps) is not list:
         raise AuthorizeError("sequence")
     if len(steps) != len(spec):
@@ -182,23 +185,25 @@ def require_authorized_sequence(steps) -> tuple:
     return tuple(steps)
 
 
-def required_sequence(sites_doc: dict) -> tuple:
+def required_sequence(sites_doc: dict, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> tuple:
     sites = sites_doc.get("sites")
     if type(sites) is not list:
         raise AuthorizeError("sequence")
     ids = [site.get("id") for site in sites]
-    if ids != list(SEALED_IDS):
+    if ids != list(contract.site_ids):
         raise AuthorizeError("sequence")
     if any(site.get("replacement") != "false" for site in sites):
-        raise AuthorizeError("operator must be whole-condition-to-false")
-    return require_authorized_sequence(authorized_step_spec())
+        raise AuthorizeError("operator must be %s" % contract.operator)
+    return require_authorized_sequence(
+        authorized_step_spec(contract=contract), contract=contract)
 
 
 def voids_before_scored(step: dict, disposition: str) -> bool:
     return step.get("kind") in ("baseline", "must-die") and disposition == "void"
 
 
-def classify_observation(step: dict, observation: dict) -> str:
+def classify_observation(step: dict, observation: dict,
+                         *, contract=AEE_CHECKER_SEALED_CONTRACT) -> str:
     """Map one observation onto the closed disposition vocabulary.
 
     Unknown or unproved state is void for baseline/control and unproved for
@@ -221,7 +226,7 @@ def classify_observation(step: dict, observation: dict) -> str:
             return "void"
         return "passed"
     if kind == "mutant":
-        if step.get("operator") != GO_RUN_OPERATOR:
+        if step.get("operator") != contract.operator:
             return "void"
         if incomplete or status not in KNOWN_MUTANT_STATUSES:
             return "unproved"
@@ -229,8 +234,10 @@ def classify_observation(step: dict, observation: dict) -> str:
     raise AuthorizeError("unknown step")
 
 
-def emit_authorize_v0(prepare_raw: bytes, dest: Path) -> bytes:
-    prepare = require_bound_prepare(load_prepare(prepare_raw))
+def emit_authorize_v0(prepare_raw: bytes, dest: Path,
+                      *, contract=AEE_CHECKER_SEALED_CONTRACT) -> bytes:
+    prepare = require_bound_prepare(
+        load_prepare(prepare_raw, contract=contract), contract=contract)
     doc = {
         "phase": AUTHORIZE_PHASE,
         "prepare_schema": prepare["schema"],
@@ -246,7 +253,8 @@ def emit_authorize_v0(prepare_raw: bytes, dest: Path) -> bytes:
     return raw
 
 
-def validate_authorize(authorize_raw: bytes, prepare_raw: bytes) -> dict:
+def validate_authorize(authorize_raw: bytes, prepare_raw: bytes,
+                       *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     try:
         auth = load_strict(authorize_raw)
     except PrepareError as exc:
@@ -260,7 +268,8 @@ def validate_authorize(authorize_raw: bytes, prepare_raw: bytes) -> dict:
     got = hashlib.sha256(prepare_raw).hexdigest()
     if auth.get("prepare_sha256") != got:
         raise AuthorizeError("prepare_sha256")
-    prepare = require_bound_prepare(load_prepare(prepare_raw))
+    prepare = require_bound_prepare(
+        load_prepare(prepare_raw, contract=contract), contract=contract)
     if auth.get("prepare_schema") != prepare["schema"]:
         raise AuthorizeError("prepare_schema drift")
     return {"authorize": auth, "prepare": prepare}

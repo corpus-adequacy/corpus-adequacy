@@ -34,11 +34,12 @@ from aee_checker_sealed_oci import (
     require_container_absent,
     require_image_id,
 )
+from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT
 
 MATERIALIZE_CAP_BYTES = MATERIALIZE_CEILINGS["disk_bytes"]
 MATERIALIZE_CAP_FILES = MATERIALIZE_CEILINGS["entry_count"]
 MATERIALIZE_DEADLINE_SECONDS = MATERIALIZE_CEILINGS["deadline_seconds"]
-CORPUS_ID_COUNT = 250
+CORPUS_ID_COUNT = AEE_CHECKER_SEALED_CONTRACT.corpus_id_count
 CARGO_CONFIG_NAME = "config.toml"
 VENDOR_CONFIG_REL = "../vendor"
 RUST_IMAGE = (
@@ -253,26 +254,29 @@ def pinned_archive_url(repository: str, commit: str) -> str:
     return "https://github.com/%s/archive/%s.tar.gz" % (repository, commit)
 
 
-def require_frozen_manifest_sha(raw: bytes) -> str:
+def require_frozen_manifest_sha(raw: bytes, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> str:
     digest = hashlib.sha256(raw).hexdigest()
-    if digest != FROZEN_CORPUS_MANIFEST_SHA256:
+    if digest != contract.corpus_manifest_sha256:
         raise PrepareError("corpus manifest sha mismatch")
     return digest
 
 
-def require_frozen_trees(subject_digest: str, corpus_digest: str) -> None:
-    if subject_digest != FROZEN_SUBJECT_TREE_SHA256:
+def require_frozen_trees(subject_digest: str, corpus_digest: str,
+                         *, contract=AEE_CHECKER_SEALED_CONTRACT) -> None:
+    if subject_digest != contract.subject_tree_sha256:
         raise PrepareError("subject tree digest mismatch")
-    if corpus_digest != FROZEN_CORPUS_TREE_SHA256:
+    if corpus_digest != contract.corpus_tree_sha256:
         raise PrepareError("corpus tree digest mismatch")
 
 
-def require_corpus_id_set(ids) -> None:
-    if type(ids) is not list or len(ids) != CORPUS_ID_COUNT or len(set(ids)) != CORPUS_ID_COUNT:
-        raise PrepareError("corpus must list exactly %d unique ids" % CORPUS_ID_COUNT)
+def require_corpus_id_set(ids, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> None:
+    count = contract.corpus_id_count
+    if type(ids) is not list or len(ids) != count or len(set(ids)) != count:
+        raise PrepareError("corpus must list exactly %d unique ids" % count)
 
 
-def verify_materialized(pins: dict, subject: Path, corpus: Path) -> dict:
+def verify_materialized(pins: dict, subject: Path, corpus: Path,
+                        *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     check = Path(subject) / pins["subject"]["path"]
     raw = verify_file_digest(check, pins["subject"]["check_rs_sha256"])
     manifest_path = Path(corpus) / "vectors" / "MANIFEST.json"
@@ -280,7 +284,7 @@ def verify_materialized(pins: dict, subject: Path, corpus: Path) -> dict:
         manifest_raw = ca.read_bounded_regular_file(manifest_path)
     except ca.ManifestError as exc:
         raise PrepareError(str(exc)) from exc
-    require_frozen_manifest_sha(manifest_raw)
+    require_frozen_manifest_sha(manifest_raw, contract=contract)
     manifest = load_strict(manifest_raw)
     if manifest.get("corpusDigest") != pins["corpus"]["corpusDigest"]:
         raise PrepareError("corpus digest mismatch")
@@ -299,15 +303,15 @@ def verify_materialized(pins: dict, subject: Path, corpus: Path) -> dict:
         listed = Path(corpus) / "vectors" / rel
         if listed.is_symlink() or not listed.is_file():
             raise PrepareError("listed vector file missing")
-    require_corpus_id_set(ids)
+    require_corpus_id_set(ids, contract=contract)
     subject_tree = tree_sha256(subject)
     corpus_tree = tree_sha256(corpus)
-    require_frozen_trees(subject_tree, corpus_tree)
+    require_frozen_trees(subject_tree, corpus_tree, contract=contract)
     return {
         "corpus_digest": manifest["corpusDigest"],
         "corpus_id_count": len(ids),
         "corpus_id_set_sha256": hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest(),
-        "corpus_manifest_sha256": FROZEN_CORPUS_MANIFEST_SHA256,
+        "corpus_manifest_sha256": contract.corpus_manifest_sha256,
         "corpus_tree_sha256": corpus_tree,
         "subject_binary": False,
         "subject_check_rs_sha256": hashlib.sha256(raw).hexdigest(),
@@ -483,7 +487,8 @@ def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -
     return {"toolchain": toolchain, "vendor_sha256": digest}
 
 
-def materialize_pinned(pins: dict, dest: Path, *, template: Path, budget=None) -> dict:
+def materialize_pinned(pins: dict, dest: Path, *, template: Path, budget=None,
+                       contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     dest = Path(dest)
     budget = _budget(budget)
     subject, corpus, vendor, tool = dest / "subject", dest / "corpus", dest / "vendor", dest / "tool"
@@ -498,7 +503,7 @@ def materialize_pinned(pins: dict, dest: Path, *, template: Path, budget=None) -
     extract_pinned_archive(subject_tar, subject, budget=budget)
     extract_pinned_archive(corpus_tar, corpus, budget=budget)
     shutil.rmtree(archives)
-    verified = verify_materialized(pins, subject, corpus)
+    verified = verify_materialized(pins, subject, corpus, contract=contract)
     verified["vendor_outside_subject"] = True
     toolchain = pull_rust_image(budget=budget)
     vendored = vendor_locked(subject, vendor, budget=budget, toolchain=toolchain)

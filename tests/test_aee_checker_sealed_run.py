@@ -9,6 +9,7 @@ input, wrong digests, abnormal exits, and live inert probes.
 from __future__ import annotations
 
 import hashlib
+import dataclasses
 import inspect
 import io
 import json
@@ -87,7 +88,9 @@ AEE_LF_ATTRS = (
     "tests/test_aee_checker_sealed_driver.py text eol=lf",
     "tests/test_aee_checker_sealed_runtime.py text eol=lf",
     "measurements/aee_checker_sealed_run.py text eol=lf",
+    "measurements/sealed_measurement_contract.py text eol=lf",
     "tests/test_aee_checker_sealed_run.py text eol=lf",
+    "tests/test_sealed_measurement_contract.py text eol=lf",
     "execution/aee-checker-sealed/** text eol=lf",
 )
 AEE_LF_PATHS = (
@@ -113,7 +116,9 @@ AEE_LF_PATHS = (
     "tests/test_aee_checker_sealed_driver.py",
     "tests/test_aee_checker_sealed_runtime.py",
     "measurements/aee_checker_sealed_run.py",
+    "measurements/sealed_measurement_contract.py",
     "tests/test_aee_checker_sealed_run.py",
+    "tests/test_sealed_measurement_contract.py",
     "execution/aee-checker-sealed/Containerfile",
     "execution/aee-checker-sealed/probe.sh",
     "execution/aee-checker-sealed/cargo-config.toml",
@@ -137,6 +142,7 @@ REQUIRED_EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_execute.py",
     "measurements/aee_checker_sealed_driver.py",
     "measurements/aee_checker_sealed_runtime.py",
+    "measurements/sealed_measurement_contract.py",
     "execution/aee-checker-sealed/Containerfile",
     "execution/aee-checker-sealed/probe.sh",
     "execution/aee-checker-sealed/cargo-config.toml",
@@ -158,6 +164,7 @@ PHASE_B_PY = (
     "measurements/contained_oci.py",
     "measurements/aee_checker_sealed_oci.py",
     "measurements/aee_checker_sealed_materialize.py",
+    "measurements/sealed_measurement_contract.py",
 )
 
 
@@ -1344,14 +1351,13 @@ class MaterializeBytes(unittest.TestCase):
                 },
             }
             fixture = _sha256((corpus / "vectors" / "MANIFEST.json").read_bytes())
-            original = mat.FROZEN_CORPUS_MANIFEST_SHA256
-            mat.FROZEN_CORPUS_MANIFEST_SHA256 = fixture
-            try:
-                with self.assertRaises(run.PrepareError) as ctx:
-                    run.verify_materialized(pins, subject, corpus)
-                self.assertRegex(str(ctx.exception).lower(), r"tree digest")
-            finally:
-                mat.FROZEN_CORPUS_MANIFEST_SHA256 = original
+            contract = dataclasses.replace(
+                run.AEE_CHECKER_SEALED_CONTRACT,
+                corpus_manifest_sha256=fixture,
+            )
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.verify_materialized(pins, subject, corpus, contract=contract)
+            self.assertRegex(str(ctx.exception).lower(), r"tree digest")
 
     def test_verify_materialized_refuses_unfrozen_manifest_bytes(self):
         with tempfile.TemporaryDirectory() as d:
