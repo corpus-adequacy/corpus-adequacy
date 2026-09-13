@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import dataclasses
+import contextlib
 import json
 import hashlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,6 +24,7 @@ import aee_checker_sealed_authorize as authorize  # noqa: E402
 import aee_checker_sealed_candidate as candidate  # noqa: E402
 import aee_checker_sealed_execute as execute  # noqa: E402
 import aee_checker_sealed_driver as driver  # noqa: E402
+import aee_checker_sealed_runtime as runtime  # noqa: E402
 import contained_hosted_publication as publication  # noqa: E402
 from aee_checker_sealed_common import PrepareError  # noqa: E402
 from sealed_measurement_contract import (  # noqa: E402
@@ -179,6 +182,143 @@ class SealedMeasurementContractTest(unittest.TestCase):
                 )
         self.assertIs(
             called.call_args.kwargs["contract"], AEE_CHECKER_SEALED_CONTRACT)
+
+    def test_prepare_forwards_the_same_nondefault_contract_to_materialization(self):
+        from tests.test_aee_checker_sealed_run import ExplicitPrepareImage
+
+        contract = self._alternate_sequence_contract()
+        fixture = ExplicitPrepareImage()
+        patches = fixture._patches()
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            active = [stack.enter_context(patcher) for patcher in patches]
+            run.prepare(
+                Path(directory) / "pins",
+                Path(directory) / "out",
+                root=Path(directory) / "root",
+                image_id=fixture.IMAGE,
+                contract=contract,
+            )
+        self.assertIs(active[5].call_args.kwargs["contract"], contract)
+
+    def test_execute_forwards_the_same_nondefault_contract_to_authorization(self):
+        class StopAfterAuthorization(Exception):
+            pass
+
+        contract = self._alternate_sequence_contract()
+        with mock.patch.object(
+                execute, "validate_authorize",
+                side_effect=StopAfterAuthorization) as validate:
+            with self.assertRaises(StopAfterAuthorization):
+                execute.run_execution_funnel(
+                    authorize_raw=b"authorize",
+                    prepare_raw=b"prepare",
+                    pins_dir=Path("pins"),
+                    manifest={},
+                    manifest_path=Path("manifest.json"),
+                    execution_backend=object(),
+                    execution_profile="contained-oci-v0",
+                    contract=contract,
+                )
+        self.assertIs(validate.call_args.kwargs["contract"], contract)
+
+    def test_runtime_forwards_the_same_nondefault_contract_to_candidate(self):
+        contract = self._alternate_sequence_contract()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            materialized = {key: root / key for key in ("corpus", "vendor", "tool")}
+            for path in materialized.values():
+                path.mkdir()
+            subject = root / "subject"
+            subject.mkdir()
+            manifest = {
+                "_repo_root": subject,
+                "accepted_exit_codes": [0],
+                "unproved_exit_codes": [75],
+                "runner": "batch",
+                "outcome_from": ["rows"],
+                "build": list(contract.candidate_build),
+                "entrypoint_command": list(contract.candidate_entrypoint),
+            }
+            completed = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout='{"rows":["ok"]}', stderr="")
+            with mock.patch.object(
+                    runtime.candidate, "run_sealed_candidate",
+                    return_value=completed) as sealed:
+                backend = runtime.make_sealed_backend(
+                    prepare_raw=b"prepare",
+                    materialized=materialized,
+                    execution_profile="contained-oci-v0",
+                    contract=contract,
+                )
+                backend(manifest, [{"vector_id": "<batch>"}], rebuild=True)
+        self.assertIs(sealed.call_args.kwargs["contract"], contract)
+
+    def test_driver_forwards_one_nondefault_contract_to_both_lower_funnels(self):
+        contract = self._alternate_sequence_contract()
+        execution_identity = {"commit": "a" * 40, "paths": [], "content_sha256": "b" * 64}
+        materialized_values = {
+            key: value for key, value in {
+                "corpus_digest": "c" * 64,
+                "corpus_id_count": 1,
+                "corpus_id_set_sha256": "d" * 64,
+                "corpus_manifest_sha256": "e" * 64,
+                "corpus_tree_sha256": "f" * 64,
+                "subject_binary": False,
+                "subject_check_rs_sha256": "1" * 64,
+                "subject_tree_sha256": "2" * 64,
+                "tool_config_sha256": "3" * 64,
+                "vendor_outside_subject": True,
+                "vendor_sha256": "4" * 64,
+            }.items()
+        }
+        prepare_doc = {
+            "execution": execution_identity,
+            "materialize_ceilings": dict(run.MATERIALIZE_CEILINGS),
+            "materialized": materialized_values,
+            "toolchain": {"tool": "test"},
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pins = root / "pins"
+            pins.mkdir()
+
+            def fake_materialize(_pins, dest, **_kwargs):
+                result = dict(materialized_values)
+                result["toolchain"] = prepare_doc["toolchain"]
+                for key in ("subject", "corpus", "vendor", "tool"):
+                    path = Path(dest) / key
+                    path.mkdir()
+                    result[key] = path
+                return result
+
+            with mock.patch.object(driver, "validate_authorize"), \
+                    mock.patch.object(driver, "load_prepare_for_profile",
+                                      return_value=prepare_doc), \
+                    mock.patch.object(driver, "execution_identity",
+                                      return_value=execution_identity), \
+                    mock.patch.object(driver, "verify_phase_a_frozen", return_value={}), \
+                    mock.patch.object(driver, "materialize_pinned",
+                                      side_effect=fake_materialize) as materializer, \
+                    mock.patch.object(driver, "verify_file_digest", return_value=b"{}"), \
+                    mock.patch.object(driver.ca, "load_manifest_bytes", return_value={}), \
+                    mock.patch.object(driver.runtime, "make_sealed_backend",
+                                      return_value=object()) as make_backend, \
+                    mock.patch.object(driver.execute, "run_execution_funnel",
+                                      return_value={}) as funnel:
+                driver.run_authorized(
+                    authorize_raw=b"authorize",
+                    prepare_raw=b"prepare",
+                    pins_dir=pins,
+                    materialize_dest=root / "materialized",
+                    root=root,
+                    execution_profile="contained-oci-v0",
+                    contract=contract,
+                )
+
+        self.assertIs(materializer.call_args.kwargs["contract"], contract)
+        self.assertIs(make_backend.call_args.kwargs["contract"], contract)
+        self.assertIs(funnel.call_args.kwargs["contract"], contract)
 
 
 if __name__ == "__main__":
