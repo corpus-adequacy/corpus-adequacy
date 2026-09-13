@@ -54,13 +54,13 @@ import corpus_adequacy as ca  # noqa: E402
 import envelope_collection as collection  # noqa: E402
 import effective_envelope  # noqa: E402
 import hosted_packet as packet_delivery  # noqa: E402
+import aee_checker_sealed_run as sealed_run  # noqa: E402
+from hosted_rail_contract import LEGACY_RAIL, require_rail  # noqa: E402
 from aee_checker_sealed_candidate import (  # noqa: E402
     CANDIDATE_MOUNT_SPEC,
     require_candidate_image,
 )
-from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT  # noqa: E402
-
-REQUIRED_PROFILE = "contained-oci-v0"
+REQUIRED_PROFILE = LEGACY_RAIL.execution_profile
 REQUIRED_RUNNER_ENVIRONMENT = "github-hosted"
 ARTIFACT_SETUP = "setup"
 ARTIFACT_ENVELOPE = "effective-envelope"
@@ -79,7 +79,7 @@ CANDIDATE_RESULT_FILENAME = "candidate-result.json"
 RERUN_EVIDENCE_FILENAME = "rerun-evidence.jsonl"
 # One name for the bindings file: the packet module's closed file-name set carries it.
 DISPATCH_BINDINGS_FILENAME = packet_delivery.BINDINGS_FILENAME
-CONCURRENCY_GROUP = "contained-hosted-publication"
+CONCURRENCY_GROUP = LEGACY_RAIL.publication_concurrency
 CANCEL_IN_PROGRESS = False
 RETENTION_DAYS = 14
 MAX_ARTIFACT_BYTES = 5242880
@@ -178,7 +178,8 @@ def check_workflow_identity(identity, *, runner_revision) -> None:
         raise HostedPublicationError("workflow_sha_binding")
 
 
-def check_packet_manifest(packet, expected_sha256, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
+def check_packet_manifest(packet, expected_sha256, *, max_bytes: int = MAX_INPUT_BYTES,
+                          rail=LEGACY_RAIL) -> dict:
     """Bind the packet under `packet` to the dispatched manifest digest, in the gate itself.
 
     The manifest's digest is compared before it is parsed; parsing is the packet module's one
@@ -189,8 +190,9 @@ def check_packet_manifest(packet, expected_sha256, *, max_bytes: int = MAX_INPUT
     if (not isinstance(expected_sha256, str) or len(expected_sha256) != 64 or
             any(ch not in "0123456789abcdef" for ch in expected_sha256)):
         raise HostedPublicationError("packet_manifest_sha256")
+    rail = require_rail(rail)
     manifest_path = resolve_confined_input(
-        packet, packet_delivery.MANIFEST_FILENAME,
+        packet, rail.packet_manifest_filename,
         max_bytes=packet_delivery.MAX_MANIFEST_BYTES)
     try:
         manifest_raw = ca.read_bounded_regular_file(
@@ -200,10 +202,10 @@ def check_packet_manifest(packet, expected_sha256, *, max_bytes: int = MAX_INPUT
     if hashlib.sha256(manifest_raw).hexdigest() != expected_sha256:
         raise HostedPublicationError("packet_manifest_binding")
     try:
-        files = packet_delivery.parse_manifest(manifest_raw)
+        files = packet_delivery.parse_manifest(manifest_raw, rail=rail)
     except packet_delivery.PacketError as exc:
         raise HostedPublicationError("packet_manifest:%s" % exc) from exc
-    if tuple(sorted(os.listdir(packet))) != packet_delivery.PACKET_ENTRIES:
+    if tuple(sorted(os.listdir(packet))) != rail.packet_entries:
         raise HostedPublicationError("packet_entries")
     for name, digest in files.items():
         path = resolve_confined_input(packet, name, max_bytes=max_bytes)
@@ -337,9 +339,10 @@ def resolve_packet_root(workspace_root, packet_root) -> Path:
 
 
 def load_dispatch_bindings(packet_root, *, expected: dict,
-                           max_bytes: int = MAX_INPUT_BYTES) -> dict:
+                           max_bytes: int = MAX_INPUT_BYTES, rail=LEGACY_RAIL) -> dict:
+    rail = require_rail(rail)
     doc = load_json_confined(
-        packet_root, DISPATCH_BINDINGS_FILENAME, max_bytes=max_bytes)
+        packet_root, rail.bindings_filename, max_bytes=max_bytes)
     if type(doc) is not dict:
         raise HostedPublicationError("dispatch_bindings")
     sealed = require_bindings(
@@ -381,7 +384,9 @@ def check_prepare_bindings(prepare_doc, *, bindings) -> None:
         raise HostedPublicationError("candidate_revision_binding")
 
 
-def check_envelope_bindings(envelope_doc, *, bindings, prepare_sha256) -> None:
+def check_envelope_bindings(envelope_doc, *, bindings, prepare_sha256,
+                            rail=LEGACY_RAIL) -> None:
+    rail = require_rail(rail)
     if type(envelope_doc) is not dict:
         raise HostedPublicationError("envelope_bindings")
     if envelope_doc.get("execution_commit") != bindings["runner_revision"]:
@@ -396,11 +401,14 @@ def check_envelope_bindings(envelope_doc, *, bindings, prepare_sha256) -> None:
         raise HostedPublicationError("prepare_sha256_binding")
     if envelope_doc.get("prepare_sha256") != prepare_sha256:
         raise HostedPublicationError("prepare_sha256_binding")
-    if requested.get("execution_profile") != REQUIRED_PROFILE:
+    if requested.get("execution_profile") != rail.execution_profile:
         raise HostedPublicationError("execution_profile_binding")
     if requested.get("sealed") is not True:
         raise HostedPublicationError("sealed_binding")
-    if requested.get("resource_profile") != contained.CANDIDATE_RESOURCE_PROFILE:
+    expected_profile = (contained.CANDIDATE_RESOURCE_PROFILE_V2
+                        if rail.execution_profile == "contained-oci-v1"
+                        else contained.CANDIDATE_RESOURCE_PROFILE)
+    if requested.get("resource_profile") != expected_profile:
         raise HostedPublicationError("resource_profile_binding")
     candidate_mount_destinations = sorted(
         destination for _key, destination in CANDIDATE_MOUNT_SPEC
@@ -629,7 +637,9 @@ def withheld_envelope_stub(*, reason, bindings) -> dict:
     }
 
 
-def setup_status_doc(*, status, reason, bindings, workflow_identity=None) -> dict:
+def setup_status_doc(*, status, reason, bindings, workflow_identity=None,
+                     rail=LEGACY_RAIL) -> dict:
+    rail = require_rail(rail)
     return {
         "schema": HOSTED_SCHEMA,
         "kind": "setup-status",
@@ -637,7 +647,7 @@ def setup_status_doc(*, status, reason, bindings, workflow_identity=None) -> dic
         "reason": reason,
         "bindings": dict(bindings),
         "dispatch_bindings": dict(bindings),
-        "operator_profile": REQUIRED_PROFILE,
+        "operator_profile": rail.execution_profile,
         "workflow_identity": (
             dict(workflow_identity) if workflow_identity is not None else None),
         "non_claims": list(NON_CLAIMS),
@@ -731,23 +741,82 @@ def default_docker_ready() -> str:
 
 def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
                            envelope_dest, materialize_dest,
-                           max_bytes: int = MAX_INPUT_BYTES) -> None:
+                           max_bytes: int = MAX_INPUT_BYTES,
+                           rail=LEGACY_RAIL):
+    rail = require_rail(rail)
     import aee_checker_sealed_driver as driver
     authorize_raw = ca.read_bounded_regular_file(
         Path(authorize_path), cap=max_bytes)
     prepare_raw = ca.read_bounded_regular_file(
         Path(prepare_path), cap=max_bytes)
-    driver.run_authorized(
+    return driver.run_authorized(
         authorize_raw=authorize_raw,
         prepare_raw=prepare_raw,
         pins_dir=Path(pins_dir),
         materialize_dest=Path(materialize_dest),
         root=Path(root),
         envelope_dest=Path(envelope_dest),
-        # Explicit: the driver has no default profile, and this lane stays v0 (#107).
-        execution_profile=REQUIRED_PROFILE,
-        contract=AEE_CHECKER_SEALED_CONTRACT,
+        # Explicit: the driver has no default profile; the closed rail selects one.
+        execution_profile=rail.execution_profile,
+        contract=rail.measurement,
     )
+
+
+def safe_candidate_projection(report, loaded, *, bindings, rail=LEGACY_RAIL) -> dict:
+    """Publish only run validity and declared candidate outcomes; never raw host observations."""
+    rail = require_rail(rail)
+    if type(report) is not dict:
+        raise HostedPublicationError("candidate_report")
+    count_keys = ("killed", "survived", "silent", "equivalent",
+                  "unexercised_out_of_scope", "unproved", "known_holes")
+    if report.get("schema") != ca.REPORT_SCHEMA:
+        raise HostedPublicationError("candidate_report")
+    if any(type(report.get(key)) is not int or report[key] < 0 for key in count_keys):
+        raise HostedPublicationError("candidate_report_counts")
+    if (type(report.get("failures")) is not list
+            or report.get("adequate") is not (not report["failures"])):
+        raise HostedPublicationError("candidate_report_adequate")
+    if report.get("declared_total") != sum(report[key] for key in count_keys):
+        raise HostedPublicationError("candidate_report_total")
+    if report.get("control_status") not in (
+            "killed", "survived", "moved", "error", "absent-or-invalid"):
+        raise HostedPublicationError("candidate_report_control")
+    if type(loaded) is not dict or type(loaded.get("index")) is not dict:
+        raise HostedPublicationError("candidate_collection")
+    try:
+        report_sha256 = hashlib.sha256(ca.encode_report_v0(report)).hexdigest()
+    except (TypeError, ValueError, ca.ReportEncodingError) as exc:
+        raise HostedPublicationError("candidate_report") from exc
+    if loaded["index"].get("report_sha256") != report_sha256:
+        raise HostedPublicationError("candidate_report_binding")
+    members = loaded.get("members")
+    entries = loaded["index"].get("members")
+    if type(members) is not list or type(entries) is not list or len(entries) != len(members):
+        raise HostedPublicationError("candidate_collection")
+    outcomes = []
+    for entry, member in zip(entries, members):
+        ordinal = entry.get("ordinal") if type(entry) is dict else None
+        if (type(ordinal) is not int or ordinal < 0 or type(member) is not dict
+                or type(member.get("candidate_outcome")) is not str):
+            raise HostedPublicationError("candidate_outcome")
+        outcomes.append({"ordinal": ordinal,
+                         "candidate_outcome": member["candidate_outcome"]})
+    publishable = (report["control_status"] == "killed"
+                   and report["unproved"] == 0 and report["adequate"] is True)
+    return {
+        "schema": "corpus-adequacy.%s.candidate-result.v1" % rail.name,
+        "kind": "hosted-candidate-result",
+        "decision": "publish" if publishable else "withhold",
+        "score_status": "none",
+        "bindings": dict(bindings),
+        "dispatch_bindings": dict(bindings),
+        "report_sha256": report_sha256,
+        "control_status": report["control_status"],
+        "unproved": report["unproved"],
+        "adequate": report["adequate"],
+        "outcomes": outcomes,
+        "non_claims": list(NON_CLAIMS),
+    }
 
 
 def _record_cleanup_failure(rerun_log, primary_reason, cleanup_exc, identity, bindings) -> None:
@@ -768,7 +837,7 @@ def _record_cleanup_failure(rerun_log, primary_reason, cleanup_exc, identity, bi
 
 def materialize_post_execute_refusal(*, out, reason, bindings, rerun_log,
                                          identity, max_artifact_bytes=MAX_ARTIFACT_BYTES,
-                                         workflow_identity=None):
+                                         workflow_identity=None, rail=LEGACY_RAIL):
     """Overwrite success-shaped post-execute artifacts, then caller re-raises.
 
     Sealed execute may already have written a permitted/verified envelope.
@@ -778,7 +847,7 @@ def materialize_post_execute_refusal(*, out, reason, bindings, rerun_log,
     """
     setup_doc = setup_status_doc(
         status="refused", reason=reason, bindings=bindings,
-        workflow_identity=workflow_identity)
+        workflow_identity=workflow_identity, rail=rail)
     envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
     candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
     append_rerun_evidence(rerun_log, {
@@ -796,11 +865,11 @@ def materialize_post_execute_refusal(*, out, reason, bindings, rerun_log,
 
 def _materialize_void(*, out, reason, setup_status, bindings, rerun_log,
                       identity, max_artifact_bytes, kind="infrastructure-failure",
-                      workflow_identity=None):
+                      workflow_identity=None, rail=LEGACY_RAIL):
     decision = publication_decision(None, setup_status=setup_status)
     setup_doc = setup_status_doc(
         status=setup_status, reason=reason, bindings=bindings,
-        workflow_identity=workflow_identity)
+        workflow_identity=workflow_identity, rail=rail)
     envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
     candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
     append_rerun_evidence(rerun_log, {
@@ -824,10 +893,12 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
              max_artifact_bytes=MAX_ARTIFACT_BYTES,
              max_input_bytes=MAX_INPUT_BYTES,
              docker_ready=None, sealed_execute=None,
-             packet_manifest_sha256=None, environ=None) -> dict:
+             packet_manifest_sha256=None, environ=None, rail=LEGACY_RAIL) -> dict:
+    rail = require_rail(rail)
     bindings = require_bindings(
         candidate_revision, runner_revision, image_digest)
-    require_operator_profile(operator_profile)
+    if operator_profile != rail.execution_profile:
+        raise HostedPublicationError("operator_profile")
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -854,6 +925,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     execute = sealed_execute or default_sealed_execute
 
     envelope = None
+    report = None
     setup_status = "unavailable"
     reason = "containment-unavailable"
 
@@ -865,14 +937,14 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             out=out, reason=reason, setup_status="unavailable",
             bindings=bindings, rerun_log=rerun_log, identity=identity,
             max_artifact_bytes=max_artifact_bytes,
-            workflow_identity=workflow_identity)
+            workflow_identity=workflow_identity, rail=rail)
     except contained.PrepareError as exc:
         reason = "containment-refused:%s" % exc
         return _materialize_void(
             out=out, reason=reason, setup_status="refused",
             bindings=bindings, rerun_log=rerun_log, identity=identity,
             max_artifact_bytes=max_artifact_bytes,
-            workflow_identity=workflow_identity)
+            workflow_identity=workflow_identity, rail=rail)
 
     if not (packet_root and authorize_path and prepare_path and pins_dir):
         reason = "execution-packets-required"
@@ -880,15 +952,15 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             out=out, reason=reason, setup_status="refused",
             bindings=bindings, rerun_log=rerun_log, identity=identity,
             max_artifact_bytes=max_artifact_bytes,
-            workflow_identity=workflow_identity)
+            workflow_identity=workflow_identity, rail=rail)
 
     if workspace_root is None:
         workspace_root = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
     packet = resolve_packet_root(workspace_root, packet_root)
     packet_files = check_packet_manifest(
-        packet, packet_manifest_sha256, max_bytes=max_input_bytes)
+        packet, packet_manifest_sha256, max_bytes=max_input_bytes, rail=rail)
     load_dispatch_bindings(
-        packet, expected=bindings, max_bytes=max_input_bytes)
+        packet, expected=bindings, max_bytes=max_input_bytes, rail=rail)
     authorize_resolved = resolve_confined_input(
         packet, authorize_path, max_bytes=max_input_bytes)
     prepare_resolved = resolve_confined_input(
@@ -904,21 +976,28 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     prepare_sha256 = hashlib.sha256(prepare_raw).hexdigest()
     # Every file matched some digest above; this binds each ROLE to its own, so the authorize
     # and prepare paths cannot be swapped between two files the manifest lists.
-    if (prepare_sha256 != packet_files[packet_delivery.PREPARE_FILENAME] or
+    if (prepare_sha256 != packet_files[rail.prepare_filename] or
             hashlib.sha256(authorize_raw).hexdigest()
-            != packet_files[packet_delivery.AUTHORIZE_FILENAME]):
+            != packet_files[rail.authorize_filename]):
         raise HostedPublicationError("packet_role_binding")
     try:
         prepare_doc = json.loads(prepare_raw.decode("utf-8"))
     except (UnicodeError, ValueError) as exc:
         raise HostedPublicationError("json_input") from exc
     check_prepare_bindings(prepare_doc, bindings=bindings)
+    if rail is not LEGACY_RAIL:
+        try:
+            sealed_run.load_prepare_for_profile(
+                prepare_raw, execution_profile=rail.execution_profile,
+                contract=rail.measurement)
+        except sealed_run.PrepareError as exc:
+            raise HostedPublicationError("prepare_profile:%s" % exc) from exc
 
     materialize_dest = out / "materialize"
     execute_began = False
     try:
         execute_began = True
-        execute(
+        report = execute(
             authorize_path=authorize_resolved,
             prepare_path=prepare_resolved,
             pins_dir=pins_resolved,
@@ -926,6 +1005,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             envelope_dest=envelope_dest,
             materialize_dest=materialize_dest,
             max_bytes=max_input_bytes,
+            **({"rail": rail} if sealed_execute is None else {}),
         )
         loaded = load_envelope_collection(envelope_dest, max_bytes=max_input_bytes)
         envelope = loaded
@@ -933,7 +1013,8 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         # behind a benign first record.
         for member in loaded["members"]:
             check_envelope_bindings(
-                member, bindings=bindings, prepare_sha256=prepare_sha256)
+                member, bindings=bindings, prepare_sha256=prepare_sha256,
+                rail=rail)
             observed_child = observe_child_environment(member)
             refuse_hostile_workflow(
                 env_names=observed_child["env_names"],
@@ -954,6 +1035,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
                     identity=identity,
                     max_artifact_bytes=max_artifact_bytes,
                     workflow_identity=workflow_identity,
+                    rail=rail,
                 )
             except BaseException as cleanup_exc:
                 # A sanitization failure must not replace the reason the run was refused: the
@@ -979,6 +1061,16 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     # Quantified over every member. `publication_decision` stays the one rule; this only
     # applies it universally, so a later member cannot rescue an earlier one.
     decision = collection_publication_decision(envelope, setup_status=setup_status)
+    safe_projection = None
+    if rail is not LEGACY_RAIL and envelope is not None:
+        safe_projection = safe_candidate_projection(
+            report, envelope, bindings=bindings, rail=rail)
+        if (decision["decision"] != "publish"
+                or safe_projection["decision"] != "publish"):
+            safe_projection["decision"] = "withhold"
+            decision = dict(decision)
+            decision["decision"] = "withhold"
+            decision["score_status"] = "none"
 
     if decision["decision"] == "unavailable":
         setup_doc = setup_status_doc(
@@ -986,7 +1078,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             else "unavailable",
             reason=reason,
             bindings=bindings,
-            workflow_identity=workflow_identity,
+            workflow_identity=workflow_identity, rail=rail,
         )
         envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
         candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
@@ -995,20 +1087,21 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             status="ready" if setup_status == "ready" else setup_status,
             reason="publication-withheld",
             bindings=bindings,
-            workflow_identity=workflow_identity)
+            workflow_identity=workflow_identity, rail=rail)
         envelope_doc = withheld_envelope_stub(
             reason="publication-withheld", bindings=bindings)
-        candidate_doc = void_candidate_result(
-            reason="publication-withheld", bindings=bindings)
+        candidate_doc = (safe_projection if safe_projection is not None
+                         else void_candidate_result(
+                             reason="publication-withheld", bindings=bindings))
     else:
         setup_doc = setup_status_doc(
             status="ready", reason="publication-permitted", bindings=bindings,
-            workflow_identity=workflow_identity)
+            workflow_identity=workflow_identity, rail=rail)
         # The collection directory is the authoritative artifact. Writing a derived aggregate
         # to the legacy single-envelope path would be a second, weaker authority for the same
         # facts, so nothing is written there on the success path.
         envelope_doc = None
-        candidate_doc = {
+        candidate_doc = (safe_projection if safe_projection is not None else {
             "schema": HOSTED_SCHEMA,
             "kind": "hosted-candidate-result",
             "score_status": "none",
@@ -1016,7 +1109,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             "bindings": dict(bindings),
             "dispatch_bindings": dict(bindings),
             "non_claims": list(NON_CLAIMS),
-        }
+        })
 
     write_separate_artifacts(
         out, setup_doc, envelope_doc, candidate_doc,

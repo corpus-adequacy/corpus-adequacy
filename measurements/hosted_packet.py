@@ -38,19 +38,21 @@ import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-MANIFEST_SCHEMA = "corpus-adequacy.hosted-packet-manifest.v0"
-MANIFEST_FILENAME = "hosted-packet-manifest.v0.json"
+from hosted_rail_contract import LEGACY_RAIL, require_rail
+
+MANIFEST_SCHEMA = LEGACY_RAIL.packet_manifest_schema
+MANIFEST_FILENAME = LEGACY_RAIL.packet_manifest_filename
 MANIFEST_KEYS = ("files", "schema")
-AUTHORIZE_FILENAME = "authorize.v0.json"
-BINDINGS_FILENAME = "hosted-dispatch-bindings.v0.json"
-PREPARE_FILENAME = "prepare.v1.json"
+AUTHORIZE_FILENAME = LEGACY_RAIL.authorize_filename
+BINDINGS_FILENAME = LEGACY_RAIL.bindings_filename
+PREPARE_FILENAME = LEGACY_RAIL.prepare_filename
 # The closed file-name set. The gate reads these fixed names, so a manifest may list exactly
 # these and nothing else.
 PACKET_FILENAMES = (AUTHORIZE_FILENAME, BINDINGS_FILENAME, PREPARE_FILENAME)
 PINS_DIRNAME = "pins"
-PINS_SOURCE = ("measurements", "aee-checker-25b9dfa")
+PINS_SOURCE = LEGACY_RAIL.pins_source
 # The fixed fresh directory phase 3 fetches into. It must not exist in R's tree.
-PACKET_DIRNAME = "hosted-packet"
+PACKET_DIRNAME = LEGACY_RAIL.packet_dirname
 PACKET_ENTRIES = tuple(sorted(PACKET_FILENAMES + (MANIFEST_FILENAME, PINS_DIRNAME)))
 MAX_MANIFEST_BYTES = 65536
 MAX_FILE_BYTES = 5242880
@@ -63,8 +65,8 @@ RELEASE_HOST = "github.com"
 # "Needed for downloading release assets". A move by GitHub refuses (fail closed) until this
 # changes; it never widens to another host on its own.
 REDIRECT_HOSTS = ("release-assets.githubusercontent.com",)
-PREPARE_RECORD_SCHEMA = "corpus-adequacy.hosted-prepare-record.v0"
-PREPARE_RECORD_FILENAME = "hosted-prepare-record.v0.json"
+PREPARE_RECORD_SCHEMA = LEGACY_RAIL.prepare_record_schema
+PREPARE_RECORD_FILENAME = LEGACY_RAIL.prepare_record_filename
 PREPARE_RECORD_ENV = (
     ("github_sha", "GITHUB_SHA"),
     ("github_workflow_sha", "GITHUB_WORKFLOW_SHA"),
@@ -138,13 +140,14 @@ def _unique_pairs(pairs):
     return dict(pairs)
 
 
-def parse_manifest(raw: bytes) -> dict:
+def parse_manifest(raw: bytes, *, rail=LEGACY_RAIL) -> dict:
     """Strictly parse manifest bytes whose digest the caller has already verified.
 
     Returns {file name: sha256} over exactly the closed file-name set. This is the one manifest
     rule: the fetch step and the gate both call it, so they cannot disagree on what a manifest
     lists.
     """
+    rail = require_rail(rail)
     try:
         text = raw.decode("utf-8")
         doc = json.loads(text, object_pairs_hook=_unique_pairs)
@@ -154,19 +157,19 @@ def parse_manifest(raw: bytes) -> dict:
         raise PacketError("manifest_json") from exc
     if type(doc) is not dict or tuple(sorted(doc)) != MANIFEST_KEYS:
         raise PacketError("manifest_keys")
-    if doc["schema"] != MANIFEST_SCHEMA:
+    if doc["schema"] != rail.packet_manifest_schema:
         raise PacketError("manifest_schema")
     files = doc["files"]
     if type(files) is not dict:
         raise PacketError("manifest_files")
     for name, digest in files.items():
         require_safe_name(name)
-        if name not in PACKET_FILENAMES:
+        if name not in rail.packet_filenames:
             raise PacketError("manifest_name_unknown")
         _require_hex(digest, 64, "manifest_file_digest")
-    if set(files) != set(PACKET_FILENAMES):
+    if set(files) != set(rail.packet_filenames):
         raise PacketError("manifest_files_incomplete")
-    return {name: files[name] for name in PACKET_FILENAMES}
+    return {name: files[name] for name in rail.packet_filenames}
 
 
 def release_asset_url(repository: str, tag: str, name: str) -> str:
@@ -319,10 +322,11 @@ def _read_regular(path: Path, cap: int, *, not_regular: str, oversize: str) -> b
     return raw
 
 
-def read_pins_source(workspace: Path) -> list:
+def read_pins_source(workspace: Path, *, rail=LEGACY_RAIL) -> list:
     """R's pins, from the checked-out tree: regular files only, no link anywhere on the path."""
+    rail = require_rail(rail)
     current = workspace
-    for part in PINS_SOURCE:
+    for part in rail.pins_source:
         current = current / part
         try:
             st = os.lstat(current)
@@ -363,7 +367,9 @@ def write_new_regular_file(path, raw: bytes) -> None:
 
 def fetch_packet(*, repository, tag, manifest_sha256, workspace_root, dest,
                  open_url=None, max_file_bytes: int = MAX_FILE_BYTES,
-                 max_manifest_bytes: int = MAX_MANIFEST_BYTES) -> dict:
+                 max_manifest_bytes: int = MAX_MANIFEST_BYTES,
+                 rail=LEGACY_RAIL) -> dict:
+    rail = require_rail(rail)
     repository = require_repository(repository)
     tag = require_tag(tag)
     expected = _require_hex(manifest_sha256, 64, "manifest_sha256")
@@ -372,20 +378,20 @@ def fetch_packet(*, repository, tag, manifest_sha256, workspace_root, dest,
     fetch = open_url or default_open_url
 
     manifest_raw = _fetch_bounded(
-        fetch, release_asset_url(repository, tag, MANIFEST_FILENAME),
+        fetch, release_asset_url(repository, tag, rail.packet_manifest_filename),
         max_manifest_bytes, "manifest_oversize")
     if _sha256(manifest_raw) != expected:
         raise PacketError("manifest_digest")
-    files = parse_manifest(manifest_raw)
+    files = parse_manifest(manifest_raw, rail=rail)
 
     payloads = {}
-    for name in PACKET_FILENAMES:
+    for name in rail.packet_filenames:
         raw = _fetch_bounded(
             fetch, release_asset_url(repository, tag, name), max_file_bytes, "file_oversize")
         if _sha256(raw) != files[name]:
             raise PacketError("file_digest")
         payloads[name] = raw
-    pins = read_pins_source(workspace)
+    pins = read_pins_source(workspace, rail=rail)
 
     # Nothing has been written yet. The destination is checked again because the network
     # phase is a window; creation itself is exclusive, so a directory or link that appeared in
@@ -395,8 +401,8 @@ def fetch_packet(*, repository, tag, manifest_sha256, workspace_root, dest,
         os.mkdir(target)
     except FileExistsError:
         raise PacketError("destination_exists") from None
-    write_new_regular_file(target / MANIFEST_FILENAME, manifest_raw)
-    for name in PACKET_FILENAMES:
+    write_new_regular_file(target / rail.packet_manifest_filename, manifest_raw)
+    for name in rail.packet_filenames:
         write_new_regular_file(target / name, payloads[name])
     pins_dir = target / PINS_DIRNAME
     os.mkdir(pins_dir)
@@ -410,8 +416,9 @@ def fetch_packet(*, repository, tag, manifest_sha256, workspace_root, dest,
     }
 
 
-def record_prepare(prepare_path, out_path, *, environ=None) -> dict:
+def record_prepare(prepare_path, out_path, *, environ=None, rail=LEGACY_RAIL) -> dict:
     """Record phase 1's PREPARE bytes beside the run identity and runner image that made them."""
+    rail = require_rail(rail)
     env = os.environ if environ is None else environ
     observed = {}
     for key, name in PREPARE_RECORD_ENV:
@@ -424,8 +431,8 @@ def record_prepare(prepare_path, out_path, *, environ=None) -> dict:
     raw = _read_regular(Path(prepare_path), MAX_FILE_BYTES,
                         not_regular="record_prepare", oversize="record_prepare")
     doc = {
-        "schema": PREPARE_RECORD_SCHEMA,
-        "prepare_file": PREPARE_FILENAME,
+        "schema": rail.prepare_record_schema,
+        "prepare_file": rail.prepare_filename,
         "prepare_sha256": _sha256(raw),
         "prepare_bytes": len(raw),
         **observed,
