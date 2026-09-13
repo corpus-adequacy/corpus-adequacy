@@ -4270,6 +4270,26 @@ class PositionalManifestInputBounds(unittest.TestCase):
             with self.assertRaisesRegex(ca.ManifestError, "not a regular file"):
                 ca.load_manifest(link)
 
+    def test_fallback_identity_change_refuses_before_any_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_bytes(self._manifest_bytes())
+            before = os.lstat(path)
+            changed = mock.Mock(
+                st_mode=before.st_mode,
+                st_dev=before.st_dev,
+                st_ino=before.st_ino + 1,
+            )
+            with mock.patch.object(ca.os, "O_NOFOLLOW", None, create=True), \
+                    mock.patch.object(ca.os, "fstat", return_value=changed), \
+                    mock.patch.object(
+                        ca.os, "read",
+                        side_effect=AssertionError("identity mismatch reached read")) as read:
+                with self.assertRaisesRegex(
+                        ca.ManifestError, "changed between lstat and open"):
+                    ca.load_manifest(path)
+            read.assert_not_called()
+
     def test_exact_cap_preserves_exact_bytes_and_digest(self):
         raw = self._manifest_bytes(ca.OUTPUT_CAP_BYTES)
         with tempfile.TemporaryDirectory() as directory:
