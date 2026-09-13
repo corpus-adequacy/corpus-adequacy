@@ -86,7 +86,8 @@ def _budget(budget, cap_bytes=None, cap_files=None, deadline_seconds=None):
 
 def tree_sha256(
         root: Path, *, cap_bytes: int = MATERIALIZE_CAP_BYTES,
-        cap_files: int = MATERIALIZE_CAP_FILES, budget=None) -> str:
+        cap_files: int = MATERIALIZE_CAP_FILES, budget=None,
+        allow_canonical_empty: bool = False) -> str:
     root = Path(root)
     limit_bytes = budget.remaining_bytes() if budget is not None else cap_bytes
     limit_entries = budget.remaining_entries() if budget is not None else cap_files
@@ -115,7 +116,7 @@ def tree_sha256(
                 raise PrepareError("tree exceeds entry ceiling")
             if total > limit_bytes:
                 raise PrepareError("tree exceeds byte ceiling")
-    if files == 0:
+    if files == 0 and not (allow_canonical_empty and not entries):
         raise PrepareError("empty tree")
     digest = hashlib.sha256()
     for rel, kind, raw in sorted(entries, key=lambda item: item[0]):
@@ -128,6 +129,20 @@ def tree_sha256(
         digest.update(b"\0")
         digest.update(raw)
     return digest.hexdigest()
+
+
+def require_vendor_tree_digest(
+        digest: str, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> str:
+    empty = digest == EMPTY_SHA256
+    if contract.vendor_tree_requirement == "nonempty":
+        if empty:
+            raise PrepareError("empty vendor")
+    elif contract.vendor_tree_requirement == "canonical-empty":
+        if not empty:
+            raise PrepareError("vendor must be empty")
+    else:  # A contract instance validates this, but refuse foreign duck types too.
+        raise PrepareError("vendor tree requirement")
+    return digest
 
 
 def download_bounded(
@@ -483,7 +498,8 @@ class _VendorCleanupTransport:
         require_container_absent(name)
 
 
-def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -> dict:
+def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None,
+                  contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     require_vendor_outside(subject, vendor)
     vendor = Path(vendor)
     vendor.mkdir(parents=True, exist_ok=True)
@@ -510,9 +526,8 @@ def vendor_locked(subject: Path, vendor: Path, *, budget=None, toolchain=None) -
         raise
     cleanup_container(cleanup, name, None, "vendor")
     charge_existing_tree(vendor, budget)
-    digest = tree_sha256(vendor)
-    if digest == EMPTY_SHA256:
-        raise PrepareError("empty vendor")
+    digest = require_vendor_tree_digest(
+        tree_sha256(vendor, allow_canonical_empty=True), contract=contract)
     return {"toolchain": toolchain, "vendor_sha256": digest}
 
 
@@ -539,7 +554,8 @@ def materialize_pinned(pins: dict, dest: Path, *, template: Path, budget=None,
     verified = verify_materialized(pins, subject, corpus, contract=contract)
     verified["vendor_outside_subject"] = True
     toolchain = pull_rust_image(budget=budget)
-    vendored = vendor_locked(subject, vendor, budget=budget, toolchain=toolchain)
+    vendored = vendor_locked(
+        subject, vendor, budget=budget, toolchain=toolchain, contract=contract)
     verified["vendor_sha256"] = vendored["vendor_sha256"]
     verified["toolchain"] = vendored["toolchain"]
     verified["tool_config_sha256"] = bind_vendor_config(tool, template)

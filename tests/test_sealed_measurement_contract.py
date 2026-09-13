@@ -61,6 +61,10 @@ class SealedMeasurementContractTest(unittest.TestCase):
             dataclasses.replace(contract, adapter_sha256=None)
         with self.assertRaises(KeyError):
             contract.pin_digest("unknown.json")
+        for invalid in (None, True, "anything-else"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    ValueError, "vendor_tree_requirement"):
+                dataclasses.replace(contract, vendor_tree_requirement=invalid)
 
     def test_alternate_contract_drives_materialized_identity_checks(self):
         manifest = b'{"corpusDigest":"fixture","vectors":[]}\n'

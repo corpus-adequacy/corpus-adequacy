@@ -158,6 +158,7 @@ def _owned_prepare_v2(path: Path, *, runner_revision="b" * 40) -> bytes:
         corpus_manifest_sha256=contract.corpus_manifest_sha256,
         corpus_tree_sha256=contract.corpus_tree_sha256,
         subject_tree_sha256=contract.subject_tree_sha256,
+        vendor_sha256=hashlib.sha256(b"").hexdigest(),
     )
     parts["candidate_profile"] = dict(contained_oci.CANDIDATE_RESOURCE_PROFILE_V2)
     parts["image"] = {**parts["image"], "id_scope": "host-local",

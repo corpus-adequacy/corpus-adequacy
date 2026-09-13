@@ -49,6 +49,59 @@ class OwnedContainedV1ContractTests(unittest.TestCase):
             "fixtures/contained-v1-owned/corpus",
         )
         self.assertEqual(contract.inert_control_ids, ("control-inert",))
+        self.assertEqual(contract.vendor_tree_requirement, "canonical-empty")
+        self.assertEqual(AEE_CHECKER_SEALED_CONTRACT.vendor_tree_requirement, "nonempty")
+
+    def test_only_owned_contract_admits_the_canonical_empty_vendor_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "vendor"
+            empty.mkdir()
+            digest = materialize.tree_sha256(empty, allow_canonical_empty=True)
+        self.assertEqual(digest, hashlib.sha256(b"").hexdigest())
+        self.assertEqual(
+            materialize.require_vendor_tree_digest(
+                digest, contract=OWNED_CONTAINED_V1_CONTRACT),
+            digest,
+        )
+        with self.assertRaisesRegex(materialize.PrepareError, "empty vendor"):
+            materialize.require_vendor_tree_digest(
+                digest, contract=AEE_CHECKER_SEALED_CONTRACT)
+        with self.assertRaisesRegex(materialize.PrepareError, "must be empty"):
+            materialize.require_vendor_tree_digest(
+                "1" * 64, contract=OWNED_CONTAINED_V1_CONTRACT)
+
+    def test_generic_tree_hash_still_refuses_an_empty_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "tree"
+            empty.mkdir()
+            with self.assertRaisesRegex(materialize.PrepareError, "empty tree"):
+                materialize.tree_sha256(empty)
+            (empty / "directory-only").mkdir()
+            with self.assertRaisesRegex(materialize.PrepareError, "empty tree"):
+                materialize.tree_sha256(empty, allow_canonical_empty=True)
+
+    def test_vendor_materialization_enforces_each_closed_requirement(self):
+        toolchain = {"image_id": "sha256:" + "1" * 64}
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(materialize, "host_bind_owner", return_value="1:1"), \
+                mock.patch.object(materialize, "require_vendor_toolchain"), \
+                mock.patch.object(materialize, "docker_bounded"), \
+                mock.patch.object(materialize, "docker_run_capped", return_value=completed), \
+                mock.patch.object(materialize, "docker_ok"), \
+                mock.patch.object(materialize, "cleanup_container"), \
+                mock.patch.object(materialize, "charge_existing_tree"):
+            root = Path(tmp)
+            subject = root / "subject"
+            subject.mkdir()
+            owned = materialize.vendor_locked(
+                subject, root / "owned-vendor", toolchain=toolchain,
+                contract=OWNED_CONTAINED_V1_CONTRACT)
+            self.assertEqual(owned["vendor_sha256"], hashlib.sha256(b"").hexdigest())
+            with self.assertRaisesRegex(materialize.PrepareError, "empty vendor"):
+                materialize.vendor_locked(
+                    subject, root / "legacy-vendor", toolchain=toolchain,
+                    contract=AEE_CHECKER_SEALED_CONTRACT)
 
     def test_contract_rejects_unsafe_subdir_and_overlapping_ids(self):
         for field in ("subject_subdir", "corpus_subdir", "container_context_relpath"):
@@ -246,7 +299,7 @@ class OwnedContainedV1ContractTests(unittest.TestCase):
                     mock.patch.object(materialize.shutil, "rmtree"), \
                     mock.patch.object(materialize, "verify_materialized", return_value={}), \
                     mock.patch.object(materialize, "pull_rust_image", return_value={"image_id": "sha256:" + "1" * 64}), \
-                    mock.patch.object(materialize, "vendor_locked", return_value={"toolchain": {}, "vendor_sha256": "2" * 64}), \
+                    mock.patch.object(materialize, "vendor_locked", return_value={"toolchain": {}, "vendor_sha256": "2" * 64}) as vendor, \
                     mock.patch.object(materialize, "bind_vendor_config", return_value="3" * 64):
                 materialize.materialize_pinned(
                     {"subject": {"repository": "r", "commit": "c"},
@@ -258,6 +311,7 @@ class OwnedContainedV1ContractTests(unittest.TestCase):
                 [OWNED_CONTAINED_V1_CONTRACT.subject_subdir,
                  OWNED_CONTAINED_V1_CONTRACT.corpus_subdir],
             )
+            self.assertIs(vendor.call_args.kwargs["contract"], OWNED_CONTAINED_V1_CONTRACT)
 
     def test_legacy_aee_inputs_and_workflows_remain_byte_identical(self):
         expected = {
