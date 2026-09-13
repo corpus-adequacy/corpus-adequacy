@@ -411,39 +411,26 @@ class OwnedHostedRailContract(unittest.TestCase):
                 report, loaded, bindings={}, rail=OWNED_V1_RAIL)
 
     def test_real_owned_gate_propagates_collection_withhold_and_quarantines_bytes(self):
+        from tests.test_effective_envelope import _requested_v2, _v2_effective
+
+        requested = _requested_v2()
         bindings = {
             "candidate_revision": "a" * 40,
             "runner_revision": "b" * 40,
-            "image_digest": "sha256:" + "c" * 64,
+            "image_digest": requested["image_id"],
         }
         report = self.report()
         report_sha = hashlib.sha256(publication.ca.encode_report_v0(report)).hexdigest()
         prepare_raw = json.dumps({"schema": owned.sealed_run.PREPARE_V2_SCHEMA}).encode()
         authorize_raw = b"authorize"
         prepare_sha = hashlib.sha256(prepare_raw).hexdigest()
-        requested = {
-            "execution_profile": OWNED_V1_RAIL.execution_profile,
-            "image_id": bindings["image_digest"],
-            "sealed": True,
-            "resource_profile": dict(contained_oci.CANDIDATE_RESOURCE_PROFILE_V2),
-            "mount_spec": sorted(destination for _name, destination
-                                 in publication.CANDIDATE_MOUNT_SPEC),
-        }
-        member = {
-            "candidate_outcome": "completed",
-            "execution_commit": bindings["runner_revision"],
-            "prepare_sha256": prepare_sha,
-            "requested": requested,
-            "setup_status": "ready",
-            "publication_permission": "withheld",
-            "envelope_status": "unverified",
-            "effective": None,
-        }
-        loaded = {
-            "index": {"report_sha256": report_sha, "members": [{"ordinal": 0}]},
-            "members": [member],
-            "withheld_reason": "stored-value-mismatch",
-        }
+        member = publication.effective_envelope.build_envelope_record(
+            requested=requested, setup_status="ready", envelope_status="verified",
+            unverified_field=None, effective=_v2_effective(),
+            candidate_outcome="completed", cleanup="removed-and-absent",
+            prepare_sha256=prepare_sha,
+            execution_commit=bindings["runner_revision"], report_sha256=None,
+            schema=publication.effective_envelope.ENVELOPE_SCHEMA_V1)
         with tempfile.TemporaryDirectory() as raw:
             workspace = Path(raw)
             packet = workspace / OWNED_V1_RAIL.packet_dirname
@@ -455,8 +442,13 @@ class OwnedHostedRailContract(unittest.TestCase):
 
             def execute(**kwargs):
                 live = Path(kwargs["envelope_dest"])
-                live.mkdir(parents=True)
-                (live / "retained-observation.json").write_text("{}\n")
+                ledger = publication.collection.Ledger()
+                recorded = ledger.register()
+                ledger.recorded(recorded, member)
+                raised = ledger.register()
+                ledger.raised(raised, "SyntheticRaised")
+                publication.collection.write_collection(
+                    ledger, live, report_sha256=report_sha)
                 return report
 
             packet_files = {
@@ -468,9 +460,7 @@ class OwnedHostedRailContract(unittest.TestCase):
                     mock.patch.object(publication, "load_dispatch_bindings"), \
                     mock.patch.object(publication, "check_prepare_bindings"), \
                     mock.patch.object(owned.sealed_run, "load_prepare_for_profile",
-                                      return_value={}), \
-                    mock.patch.object(publication, "load_envelope_collection",
-                                      return_value=loaded):
+                                      return_value={}):
                 decision = publication.run_gate(
                     **bindings, operator_profile=OWNED_V1_RAIL.execution_profile,
                     out_dir=out, workspace_root=workspace,
@@ -485,8 +475,10 @@ class OwnedHostedRailContract(unittest.TestCase):
             self.assertEqual(decision["decision"], "withhold")
             self.assertFalse((out / publication.COLLECTION_DIRNAME).exists())
             retained = (out / publication.WITHHELD_COLLECTION_DIRNAME
-                        / "attempt-0000" / "retained-observation.json")
-            self.assertEqual(retained.read_text(), "{}\n")
+                        / "attempt-0000")
+            loaded = publication.collection.load_collection(retained)
+            self.assertEqual(publication.collection.withheld_reason(loaded),
+                             "attempt_raised")
             candidate = json.loads((out / publication.CANDIDATE_RESULT_FILENAME).read_text())
             self.assertEqual(candidate["decision"], "withhold")
             self.assertEqual(candidate["outcomes"], [
@@ -523,6 +515,17 @@ class OwnedHostedRailContract(unittest.TestCase):
             ROOT / ".github/workflows/owned-contained-v1-publication.yml").read_text()
         self.assertEqual(parse_workflow_yaml(prepare_text), OWNED_PREPARE_WORKFLOW)
         self.assertEqual(parse_workflow_yaml(publication_text), OWNED_PUBLICATION_WORKFLOW)
+
+    def test_readme_names_both_hosted_rails_without_the_retired_v1_absence_claim(self):
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("separate repository-owned `contained-oci-v1` rail", readme)
+        for retired in (
+            "hosted v1 execution remains unavailable",
+            "no command or hosted lane selects",
+            "the hosted lane stays `contained-oci-v0`",
+            "the hosted lane stays v0-only",
+        ):
+            self.assertNotIn(retired, readme)
 
     def test_owned_workflow_boundary_mutations_are_red(self):
         prepare_text = (ROOT / ".github/workflows/owned-contained-v1-prepare.yml").read_text()
