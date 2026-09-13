@@ -12,7 +12,11 @@ pub fn check(value: i64, maximum: i64) -> (bool, &'static str, String) {
     if value == i64::MIN {
         return (false, "minimum-sentinel", "minimum sentinel".to_owned());
     }
-    (true, "accepted", format!("value {value} is within the declared range"))
+    (
+        true,
+        "accepted",
+        format!("value {value} is within the declared range"),
+    )
 }
 
 #[cfg(test)]
