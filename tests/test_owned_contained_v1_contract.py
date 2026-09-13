@@ -6,6 +6,7 @@ import dataclasses
 import hashlib
 import io
 import json
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -50,8 +51,9 @@ class OwnedContainedV1ContractTests(unittest.TestCase):
         self.assertEqual(contract.inert_control_ids, ("control-inert",))
 
     def test_contract_rejects_unsafe_subdir_and_overlapping_ids(self):
-        with self.assertRaisesRegex(ValueError, "subject_subdir"):
-            dataclasses.replace(OWNED_CONTAINED_V1_CONTRACT, subject_subdir="../candidate")
+        for field in ("subject_subdir", "corpus_subdir", "container_context_relpath"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
+                dataclasses.replace(OWNED_CONTAINED_V1_CONTRACT, **{field: "../outside"})
         with self.assertRaisesRegex(ValueError, "disjoint"):
             dataclasses.replace(
                 OWNED_CONTAINED_V1_CONTRACT,
@@ -119,6 +121,26 @@ class OwnedContainedV1ContractTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(json.loads(completed.stdout)["rows"]["allow"]["reason"], "accepted")
 
+    def test_candidate_result_forwards_owned_contract_to_normalizer(self):
+        expected = adapter.expected_ids(FIXTURE / "corpus" / "vectors")
+        inner = {"vectors": [
+            {"id": row_id, "accepted": True, "reason": "accepted", "detail": "ok"}
+            for row_id in expected
+        ]}
+        raw = {
+            "state": "completed",
+            "oom_killed": False,
+            "process": subprocess.CompletedProcess(
+                [], 0, json.dumps(inner, sort_keys=True, separators=(",", ":")) + "\n", ""),
+        }
+        completed = candidate.candidate_result(
+            raw,
+            mounts={"input": FIXTURE / "corpus"},
+            contract=OWNED_CONTAINED_V1_CONTRACT,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("reason", json.loads(completed.stdout)["rows"]["allow"])
+
     def test_authorized_order_is_baseline_positive_inert_then_mutants(self):
         steps = authorize.authorized_step_spec(contract=OWNED_CONTAINED_V1_CONTRACT)
         self.assertEqual(
@@ -182,6 +204,23 @@ class OwnedContainedV1ContractTests(unittest.TestCase):
             ceilings["disk_bytes"] = len(raw) - 1
             budget = materialize.MaterializeBudget(ceilings)
             with self.assertRaisesRegex(materialize.PrepareError, "byte ceiling"):
+                materialize.extract_pinned_archive(
+                    archive, root / "dest", budget=budget,
+                    selected_subdir="fixtures/contained-v1-owned/candidate")
+
+    def test_selected_archive_charges_unselected_headers_against_entry_ceiling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "source.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                for index in range(4):
+                    info = tarfile.TarInfo("repo/unselected-%d" % index)
+                    info.type = tarfile.DIRTYPE
+                    tar.addfile(info)
+            ceilings = dict(materialize.MATERIALIZE_CEILINGS)
+            ceilings["entry_count"] = 3
+            budget = materialize.MaterializeBudget(ceilings)
+            with self.assertRaisesRegex(materialize.PrepareError, "entry ceiling"):
                 materialize.extract_pinned_archive(
                     archive, root / "dest", budget=budget,
                     selected_subdir="fixtures/contained-v1-owned/candidate")
