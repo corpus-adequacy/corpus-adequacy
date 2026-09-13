@@ -39,6 +39,7 @@ from aee_checker_sealed_materialize import materialize_pinned  # noqa: E402
 from aee_checker_sealed_run import (  # noqa: E402
     MATERIALIZED_KEYS,
     PHASE_A_PIN_DIGESTS,
+    container_context,
     execution_identity,
     load_prepare_for_profile,
     verify_phase_a_frozen,
@@ -114,7 +115,7 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
         dest.mkdir()
         materialized = materialize_pinned(
             pins, dest,
-            template=Path(root) / "execution" / "aee-checker-sealed" / "cargo-config.toml",
+            template=container_context(root, contract=contract) / "cargo-config.toml",
             budget=budget,
             contract=contract,
         )

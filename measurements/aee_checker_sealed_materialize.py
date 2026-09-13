@@ -216,7 +216,8 @@ def stream_archive_member(source, dest: Path, header_size, remaining: int) -> in
 
 def extract_pinned_archive(
         archive: Path, dest: Path, *, cap_bytes: int = MATERIALIZE_CAP_BYTES,
-        cap_files: int = MATERIALIZE_CAP_FILES, budget=None) -> Path:
+        cap_files: int = MATERIALIZE_CAP_FILES, budget=None,
+        selected_subdir: str | None = None) -> Path:
     dest = Path(dest)
     if dest.exists():
         raise PrepareError("extract dest exists")
@@ -224,15 +225,41 @@ def extract_pinned_archive(
     budget = _budget(budget, cap_bytes, cap_files)
     files = 0
     seen = set()
+    archive_seen = set()
     with tarfile.open(archive, "r:*") as tar:
         for info in tar:
             budget.check_deadline()
             rel = archive_member_rel(info.name)
             if rel is None:
+                if selected_subdir is not None:
+                    refuse_archive_link(info)
+                    budget.charge(entries=1)
+                    if not info.isdir():
+                        raise PrepareError("non-regular in archive")
                 continue
             refuse_archive_link(info)
+            # A selected extraction still admits every archive header before deciding
+            # whether it belongs to the destination subtree.
+            if selected_subdir is not None:
+                refuse_duplicate_member(archive_seen, rel)
+                budget.charge(entries=1)
+                if info.isreg():
+                    if type(info.size) is not int or info.size < 0:
+                        raise PrepareError("extract size")
+                    budget.charge(bytes=info.size)
+                elif not info.isdir():
+                    raise PrepareError("non-regular in archive")
+                prefix = selected_subdir + "/"
+                if rel == selected_subdir:
+                    continue
+                if not rel.startswith(prefix):
+                    continue
+                rel = rel[len(prefix):]
+                if not rel:
+                    continue
             refuse_duplicate_member(seen, rel)
-            budget.charge(entries=1)
+            if selected_subdir is None:
+                budget.charge(entries=1)
             if info.isdir():
                 (dest / rel).mkdir(parents=True, exist_ok=True)
                 continue
@@ -242,8 +269,10 @@ def extract_pinned_archive(
             if source is None:
                 raise PrepareError("extract missing")
             written = stream_archive_member(
-                source, dest / rel, info.size, budget.remaining_bytes())
-            budget.charge(bytes=written)
+                source, dest / rel, info.size,
+                info.size if selected_subdir is not None else budget.remaining_bytes())
+            if selected_subdir is None:
+                budget.charge(bytes=written)
             files += 1
     if files == 0:
         raise PrepareError("empty archive")
@@ -500,8 +529,12 @@ def materialize_pinned(pins: dict, dest: Path, *, template: Path, budget=None,
     corpus_tar = download_bounded(
         pinned_archive_url(pins["corpus"]["repository"], pins["corpus"]["commit"]),
         archives / "corpus.tar.gz", budget=budget)
-    extract_pinned_archive(subject_tar, subject, budget=budget)
-    extract_pinned_archive(corpus_tar, corpus, budget=budget)
+    extract_pinned_archive(
+        subject_tar, subject, budget=budget,
+        selected_subdir=contract.subject_subdir)
+    extract_pinned_archive(
+        corpus_tar, corpus, budget=budget,
+        selected_subdir=contract.corpus_subdir)
     shutil.rmtree(archives)
     verified = verify_materialized(pins, subject, corpus, contract=contract)
     verified["vendor_outside_subject"] = True

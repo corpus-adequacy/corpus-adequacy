@@ -42,6 +42,7 @@ class SealedMeasurementContractTest(unittest.TestCase):
             control_id="owned-control",
             site_ids=("owned-1", "owned-2"),
             operator="replace-condition",
+            container_context_relpath="execution/owned-fixture",
             candidate_build=("printf", "build"),
             candidate_entrypoint=("printf", "run"),
         )
@@ -317,6 +318,10 @@ class SealedMeasurementContractTest(unittest.TestCase):
                 )
 
         self.assertIs(materializer.call_args.kwargs["contract"], contract)
+        self.assertEqual(
+            materializer.call_args.kwargs["template"],
+            root / "execution" / "owned-fixture" / "cargo-config.toml",
+        )
         self.assertIs(make_backend.call_args.kwargs["contract"], contract)
         self.assertIs(funnel.call_args.kwargs["contract"], contract)
 

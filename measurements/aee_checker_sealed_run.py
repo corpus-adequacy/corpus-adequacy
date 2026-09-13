@@ -252,10 +252,15 @@ def record_toolchain(toolchain: dict) -> dict:
     return require_vendor_toolchain(toolchain)
 
 
-def resolve_prepare_image(image_id, *, root: Path) -> str:
+def container_context(root: Path, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> Path:
+    return Path(root) / contract.container_context_relpath
+
+
+def resolve_prepare_image(image_id, *, root: Path,
+                          contract=AEE_CHECKER_SEALED_CONTRACT) -> str:
     """Reuse a local sha256 image, or build the inert image once."""
     if image_id is None:
-        return build_inert_image(Path(root) / "execution" / "aee-checker-sealed")
+        return build_inert_image(container_context(root, contract=contract))
     require_local_image(image_id)
     return require_image_id(image_id)
 
@@ -266,8 +271,8 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
     dest = Path(dest)
     pins_doc = verify_phase_a_frozen(Path(pins_dir), adapter=adapter, contract=contract)
     require_docker_ready()
-    image_id = resolve_prepare_image(image_id, root=root)
-    template = Path(root) / "execution" / "aee-checker-sealed" / "cargo-config.toml"
+    image_id = resolve_prepare_image(image_id, root=root, contract=contract)
+    template = container_context(root, contract=contract) / "cargo-config.toml"
     with tempfile.TemporaryDirectory() as scratch:
         pre_mounts = {name: Path(scratch) / name for name in ("input", "vendor", "tool")}
         for path in pre_mounts.values():

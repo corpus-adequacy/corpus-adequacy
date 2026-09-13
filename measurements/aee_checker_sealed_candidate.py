@@ -43,6 +43,8 @@ _ADAPTERS = str(_ROOT / "adapters")
 if _ADAPTERS not in sys.path:
     sys.path.insert(0, _ADAPTERS)
 import aee_checker_sealed as sealed_adapter  # noqa: E402
+import owned_contained_v1 as owned_adapter  # noqa: E402
+from sealed_measurement_contract import OWNED_CONTAINED_V1_CONTRACT  # noqa: E402
 
 CANDIDATE_MOUNT_SPEC = DEFAULT_MOUNT_SPEC + (("subject", "/subject"),)
 CANDIDATE_ENTRYPOINT = "/bin/sh"
@@ -143,7 +145,17 @@ def host_vectors_path(mounts: dict) -> str:
     return str(Path(mounts["input"]) / "vectors")
 
 
-def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.CompletedProcess:
+def sealed_adapter_for(contract):
+    """Resolve only the two code-owned adapters; paths are never operator input."""
+    if contract is AEE_CHECKER_SEALED_CONTRACT:
+        return sealed_adapter
+    if contract is OWNED_CONTAINED_V1_CONTRACT:
+        return owned_adapter
+    raise PrepareError("sealed measurement adapter")
+
+
+def normalize_inner_event(*, returncode, stdout, vectors,
+                          contract=AEE_CHECKER_SEALED_CONTRACT) -> subprocess.CompletedProcess:
     """Parse the inner report once, then reuse adapter expected_ids/project."""
     if returncode not in COMPLETE_RETURNCODES:
         return _unproved("inner-exit")
@@ -161,8 +173,9 @@ def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.Complete
     if type(inner) is not dict:
         return _unproved("malformed")
     try:
-        expected = sealed_adapter.expected_ids(vectors)
-        projected = sealed_adapter.project(inner, expected)
+        adapter = sealed_adapter_for(contract)
+        expected = adapter.expected_ids(vectors)
+        projected = adapter.project(inner, expected)
     except (PrepareError, ca.ManifestError, KeyError, TypeError, ValueError, OSError):
         return _unproved("projection")
     return subprocess.CompletedProcess(
@@ -177,7 +190,8 @@ def normalize_inner_event(*, returncode, stdout, vectors) -> subprocess.Complete
 OOM_KILLED_REPORTED = "oom-killed-reported"
 
 
-def candidate_result(raw: dict, *, mounts: dict) -> subprocess.CompletedProcess:
+def candidate_result(raw: dict, *, mounts: dict,
+                     contract=AEE_CHECKER_SEALED_CONTRACT) -> subprocess.CompletedProcess:
     """The candidate's result from one contained run's raw outcome, on both paths.
 
     A run that did not complete keeps its own state: a deadline remains `timeout` and an
@@ -201,6 +215,7 @@ def candidate_result(raw: dict, *, mounts: dict) -> subprocess.CompletedProcess:
         returncode=proc.returncode,
         stdout=proc.stdout or "",
         vectors=host_vectors_path(mounts),
+        contract=contract,
     )
 
 
@@ -368,7 +383,7 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
     except PrepareError as exc:
         return _refused_envelope(binding, requested, "refused", str(exc), schema)
 
-    completed = candidate_result(raw, mounts=mounts)
+    completed = candidate_result(raw, mounts=mounts, contract=contract)
 
     effective = None
     unverified_field = None
@@ -422,7 +437,7 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
         image_id=image_id, mounts=mounts, resource_profile=resource_profile,
         name_prefix=name_prefix, sealed=sealed, transport=transport,
         execution_contract=execution_contract, record_cleanup=False, contract=contract)
-    return candidate_result(raw, mounts=mounts)
+    return candidate_result(raw, mounts=mounts, contract=contract)
 
 
 # The one profile with a legacy unrecorded run: contained-oci-v0 predates the envelope record.
