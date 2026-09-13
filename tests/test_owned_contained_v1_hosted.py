@@ -21,6 +21,111 @@ import hosted_packet  # noqa: E402
 import owned_contained_v1_hosted as owned  # noqa: E402
 from hosted_rail_contract import LEGACY_RAIL, OWNED_V1_RAIL  # noqa: E402
 from sealed_measurement_contract import OWNED_CONTAINED_V1_CONTRACT  # noqa: E402
+from tests.test_contained_hosted_workflow_contract import (  # noqa: E402
+    CHECKOUT_ACTION,
+    SETUP_PYTHON_ACTION,
+    UPLOAD_ACTION,
+    parse_workflow_yaml,
+)
+
+
+OWNED_PREPARE_WORKFLOW = {
+    "name": "owned-contained-v1-prepare",
+    "on": {"workflow_dispatch": None},
+    "permissions": {"contents": "read"},
+    "concurrency": {
+        "group": "owned-contained-v1-prepare",
+        "cancel-in-progress": False,
+    },
+    "env": {"PYTHON_VERSION": "3.13"},
+    "jobs": {"owned-prepare": {
+        "runs-on": "ubuntu-24.04",
+        "timeout-minutes": 30,
+        "steps": [
+            {"name": "Checkout", "uses": CHECKOUT_ACTION,
+             "with": {"persist-credentials": False}},
+            {"name": "Set up Python", "uses": SETUP_PYTHON_ACTION,
+             "with": {"python-version": "${{ env.PYTHON_VERSION }}"}},
+            {"name": "Prepare owned contained-v1 packet input", "shell": "bash",
+             "run": "python measurements/owned_contained_v1_hosted.py prepare"},
+            {"name": "Upload owned prepare", "uses": UPLOAD_ACTION,
+             "with": {
+                 "name": "owned-contained-v1-prepare-${{ github.run_id }}-${{ github.run_attempt }}",
+                 "path": "owned-contained-v1-prepare/prepare.v2.json",
+                 "retention-days": 14, "if-no-files-found": "error"}},
+            {"name": "Upload owned prepare record", "uses": UPLOAD_ACTION,
+             "with": {
+                 "name": "owned-contained-v1-prepare-record-${{ github.run_id }}-${{ github.run_attempt }}",
+                 "path": "owned-contained-v1-prepare-record/owned-contained-v1-prepare-record.v1.json",
+                 "retention-days": 14, "if-no-files-found": "error"}},
+        ],
+    }},
+}
+
+
+OWNED_PUBLICATION_WORKFLOW = {
+    "name": "owned-contained-v1-publication",
+    "on": {"workflow_dispatch": {"inputs": {
+        name: {"required": True, "type": "string"}
+        for name in (
+            "candidate_revision", "runner_revision", "image_digest",
+            "packet_release_tag", "packet_manifest_sha256",
+        )
+    }}},
+    "permissions": {"contents": "read"},
+    "concurrency": {
+        "group": "owned-contained-v1-publication",
+        "cancel-in-progress": False,
+    },
+    "env": {"PYTHON_VERSION": "3.13"},
+    "jobs": {"owned-contained": {
+        "runs-on": "ubuntu-24.04",
+        "timeout-minutes": 30,
+        "steps": [
+            {"name": "Checkout immutable runner", "uses": CHECKOUT_ACTION,
+             "with": {"persist-credentials": False, "fetch-depth": 0,
+                      "ref": "${{ inputs.runner_revision }}"}},
+            {"name": "Set up Python", "uses": SETUP_PYTHON_ACTION,
+             "with": {"python-version": "${{ env.PYTHON_VERSION }}"}},
+            {"name": "Fetch owned packet", "shell": "bash",
+             "env": {
+                 "PACKET_RELEASE_TAG": "${{ inputs.packet_release_tag }}",
+                 "PACKET_MANIFEST_SHA256": "${{ inputs.packet_manifest_sha256 }}",
+             },
+             "run": "python measurements/owned_contained_v1_hosted.py fetch --repository \"$GITHUB_REPOSITORY\" --tag \"$PACKET_RELEASE_TAG\" --manifest-sha256 \"$PACKET_MANIFEST_SHA256\""},
+            {"name": "Gate owned publication", "id": "gate", "shell": "bash",
+             "env": {
+                 "CANDIDATE_REVISION": "${{ inputs.candidate_revision }}",
+                 "RUNNER_REVISION": "${{ inputs.runner_revision }}",
+                 "IMAGE_DIGEST": "${{ inputs.image_digest }}",
+                 "PACKET_MANIFEST_SHA256": "${{ inputs.packet_manifest_sha256 }}",
+             },
+             "run": "python measurements/owned_contained_v1_hosted.py gate --candidate-revision \"$CANDIDATE_REVISION\" --runner-revision \"$RUNNER_REVISION\" --image-digest \"$IMAGE_DIGEST\" --packet-manifest-sha256 \"$PACKET_MANIFEST_SHA256\" --out owned-contained-v1-artifacts"},
+            {"name": "Upload setup", "if": "always() && !cancelled()",
+             "uses": UPLOAD_ACTION,
+             "with": {"name": "owned-contained-v1-setup",
+                      "path": "owned-contained-v1-artifacts/setup-status.json",
+                      "retention-days": 14, "if-no-files-found": "error"}},
+            {"name": "Upload verified collection",
+             "if": "steps.gate.outcome == 'success' && !cancelled()",
+             "uses": UPLOAD_ACTION,
+             "with": {"name": "owned-contained-v1-effective-envelope",
+                      "path": "owned-contained-v1-artifacts/effective-envelope-collection.v0/",
+                      "retention-days": 14, "if-no-files-found": "error"}},
+            {"name": "Upload candidate result", "if": "always() && !cancelled()",
+             "uses": UPLOAD_ACTION,
+             "with": {"name": "owned-contained-v1-candidate-result",
+                      "path": "owned-contained-v1-artifacts/candidate-result.json",
+                      "retention-days": 14, "if-no-files-found": "error"}},
+            {"name": "Upload rerun evidence", "if": "always() && !cancelled()",
+             "uses": UPLOAD_ACTION,
+             "with": {
+                 "name": "owned-contained-v1-rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}",
+                 "path": "owned-contained-v1-artifacts/rerun-evidence.jsonl",
+                 "retention-days": 14, "if-no-files-found": "error"}},
+        ],
+    }},
+}
 
 
 class OwnedHostedRailContract(unittest.TestCase):
@@ -90,6 +195,50 @@ class OwnedHostedRailContract(unittest.TestCase):
                 raw, execution_profile=OWNED_V1_RAIL.execution_profile,
                 contract=OWNED_V1_RAIL.measurement)
 
+    def test_crossed_prepare_refuses_through_real_gate_before_execute(self):
+        bindings = {
+            "candidate_revision": "a" * 40,
+            "runner_revision": "b" * 40,
+            "image_digest": "sha256:" + "c" * 64,
+        }
+        prepare_raw = json.dumps({"schema": owned.sealed_run.PREPARE_V1_SCHEMA}).encode()
+        authorize_raw = b"authorize"
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw)
+            packet = workspace / OWNED_V1_RAIL.packet_dirname
+            packet.mkdir()
+            (packet / OWNED_V1_RAIL.prepare_filename).write_bytes(prepare_raw)
+            (packet / OWNED_V1_RAIL.authorize_filename).write_bytes(authorize_raw)
+            (packet / "pins").mkdir()
+            packet_files = {
+                OWNED_V1_RAIL.prepare_filename: hashlib.sha256(prepare_raw).hexdigest(),
+                OWNED_V1_RAIL.authorize_filename: hashlib.sha256(authorize_raw).hexdigest(),
+            }
+            reached = []
+
+            def execute(**_kwargs):
+                reached.append(True)
+                raise AssertionError("crossed PREPARE reached execute")
+
+            with mock.patch.object(publication, "check_packet_manifest",
+                                   return_value=packet_files), \
+                    mock.patch.object(publication, "load_dispatch_bindings"), \
+                    mock.patch.object(publication, "check_prepare_bindings"):
+                with self.assertRaisesRegex(publication.HostedPublicationError,
+                                            "prepare_profile:.*contained-oci-v1 admits only prepare.v2"):
+                    publication.run_gate(
+                        **bindings, operator_profile=OWNED_V1_RAIL.execution_profile,
+                        out_dir=workspace / "out", workspace_root=workspace,
+                        packet_root=OWNED_V1_RAIL.packet_dirname,
+                        authorize_path=OWNED_V1_RAIL.authorize_filename,
+                        prepare_path=OWNED_V1_RAIL.prepare_filename, pins_dir="pins",
+                        packet_manifest_sha256="d" * 64, docker_ready=lambda: "ready",
+                        sealed_execute=execute,
+                        environ={"GITHUB_SHA": bindings["runner_revision"],
+                                 "GITHUB_WORKFLOW_SHA": bindings["runner_revision"]},
+                        rail=OWNED_V1_RAIL)
+            self.assertEqual(reached, [])
+
     def test_owned_packet_fetch_uses_only_owned_names_and_pins(self):
         files = {name: (name + "\n").encode() for name in OWNED_V1_RAIL.packet_filenames}
         manifest = (json.dumps({
@@ -130,6 +279,28 @@ class OwnedHostedRailContract(unittest.TestCase):
         self.assertIs(result, expected)
         self.assertEqual(call.call_args.kwargs["execution_profile"], "contained-oci-v1")
         self.assertIs(call.call_args.kwargs["contract"], OWNED_CONTAINED_V1_CONTRACT)
+
+    def test_owned_gate_facade_forwards_the_closed_rail_exactly(self):
+        with mock.patch.object(publication, "run_gate",
+                               return_value={"decision": "publish"}) as call:
+            owned.gate_owned(
+                candidate_revision="a" * 40, runner_revision="b" * 40,
+                image_digest="sha256:" + "c" * 64,
+                packet_manifest_sha256="d" * 64, out_dir="out")
+        self.assertEqual(call.call_args.kwargs, {
+            "candidate_revision": "a" * 40,
+            "runner_revision": "b" * 40,
+            "image_digest": "sha256:" + "c" * 64,
+            "operator_profile": OWNED_V1_RAIL.execution_profile,
+            "out_dir": "out",
+            "workspace_root": ROOT,
+            "packet_root": OWNED_V1_RAIL.packet_dirname,
+            "authorize_path": OWNED_V1_RAIL.authorize_filename,
+            "prepare_path": OWNED_V1_RAIL.prepare_filename,
+            "pins_dir": "pins",
+            "packet_manifest_sha256": "d" * 64,
+            "rail": OWNED_V1_RAIL,
+        })
 
     def test_owned_profile_reaches_final_create_argv_with_cpu_and_nofile(self):
         profile = dict(contained_oci.CANDIDATE_RESOURCE_PROFILE_V2)
@@ -239,6 +410,89 @@ class OwnedHostedRailContract(unittest.TestCase):
             publication.safe_candidate_projection(
                 report, loaded, bindings={}, rail=OWNED_V1_RAIL)
 
+    def test_real_owned_gate_propagates_collection_withhold_and_quarantines_bytes(self):
+        bindings = {
+            "candidate_revision": "a" * 40,
+            "runner_revision": "b" * 40,
+            "image_digest": "sha256:" + "c" * 64,
+        }
+        report = self.report()
+        report_sha = hashlib.sha256(publication.ca.encode_report_v0(report)).hexdigest()
+        prepare_raw = json.dumps({"schema": owned.sealed_run.PREPARE_V2_SCHEMA}).encode()
+        authorize_raw = b"authorize"
+        prepare_sha = hashlib.sha256(prepare_raw).hexdigest()
+        requested = {
+            "execution_profile": OWNED_V1_RAIL.execution_profile,
+            "image_id": bindings["image_digest"],
+            "sealed": True,
+            "resource_profile": dict(contained_oci.CANDIDATE_RESOURCE_PROFILE_V2),
+            "mount_spec": sorted(destination for _name, destination
+                                 in publication.CANDIDATE_MOUNT_SPEC),
+        }
+        member = {
+            "candidate_outcome": "completed",
+            "execution_commit": bindings["runner_revision"],
+            "prepare_sha256": prepare_sha,
+            "requested": requested,
+            "setup_status": "ready",
+            "publication_permission": "withheld",
+            "envelope_status": "unverified",
+            "effective": None,
+        }
+        loaded = {
+            "index": {"report_sha256": report_sha, "members": [{"ordinal": 0}]},
+            "members": [member],
+            "withheld_reason": "stored-value-mismatch",
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw)
+            packet = workspace / OWNED_V1_RAIL.packet_dirname
+            packet.mkdir()
+            (packet / OWNED_V1_RAIL.prepare_filename).write_bytes(prepare_raw)
+            (packet / OWNED_V1_RAIL.authorize_filename).write_bytes(authorize_raw)
+            (packet / "pins").mkdir()
+            out = workspace / "out"
+
+            def execute(**kwargs):
+                live = Path(kwargs["envelope_dest"])
+                live.mkdir(parents=True)
+                (live / "retained-observation.json").write_text("{}\n")
+                return report
+
+            packet_files = {
+                OWNED_V1_RAIL.prepare_filename: prepare_sha,
+                OWNED_V1_RAIL.authorize_filename: hashlib.sha256(authorize_raw).hexdigest(),
+            }
+            with mock.patch.object(publication, "check_packet_manifest",
+                                   return_value=packet_files), \
+                    mock.patch.object(publication, "load_dispatch_bindings"), \
+                    mock.patch.object(publication, "check_prepare_bindings"), \
+                    mock.patch.object(owned.sealed_run, "load_prepare_for_profile",
+                                      return_value={}), \
+                    mock.patch.object(publication, "load_envelope_collection",
+                                      return_value=loaded):
+                decision = publication.run_gate(
+                    **bindings, operator_profile=OWNED_V1_RAIL.execution_profile,
+                    out_dir=out, workspace_root=workspace,
+                    packet_root=OWNED_V1_RAIL.packet_dirname,
+                    authorize_path=OWNED_V1_RAIL.authorize_filename,
+                    prepare_path=OWNED_V1_RAIL.prepare_filename, pins_dir="pins",
+                    packet_manifest_sha256="d" * 64, docker_ready=lambda: "ready",
+                    sealed_execute=execute,
+                    environ={"GITHUB_SHA": bindings["runner_revision"],
+                             "GITHUB_WORKFLOW_SHA": bindings["runner_revision"]},
+                    rail=OWNED_V1_RAIL)
+            self.assertEqual(decision["decision"], "withhold")
+            self.assertFalse((out / publication.COLLECTION_DIRNAME).exists())
+            retained = (out / publication.WITHHELD_COLLECTION_DIRNAME
+                        / "attempt-0000" / "retained-observation.json")
+            self.assertEqual(retained.read_text(), "{}\n")
+            candidate = json.loads((out / publication.CANDIDATE_RESULT_FILENAME).read_text())
+            self.assertEqual(candidate["decision"], "withhold")
+            self.assertEqual(candidate["outcomes"], [
+                {"ordinal": 0, "candidate_outcome": "completed"},
+            ])
+
     def test_new_workflows_are_disjoint_and_legacy_bytes_stay_fixed(self):
         expected = {
             ".github/workflows/contained-hosted-prepare.yml":
@@ -262,6 +516,33 @@ class OwnedHostedRailContract(unittest.TestCase):
                       OWNED_V1_RAIL.packet_dirname,
                       OWNED_V1_RAIL.packet_manifest_filename):
             self.assertNotIn(token, legacy)
+
+    def test_new_workflows_match_their_exact_parsed_contracts(self):
+        prepare_text = (ROOT / ".github/workflows/owned-contained-v1-prepare.yml").read_text()
+        publication_text = (
+            ROOT / ".github/workflows/owned-contained-v1-publication.yml").read_text()
+        self.assertEqual(parse_workflow_yaml(prepare_text), OWNED_PREPARE_WORKFLOW)
+        self.assertEqual(parse_workflow_yaml(publication_text), OWNED_PUBLICATION_WORKFLOW)
+
+    def test_owned_workflow_boundary_mutations_are_red(self):
+        prepare_text = (ROOT / ".github/workflows/owned-contained-v1-prepare.yml").read_text()
+        publication_text = (
+            ROOT / ".github/workflows/owned-contained-v1-publication.yml").read_text()
+        mutations = (
+            (publication_text,
+             "steps.gate.outcome == 'success' && !cancelled()", "always()"),
+            (publication_text, "          ref: ${{ inputs.runner_revision }}\n", ""),
+            (publication_text, "persist-credentials: false", "persist-credentials: true"),
+            (publication_text, "cancel-in-progress: false", "cancel-in-progress: true"),
+            (prepare_text, "persist-credentials: false", "persist-credentials: true"),
+            (prepare_text, "cancel-in-progress: false", "cancel-in-progress: true"),
+        )
+        for text, old, new in mutations:
+            with self.subTest(old=old, new=new):
+                self.assertIn(old, text)
+                expected = (OWNED_PREPARE_WORKFLOW if text is prepare_text
+                            else OWNED_PUBLICATION_WORKFLOW)
+                self.assertNotEqual(parse_workflow_yaml(text.replace(old, new, 1)), expected)
 
 
 if __name__ == "__main__":
