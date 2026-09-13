@@ -917,7 +917,8 @@ class PrepareDispatcher(unittest.TestCase):
                     mock.patch.object(
                         run, untouched, side_effect=AssertionError("wrong loader")) as other:
                 run.load_prepare_for_profile(raw, execution_profile=profile)
-            used.assert_called_once_with(raw)
+            used.assert_called_once_with(
+                raw, contract=run.AEE_CHECKER_SEALED_CONTRACT)
             other.assert_not_called()
 
     def test_crossed_versions_refuse_under_their_own_names(self):

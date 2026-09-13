@@ -35,6 +35,7 @@ from aee_checker_sealed_run import (  # noqa: E402
     PHASE_A_PIN_DIGESTS,
     load_prepare_for_profile,
 )
+from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT  # noqa: E402
 
 NON_CLAIMS = (
     "MC/DC",
@@ -56,15 +57,17 @@ def _same_mutation(got: dict, expected: dict) -> bool:
 
 
 def bind_authorized_mutation_order(*, manifest: dict, sites: dict,
-                                   control: dict, steps) -> tuple[str, ...]:
+                                   control: dict, steps,
+                                   contract=AEE_CHECKER_SEALED_CONTRACT) -> tuple[str, ...]:
     """Resolve the authorized IDs to exact trusted manifest mutations."""
     try:
-        steps = require_authorized_sequence(steps)
+        steps = require_authorized_sequence(steps, contract=contract)
     except AuthorizeError as exc:
         raise ExecuteError(str(exc)) from exc
-    if type(manifest) is not dict or set(manifest.get("mutants", {})) != {"sealed"}:
+    if (type(manifest) is not dict or
+            set(manifest.get("mutants", {})) != {contract.mutation_group}):
         raise ExecuteError("manifest mutation groups")
-    rows = manifest["mutants"]["sealed"]
+    rows = manifest["mutants"][contract.mutation_group]
     if type(rows) is not list or len(rows) != len(steps) - 1:
         raise ExecuteError("manifest mutation count")
     by_id = {}
@@ -76,11 +79,11 @@ def bind_authorized_mutation_order(*, manifest: dict, sites: dict,
     if set(by_id) != {step["id"] for step in steps[1:]}:
         raise ExecuteError("manifest mutation ids")
     expected_control = dict(control)
-    if not by_id["control"].get("control") or not _same_mutation(
-            by_id["control"], expected_control):
+    if not by_id[contract.control_id].get("control") or not _same_mutation(
+            by_id[contract.control_id], expected_control):
         raise ExecuteError("manifest control drift")
     site_rows = sites.get("sites") if type(sites) is dict else None
-    if type(site_rows) is not list or len(site_rows) != 7:
+    if type(site_rows) is not list or len(site_rows) != len(contract.site_ids):
         raise ExecuteError("manifest site sequence")
     for site in site_rows:
         expected = {
@@ -96,7 +99,8 @@ def bind_authorized_mutation_order(*, manifest: dict, sites: dict,
 
 def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
                          pins_dir: Path, manifest: dict, manifest_path: Path,
-                         execution_backend, execution_profile) -> dict:
+                         execution_backend, execution_profile,
+                         contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     """Admit the authorized PREPARE under the resolved profile, then run the engine.
 
     `execution_profile` has no default, so omitting it is TypeError rather than an implied
@@ -104,15 +108,17 @@ def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
     only under contained-oci-v0, prepare.v2 only under contained-oci-v1, before any effect.
     """
     try:
-        validate_authorize(authorize_raw, prepare_raw)
-        load_prepare_for_profile(prepare_raw, execution_profile=execution_profile)
-        sites = load_frozen_sites(Path(pins_dir))
+        validate_authorize(authorize_raw, prepare_raw, contract=contract)
+        load_prepare_for_profile(
+            prepare_raw, execution_profile=execution_profile, contract=contract)
+        sites = load_frozen_sites(Path(pins_dir), contract=contract)
         control_raw = verify_file_digest(
-            Path(pins_dir) / "control.json", PHASE_A_PIN_DIGESTS["control.json"])
+            Path(pins_dir) / "control.json", contract.pin_digest("control.json"))
         control = load_strict(control_raw)
-        steps = required_sequence(sites)
+        steps = required_sequence(sites, contract=contract)
         order = bind_authorized_mutation_order(
-            manifest=manifest, sites=sites, control=control, steps=steps)
+            manifest=manifest, sites=sites, control=control, steps=steps,
+            contract=contract)
     except (AuthorizeError, PrepareError) as exc:
         raise ExecuteError(str(exc)) from exc
     return ca._run_process(

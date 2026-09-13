@@ -7,8 +7,10 @@ import dataclasses
 import json
 import hashlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -16,6 +18,11 @@ sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
 import aee_checker_sealed_materialize as materialize  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
+import aee_checker_sealed_authorize as authorize  # noqa: E402
+import aee_checker_sealed_candidate as candidate  # noqa: E402
+import aee_checker_sealed_execute as execute  # noqa: E402
+import aee_checker_sealed_driver as driver  # noqa: E402
+import contained_hosted_publication as publication  # noqa: E402
 from aee_checker_sealed_common import PrepareError  # noqa: E402
 from sealed_measurement_contract import (  # noqa: E402
     AEE_CHECKER_SEALED_CONTRACT,
@@ -24,6 +31,18 @@ from sealed_measurement_contract import (  # noqa: E402
 
 
 class SealedMeasurementContractTest(unittest.TestCase):
+    def _alternate_sequence_contract(self):
+        return dataclasses.replace(
+            AEE_CHECKER_SEALED_CONTRACT,
+            name="owned-fixture",
+            mutation_group="owned",
+            control_id="owned-control",
+            site_ids=("owned-1", "owned-2"),
+            operator="replace-condition",
+            candidate_build=("printf", "build"),
+            candidate_entrypoint=("printf", "run"),
+        )
+
     def test_contract_is_closed_immutable_and_rejects_unsafe_identity(self):
         contract = AEE_CHECKER_SEALED_CONTRACT
         with self.assertRaises(dataclasses.FrozenInstanceError):
@@ -97,6 +116,69 @@ class SealedMeasurementContractTest(unittest.TestCase):
         parts = {key: doc[key] for key in run.PREPARE_PART_KEYS}
         rebuilt = run._prepare_v0_doc(parts, contract=AEE_CHECKER_SEALED_CONTRACT)
         self.assertEqual(run.encode_json(rebuilt), raw)
+
+    def test_alternate_contract_controls_authorized_sequence_and_mutation_binding(self):
+        contract = self._alternate_sequence_contract()
+        sites = {
+            "sites": [
+                {"id": "owned-1", "label": "one", "anchor": "a",
+                 "replacement": "false", "manifest_replacement": "false"},
+                {"id": "owned-2", "label": "two", "anchor": "b",
+                 "replacement": "false", "manifest_replacement": "false"},
+            ],
+        }
+        control = {"label": "control", "anchor": "c", "replacement": "false"}
+        manifest = {
+            "mutants": {
+                "owned": [
+                    {"id": "owned-control", "control": True, **control},
+                    {"id": "owned-1", "control": False, "label": "one",
+                     "anchor": "a", "replacement": "false"},
+                    {"id": "owned-2", "control": False, "label": "two",
+                     "anchor": "b", "replacement": "false"},
+                ],
+            },
+        }
+
+        steps = authorize.required_sequence(sites, contract=contract)
+        self.assertEqual([step["id"] for step in steps],
+                         ["baseline", "owned-control", "owned-1", "owned-2"])
+        order = execute.bind_authorized_mutation_order(
+            manifest=manifest, sites=sites, control=control, steps=steps,
+            contract=contract,
+        )
+        self.assertEqual(order, ("control", "one", "two"))
+
+    def test_alternate_contract_controls_candidate_commands(self):
+        contract = self._alternate_sequence_contract()
+        execution = {
+            "build": list(contract.candidate_build),
+            "entrypoint_command": list(contract.candidate_entrypoint),
+        }
+        script = candidate.candidate_script(execution, contract=contract)
+        self.assertIn("printf build", script)
+        self.assertIn("printf run", script)
+        with self.assertRaisesRegex(PrepareError, "candidate execution contract"):
+            candidate.candidate_script(execution)
+
+    def test_hosted_legacy_root_names_the_aee_contract_explicitly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            authorize_path = root / "authorize.json"
+            prepare_path = root / "prepare.json"
+            authorize_path.write_bytes(b"authorize")
+            prepare_path.write_bytes(b"prepare")
+            with mock.patch.object(driver, "run_authorized") as called:
+                publication.default_sealed_execute(
+                    authorize_path=authorize_path,
+                    prepare_path=prepare_path,
+                    pins_dir=root / "pins",
+                    root=root,
+                    envelope_dest=root / "envelope",
+                    materialize_dest=root / "materialized",
+                )
+        self.assertIs(
+            called.call_args.kwargs["contract"], AEE_CHECKER_SEALED_CONTRACT)
 
 
 if __name__ == "__main__":

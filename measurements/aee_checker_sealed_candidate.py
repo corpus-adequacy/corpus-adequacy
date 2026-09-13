@@ -36,6 +36,7 @@ from aee_checker_sealed_run import load_prepare_for_profile
 import bounded_run as br
 import contained_oci as contained
 import effective_envelope as envelope
+from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ADAPTERS = str(_ROOT / "adapters")
@@ -45,18 +46,18 @@ import aee_checker_sealed as sealed_adapter  # noqa: E402
 
 CANDIDATE_MOUNT_SPEC = DEFAULT_MOUNT_SPEC + (("subject", "/subject"),)
 CANDIDATE_ENTRYPOINT = "/bin/sh"
-CONTAINER_BUILD = ("cargo", "build", "--release", "--locked", "--offline")
-CONTAINER_ENTRYPOINT = (
-    "/work/target/release/aee-checker", "/input/vectors", "--json", "/work/report.json",
-)
+CONTAINER_BUILD = AEE_CHECKER_SEALED_CONTRACT.candidate_build
+CONTAINER_ENTRYPOINT = AEE_CHECKER_SEALED_CONTRACT.candidate_entrypoint
 
 
-def candidate_script(execution_contract: dict) -> str:
+def candidate_script(execution_contract: dict,
+                     *, contract=AEE_CHECKER_SEALED_CONTRACT) -> str:
     if type(execution_contract) is not dict:
         raise PrepareError("candidate execution contract")
     build = execution_contract.get("build")
     entrypoint = execution_contract.get("entrypoint_command")
-    if build != list(CONTAINER_BUILD) or entrypoint != list(CONTAINER_ENTRYPOINT):
+    if (build != list(contract.candidate_build) or
+            entrypoint != list(contract.candidate_entrypoint)):
         raise PrepareError("candidate execution contract")
     return (
     "set -eu; "
@@ -205,14 +206,17 @@ def candidate_result(raw: dict, *, mounts: dict) -> subprocess.CompletedProcess:
 
 def candidate_create_argv(*, image_id: str, name: str, mounts: dict,
                           sealed: bool = True, resource_profile=None,
-                          execution_contract=None) -> list[str]:
+                          execution_contract=None,
+                          contract=AEE_CHECKER_SEALED_CONTRACT) -> list[str]:
     return docker_create_argv(
         image_id=image_id,
         name=name,
         mounts=mounts,
         command=["-lc", candidate_script(
-            DEFAULT_EXECUTION_CONTRACT
-            if execution_contract is None else execution_contract)],
+            {"build": list(contract.candidate_build),
+             "entrypoint_command": list(contract.candidate_entrypoint)}
+            if execution_contract is None else execution_contract,
+            contract=contract)],
         sealed=sealed,
         mount_spec=CANDIDATE_MOUNT_SPEC,
         entrypoint=CANDIDATE_ENTRYPOINT,
@@ -317,13 +321,16 @@ def _require_no_create_warnings(create_warnings) -> None:
 
 def _contained_candidate_run(*, image_id: str, mounts: dict, resource_profile,
                              name_prefix: str, sealed: bool, transport,
-                             execution_contract, record_cleanup: bool) -> dict:
+                             execution_contract, record_cleanup: bool,
+                             contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     return contained.run_contained(
         image_id=image_id,
         mounts=mounts,
         command=["-lc", candidate_script(
-            DEFAULT_EXECUTION_CONTRACT
-            if execution_contract is None else execution_contract)],
+            {"build": list(contract.candidate_build),
+             "entrypoint_command": list(contract.candidate_entrypoint)}
+            if execution_contract is None else execution_contract,
+            contract=contract)],
         entrypoint=CANDIDATE_ENTRYPOINT,
         mount_spec=CANDIDATE_MOUNT_SPEC,
         resource_profile=resource_profile,
@@ -336,7 +343,7 @@ def _contained_candidate_run(*, image_id: str, mounts: dict, resource_profile,
 
 def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
                                execution_profile, name_prefix, sealed, transport,
-                               execution_contract, binding,
+                               execution_contract, binding, contract,
                                ) -> subprocess.CompletedProcess:
     """Run the candidate and keep one envelope record whatever happens.
 
@@ -354,7 +361,8 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
             image_id=image_id, mounts=mounts,
             resource_profile=resource_profile, name_prefix=name_prefix,
             sealed=sealed, transport=transport,
-            execution_contract=execution_contract, record_cleanup=True)
+            execution_contract=execution_contract, record_cleanup=True,
+            contract=contract)
     except DockerUnavailable as exc:
         return _refused_envelope(binding, requested, "unavailable", str(exc), schema)
     except PrepareError as exc:
@@ -394,6 +402,7 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
                           sealed: bool = True, transport=None,
                           execution_contract=None, binding=None,
                           execution_profile=None,
+                          contract=AEE_CHECKER_SEALED_CONTRACT,
                           ) -> subprocess.CompletedProcess:
     """Without a binding this is the legacy unrecorded run, unchanged.
 
@@ -408,11 +417,11 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
             resource_profile=resource_profile,
             execution_profile=execution_profile, name_prefix=name_prefix,
             sealed=sealed, transport=transport,
-            execution_contract=execution_contract, binding=binding)
+            execution_contract=execution_contract, binding=binding, contract=contract)
     raw = _contained_candidate_run(
         image_id=image_id, mounts=mounts, resource_profile=resource_profile,
         name_prefix=name_prefix, sealed=sealed, transport=transport,
-        execution_contract=execution_contract, record_cleanup=False)
+        execution_contract=execution_contract, record_cleanup=False, contract=contract)
     return candidate_result(raw, mounts=mounts)
 
 
@@ -437,14 +446,16 @@ def require_recording(*, execution_profile, binding) -> None:
 def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict, execution_profile,
                          name_prefix: str = "aee-cand-",
                          transport=None, execution_contract=None,
-                         binding=None) -> subprocess.CompletedProcess:
+                         binding=None,
+                         contract=AEE_CHECKER_SEALED_CONTRACT) -> subprocess.CompletedProcess:
     """Admit PREPARE bytes under the resolved execution profile, then run them.
 
     `execution_profile` has no default: omission is TypeError, never an implied
     contained-oci-v0. The shared dispatcher admits prepare.v1 only under
     contained-oci-v0 and prepare.v2 only under contained-oci-v1, before any effect.
     """
-    prepare = load_prepare_for_profile(prepare_raw, execution_profile=execution_profile)
+    prepare = load_prepare_for_profile(
+        prepare_raw, execution_profile=execution_profile, contract=contract)
     require_recording(execution_profile=execution_profile, binding=binding)
     image_id = require_candidate_image(
         image_id=prepare["toolchain"]["image_id"],
@@ -461,4 +472,5 @@ def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict, execution_profile,
         transport=transport,
         execution_contract=execution_contract,
         binding=binding,
+        contract=contract,
     )
