@@ -45,12 +45,16 @@ class SealedMeasurementContract:
     corpus_manifest_sha256: str
     subject_tree_sha256: str
     corpus_tree_sha256: str
+    subject_subdir: str | None
+    corpus_subdir: str | None
     corpus_id_count: int
     mutation_group: str
     control_id: str
+    inert_control_ids: tuple[str, ...]
     site_ids: tuple[str, ...]
     operator: str
     execution_paths: tuple[str, ...]
+    container_context_relpath: str
     candidate_build: tuple[str, ...]
     candidate_entrypoint: tuple[str, ...]
 
@@ -63,6 +67,13 @@ class SealedMeasurementContract:
             if "/" in part:
                 raise ValueError("pins_relpath must contain path components")
         _require_relpath(self.adapter_relpath, "adapter_relpath")
+        _require_relpath(self.container_context_relpath, "container_context_relpath")
+        for where, value in (
+            ("subject_subdir", self.subject_subdir),
+            ("corpus_subdir", self.corpus_subdir),
+        ):
+            if value is not None:
+                _require_relpath(value, where)
         if not _is_hex(self.instrument_commit, _HEX40):
             raise ValueError("instrument_commit must be lowercase hex")
 
@@ -100,8 +111,15 @@ class SealedMeasurementContract:
         _require_tuple(self.site_ids, "site_ids")
         if any(not isinstance(value, str) or not value for value in self.site_ids):
             raise ValueError("site_ids")
-        if len(self.site_ids) != len(set(self.site_ids)) or self.control_id in self.site_ids:
-            raise ValueError("site_ids must be unique and exclude control_id")
+        if type(self.inert_control_ids) is not tuple or any(
+                not isinstance(value, str) or not value
+                for value in self.inert_control_ids):
+            raise ValueError("inert_control_ids")
+        if len(self.inert_control_ids) != len(set(self.inert_control_ids)):
+            raise ValueError("inert_control_ids must be unique")
+        identities = (self.control_id,) + self.inert_control_ids + self.site_ids
+        if len(identities) != len(set(identities)):
+            raise ValueError("control and site ids must be disjoint")
 
         _require_tuple(self.execution_paths, "execution_paths")
         if len(self.execution_paths) != len(set(self.execution_paths)):
@@ -138,9 +156,12 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
     corpus_manifest_sha256="aaee0241d5f92a65ecfa603113f5c313b3f0593aa97ce8a54732287f0dc26c67",
     subject_tree_sha256="393d742154918f640593fe9962cf87a273a28c93b24c0569ee4bef3a039fdc3d",
     corpus_tree_sha256="4bd2f2bf1208beb613fef0e6cc4728483cecae1097b74b54baaf54ce22569c42",
+    subject_subdir=None,
+    corpus_subdir=None,
     corpus_id_count=250,
     mutation_group="sealed",
     control_id="control",
+    inert_control_ids=(),
     site_ids=tuple("sealed-%d" % index for index in range(1, 8)),
     operator="whole-condition-to-false",
     execution_paths=(
@@ -167,8 +188,48 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
         "execution/aee-checker-sealed/probe.sh",
         "execution/aee-checker-sealed/cargo-config.toml",
     ),
+    container_context_relpath="execution/aee-checker-sealed",
     candidate_build=("cargo", "build", "--release", "--locked", "--offline"),
     candidate_entrypoint=(
         "/work/target/release/aee-checker", "/input/vectors", "--json", "/work/report.json",
+    ),
+)
+
+
+OWNED_CONTAINED_V1_CONTRACT = SealedMeasurementContract(
+    name="owned-contained-v1",
+    pins_relpath=("measurements", "owned-contained-v1"),
+    instrument_commit="0e69b834aa62c7f0fb2bff331884d6ee66a97bfe",
+    pin_digests=(
+        ("control.json", "b34629777838968cb239e4c9bc533c740409c58e7d245722e8c5408a94ac1057"),
+        ("manifest.json", "d73dbef6b535bc61ecb8855a59bed8228c760fc9c978d6e26dc50b3162c8ac26"),
+        ("pins.json", "442c9b891362f1bc28350d6050535fbacf6186c30d5995f0ed4f2f38cb0b2ab4"),
+        ("sites.json", "3de344ef7db927aae69b41c379379d67512685796589e55141f840f293a830ce"),
+    ),
+    adapter_relpath="adapters/owned_contained_v1.py",
+    adapter_sha256="30de9ed72184ff3d90b20be919312a4f4c92a786c68c33480150b6308ac209d1",
+    corpus_manifest_sha256="979b9367f9662d2df45ec1078f0b4b4466e77a0dca163ea19ca2a60c44c267ec",
+    subject_tree_sha256="6a6ae2e47737c972f89b7017faa9842b1a8c3ed0b881bc0d6e293dfd0f13b7ca",
+    corpus_tree_sha256="83e6b981cf2b55812dd6d47c7dcd45da855d8019206744962e8ec0239888ddd3",
+    subject_subdir="fixtures/contained-v1-owned/candidate",
+    corpus_subdir="fixtures/contained-v1-owned/corpus",
+    corpus_id_count=4,
+    mutation_group="owned",
+    control_id="control-positive",
+    inert_control_ids=("control-inert",),
+    site_ids=("negative-guard", "upper-guard"),
+    operator="whole-condition-to-false",
+    execution_paths=tuple(
+        "adapters/owned_contained_v1.py" if path == "adapters/aee_checker_sealed.py"
+        else "measurements/owned-contained-v1/manifest.json"
+        if path == "measurements/aee-checker-25b9dfa/manifest.json"
+        else path
+        for path in AEE_CHECKER_SEALED_CONTRACT.execution_paths
+    ),
+    container_context_relpath="execution/aee-checker-sealed",
+    candidate_build=("cargo", "build", "--release", "--locked", "--offline"),
+    candidate_entrypoint=(
+        "/work/target/release/corpus-adequacy-owned-fixture",
+        "/input/vectors", "--json", "/work/report.json",
     ),
 )

@@ -164,6 +164,9 @@ def authorized_step_spec(*, contract=AEE_CHECKER_SEALED_CONTRACT) -> tuple:
         {"id": "baseline", "kind": "baseline", "scored": False},
         {"id": contract.control_id, "kind": "must-die", "scored": False},
     ) + tuple(
+        {"id": control_id, "kind": "must-stay", "scored": False}
+        for control_id in contract.inert_control_ids
+    ) + tuple(
         {"id": site_id, "kind": "mutant", "operator": contract.operator}
         for site_id in contract.site_ids
     )
@@ -199,7 +202,7 @@ def required_sequence(sites_doc: dict, *, contract=AEE_CHECKER_SEALED_CONTRACT) 
 
 
 def voids_before_scored(step: dict, disposition: str) -> bool:
-    return step.get("kind") in ("baseline", "must-die") and disposition == "void"
+    return step.get("kind") in ("baseline", "must-die", "must-stay") and disposition == "void"
 
 
 def classify_observation(step: dict, observation: dict,
@@ -217,7 +220,7 @@ def classify_observation(step: dict, observation: dict,
         if incomplete:
             return "void"
         return "passed" if status == "passed" else "void"
-    if kind == "must-die":
+    if kind in ("must-die", "must-stay"):
         if incomplete:
             return "void"
         if observation.get("scored") is not False:

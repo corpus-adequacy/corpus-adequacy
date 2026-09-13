@@ -352,7 +352,7 @@ class InnerNormalize(unittest.TestCase):
 
     def test_copy_mutation_local_four_key_extractor_turns_red(self):
         src = Path(cand.__file__).read_text()
-        needle = "projected = sealed_adapter.project(inner, expected)"
+        needle = "projected = adapter.project(inner, expected)"
         self.assertIn(needle, src)
         mutated = src.replace(
             needle,
@@ -878,15 +878,17 @@ class ClosedInnerProtocol(unittest.TestCase):
     if type(inner) is not dict:
         return _unproved("malformed")
     try:
-        expected = sealed_adapter.expected_ids(vectors)
-        projected = sealed_adapter.project(inner, expected)
+        adapter = sealed_adapter_for(contract)
+        expected = adapter.expected_ids(vectors)
+        projected = adapter.project(inner, expected)
     except (PrepareError, ca.ManifestError, KeyError, TypeError, ValueError, OSError):
         return _unproved("projection")
 """,
             """    try:
         inner = load_strict(body.encode("utf-8"))
-        expected = sealed_adapter.expected_ids(vectors)
-        projected = sealed_adapter.project(inner, expected)
+        adapter = sealed_adapter_for(contract)
+        expected = adapter.expected_ids(vectors)
+        projected = adapter.project(inner, expected)
     except (PrepareError, ca.ManifestError, KeyError, TypeError, ValueError, OSError):
         return _unproved("projection")
     if type(inner) is not dict:

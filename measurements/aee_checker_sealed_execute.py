@@ -79,9 +79,15 @@ def bind_authorized_mutation_order(*, manifest: dict, sites: dict,
     if set(by_id) != {step["id"] for step in steps[1:]}:
         raise ExecuteError("manifest mutation ids")
     expected_control = dict(control)
-    if not by_id[contract.control_id].get("control") or not _same_mutation(
+    if by_id[contract.control_id].get("control") is not True or \
+            by_id[contract.control_id].get("control_polarity", "positive") != "positive" or not _same_mutation(
             by_id[contract.control_id], expected_control):
         raise ExecuteError("manifest control drift")
+    for control_id in contract.inert_control_ids:
+        row = by_id[control_id]
+        if (row.get("control") is not True or
+                row.get("control_polarity") != "inert"):
+            raise ExecuteError("manifest inert control drift")
     site_rows = sites.get("sites") if type(sites) is dict else None
     if type(site_rows) is not list or len(site_rows) != len(contract.site_ids):
         raise ExecuteError("manifest site sequence")
@@ -92,7 +98,7 @@ def bind_authorized_mutation_order(*, manifest: dict, sites: dict,
             "replacement": site.get("manifest_replacement"),
         }
         row = by_id.get(site.get("id"))
-        if row is None or row.get("control") or not _same_mutation(row, expected):
+        if row is None or row.get("control", False) is not False or not _same_mutation(row, expected):
             raise ExecuteError("manifest site drift")
     return tuple(by_id[step["id"]]["label"] for step in steps[1:])
 

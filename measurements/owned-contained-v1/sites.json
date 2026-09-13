@@ -1,0 +1,18 @@
+{
+  "sites": [
+    {
+      "anchor": "if value < 0",
+      "id": "negative-guard",
+      "label": "remove owned-fixture negative guard",
+      "manifest_replacement": "if false",
+      "replacement": "false"
+    },
+    {
+      "anchor": "if value > maximum",
+      "id": "upper-guard",
+      "label": "remove owned-fixture upper guard",
+      "manifest_replacement": "if false",
+      "replacement": "false"
+    }
+  ]
+}
