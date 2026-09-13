@@ -427,7 +427,7 @@ def read_bounded_regular_file(path: Path, *, cap: int | None = None) -> bytes:
                 "input %s changed between lstat and open; refusing" % path)
         if st.st_size > cap:
             raise ManifestError(
-                "input %s exceeds the projection cap of %d bytes" % (path, cap))
+                "input %s exceeds the input cap of %d bytes" % (path, cap))
         data = bytearray()
         while len(data) <= cap:
             chunk = os.read(fd, min(65536, cap + 1 - len(data)))
@@ -436,7 +436,7 @@ def read_bounded_regular_file(path: Path, *, cap: int | None = None) -> bytes:
             data.extend(chunk)
         if len(data) > cap:
             raise ManifestError(
-                "input %s exceeds the projection cap of %d bytes" % (path, cap))
+                "input %s exceeds the input cap of %d bytes" % (path, cap))
         return bytes(data)
     finally:
         os.close(fd)
@@ -1239,7 +1239,7 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
 
 def load_manifest(path: Path) -> dict:
     path = Path(path)
-    return load_manifest_bytes(path.read_bytes(), path)
+    return load_manifest_bytes(read_bounded_regular_file(path), path)
 
 
 def _acknowledged_holes(m: dict) -> dict:

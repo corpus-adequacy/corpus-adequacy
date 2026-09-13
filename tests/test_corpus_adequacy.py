@@ -4215,6 +4215,163 @@ class SurvivorFindings(unittest.TestCase):
                     self.assertEqual(rows[0]["vector_id"], "v1")
 
 
+class PositionalManifestInputBounds(unittest.TestCase):
+    def _manifest_bytes(self, size=None):
+        raw = json.dumps({
+            "schema": ca.SCHEMA,
+            "implementation": "implementation.py",
+            "vectors": "vectors.json",
+            "mutants": {"all": [{
+                "label": "bounded input",
+                "anchor": "before",
+                "replacement": "after",
+            }]},
+        }, sort_keys=True).encode("utf-8")
+        if size is None:
+            return raw
+        self.assertLessEqual(len(raw), size)
+        return raw + (b" " * (size - len(raw)))
+
+    def test_positional_manifest_refuses_cap_plus_one_before_parser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized.json"
+            path.write_bytes(b"x" * (ca.OUTPUT_CAP_BYTES + 1))
+            with mock.patch.object(
+                    ca, "load_manifest_bytes",
+                    side_effect=AssertionError("oversized manifest reached parser")) as parser:
+                with self.assertRaisesRegex(ca.ManifestError, "input cap"):
+                    ca.load_manifest(path)
+            parser.assert_not_called()
+
+    def test_positional_manifest_uses_one_bounded_reader_and_one_parser(self):
+        bounded = self._manifest_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_bytes(b"wrong bytes")
+            marker = object()
+            with mock.patch.object(
+                    ca, "read_bounded_regular_file", return_value=bounded) as reader, \
+                    mock.patch.object(
+                        ca, "load_manifest_bytes", return_value=marker) as parser:
+                self.assertIs(ca.load_manifest(path), marker)
+        reader.assert_called_once_with(path)
+        parser.assert_called_once_with(bounded, path)
+
+    def test_positional_manifest_refuses_a_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            target.write_bytes(self._manifest_bytes())
+            link = root / "manifest.json"
+            try:
+                link.symlink_to(target)
+            except OSError as exc:
+                self.skipTest("symlink unavailable: %s" % exc)
+            with self.assertRaisesRegex(ca.ManifestError, "not a regular file"):
+                ca.load_manifest(link)
+
+    def test_exact_cap_preserves_exact_bytes_and_digest(self):
+        raw = self._manifest_bytes(ca.OUTPUT_CAP_BYTES)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_bytes(raw)
+            loaded = ca.load_manifest(path)
+        self.assertEqual(loaded["_manifest_sha256"],
+                         "sha256:" + hashlib.sha256(raw).hexdigest())
+
+    def test_positional_loader_source_has_no_unbounded_read(self):
+        source = inspect.getsource(ca.load_manifest)
+        self.assertNotIn("read_bytes", source)
+        self.assertIn("read_bounded_regular_file", source)
+
+    def test_invalid_positional_inputs_are_controlled_json_cli_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = root / "missing.json"
+            child_directory = root / "directory"
+            child_directory.mkdir()
+            oversized = root / "oversized.json"
+            oversized.write_bytes(b"x" * (ca.OUTPUT_CAP_BYTES + 1))
+            target = root / "target.json"
+            target.write_bytes(self._manifest_bytes())
+            symlink = root / "symlink.json"
+            try:
+                symlink.symlink_to(target)
+            except OSError as exc:
+                self.skipTest("symlink unavailable: %s" % exc)
+            for path in (missing, child_directory, oversized, symlink):
+                with self.subTest(path=path.name):
+                    proc = subprocess.run(
+                        [sys.executable, str(ca.__file__), str(path), "--json"],
+                        capture_output=True, timeout=5)
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertNotIn(b"Traceback", proc.stderr)
+                    envelope = json.loads(proc.stdout)
+                    self.assertEqual(envelope["schema"], ca.ERROR_SCHEMA)
+
+    @unittest.skipIf(not hasattr(os, "mkfifo"), "os.mkfifo is unavailable")
+    def test_fifo_is_a_controlled_cli_error_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fifo = Path(directory) / "manifest.fifo"
+            os.mkfifo(fifo)
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), str(fifo), "--json"],
+                capture_output=True, timeout=5)
+        self.assertEqual(proc.returncode, 2)
+        self.assertNotIn(b"Traceback", proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["schema"], ca.ERROR_SCHEMA)
+
+    def test_tracked_manifest_inventory_is_below_the_shared_cap(self):
+        repository = Path(ca.__file__).resolve().parent
+        proc = subprocess.run(
+            ["git", "ls-files", "-z", "*.json"], cwd=repository,
+            capture_output=True, check=True)
+        manifests = sorted(
+            name for name in proc.stdout.decode("utf-8").split("\0")
+            if name.endswith("/manifest.json"))
+        expected = {
+            "fixtures/algovoi-jcs-edge-aa53149c/manifest.json": 43225,
+            "measurements/aee-checker-25b9dfa/manifest.json": 2952,
+            "measurements/owned-contained-v1/manifest.json": 1846,
+            "measurements/tersign-0e560c1/manifest.json": 4502,
+            "measurements/tersign-1cc5ea32/manifest.json": 4502,
+        }
+        self.assertEqual(manifests, sorted(expected))
+        observed = {name: (repository / name).stat().st_size for name in manifests}
+        self.assertEqual(observed, expected)
+        self.assertEqual(max(observed.values()), 43225)
+        self.assertLess(max(observed.values()), ca.OUTPUT_CAP_BYTES)
+
+    def _assert_loader_route_preserves_report_bytes(self, runner):
+        fixture = ReportShapeParityAcrossRunners()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = (fixture._module(root) if runner == "module"
+                    else fixture._process(root, runner))
+            bounded = ca.encode_report_v0(
+                ca.run(path, execution_profile="trusted-local"))
+
+            def legacy_loader(manifest_path):
+                manifest_path = Path(manifest_path)
+                return ca.load_manifest_bytes(manifest_path.read_bytes(), manifest_path)
+
+            with mock.patch.object(ca, "load_manifest", side_effect=legacy_loader):
+                legacy = ca.encode_report_v0(
+                    ca.run(path, execution_profile="trusted-local"))
+        self.assertEqual(bounded, legacy)
+
+    def test_module_report_bytes_are_preserved_by_the_loader_route(self):
+        self._assert_loader_route_preserves_report_bytes("module")
+
+    @unittest.skipIf(ca.fcntl is None, "process scoring requires an advisory lock")
+    def test_process_report_bytes_are_preserved_by_the_loader_route(self):
+        self._assert_loader_route_preserves_report_bytes("process")
+
+    @unittest.skipIf(ca.fcntl is None, "batch scoring requires an advisory lock")
+    def test_batch_report_bytes_are_preserved_by_the_loader_route(self):
+        self._assert_loader_route_preserves_report_bytes("batch")
+
+
 class SurvivorConsumerClosedSet(unittest.TestCase):
     """Issue #96: --survivors refuses unknown keys at report and mutant-row depth."""
 
