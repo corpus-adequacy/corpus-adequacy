@@ -238,14 +238,31 @@ class OwnedHostedRailContract(unittest.TestCase):
                          "ImageOS": "ubuntu24", "ImageVersion": "20260913.1"},
                 rail=OWNED_V1_RAIL)
             destination = root / "release-assets"
+            load_prepare_v2 = owned.sealed_run.load_prepare_v2
+            read_bounded = owned.ca.read_bounded_regular_file
             with mock.patch.object(publication, "run_gate",
                                    side_effect=AssertionError("packet assembly reached gate")), \
                     mock.patch.object(owned.sealed_run, "prepare",
-                                      side_effect=AssertionError("packet assembly reran PREPARE")):
+                                      side_effect=AssertionError("packet assembly reran PREPARE")), \
+                    mock.patch.object(owned.hosted_packet, "fetch_packet",
+                                      side_effect=AssertionError("packet assembly fetched")), \
+                    mock.patch.object(owned.sealed_run, "load_prepare_v2",
+                                      wraps=load_prepare_v2) as load_prepare, \
+                    mock.patch.object(owned.ca, "read_bounded_regular_file",
+                                      wraps=read_bounded) as bounded_read:
                 result = owned.authorize_packet_owned(
                     prepare_path=prepare_path, prepare_record_path=record_path,
                     expected_prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
                     expected_runner_revision=runner, out_dir=destination)
+            self.assertEqual(load_prepare.call_count, 2)
+            for call in load_prepare.call_args_list:
+                self.assertEqual(call.args, (prepare_raw,))
+                self.assertIs(call.kwargs["contract"], OWNED_CONTAINED_V1_CONTRACT)
+            self.assertGreaterEqual(bounded_read.call_count, 4)
+            self.assertEqual(bounded_read.call_args_list[0].args, (prepare_path,))
+            self.assertEqual(bounded_read.call_args_list[1].args, (record_path,))
+            self.assertTrue(all(call.kwargs["cap"] == hosted_packet.MAX_FILE_BYTES
+                                for call in bounded_read.call_args_list))
             self.assertEqual(set(p.name for p in destination.iterdir()), {
                 *OWNED_V1_RAIL.packet_filenames,
                 OWNED_V1_RAIL.packet_manifest_filename,
@@ -340,8 +357,35 @@ class OwnedHostedRailContract(unittest.TestCase):
             self.assertFalse(destination.with_name(destination.name + ".lease").exists())
             self.assertEqual(list(root.glob(destination.name + ".tmp-*")), [])
 
+    def test_authorize_packet_refuses_oversized_inputs_before_staging(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            cases = (
+                (b"xx", b"x", "prepare"),
+                (b"x", b"xx", "record"),
+            )
+            for prepare_raw, record_raw, name in cases:
+                prepare_path = root / (name + "-prepare.json")
+                record_path = root / (name + "-record.json")
+                prepare_path.write_bytes(prepare_raw)
+                record_path.write_bytes(record_raw)
+                with self.subTest(name=name), \
+                        mock.patch.object(hosted_packet, "MAX_FILE_BYTES", 1), \
+                        mock.patch.object(owned, "begin_atomic_dest",
+                                          side_effect=AssertionError("staging reached")), \
+                        self.assertRaises(owned.ca.ManifestError):
+                    owned.authorize_packet_owned(
+                        prepare_path=prepare_path, prepare_record_path=record_path,
+                        expected_prepare_sha256="a" * 64,
+                        expected_runner_revision="b" * 40,
+                        out_dir=root / (name + "-out"))
+
     def test_authorize_packet_cli_has_no_free_identity_or_contract_selectors(self):
-        help_text = owned.build_parser().format_help()
+        parser = owned.build_parser()
+        subparsers = next(action for action in parser._actions
+                          if getattr(action, "choices", None)
+                          and "authorize-packet" in action.choices)
+        help_text = subparsers.choices["authorize-packet"].format_help()
         for forbidden in (
             "--profile", "--schema", "--contract", "--candidate-revision",
             "--image-digest", "--rail",
