@@ -367,6 +367,11 @@ def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = No
                 {**parts, "candidate_profile": dict(CANDIDATE_RESOURCE_PROFILE)},
                 state["staging"] / "prepare.v1.json",
             )
+        elif schema == PREPARE_V2_SCHEMA:
+            raw = emit_prepare_v2(
+                {**parts, "candidate_profile": dict(CANDIDATE_RESOURCE_PROFILE_V2)},
+                state["staging"] / "prepare.v2.json",
+            )
         else:
             raise PrepareError("prepare schema")
         commit_atomic_dest(state)
@@ -581,17 +586,20 @@ def main(argv: list[str]) -> int:
         pins = Path(argv[2]) if len(argv) > 2 else pins_default
         verify_phase_a_frozen(pins, adapter=adapter)
         return 0
-    if len(argv) in (4, 5) and argv[1] in ("prepare", "prepare-v1"):
+    if len(argv) in (4, 5) and argv[1] in ("prepare", "prepare-v1", "prepare-v2"):
         image_id = argv[4] if len(argv) == 5 else None
         kwargs = {"root": _ROOT, "adapter": adapter, "image_id": image_id}
         if argv[1] == "prepare-v1":
             kwargs["schema"] = PREPARE_V1_SCHEMA
+        elif argv[1] == "prepare-v2":
+            kwargs["schema"] = PREPARE_V2_SCHEMA
         prepare(Path(argv[2]), Path(argv[3]), **kwargs)
         return 0
     sys.stderr.write(
         "usage: aee_checker_sealed_run.py verify-phase-a [pins-dir]\n"
         "       aee_checker_sealed_run.py prepare <pins-dir> <out-dir> [image-id]\n"
-        "       aee_checker_sealed_run.py prepare-v1 <pins-dir> <out-dir> [image-id]\n")
+        "       aee_checker_sealed_run.py prepare-v1 <pins-dir> <out-dir> [image-id]\n"
+        "       aee_checker_sealed_run.py prepare-v2 <pins-dir> <out-dir> [image-id]\n")
     return 2
 
 
