@@ -747,6 +747,19 @@ class PrepareEvidence(unittest.TestCase):
                 run.emit_prepare_v0(parts, dest)
             self.assertRegex(str(ctx.exception).lower(), r"empty|vendor")
 
+    def test_empty_vendor_digest_is_admitted_only_by_explicit_contract(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "prepare.v0.json"
+            parts = self._parts()
+            parts["materialized"]["vendor_sha256"] = EMPTY_VENDOR
+            contract = dataclasses.replace(
+                run.AEE_CHECKER_SEALED_CONTRACT,
+                vendor_tree_requirement="canonical-empty",
+            )
+            doc = json.loads(run.emit_prepare_v0(
+                parts, dest, contract=contract).decode("utf-8"))
+        self.assertEqual(doc["materialized"]["vendor_sha256"], EMPTY_VENDOR)
+
     def test_oci_drops_unexercised_cpus_and_nofile(self):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "prepare.v0.json"

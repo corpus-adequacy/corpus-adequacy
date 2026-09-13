@@ -30,7 +30,6 @@ from contained_oci import (  # noqa: E402
 )
 from aee_checker_sealed_common import (  # noqa: E402
     DECLARED_CEILINGS,
-    EMPTY_SHA256,
     FROZEN_CORPUS_MANIFEST_SHA256,
     FROZEN_CORPUS_TREE_SHA256,
     FROZEN_SUBJECT_TREE_SHA256,
@@ -75,6 +74,7 @@ from aee_checker_sealed_materialize import (  # noqa: E402
     require_frozen_manifest_sha,
     require_frozen_trees,
     require_vendor_outside,
+    require_vendor_tree_digest,
     require_vendor_toolchain,
     stream_archive_member,
     tree_sha256,
@@ -403,8 +403,8 @@ def _prepare_v0_doc(parts: dict, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> dic
         raise PrepareError("prepare must not record per-vector outcomes")
     if materialized.get("subject_binary") is not False:
         raise PrepareError("subject binary is not produced here")
-    if materialized.get("vendor_sha256") == EMPTY_SHA256:
-        raise PrepareError("empty vendor")
+    require_vendor_tree_digest(
+        materialized.get("vendor_sha256"), contract=contract)
     if materialized.get("corpus_id_count") != contract.corpus_id_count:
         raise PrepareError(
             "corpus must list exactly %d unique ids" % contract.corpus_id_count)

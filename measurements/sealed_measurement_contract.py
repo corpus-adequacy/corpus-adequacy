@@ -57,6 +57,7 @@ class SealedMeasurementContract:
     container_context_relpath: str
     candidate_build: tuple[str, ...]
     candidate_entrypoint: tuple[str, ...]
+    vendor_tree_requirement: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -133,6 +134,9 @@ class SealedMeasurementContract:
             _require_tuple(command, where)
             if any(not isinstance(value, str) or not value for value in command):
                 raise ValueError(where)
+        if type(self.vendor_tree_requirement) is not str or self.vendor_tree_requirement not in (
+                "nonempty", "canonical-empty"):
+            raise ValueError("vendor_tree_requirement")
 
     def pin_digest(self, name: str) -> str:
         for candidate, digest in self.pin_digests:
@@ -193,6 +197,7 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
     candidate_entrypoint=(
         "/work/target/release/aee-checker", "/input/vectors", "--json", "/work/report.json",
     ),
+    vendor_tree_requirement="nonempty",
 )
 
 
@@ -232,4 +237,5 @@ OWNED_CONTAINED_V1_CONTRACT = SealedMeasurementContract(
         "/work/target/release/corpus-adequacy-owned-fixture",
         "/input/vectors", "--json", "/work/report.json",
     ),
+    vendor_tree_requirement="canonical-empty",
 )
