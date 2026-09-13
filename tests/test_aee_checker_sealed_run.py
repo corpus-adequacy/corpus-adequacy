@@ -2491,13 +2491,13 @@ class ExplicitPrepareImage(unittest.TestCase):
             }),
         )
 
-    def _run_prepare(self, dest, image_id=None, root=None):
+    def _run_prepare(self, dest, image_id=None, root=None, schema=run.PREPARE_SCHEMA):
         root = root or dest.parent / "root"
         pins = dest.parent / "pins"
         patches = self._patches()
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
                 patches[5], patches[6], patches[7], patches[8], patches[9]:
-            return run.prepare(pins, dest, root=root, image_id=image_id)
+            return run.prepare(pins, dest, root=root, image_id=image_id, schema=schema)
 
     def test_omitted_image_still_builds_once(self):
         with tempfile.TemporaryDirectory() as d:
@@ -2522,6 +2522,17 @@ class ExplicitPrepareImage(unittest.TestCase):
             right = self._run_prepare(Path(d) / "out-b", image_id=self.IMAGE)
         self.assertEqual(left, right)
         self.assertIn(self.IMAGE.encode("ascii"), left)
+
+    def test_production_prepare_emits_v2_only_when_v2_schema_is_selected(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(run, "emit_prepare_v2", wraps=run.emit_prepare_v2) as emit:
+            raw = self._run_prepare(
+                Path(d) / "out-v2", image_id=self.IMAGE, schema=run.PREPARE_V2_SCHEMA)
+        emit.assert_called_once()
+        doc = json.loads(raw)
+        self.assertEqual(doc["schema"], run.PREPARE_V2_SCHEMA)
+        self.assertEqual(
+            doc["candidate_profile"], contained.CANDIDATE_RESOURCE_PROFILE_V2)
 
     def test_malformed_or_absent_local_image_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
@@ -2564,6 +2575,22 @@ class ExplicitPrepareImage(unittest.TestCase):
         with mock.patch.object(run, "prepare", side_effect=fake_prepare):
             rc = run.main(["aee_checker_sealed_run.py", "prepare", "pins", "out"])
         self.assertEqual(captured["image_id"], None)
+
+    def test_prepare_v2_cli_selects_v2_schema_without_an_operator_profile_input(self):
+        captured = {}
+
+        def fake_prepare(pins, dest, *, root, adapter, image_id=None, schema=None):
+            captured.update(image_id=image_id, schema=schema)
+            return b"{}\n"
+
+        with mock.patch.object(run, "prepare", side_effect=fake_prepare):
+            rc = run.main([
+                "aee_checker_sealed_run.py", "prepare-v2", "pins", "out", self.IMAGE])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured, {
+            "image_id": self.IMAGE,
+            "schema": run.PREPARE_V2_SCHEMA,
+        })
 
 
 if __name__ == "__main__":
@@ -2623,13 +2650,6 @@ class PrepareV2Codec(unittest.TestCase):
             v2 = run.emit_prepare_v2(self._parts(), Path(raw) / "p2.json")
         with self.assertRaises(PrepareError):
             run.load_prepare_v1(v2)
-
-    def test_production_prepare_dispatch_does_not_emit_v2(self):
-        """Codec infrastructure only: no CLI or production path produces prepare.v2 here."""
-        import inspect as _inspect
-        src = _inspect.getsource(run.prepare)
-        self.assertNotIn("PREPARE_V2_SCHEMA", src)
-        self.assertNotIn("emit_prepare_v2", src)
 
     def test_execute_and_driver_refuse_v2_under_v0_before_any_effect(self):
         """F1: call the real funnels, do not search their source.
