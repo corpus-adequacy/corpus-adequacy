@@ -22,6 +22,8 @@ tests/fixtures/publication/** text eol=lf
 .github/ISSUE_TEMPLATE/add-corpus.yml text eol=lf
 .github/ISSUE_TEMPLATE/publish-measurement.yml text eol=lf
 .github/workflows/pages.yml text eol=lf
+.github/workflows/contained-hosted-prepare.yml text eol=lf
+.github/workflows/contained-hosted-publication.yml text eol=lf
 site/index.html text eol=lf
 site/runs/** text eol=lf
 

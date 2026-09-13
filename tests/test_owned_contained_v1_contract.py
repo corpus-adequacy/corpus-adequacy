@@ -187,7 +187,11 @@ class OwnedContainedV1ContractTests(unittest.TestCase):
                 selected_subdir="fixtures/contained-v1-owned/candidate")
             self.assertEqual((dest / "src/check.rs").read_bytes(), b"owned")
             self.assertEqual(
-                sorted(str(path.relative_to(dest)) for path in dest.rglob("*") if path.is_file()),
+                sorted(
+                    path.relative_to(dest).as_posix()
+                    for path in dest.rglob("*")
+                    if path.is_file()
+                ),
                 ["src/check.rs"],
             )
 
