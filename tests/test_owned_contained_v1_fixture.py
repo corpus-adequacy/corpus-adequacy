@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import unittest
 from pathlib import Path
 
@@ -50,13 +51,20 @@ class OwnedContainedV1Fixture(unittest.TestCase):
         self.assertEqual(tuple(row["id"] for row in rows), EXPECTED_IDS)
         self.assertEqual(len({row["id"] for row in rows}), len(rows))
         self.assertEqual(
-            {row["path"] for row in rows},
+            {row["file"] for row in rows},
             {path.name for path in VECTORS.glob("*.json")} - {"MANIFEST.json"},
         )
         self.assertEqual(
-            [json.loads((VECTORS / row["path"]).read_bytes()) for row in rows],
+            [json.loads((VECTORS / row["file"]).read_bytes()) for row in rows],
             [{"value": 5}, {"value": 10}, {"value": -1}, {"value": 11}],
         )
+
+        digest = hashlib.sha256()
+        for row in rows:
+            digest.update(row["file"].encode("utf-8"))
+            digest.update(b"\0")
+            digest.update((VECTORS / row["file"]).read_bytes())
+        self.assertEqual(manifest["corpusDigest"], digest.hexdigest())
 
     def test_source_exposes_the_two_rules_and_one_inert_anchor(self):
         source = (CANDIDATE / "src" / "check.rs").read_text(encoding="utf-8")
