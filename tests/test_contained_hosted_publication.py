@@ -1462,14 +1462,14 @@ class SourceMutations(unittest.TestCase):
         needle = (
             '    setup_doc = setup_status_doc(\n'
             '        status="refused", reason=reason, bindings=bindings,\n'
-            '        workflow_identity=workflow_identity)\n'
+            '        workflow_identity=workflow_identity, rail=rail)\n'
             '    envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)\n'
         )
         self.assertEqual(original.count(needle), 1)
         restored = (
             '    setup_doc = setup_status_doc(\n'
             '        status="refused", reason=reason, bindings=bindings,\n'
-            '        workflow_identity=workflow_identity)\n'
+            '        workflow_identity=workflow_identity, rail=rail)\n'
             '    envelope_doc = {\n'
             '        "schema": HOSTED_SCHEMA,\n'
             '        "kind": "stale-success-restored",\n'
