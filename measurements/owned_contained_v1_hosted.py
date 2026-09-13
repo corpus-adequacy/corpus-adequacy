@@ -4,13 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
 
+import aee_checker_sealed_authorize as authorize
 import aee_checker_sealed_run as sealed_run
 import contained_hosted_publication as publication
+import corpus_adequacy as ca
 import hosted_packet
+from aee_checker_sealed_materialize import (
+    abort_atomic_dest,
+    begin_atomic_dest,
+    commit_atomic_dest,
+)
 from hosted_rail_contract import OWNED_V1_RAIL
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +48,91 @@ def fetch_owned(*, repository, tag, manifest_sha256) -> dict:
         workspace_root=ROOT, dest=RAIL.packet_dirname, rail=RAIL)
 
 
+def authorize_packet_owned(*, prepare_path, prepare_record_path,
+                           expected_prepare_sha256, expected_runner_revision,
+                           out_dir) -> dict:
+    """Validate hosted PREPARE bytes and atomically assemble the closed release assets.
+
+    This is an offline owner step. It does not fetch, publish, dispatch, execute a
+    candidate, or call Docker.
+    """
+    rail = RAIL
+    prepare_raw = ca.read_bounded_regular_file(
+        Path(prepare_path), cap=hosted_packet.MAX_FILE_BYTES)
+    record_raw = ca.read_bounded_regular_file(
+        Path(prepare_record_path), cap=hosted_packet.MAX_FILE_BYTES)
+    hosted_packet.validate_prepare_record(
+        record_raw, prepare_raw,
+        expected_prepare_sha256=expected_prepare_sha256,
+        expected_runner_revision=expected_runner_revision, rail=rail)
+    prepare_doc = sealed_run.load_prepare_v2(
+        prepare_raw, contract=rail.measurement)
+    bindings = publication.require_bindings(
+        prepare_doc["pins"]["subject_commit"],
+        prepare_doc["execution"]["commit"],
+        prepare_doc["toolchain"]["image_id"],
+    )
+    if bindings["runner_revision"] != expected_runner_revision:
+        raise hosted_packet.PacketError("prepare_record_runner")
+    publication.check_prepare_bindings(prepare_doc, bindings=bindings)
+
+    state = begin_atomic_dest(Path(out_dir))
+    try:
+        staging = state["staging"]
+        authorize_raw = authorize.emit_authorize_v0(
+            prepare_raw, staging / rail.authorize_filename,
+            contract=rail.measurement)
+        authorize.validate_authorize(
+            authorize_raw, prepare_raw, contract=rail.measurement)
+        bindings_raw = (json.dumps(bindings, sort_keys=True) + "\n").encode("utf-8")
+        payloads = {
+            rail.authorize_filename: authorize_raw,
+            rail.bindings_filename: bindings_raw,
+            rail.prepare_filename: prepare_raw,
+        }
+        manifest_raw = hosted_packet.encode_packet_manifest(payloads, rail=rail)
+        hosted_packet.write_new_regular_file(
+            staging / rail.bindings_filename, bindings_raw)
+        hosted_packet.write_new_regular_file(
+            staging / rail.prepare_filename, prepare_raw)
+        hosted_packet.write_new_regular_file(
+            staging / rail.packet_manifest_filename, manifest_raw)
+
+        files = hosted_packet.parse_manifest(manifest_raw, rail=rail)
+        if set(path.name for path in staging.iterdir()) != {
+                *rail.packet_filenames, rail.packet_manifest_filename}:
+            raise hosted_packet.PacketError("packet_entries")
+        for name, digest in files.items():
+            raw = ca.read_bounded_regular_file(
+                staging / name, cap=hosted_packet.MAX_FILE_BYTES)
+            if hashlib.sha256(raw).hexdigest() != digest:
+                raise hosted_packet.PacketError("file_digest")
+        final_prepare = ca.read_bounded_regular_file(
+            staging / rail.prepare_filename, cap=hosted_packet.MAX_FILE_BYTES)
+        final_authorize = ca.read_bounded_regular_file(
+            staging / rail.authorize_filename, cap=hosted_packet.MAX_FILE_BYTES)
+        sealed_run.load_prepare_v2(final_prepare, contract=rail.measurement)
+        authorize.validate_authorize(
+            final_authorize, final_prepare, contract=rail.measurement)
+        publication.load_dispatch_bindings(
+            staging, expected=bindings, rail=rail)
+        commit_atomic_dest(state)
+    except BaseException as primary:
+        try:
+            abort_atomic_dest(state)
+        except BaseException as cleanup_exc:
+            sealed_run.preserve_cleanup_failure(
+                primary, "owned packet atomic abort", cleanup_exc)
+        raise
+    return {
+        "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        "prepare_sha256": hashlib.sha256(prepare_raw).hexdigest(),
+        "bindings": bindings,
+        "files": files,
+        "candidate_executed": False,
+    }
+
+
 def gate_owned(*, candidate_revision, runner_revision, image_digest,
                packet_manifest_sha256, out_dir) -> dict:
     return publication.run_gate(
@@ -60,6 +153,12 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--repository", required=True)
     fetch.add_argument("--tag", required=True)
     fetch.add_argument("--manifest-sha256", required=True)
+    packet = sub.add_parser("authorize-packet")
+    packet.add_argument("--prepare", required=True)
+    packet.add_argument("--prepare-record", required=True)
+    packet.add_argument("--prepare-sha256", required=True)
+    packet.add_argument("--runner-revision", required=True)
+    packet.add_argument("--out", required=True)
     gate = sub.add_parser("gate")
     gate.add_argument("--candidate-revision", required=True)
     gate.add_argument("--runner-revision", required=True)
@@ -77,6 +176,13 @@ def main(argv=None) -> int:
         elif args.command == "fetch":
             result = fetch_owned(repository=args.repository, tag=args.tag,
                                  manifest_sha256=args.manifest_sha256)
+        elif args.command == "authorize-packet":
+            result = authorize_packet_owned(
+                prepare_path=args.prepare,
+                prepare_record_path=args.prepare_record,
+                expected_prepare_sha256=args.prepare_sha256,
+                expected_runner_revision=args.runner_revision,
+                out_dir=args.out)
         else:
             result = gate_owned(
                 candidate_revision=args.candidate_revision,
@@ -85,7 +191,8 @@ def main(argv=None) -> int:
                 packet_manifest_sha256=args.packet_manifest_sha256,
                 out_dir=args.out)
     except (hosted_packet.PacketError, publication.HostedPublicationError,
-            sealed_run.PrepareError) as exc:
+            sealed_run.PrepareError, authorize.AuthorizeError,
+            ca.ManifestError) as exc:
         print("owned hosted rail refused: %s" % exc, file=sys.stderr)
         return 2
     print(json.dumps(result, sort_keys=True))

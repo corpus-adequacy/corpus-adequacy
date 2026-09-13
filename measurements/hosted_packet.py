@@ -79,6 +79,11 @@ PREPARE_RECORD_NON_CLAIMS = (
     "ImageOS and ImageVersion are the runner image's own labels, not an attestation.",
     "Not authentication, endorsement, audit or certification.",
 )
+PREPARE_RECORD_KEYS = (
+    "schema", "prepare_file", "prepare_sha256", "prepare_bytes",
+    "github_sha", "github_workflow_sha", "image_os", "image_version",
+    "non_claims",
+)
 
 _HEX = frozenset("0123456789abcdef")
 _SEGMENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
@@ -170,6 +175,77 @@ def parse_manifest(raw: bytes, *, rail=LEGACY_RAIL) -> dict:
     if set(files) != set(rail.packet_filenames):
         raise PacketError("manifest_files_incomplete")
     return {name: files[name] for name in rail.packet_filenames}
+
+
+def encode_packet_manifest(payloads: dict, *, rail=LEGACY_RAIL) -> bytes:
+    """Encode the one closed payload set, then read it through the existing parser."""
+    rail = require_rail(rail)
+    if type(payloads) is not dict or set(payloads) != set(rail.packet_filenames):
+        raise PacketError("manifest_payloads")
+    files = {}
+    for name in rail.packet_filenames:
+        raw = payloads[name]
+        if type(raw) is not bytes:
+            raise PacketError("manifest_payload_type")
+        if len(raw) > MAX_FILE_BYTES:
+            raise PacketError("file_oversize")
+        files[name] = _sha256(raw)
+    encoded = (json.dumps({"files": files, "schema": rail.packet_manifest_schema},
+                          indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        raise PacketError("manifest_oversize")
+    if parse_manifest(encoded, rail=rail) != files:
+        raise PacketError("manifest_round_trip")
+    return encoded
+
+
+def validate_prepare_record(record_raw: bytes, prepare_raw: bytes, *,
+                            expected_prepare_sha256: str,
+                            expected_runner_revision: str,
+                            rail=LEGACY_RAIL) -> dict:
+    """Bind downloaded PREPARE bytes to the phase-1 record and immutable runner."""
+    rail = require_rail(rail)
+    expected_digest = _require_hex(
+        expected_prepare_sha256, 64, "prepare_record_expected_digest")
+    runner = _require_hex(
+        expected_runner_revision, 40, "prepare_record_expected_runner")
+    if type(record_raw) is not bytes or type(prepare_raw) is not bytes:
+        raise PacketError("prepare_record_type")
+    actual_digest = _sha256(prepare_raw)
+    if actual_digest != expected_digest:
+        raise PacketError("prepare_record_expected_digest")
+    try:
+        doc = json.loads(record_raw.decode("utf-8"), object_pairs_hook=_unique_pairs)
+    except PacketError:
+        raise
+    except (UnicodeError, ValueError) as exc:
+        raise PacketError("prepare_record_json") from exc
+    if type(doc) is not dict or set(doc) != set(PREPARE_RECORD_KEYS):
+        raise PacketError("prepare_record_keys")
+    canonical = (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if record_raw != canonical:
+        raise PacketError("prepare_record_canonical")
+    if doc["schema"] != rail.prepare_record_schema:
+        raise PacketError("prepare_record_schema")
+    if doc["prepare_file"] != rail.prepare_filename:
+        raise PacketError("prepare_record_file")
+    if doc["prepare_sha256"] != actual_digest:
+        raise PacketError("prepare_record_digest")
+    if type(doc["prepare_bytes"]) is not int or doc["prepare_bytes"] != len(prepare_raw):
+        raise PacketError("prepare_record_bytes")
+    github_sha = _require_hex(doc["github_sha"], 40, "prepare_record_identity")
+    workflow_sha = _require_hex(
+        doc["github_workflow_sha"], 40, "prepare_record_identity")
+    if github_sha != workflow_sha:
+        raise PacketError("prepare_record_identity")
+    if github_sha != runner:
+        raise PacketError("prepare_record_runner")
+    for key in ("image_os", "image_version"):
+        if not isinstance(doc[key], str) or not doc[key]:
+            raise PacketError("prepare_record_identity")
+    if doc["non_claims"] != list(PREPARE_RECORD_NON_CLAIMS):
+        raise PacketError("prepare_record_non_claims")
+    return doc
 
 
 def release_asset_url(repository: str, tag: str, name: str) -> str:

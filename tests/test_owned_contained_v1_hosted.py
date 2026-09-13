@@ -128,6 +128,44 @@ OWNED_PUBLICATION_WORKFLOW = {
 }
 
 
+def _owned_prepare_v2(path: Path, *, runner_revision="b" * 40) -> bytes:
+    from tests.test_aee_checker_sealed_run import PrepareEvidence
+
+    parts = PrepareEvidence(methodName="runTest")._parts()
+    pins_doc = json.loads((ROOT.joinpath(*OWNED_V1_RAIL.pins_source)
+                           / "pins.json").read_text())
+    contract = OWNED_V1_RAIL.measurement
+    parts["pins"] = {
+        "subject_commit": pins_doc["subject"]["commit"],
+        "corpus_commit": pins_doc["corpus"]["commit"],
+        "corpus_digest": pins_doc["corpus"]["corpusDigest"],
+        "instrument_commit": pins_doc["instrument"]["commit"],
+        "phase_a": {
+            contract.adapter_relpath: contract.adapter_sha256,
+            **{"/".join((*contract.pins_relpath, name)): digest
+               for name, digest in contract.pin_digests},
+        },
+    }
+    parts["execution"] = {
+        "commit": runner_revision,
+        "content_sha256": "cc" * 32,
+        "paths": list(contract.execution_paths),
+    }
+    parts["materialized"].update(
+        subject_check_rs_sha256=pins_doc["subject"]["check_rs_sha256"],
+        corpus_digest=pins_doc["corpus"]["corpusDigest"],
+        corpus_id_count=contract.corpus_id_count,
+        corpus_manifest_sha256=contract.corpus_manifest_sha256,
+        corpus_tree_sha256=contract.corpus_tree_sha256,
+        subject_tree_sha256=contract.subject_tree_sha256,
+    )
+    parts["candidate_profile"] = dict(contained_oci.CANDIDATE_RESOURCE_PROFILE_V2)
+    parts["image"] = {**parts["image"], "id_scope": "host-local",
+                      "platform": "linux/amd64"}
+    return owned.sealed_run.emit_prepare_v2(
+        parts, path, contract=OWNED_CONTAINED_V1_CONTRACT)
+
+
 class OwnedHostedRailContract(unittest.TestCase):
     @staticmethod
     def report(**overrides):
@@ -186,6 +224,174 @@ class OwnedHostedRailContract(unittest.TestCase):
                          owned.sealed_run.PREPARE_V2_SCHEMA)
         self.assertIs(prepare.call_args.kwargs["contract"],
                       OWNED_CONTAINED_V1_CONTRACT)
+
+    def test_authorize_packet_builds_four_owned_assets_and_reads_every_byte_back(self):
+        runner = "b" * 40
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prepare_path = root / OWNED_V1_RAIL.prepare_filename
+            prepare_raw = _owned_prepare_v2(prepare_path, runner_revision=runner)
+            record_path = root / OWNED_V1_RAIL.prepare_record_filename
+            hosted_packet.record_prepare(
+                prepare_path, record_path,
+                environ={"GITHUB_SHA": runner, "GITHUB_WORKFLOW_SHA": runner,
+                         "ImageOS": "ubuntu24", "ImageVersion": "20260913.1"},
+                rail=OWNED_V1_RAIL)
+            destination = root / "release-assets"
+            load_prepare_v2 = owned.sealed_run.load_prepare_v2
+            read_bounded = owned.ca.read_bounded_regular_file
+            with mock.patch.object(publication, "run_gate",
+                                   side_effect=AssertionError("packet assembly reached gate")), \
+                    mock.patch.object(owned.sealed_run, "prepare",
+                                      side_effect=AssertionError("packet assembly reran PREPARE")), \
+                    mock.patch.object(owned.hosted_packet, "fetch_packet",
+                                      side_effect=AssertionError("packet assembly fetched")), \
+                    mock.patch.object(owned.sealed_run, "load_prepare_v2",
+                                      wraps=load_prepare_v2) as load_prepare, \
+                    mock.patch.object(owned.ca, "read_bounded_regular_file",
+                                      wraps=read_bounded) as bounded_read:
+                result = owned.authorize_packet_owned(
+                    prepare_path=prepare_path, prepare_record_path=record_path,
+                    expected_prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
+                    expected_runner_revision=runner, out_dir=destination)
+            self.assertEqual(load_prepare.call_count, 2)
+            for call in load_prepare.call_args_list:
+                self.assertEqual(call.args, (prepare_raw,))
+                self.assertIs(call.kwargs["contract"], OWNED_CONTAINED_V1_CONTRACT)
+            self.assertGreaterEqual(bounded_read.call_count, 4)
+            self.assertEqual(bounded_read.call_args_list[0].args, (prepare_path,))
+            self.assertEqual(bounded_read.call_args_list[1].args, (record_path,))
+            self.assertTrue(all(call.kwargs["cap"] == hosted_packet.MAX_FILE_BYTES
+                                for call in bounded_read.call_args_list))
+            self.assertEqual(set(p.name for p in destination.iterdir()), {
+                *OWNED_V1_RAIL.packet_filenames,
+                OWNED_V1_RAIL.packet_manifest_filename,
+            })
+            manifest_raw = (destination / OWNED_V1_RAIL.packet_manifest_filename).read_bytes()
+            self.assertEqual(result["manifest_sha256"],
+                             hashlib.sha256(manifest_raw).hexdigest())
+            files = hosted_packet.parse_manifest(manifest_raw, rail=OWNED_V1_RAIL)
+            for name, digest in files.items():
+                self.assertEqual(hashlib.sha256((destination / name).read_bytes()).hexdigest(),
+                                 digest)
+            loaded = owned.sealed_run.load_prepare_v2(
+                (destination / OWNED_V1_RAIL.prepare_filename).read_bytes(),
+                contract=OWNED_CONTAINED_V1_CONTRACT)
+            self.assertEqual(loaded["execution"]["commit"], runner)
+            self.assertEqual(result["bindings"]["candidate_revision"],
+                             loaded["pins"]["subject_commit"])
+
+    def test_authorize_packet_refuses_changed_prepare_before_authorizer_and_output(self):
+        runner = "b" * 40
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prepare_path = root / OWNED_V1_RAIL.prepare_filename
+            prepare_raw = _owned_prepare_v2(prepare_path, runner_revision=runner)
+            record_path = root / OWNED_V1_RAIL.prepare_record_filename
+            hosted_packet.record_prepare(
+                prepare_path, record_path,
+                environ={"GITHUB_SHA": runner, "GITHUB_WORKFLOW_SHA": runner,
+                         "ImageOS": "ubuntu24", "ImageVersion": "20260913.1"},
+                rail=OWNED_V1_RAIL)
+            prepare_path.write_bytes(prepare_raw + b" ")
+            destination = root / "must-not-exist"
+            with mock.patch.object(owned.authorize, "emit_authorize_v0",
+                                   side_effect=AssertionError("authorizer reached")):
+                with self.assertRaises(hosted_packet.PacketError):
+                    owned.authorize_packet_owned(
+                        prepare_path=prepare_path, prepare_record_path=record_path,
+                        expected_prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
+                        expected_runner_revision=runner, out_dir=destination)
+            self.assertFalse(destination.exists())
+
+    def test_authorize_packet_refuses_crossed_contract_or_runner_before_output(self):
+        runner = "b" * 40
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prepare_path = root / OWNED_V1_RAIL.prepare_filename
+            prepare_raw = _owned_prepare_v2(prepare_path, runner_revision=runner)
+            record_path = root / OWNED_V1_RAIL.prepare_record_filename
+            hosted_packet.record_prepare(
+                prepare_path, record_path,
+                environ={"GITHUB_SHA": runner, "GITHUB_WORKFLOW_SHA": runner,
+                         "ImageOS": "ubuntu24", "ImageVersion": "20260913.1"},
+                rail=OWNED_V1_RAIL)
+            for suffix, expected_runner, rail, reason in (
+                ("wrong-runner", "c" * 40, None, "prepare_record_runner"),
+                ("legacy-rail", runner, LEGACY_RAIL, "prepare_record_schema"),
+            ):
+                destination = root / suffix
+                rail_context = (mock.patch.object(owned, "RAIL", rail)
+                                if rail is not None else mock.patch.object(
+                                    owned, "RAIL", OWNED_V1_RAIL))
+                with self.subTest(suffix=suffix), rail_context, \
+                        self.assertRaisesRegex(hosted_packet.PacketError, reason):
+                    owned.authorize_packet_owned(
+                        prepare_path=prepare_path, prepare_record_path=record_path,
+                        expected_prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
+                        expected_runner_revision=expected_runner,
+                        out_dir=destination)
+                self.assertFalse(destination.exists())
+
+    def test_authorize_packet_aborts_owned_staging_on_late_refusal(self):
+        runner = "b" * 40
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prepare_path = root / OWNED_V1_RAIL.prepare_filename
+            prepare_raw = _owned_prepare_v2(prepare_path, runner_revision=runner)
+            record_path = root / OWNED_V1_RAIL.prepare_record_filename
+            hosted_packet.record_prepare(
+                prepare_path, record_path,
+                environ={"GITHUB_SHA": runner, "GITHUB_WORKFLOW_SHA": runner,
+                         "ImageOS": "ubuntu24", "ImageVersion": "20260913.1"},
+                rail=OWNED_V1_RAIL)
+            destination = root / "late-refusal"
+            with mock.patch.object(hosted_packet, "encode_packet_manifest",
+                                   side_effect=hosted_packet.PacketError("late-refusal")):
+                with self.assertRaisesRegex(hosted_packet.PacketError, "late-refusal"):
+                    owned.authorize_packet_owned(
+                        prepare_path=prepare_path, prepare_record_path=record_path,
+                        expected_prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
+                        expected_runner_revision=runner, out_dir=destination)
+            self.assertFalse(destination.exists())
+            self.assertFalse(destination.with_name(destination.name + ".lease").exists())
+            self.assertEqual(list(root.glob(destination.name + ".tmp-*")), [])
+
+    def test_authorize_packet_refuses_oversized_inputs_before_staging(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            cases = (
+                (b"xx", b"x", "prepare"),
+                (b"x", b"xx", "record"),
+            )
+            for prepare_raw, record_raw, name in cases:
+                prepare_path = root / (name + "-prepare.json")
+                record_path = root / (name + "-record.json")
+                prepare_path.write_bytes(prepare_raw)
+                record_path.write_bytes(record_raw)
+                with self.subTest(name=name), \
+                        mock.patch.object(hosted_packet, "MAX_FILE_BYTES", 1), \
+                        mock.patch.object(owned, "begin_atomic_dest",
+                                          side_effect=AssertionError("staging reached")), \
+                        self.assertRaises(owned.ca.ManifestError):
+                    owned.authorize_packet_owned(
+                        prepare_path=prepare_path, prepare_record_path=record_path,
+                        expected_prepare_sha256="a" * 64,
+                        expected_runner_revision="b" * 40,
+                        out_dir=root / (name + "-out"))
+
+    def test_authorize_packet_cli_has_no_free_identity_or_contract_selectors(self):
+        parser = owned.build_parser()
+        subparsers = next(action for action in parser._actions
+                          if getattr(action, "choices", None)
+                          and "authorize-packet" in action.choices)
+        help_text = subparsers.choices["authorize-packet"].format_help()
+        for forbidden in (
+            "--profile", "--schema", "--contract", "--candidate-revision",
+            "--image-digest", "--rail",
+        ):
+            self.assertNotIn(forbidden, help_text)
+        self.assertIn("authorize-packet", help_text)
 
     def test_crossed_prepare_refuses_before_driver(self):
         raw = json.dumps({"schema": owned.sealed_run.PREPARE_V1_SCHEMA}).encode()
@@ -519,6 +725,7 @@ class OwnedHostedRailContract(unittest.TestCase):
     def test_readme_names_both_hosted_rails_without_the_retired_v1_absence_claim(self):
         readme = (ROOT / "README.md").read_text()
         self.assertIn("separate repository-owned `contained-oci-v1` rail", readme)
+        self.assertIn("`authorize-packet`", readme)
         for retired in (
             "hosted v1 execution remains unavailable",
             "no command or hosted lane selects",

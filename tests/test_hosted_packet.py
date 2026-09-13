@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "measurements"))
 
 import hosted_packet as packet  # noqa: E402
+from hosted_rail_contract import LEGACY_RAIL, OWNED_V1_RAIL  # noqa: E402
 
 REPOSITORY = "corpus-adequacy/corpus-adequacy"
 TAG = "hosted-packet-r1"
@@ -101,6 +102,105 @@ class FakeRelease:
 
     def names(self):
         return [urllib.parse.unquote(url[len(self.prefix):]) for url, _ in self.calls]
+
+
+class OwnedPrepareRecordAndManifest(unittest.TestCase):
+    @staticmethod
+    def record(prepare_raw: bytes, *, runner="b" * 40, **overrides) -> bytes:
+        doc = {
+            "schema": OWNED_V1_RAIL.prepare_record_schema,
+            "prepare_file": OWNED_V1_RAIL.prepare_filename,
+            "prepare_sha256": _sha256(prepare_raw),
+            "prepare_bytes": len(prepare_raw),
+            "github_sha": runner,
+            "github_workflow_sha": runner,
+            "image_os": "ubuntu24",
+            "image_version": "20260913.1",
+            "non_claims": list(packet.PREPARE_RECORD_NON_CLAIMS),
+        }
+        doc.update(overrides)
+        return (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode()
+
+    def test_prepare_record_binds_exact_bytes_and_runner_identity(self):
+        prepare_raw = b'{"schema":"prepare.v2"}\n'
+        runner = "b" * 40
+        record = self.record(prepare_raw, runner=runner)
+        self.assertEqual(packet.validate_prepare_record(
+            record, prepare_raw, expected_prepare_sha256=_sha256(prepare_raw),
+            expected_runner_revision=runner, rail=OWNED_V1_RAIL)["github_sha"], runner)
+
+    def test_prepare_record_refuses_every_crossed_binding(self):
+        prepare_raw = b'{"schema":"prepare.v2"}\n'
+        runner = "b" * 40
+        cases = (
+            (dict(prepare_sha256="0" * 64), "prepare_record_digest"),
+            (dict(prepare_bytes=len(prepare_raw) + 1), "prepare_record_bytes"),
+            (dict(schema=LEGACY_RAIL.prepare_record_schema), "prepare_record_schema"),
+            (dict(prepare_file=LEGACY_RAIL.prepare_filename), "prepare_record_file"),
+            (dict(github_workflow_sha="c" * 40), "prepare_record_identity"),
+            (dict(github_sha="c" * 40, github_workflow_sha="c" * 40),
+             "prepare_record_runner"),
+            (dict(image_os=""), "prepare_record_identity"),
+            (dict(non_claims=[]), "prepare_record_non_claims"),
+        )
+        for override, reason in cases:
+            with self.subTest(reason=reason), self.assertRaisesRegex(
+                    packet.PacketError, reason):
+                packet.validate_prepare_record(
+                    self.record(prepare_raw, runner=runner, **override), prepare_raw,
+                    expected_prepare_sha256=_sha256(prepare_raw),
+                    expected_runner_revision=runner, rail=OWNED_V1_RAIL)
+        with self.assertRaisesRegex(packet.PacketError, "prepare_record_expected_digest"):
+            packet.validate_prepare_record(
+                self.record(prepare_raw, runner=runner), prepare_raw,
+                expected_prepare_sha256="0" * 64,
+                expected_runner_revision=runner, rail=OWNED_V1_RAIL)
+
+    def test_prepare_record_refuses_noncanonical_or_unknown_fields(self):
+        prepare_raw = b'{}\n'
+        canonical = self.record(prepare_raw)
+        with self.assertRaisesRegex(packet.PacketError, "prepare_record_canonical"):
+            packet.validate_prepare_record(
+                b" " + canonical, prepare_raw,
+                expected_prepare_sha256=_sha256(prepare_raw),
+                expected_runner_revision="b" * 40, rail=OWNED_V1_RAIL)
+        doc = json.loads(canonical)
+        doc["extra"] = "not admitted"
+        with self.assertRaisesRegex(packet.PacketError, "prepare_record_keys"):
+            packet.validate_prepare_record(
+                (json.dumps(doc, sort_keys=True) + "\n").encode(), prepare_raw,
+                expected_prepare_sha256=_sha256(prepare_raw),
+                expected_runner_revision="b" * 40, rail=OWNED_V1_RAIL)
+
+    def test_owned_manifest_emitter_round_trips_through_the_existing_parser(self):
+        payloads = {name: (name + "\n").encode()
+                    for name in OWNED_V1_RAIL.packet_filenames}
+        raw = packet.encode_packet_manifest(payloads, rail=OWNED_V1_RAIL)
+        self.assertEqual(packet.parse_manifest(raw, rail=OWNED_V1_RAIL), {
+            name: _sha256(payloads[name]) for name in OWNED_V1_RAIL.packet_filenames
+        })
+        with self.assertRaises(packet.PacketError):
+            packet.parse_manifest(raw, rail=LEGACY_RAIL)
+
+    def test_manifest_emitter_refuses_when_the_shared_parser_disagrees(self):
+        payloads = {name: (name + "\n").encode()
+                    for name in OWNED_V1_RAIL.packet_filenames}
+        with mock.patch.object(packet, "parse_manifest", return_value={}):
+            with self.assertRaisesRegex(packet.PacketError, "manifest_round_trip"):
+                packet.encode_packet_manifest(payloads, rail=OWNED_V1_RAIL)
+
+    def test_manifest_emitter_refuses_missing_extra_or_nonbytes_payloads(self):
+        payloads = {name: (name + "\n").encode()
+                    for name in OWNED_V1_RAIL.packet_filenames}
+        cases = (
+            {name: raw for name, raw in payloads.items()
+             if name != OWNED_V1_RAIL.authorize_filename},
+            {**payloads, "extra.json": b"extra"},
+            {**payloads, OWNED_V1_RAIL.prepare_filename: "not bytes"},
+        )
+        for bad in cases:
+            with self.subTest(keys=sorted(bad)), self.assertRaises(packet.PacketError):
+                packet.encode_packet_manifest(bad, rail=OWNED_V1_RAIL)
 
 
 def _release(files=None, manifest_raw=None):
