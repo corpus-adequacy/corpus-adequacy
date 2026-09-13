@@ -2592,6 +2592,28 @@ class ExplicitPrepareImage(unittest.TestCase):
             "schema": run.PREPARE_V2_SCHEMA,
         })
 
+    def test_prepare_v2_cli_commits_only_the_canonical_v2_artifact(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            pins = root / "pins"
+            dest = root / "prepared"
+            patches = self._patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                    patches[5], patches[6], patches[7], patches[8], patches[9], \
+                    mock.patch.object(
+                        run, "emit_prepare_v2", wraps=run.emit_prepare_v2) as emit:
+                rc = run.main([
+                    "aee_checker_sealed_run.py", "prepare-v2", str(pins), str(dest),
+                    self.IMAGE,
+                ])
+            artifact = dest / "prepare.v2.json"
+            self.assertEqual(rc, 0)
+            emit.assert_called_once()
+            self.assertEqual(run.load_prepare_v2(artifact.read_bytes())["schema"],
+                             run.PREPARE_V2_SCHEMA)
+            self.assertFalse((dest / "prepare.v0.json").exists())
+            self.assertFalse((dest / "prepare.v1.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
