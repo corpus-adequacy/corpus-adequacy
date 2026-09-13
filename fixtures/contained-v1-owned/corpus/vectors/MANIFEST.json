@@ -1,0 +1,20 @@
+{
+  "vectors": [
+    {
+      "id": "allow",
+      "path": "allow.json"
+    },
+    {
+      "id": "boundary",
+      "path": "boundary.json"
+    },
+    {
+      "id": "negative",
+      "path": "negative.json"
+    },
+    {
+      "id": "over-limit",
+      "path": "over-limit.json"
+    }
+  ]
+}
