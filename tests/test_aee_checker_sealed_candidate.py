@@ -1161,7 +1161,22 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
         factory.assert_called_once_with()
         self.assertEqual(len(transport.started), 1)
         self.assertEqual(completed.envelope_record["envelope_status"], "verified")
+        self.assertIsNone(completed.envelope_record["unverified_field"])
+        self.assertEqual(completed.envelope_record["candidate_outcome"], "completed")
         self.assertIsNotNone(completed.envelope_record["effective"])
+
+    def test_recorded_default_transport_unavailable_still_returns_an_envelope(self):
+        with mock.patch.object(
+                contained, "require_local_image",
+                side_effect=contained.DockerUnavailable("docker unavailable")):
+            completed, _ = self._admit(
+                _prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2),
+                V1_PROFILE, None)
+
+        self.assertEqual(completed.envelope_record["setup_status"], "unavailable")
+        self.assertEqual(completed.envelope_record["envelope_status"], "unverified")
+        self.assertEqual(completed.envelope_record["candidate_outcome"], "not-run")
+        self.assertEqual(completed.unproved_reason, "setup")
 
     def test_v2_prepare_under_v0_refuses_before_create(self):
         with self.assertRaisesRegex(PrepareError, "prepare.v2 requires contained-oci-v1"):
