@@ -17,11 +17,11 @@ as line and branch coverage for exactly this question.
 The bar here is higher than the usual one. In ordinary mutation testing the
 artifact under test is a test suite, a surviving mutant is a gap in confidence,
 and a score near 80% is a working target. Here the artifact under test is a
-*published corpus whose digest is the contract*. A surviving mutant means an
-implementer can delete that rule, reproduce the pinned digest, and be
-indistinguishable from a conforming implementation. That is not a confidence
-gap, it is a hole in the contract. So the required score is 100% of
-non-equivalent mutants.
+*published corpus whose digest is the contract*. After a valid run, a surviving
+mutant means only that the declared mutation did not change the declared
+outcome on the pinned inputs. Reading that as a hole in the contract also
+requires a faithful owner-pinned declaration and rule ownership. So the
+required score is 100% of non-equivalent mutants.
 
 WHAT THIS TOOL CAN AND CANNOT GENERALIZE, STATED PLAINLY
 ---------------------------------------------------------
@@ -491,12 +491,14 @@ SCORE_MEANS = ("percent of author-declared in-scope rules killed; NOT percent of
 
 
 SURVIVED_OBLIGATION = (
-    "A future vector must distinguish this rule on a declared outcome. "
-    "This projection does not name such a vector.")
+    "After a valid run, the declared mutation did not change the declared "
+    "outcome on the pinned inputs. A contract-hole reading also needs a "
+    "faithful owner-pinned declaration and rule ownership.")
 SILENT_OBLIGATION = (
-    "A future vector must distinguish this rule on a declared outcome, "
-    "not only the diagnostic channel. "
-    "This projection does not name such a vector.")
+    "After a valid run, the declared mutation moved only the diagnostic "
+    "channel. Silent is diagnostic-only and never a numerator. A "
+    "contract-hole reading also needs a faithful owner-pinned declaration "
+    "and rule ownership.")
 
 
 

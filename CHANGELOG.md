@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+Offline reason-token projections example: the same process-runner
+implementation, vector, mutation and control bytes under three first-party
+manifests in `examples/reason-token-projections/`. Pinning `accepted` and
+`wire_code` as outcome kills the reason-token mutant; pinning only `accepted`
+lets it survive; pinning `wire_code` as diagnostic makes it silent. A positive
+control flips only `accepted`; an inert control changes an unused constant;
+both stay outside the denominator. `walkthrough.py` invokes the shipped CLI
+with a bounded timeout and inspects only produced `report.v0` fields; without
+`fcntl` it returns a named unsupported result and no result claim. Manifests
+are v0, so absent inventory is not a measured zero. Survivor and silent
+obligation text now state only that a valid run did not change the declared
+outcome on pinned inputs; a contract-hole reading also needs a faithful
+owner-pinned declaration and rule ownership. The survivors.v0 projection of
+existing reports and the published `site/runs/tersign-1cc5ea32/rules/0002.html`
+page follow that text; tracked `report.v0` fixtures, measurements, public
+indexes, and other site files stay byte-identical. Changing selectors changes
+the observational question. This is not whole-corpus adequacy, adapter fidelity,
+rule ownership, cross-platform process support, security effectiveness,
+reachability, or a claim that selector changes improve a corpus.
+
 Class evidence codecs (#103): adds nonexecuting closed codecs
 `corpus-adequacy.class-provenance.v0` and `corpus-adequacy.class-attempt.v0` for
 one declared evidence class. Loaders reuse the shared 4 MiB no-follow reader

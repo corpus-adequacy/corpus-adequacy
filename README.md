@@ -34,7 +34,20 @@ python3 corpus_adequacy.py --rules <report.json> --manifest <manifest.json>
 python3 corpus_adequacy.py --rules <report.json> --manifest <manifest.json> --json
 python3 corpus_adequacy.py --diff <old.report.v0> <new.report.v0>
 python3 corpus_adequacy.py --diff <old.report.v0> <new.report.v0> --json
+python3 examples/reason-token-projections/walkthrough.py
 ```
+
+`examples/reason-token-projections/` is one offline process-runner example: the
+same implementation, vector, mutation and control bytes under three
+declarations. `outcome_from` of `accepted` plus `wire_code` kills the
+reason-token mutant; `accepted` alone lets it survive; `accepted` as outcome
+and `wire_code` as `diagnostic_from` makes it silent. Controls stay outside
+the denominator. The walkthrough invokes this CLI with a timeout and inspects
+only produced `report.v0` fields. On platforms without `fcntl` it returns a
+named unsupported result and makes no result claim. The manifests are v0, so
+absent inventory is not a measured zero. This example does not establish
+whole-corpus adequacy, adapter fidelity, rule ownership, cross-platform
+process support, security effectiveness, or reachability.
 
 `--survivors` is a sibling projection over an existing `report.v0` file. It does
 not measure, does not call the runner, and does not change `report.v0` bytes.
@@ -173,9 +186,11 @@ Outcome coverage is not rule coverage. A corpus can reach every declared outcome
 while some rule never decides anything, because another rule reaches the same
 outcome first on every vector it would have caught.
 
-So a surviving mutant is not a gap in confidence. It is a **hole in the
-contract**, which is why the bar is 100% of the rules the author declared rather
-than the ~80% usual in mutation testing.
+After a valid run, a surviving mutant means only that the declared mutation
+did not change the declared outcome on the pinned inputs. Reading that as a
+hole in the contract also requires a faithful owner-pinned declaration and
+rule ownership. The bar is still 100% of the rules the author declared rather
+than the ~80% usual in mutation testing. Changing selectors changes the observational question; it does not improve a corpus.
 
 ## What it cannot do, stated first
 
@@ -294,11 +309,12 @@ verdict alone would hide it. Only an in-scope, unacknowledged mutant becomes
 `silent`. Outcome movement is unaffected: it still kills, and killing an
 acknowledged rule still retires the acknowledgement.
 
-`silent` sits in the denominator and **never** in the numerator: an implementer
-can still delete that rule and reproduce every pinned outcome. It is named
-separately because the repair differs — a survivor needs a vector that moves an
-outcome, a silent mutant may instead mean the corpus should declare its
-diagnostics part of the pinned surface.
+`silent` sits in the denominator and is diagnostic-only and never the numerator.
+That reading is only that the declared mutation moved the diagnostic channel
+and not the declared outcome on the pinned inputs after a valid run. It is
+named separately because the repair differs — a survivor needs a vector that
+moves an outcome, a silent mutant may instead mean the corpus should declare
+its diagnostics part of the pinned surface.
 
 The two selectors may not name the same member: a member read as the outcome can
 never produce a silent-only move, so the class would be unreachable and the

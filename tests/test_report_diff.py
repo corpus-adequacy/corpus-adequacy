@@ -78,7 +78,7 @@ VALID_TERSIGH_REPORT = (
     REPO_ROOT / "tests" / "fixtures" / "publication" / "valid-tersign" / "report.v0.json"
 )
 VALID_SURVIVORS_SHA256 = (
-    "caf3c2345a229d9f76367753ed7e856627fdd8f55aa00e6fbfad2ee502f9e9bb"
+    "9f4f575efb1a9eae9aed019c2de2f508625bd30445e8a9f4b3e6d194f5f21bfb"
 )
 
 OLD_MANIFEST = "sha256:" + "1" * 64

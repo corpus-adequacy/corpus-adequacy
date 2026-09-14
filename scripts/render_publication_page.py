@@ -1236,7 +1236,6 @@ def _rule_page(record: dict, finding: dict, build_commit: str) -> str:
         '<main id="finding" class="finding">\n'
         "<p>verdict <span>%s</span></p>\n"
         "<p>group <span class=\"mono\">%s</span></p>\n"
-        "<p>how %s</p>\n"
         "<p>obligation %s</p>\n"
         "<p>moved <span class=\"mono\">%s</span></p>\n"
         "%s%s"
@@ -1247,7 +1246,6 @@ def _rule_page(record: dict, finding: dict, build_commit: str) -> str:
             _non_claims_html([record]),
             _esc(finding["verdict"]),
             _esc(finding["group"]),
-            _esc(finding["how"]),
             _esc(finding["obligation"]),
             _esc(finding["moved"]),
             diagnostic,
