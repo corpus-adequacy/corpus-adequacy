@@ -1,0 +1,50 @@
+name: Reproducible defect
+description: Report a bounded, reproducible problem in the tool or its published output.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report undisclosed vulnerabilities here. Use the private **Report a vulnerability** route in the Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: Version or exact commit
+      placeholder: v0.0.0 or 40-hex commit
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Python version, operating system, and runner kind.
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: Provide public fixture bytes or a minimal manifest and the exact command.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed result
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Public-data check
+      options:
+        - label: This report contains no credentials, private corpus material, embargoed finding, or personal data.
+          required: true

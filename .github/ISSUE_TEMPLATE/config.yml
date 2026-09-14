@@ -1,1 +1,8 @@
 blank_issues_enabled: true
+contact_links:
+  - name: Usage questions and interpretation
+    url: https://github.com/corpus-adequacy/corpus-adequacy/discussions
+    about: Ask how to run the tool or interpret a bounded result.
+  - name: Private security report
+    url: https://github.com/corpus-adequacy/corpus-adequacy/security/advisories/new
+    about: Report an undisclosed vulnerability privately.
