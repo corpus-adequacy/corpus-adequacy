@@ -1162,6 +1162,37 @@ def diff_reports(old_report, new_report) -> dict:
     }
 
 
+def _require_diff_input_block(block: dict, name: str) -> None:
+    if type(block["adequate"]) is not bool:
+        raise ManifestError("%s.adequate must be a bool" % name)
+    if not isinstance(block["control_status"], str) or not block["control_status"]:
+        raise ManifestError("%s.control_status must be a non-empty string" % name)
+    if type(block["unproved"]) is not int:
+        raise ManifestError("%s.unproved must be an int" % name)
+
+
+def _require_diff_component_status(component: dict, status_fn, where: str) -> None:
+    if component.get("status") != status_fn(component.get("old"), component.get("new")):
+        raise ManifestError("%s has an invalid status" % where)
+
+
+def _require_diff_mutant_row(row, where: str) -> None:
+    require_shape(row, dict, where)
+    verdict = row.get("verdict") if isinstance(row.get("verdict"), str) else ""
+    _require_closed_keys(
+        row, _mutant_row_required_keys(verdict), _mutant_row_allowed_keys(verdict),
+        missing_token=MUTANT_MISSING_KEY, extra_token=MUTANT_EXTRA_KEY)
+    for key in ("group", "label", "verdict"):
+        val = row.get(key)
+        if not isinstance(val, str) or not val:
+            raise ManifestError("%s.%s must be a non-empty string" % (where, key))
+    if row["verdict"] not in REPORT_VERDICTS:
+        raise ManifestError("%s.verdict is not a producer verdict" % where)
+    for key in ("moved", "moved_diagnostic"):
+        if key in row and type(row[key]) is not int:
+            raise ManifestError("%s.%s must be an int" % (where, key))
+
+
 def _require_diff_v0_document(doc: dict) -> None:
     require_shape(doc, dict, "diff projection")
     _require_closed_keys(
@@ -1174,17 +1205,21 @@ def _require_diff_v0_document(doc: dict) -> None:
         _require_closed_keys(
             doc[name], _DIFF_INPUT_KEYS, _DIFF_INPUT_KEYS,
             missing_token=name + " missing key", extra_token=name + " extra key")
+        _require_diff_input_block(doc[name], name)
     identity = doc["identity"]
     require_shape(identity, dict, "identity")
     _require_closed_keys(
         identity, _DIFF_IDENTITY_KEYS, _DIFF_IDENTITY_KEYS,
         missing_token="identity missing key", extra_token="identity extra key")
-    for name in ("manifest_sha256", "corpus_digest"):
+    for name, status_fn in (
+            ("manifest_sha256", _manifest_identity_status),
+            ("corpus_digest", _corpus_identity_status)):
         require_shape(identity[name], dict, "identity." + name)
         _require_closed_keys(
             identity[name], _DIFF_COMPONENT_KEYS, _DIFF_COMPONENT_KEYS,
             missing_token="identity component missing key",
             extra_token="identity component extra key")
+        _require_diff_component_status(identity[name], status_fn, "identity." + name)
     require_shape(identity["tool"], dict, "identity.tool")
     _require_closed_keys(
         identity["tool"], _DIFF_TOOL_KEYS, _DIFF_TOOL_KEYS,
@@ -1195,16 +1230,78 @@ def _require_diff_v0_document(doc: dict) -> None:
             identity["tool"][name], _DIFF_COMPONENT_KEYS, _DIFF_COMPONENT_KEYS,
             missing_token="identity component missing key",
             extra_token="identity component extra key")
+        _require_diff_component_status(
+            identity["tool"][name], _tool_component_status, "identity.tool." + name)
     require_shape(doc["rows"], list, "rows")
+    manifest_changed = identity["manifest_sha256"]["status"] == "changed"
+    labels = []
     for i, row in enumerate(doc["rows"]):
-        require_shape(row, dict, "rows[%d]" % i)
+        where = "rows[%d]" % i
+        require_shape(row, dict, where)
         _require_closed_keys(
             row, _DIFF_ROW_KEYS, _DIFF_ROW_KEYS,
             missing_token="diff row missing key", extra_token="diff row extra key")
+        label = row["label"]
+        if not isinstance(label, str) or not label:
+            raise ManifestError("%s.label must be a non-empty string" % where)
+        presence = row["presence"]
+        old_row, new_row = row["old"], row["new"]
+        if presence == "common":
+            if old_row is None or new_row is None:
+                raise ManifestError("%s presence/value mismatch" % where)
+        elif presence == "added":
+            if old_row is not None or new_row is None:
+                raise ManifestError("%s presence/value mismatch" % where)
+        elif presence == "removed":
+            if old_row is None or new_row is not None:
+                raise ManifestError("%s presence/value mismatch" % where)
+        else:
+            raise ManifestError("%s has invalid presence" % where)
+        if presence in ("added", "removed") and not manifest_changed:
+            raise ManifestError("added or removed labels require a changed manifest")
+        if old_row is not None:
+            _require_diff_mutant_row(old_row, where + ".old")
+            if old_row["label"] != label:
+                raise ManifestError("%s.old label does not match" % where)
+        if new_row is not None:
+            _require_diff_mutant_row(new_row, where + ".new")
+            if new_row["label"] != label:
+                raise ManifestError("%s.new label does not match" % where)
+        if row["verdict_transition"] != _verdict_transition(old_row, new_row, presence):
+            raise ManifestError("%s has invalid verdict_transition" % where)
+        require_shape(row["changed_fields"], list, where + ".changed_fields")
+        if row["changed_fields"] != _row_changed_fields(old_row, new_row, presence):
+            raise ManifestError("%s has invalid changed_fields" % where)
+        if type(row["acknowledgement_retired"]) is not bool:
+            raise ManifestError("%s.acknowledgement_retired must be a bool" % where)
+        if row["acknowledgement_retired"] != _acknowledgement_retired(
+                old_row, new_row, presence, manifest_changed):
+            raise ManifestError("%s has invalid acknowledgement_retired" % where)
+        labels.append(label)
+    if labels != sorted(labels) or len(labels) != len(set(labels)):
+        raise ManifestError("diff rows are not unique exact label order")
     require_shape(doc["counts"], dict, "counts")
     _require_closed_keys(
         doc["counts"], _DIFF_COUNT_KEYS, _DIFF_COUNT_KEYS,
         missing_token="counts missing key", extra_token="counts extra key")
+    for key in _DIFF_COUNT_KEYS:
+        value = doc["counts"][key]
+        if type(value) is not int or value < 0:
+            raise ManifestError("counts.%s must be a non-negative int" % key)
+    expected_counts = {
+        "common": sum(row["presence"] == "common" for row in doc["rows"]),
+        "added": sum(row["presence"] == "added" for row in doc["rows"]),
+        "removed": sum(row["presence"] == "removed" for row in doc["rows"]),
+        "verdict_changed": sum(
+            row["presence"] == "common" and row["verdict_transition"] == "changed"
+            for row in doc["rows"]),
+        "verdict_same": sum(
+            row["presence"] == "common" and row["verdict_transition"] == "same"
+            for row in doc["rows"]),
+        "acknowledgement_retired": sum(row["acknowledgement_retired"] for row in doc["rows"]),
+    }
+    if doc["counts"] != expected_counts:
+        raise ManifestError("diff counts invariant failed")
     if list(doc["non_claims"]) != list(DIFF_NON_CLAIMS):
         raise ManifestError("diff projection has invalid non_claims")
 
@@ -3558,6 +3655,8 @@ def _render_diff_v0(projected: dict) -> None:
 def _diff_cli(args) -> int:
     """Early sibling path: read two report.v0 files. Never calls run()."""
     try:
+        if args.manifest is not None:
+            raise ManifestError("--diff does not take a positional manifest")
         old_raw = read_bounded_regular_file(args.diff[0])
         new_raw = read_bounded_regular_file(args.diff[1])
         old_report = _parse_projection_json(old_raw)

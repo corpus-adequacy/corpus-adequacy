@@ -651,7 +651,146 @@ class ReportDiffCLI(unittest.TestCase):
         self.assertEqual(json.loads(encoded)["schema"], DIFF_SCHEMA)
 
 
+class ReportDiffEncoderClosure(unittest.TestCase):
+    def _valid(self):
+        old = _report(
+            [producer_shaped_row("survived", "keep"),
+             producer_shaped_row("known-hole", "retire", how="acknowledged hole"),
+             producer_shaped_row("known-hole", "remove-hole", how="acknowledged hole")],
+            manifest_sha256=OLD_MANIFEST,
+        )
+        new = _report(
+            [producer_shaped_row("survived", "keep"),
+             producer_shaped_row("killed", "retire", moved=1, how="1 vector(s) moved"),
+             producer_shaped_row("survived", "fresh")],
+            manifest_sha256=NEW_MANIFEST,
+        )
+        projected = _project(old, new)
+        _assert_closed_diff(projected)
+        return projected
+
+    def _null_identity(self):
+        report = producer_shaped_report(
+            mutants=[producer_shaped_row("survived", "only")],
+        )
+        return _project(report, _clone(report))
+
+    def test_encode_diff_v0_refuses_value_and_cross_field_corruptions(self):
+        valid = self._valid()
+        encoded = ca.encode_diff_v0(valid)
+        self.assertEqual(json.loads(encoded)["schema"], DIFF_SCHEMA)
+        self.assertIn("_require_diff_v0_document", inspect.getsource(ca.encode_diff_v0))
+        self.assertEqual(
+            inspect.getsource(ca.encode_diff_v0).count("_require_diff_v0_document"), 1)
+
+        def mutate(doc, fn):
+            cloned = _clone(doc)
+            fn(cloned)
+            return cloned
+
+        keep = next(row for row in valid["rows"] if row["label"] == "keep")
+        self.assertEqual(keep["presence"], "common")
+        self.assertEqual(keep["changed_fields"], [])
+        self.assertEqual(keep["verdict_transition"], "same")
+        retire = next(row for row in valid["rows"] if row["label"] == "retire")
+        remove_hole = next(row for row in valid["rows"] if row["label"] == "remove-hole")
+        fresh = next(row for row in valid["rows"] if row["label"] == "fresh")
+        self.assertTrue(retire["acknowledgement_retired"])
+        self.assertEqual(remove_hole["presence"], "removed")
+        self.assertFalse(remove_hole["acknowledgement_retired"])
+        self.assertEqual(fresh["presence"], "added")
+
+        corruptions = (
+            ("certified-manifest-status", mutate(valid, lambda d: d["identity"]["manifest_sha256"].__setitem__("status", "certified"))),
+            ("adequate-as-string", mutate(valid, lambda d: d["old_input"].__setitem__("adequate", "yes"))),
+            ("negative-common-count", mutate(valid, lambda d: d["counts"].__setitem__("common", -99))),
+            ("caused-by-tool-transition", mutate(valid, lambda d: d["rows"][0].__setitem__("verdict_transition", "caused-by-tool"))),
+            ("unchanged-row-lists-verdict", mutate(valid, lambda d: next(
+                row for row in d["rows"] if row["label"] == "keep").__setitem__(
+                    "changed_fields", ["verdict"]))),
+            ("bool-count", mutate(valid, lambda d: d["counts"].__setitem__("common", True))),
+            ("unproved-as-bool", mutate(valid, lambda d: d["new_input"].__setitem__("unproved", True))),
+            ("unsorted-changed-fields", mutate(valid, lambda d: next(
+                row for row in d["rows"] if row["label"] == "retire").__setitem__(
+                    "changed_fields", list(reversed(retire["changed_fields"]))))),
+            ("reversed-row-order", mutate(valid, lambda d: d.__setitem__("rows", list(reversed(d["rows"]))))),
+            ("duplicate-label", mutate(valid, lambda d: d.__setitem__("rows", [d["rows"][0], _clone(d["rows"][0])] + d["rows"][1:]))),
+            ("added-with-same-manifest", mutate(valid, lambda d: (
+                d["identity"]["manifest_sha256"].__setitem__("new", d["identity"]["manifest_sha256"]["old"]),
+                d["identity"]["manifest_sha256"].__setitem__("status", "same")))),
+            ("retired-on-removed-hole", mutate(valid, lambda d: next(
+                row for row in d["rows"] if row["label"] == "remove-hole").__setitem__(
+                    "acknowledgement_retired", True))),
+            ("acknowledgement-as-int", mutate(valid, lambda d: next(
+                row for row in d["rows"] if row["label"] == "keep").__setitem__(
+                    "acknowledgement_retired", 1))),
+            ("presence-common-without-old", mutate(valid, lambda d: next(
+                row for row in d["rows"] if row["label"] == "keep").__setitem__("old", None))),
+            ("extra-mutant-row-key", mutate(valid, lambda d: next(
+                row for row in d["rows"] if row["label"] == "keep")["old"].__setitem__(
+                    "extra", True))),
+            ("recomputed-verdict-changed", mutate(valid, lambda d: d["counts"].__setitem__("verdict_changed", 0))),
+            ("manifest-status-same-when-changed", mutate(valid, lambda d: d["identity"]["manifest_sha256"].__setitem__("status", "same"))),
+            ("null-tool-marked-same", mutate(self._null_identity(), lambda d: d["identity"]["tool"]["tool_commit"].__setitem__("status", "same"))),
+            ("null-corpus-marked-same", mutate(self._null_identity(), lambda d: d["identity"]["corpus_digest"].__setitem__("status", "same"))),
+        )
+        self.assertGreaterEqual(len(corruptions), 15)
+        for name, malformed in corruptions:
+            with self.subTest(name=name):
+                with self.assertRaises(ca.ManifestError):
+                    ca.encode_diff_v0(malformed)
+
+
+class ReportDiffPositionalRefusal(unittest.TestCase):
+    def test_diff_cli_refuses_nonexistent_positional_before_reading_reports(self):
+        ignored = Path("/no-such-corpus-adequacy-ignored-positional.json")
+        self.assertFalse(ignored.exists())
+        proc = _cli(
+            str(ignored), "--diff", str(OLD_FIXTURE), str(NEW_FIXTURE), "--json")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        stderr = proc.stderr.decode("utf-8")
+        self.assertIn("could not project", stderr)
+        self.assertIn("positional", stderr.lower())
+        self.assertNotIn("could not measure", stderr)
+        self.assertNotIn("Traceback", stderr)
+        env = json.loads(proc.stdout)
+        self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+        self.assertEqual(env["exit"], 2)
+        self.assertIn("could not project", env["error"])
+        self.assertNotEqual(env.get("schema"), DIFF_SCHEMA)
+        self.assertNotIn("corpus-adequacy.diff.v0", env.get("schema", ""))
+
+        stdout = io.BytesIO()
+        stderr_buf = io.StringIO()
+
+        class BinaryStdout:
+            buffer = stdout
+
+            def write(self, text):
+                stdout.write(text.encode("utf-8") if isinstance(text, str) else text)
+
+        with (mock.patch.object(sys, "argv", [
+                "corpus_adequacy.py", str(ignored), "--diff",
+                str(OLD_FIXTURE), str(NEW_FIXTURE), "--json"]),
+              mock.patch.object(sys, "stdout", BinaryStdout()),
+              mock.patch.object(sys, "stderr", stderr_buf),
+              mock.patch.object(
+                  ca, "read_bounded_regular_file",
+                  side_effect=AssertionError(
+                      "read report before refusing positional"))):
+            rc = ca.main()
+        self.assertEqual(rc, 2)
+        self.assertIn("could not project", stderr_buf.getvalue())
+        self.assertNotIn("could not measure", stderr_buf.getvalue())
+        self.assertNotIn("Traceback", stderr_buf.getvalue())
+        env = json.loads(stdout.getvalue().decode("utf-8"))
+        self.assertEqual(env["schema"], ca.ERROR_SCHEMA)
+        self.assertEqual(env["exit"], 2)
+        self.assertIn("positional", env["error"].lower())
+
+
 class ReportDiffDocs(unittest.TestCase):
+
     def test_readme_documents_pinned_identities_only(self):
         text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("python3 corpus_adequacy.py --diff <old.report.v0> <new.report.v0>", text)
