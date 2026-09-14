@@ -2509,7 +2509,7 @@ _MAX_EXACT_TIMEOUT_SECONDS = (1 << 53) - 1
 
 
 def _require_positive_timeout(value, where: str, *, allow_none: bool = False) -> None:
-    """Require a positive integer exactly representable by the float deadline."""
+    """Require a positive integer at most the conservative binary64 bound 2^53 - 1."""
     if allow_none and value is None:
         return
     if (type(value) is not int or value <= 0

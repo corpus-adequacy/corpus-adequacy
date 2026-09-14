@@ -49,10 +49,11 @@ operator profile and contained resource settings are unavailable because the
 manifest does not carry them. Manifest v0 reports rule inventory as absent,
 while v1 summarizes only its validated author-declared inventory. Inspection
 and normal loading share the same declaration checks: controls are exact JSON
-booleans, child deadlines are positive JSON integers under the float-deadline
-representational ceiling, build argv may be empty, and execution argv must be a
-non-empty array; every argv member is a non-empty string. These are input-shape
-refusals, not tuned runtime policy.
+booleans, child deadlines are positive JSON integers no greater than `2^53 - 1`,
+a conservative bound within binary64's contiguous exact-integer range. The
+bound does not claim that `2^53` itself is unrepresentable. Build argv may be
+empty, and execution argv must be a non-empty array; every argv member is a
+non-empty string. These are input-shape refusals, not tuned runtime policy.
 Static inspection does not resolve or check paths, read vectors or a known-hole
 digest file;
 when that digest path is declared, inspection shows only its original relative
