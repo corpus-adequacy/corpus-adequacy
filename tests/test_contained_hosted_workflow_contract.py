@@ -12,6 +12,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GATE_BOUND_UPLOAD_IF = "steps.gate.outcome == 'success' && !cancelled()"
+DIAGNOSTIC_UPLOAD_IF = (
+    "always() && !cancelled() && steps.gate.outcome == 'failure'"
+)
+DIAGNOSTIC_PACKAGE_DIRNAME = "withheld-diagnostic-package.v0"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "contained-hosted-publication.yml"
 
 sys.path.insert(0, str(REPO_ROOT))
@@ -157,6 +161,13 @@ ALLOWED_HOSTED_WORKFLOW = {
              'uses': UPLOAD_ACTION,
              'with': {'name': 'rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}',
                       'path': 'artifacts/rerun-evidence.jsonl',
+                      'retention-days': 14,
+                      'if-no-files-found': 'error'}},
+            {'name': 'Upload withheld diagnostic package',
+             'if': DIAGNOSTIC_UPLOAD_IF,
+             'uses': UPLOAD_ACTION,
+             'with': {'name': 'withheld-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}',
+                      'path': 'artifacts/withheld-diagnostic-package.v0/',
                       'retention-days': 14,
                       'if-no-files-found': 'error'}},
         ]}}}
@@ -317,7 +328,8 @@ def hosted_shape_violations(tree) -> list[str]:
             if with_block.get("if-no-files-found") != "error":
                 bad.append("upload if-no-files-found must be error")
             step_if = step.get("if")
-            if with_block.get("name") == "effective-envelope":
+            name = with_block.get("name")
+            if name == "effective-envelope":
                 # Fail-closed upload authorization. Quarantine is a filesystem move and can
                 # fail; if it does the gate exits nonzero, and the published collection must
                 # not be uploaded anyway. This is an authorization boundary, not a claim that
@@ -326,6 +338,17 @@ def hosted_shape_violations(tree) -> list[str]:
                     bad.append(
                         "the published collection upload must be bound to gate success "
                         "(if: %s)" % GATE_BOUND_UPLOAD_IF)
+            elif isinstance(name, str) and "withheld-diagnostic" in name:
+                if step_if != DIAGNOSTIC_UPLOAD_IF:
+                    bad.append(
+                        "the withheld diagnostic upload must be bound to gate failure "
+                        "(if: %s)" % DIAGNOSTIC_UPLOAD_IF)
+                if "github.run_id" not in name or "github.run_attempt" not in name:
+                    bad.append(
+                        "diagnostic artifact name must include run_id and run_attempt")
+                path = str(with_block.get("path") or "")
+                if DIAGNOSTIC_PACKAGE_DIRNAME not in path:
+                    bad.append("diagnostic upload path must be the diagnostic package")
             elif step_if != "always() && !cancelled()":
                 bad.append(
                     "diagnostic upload steps must run on failure/cancellation "
@@ -380,13 +403,14 @@ def hosted_shape_violations(tree) -> list[str]:
     expected_uploads = [
         "setup", "effective-envelope", "candidate-result",
     ]
-    if len(upload_names) != 4 or upload_names[:3] != expected_uploads:
+    if len(upload_names) != 5 or upload_names[:3] != expected_uploads:
         bad.append(
             "must upload setup, effective-envelope, candidate-result, "
-            "rerun-evidence separately"
+            "rerun-evidence and withheld-diagnostic separately"
         )
     else:
         rerun_name = upload_names[3]
+        diagnostic_name = upload_names[4]
         if not isinstance(rerun_name, str):
             bad.append("rerun-evidence artifact name missing run identity")
         else:
@@ -394,6 +418,13 @@ def hosted_shape_violations(tree) -> list[str]:
                 bad.append("rerun-evidence artifact name must include run_id and run_attempt")
             if rerun_name == "rerun-evidence":
                 bad.append("rerun-evidence artifact name must not be static")
+        if not isinstance(diagnostic_name, str):
+            bad.append("withheld-diagnostic artifact name missing run identity")
+        else:
+            if "withheld-diagnostic" not in diagnostic_name:
+                bad.append("fifth upload must be the withheld diagnostic package")
+            if "github.run_id" not in diagnostic_name or "github.run_attempt" not in diagnostic_name:
+                bad.append("diagnostic artifact name must include run_id and run_attempt")
     if tree != ALLOWED_HOSTED_WORKFLOW and not bad:
         bad.append("workflow diverges from ALLOWED_HOSTED_WORKFLOW")
     return bad
@@ -515,23 +546,70 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
 
 
     def test_upload_steps_always_on_failure_and_keep_if_no_files_error(self):
-        diagnostics = 0
+        always_on = 0
+        diagnostic = 0
+        verified = 0
         for step in self.tree["jobs"]["hosted-contained"]["steps"]:
             uses = str(step.get("uses") or "")
             if not uses.startswith("actions/upload-artifact@"):
                 continue
             self.assertEqual(step["with"].get("if-no-files-found"), "error")
-            if step["with"].get("name") == "effective-envelope":
+            name = step["with"].get("name")
+            if name == "effective-envelope":
                 # Published evidence: authorized only by a successful gate.
                 self.assertEqual(step.get("if"), GATE_BOUND_UPLOAD_IF)
+                verified += 1
+            elif isinstance(name, str) and "withheld-diagnostic" in name:
+                self.assertEqual(step.get("if"), DIAGNOSTIC_UPLOAD_IF)
+                diagnostic += 1
             else:
-                # Refusal diagnostics: still observable when the gate fails.
+                # Setup, candidate and rerun stay observable when the gate fails.
                 self.assertEqual(step.get("if"), "always() && !cancelled()")
-                diagnostics += 1
-        self.assertEqual(diagnostics, 3, "setup, candidate and rerun must stay always-on")
+                always_on += 1
+        self.assertEqual(always_on, 3, "setup, candidate and rerun must stay always-on")
+        self.assertEqual(verified, 1)
+        self.assertEqual(diagnostic, 1, "gate failure must upload the diagnostic package")
         gate = self.tree["jobs"]["hosted-contained"]["steps"][3]
         self.assertEqual(gate.get("name"), "Gate hosted publication")
         self.assertNotEqual(gate.get("continue-on-error"), True)
+
+    def test_five_separate_upload_classes_include_attempt_scoped_diagnostic(self):
+        hits = hosted_shape_violations(self.tree)
+        self.assertEqual(hits, [])
+        names = [
+            (step.get("with") or {}).get("name")
+            for step in self.tree["jobs"]["hosted-contained"]["steps"]
+            if str(step.get("uses") or "").startswith("actions/upload-artifact@")
+        ]
+        self.assertEqual(len(names), 5)
+        self.assertEqual(names[0], "setup")
+        self.assertEqual(names[1], "effective-envelope")
+        self.assertEqual(names[2], "candidate-result")
+        self.assertIn("github.run_id", names[3])
+        self.assertIn("github.run_attempt", names[3])
+        self.assertIn("withheld-diagnostic", names[4])
+        self.assertIn("github.run_id", names[4])
+        self.assertIn("github.run_attempt", names[4])
+
+    def test_mutation_omit_generic_diagnostic_upload_is_red(self):
+        block = (
+            "      - name: Upload withheld diagnostic package\n"
+            "        if: always() && !cancelled() && steps.gate.outcome == 'failure'\n"
+            "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
+            "        with:\n"
+            "          name: withheld-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}\n"
+            "          path: artifacts/withheld-diagnostic-package.v0/\n"
+            "          retention-days: 14\n"
+            "          if-no-files-found: error\n"
+        )
+        self.assertIn(block, self.text)
+        mutated = self.text.replace(block, "", 1)
+        self.assertNotEqual(mutated, self.text)
+        hits = hosted_shape_violations(parse_workflow_yaml(mutated))
+        self.assertTrue(
+            any("withheld-diagnostic" in h or "separately" in h for h in hits),
+            hits,
+        )
 
     def test_mutation_drop_upload_always_is_red(self):
         hits = hosted_shape_violations(self._mutated(
@@ -651,11 +729,29 @@ if __name__ == "__main__":
 
 def _upload_selection(tree, artifact_name):
     """The path the workflow ACTUALLY declares for one upload, read from the file."""
-    for step in tree["jobs"]["hosted-contained"]["steps"]:
+    job = next(iter((tree.get("jobs") or {}).values()))
+    for step in job.get("steps") or []:
         with_ = step.get("with") or {}
         if with_.get("name") == artifact_name:
             return with_["path"]
     raise AssertionError("no upload step named %r" % artifact_name)
+
+
+def _upload_selection_containing(tree, fragment):
+    """Resolve the upload path whose name or path carries `fragment`."""
+    job = next(iter((tree.get("jobs") or {}).values()))
+    for step in job.get("steps") or []:
+        with_ = step.get("with") or {}
+        name = str(with_.get("name") or "")
+        path = str(with_.get("path") or "")
+        if fragment in name or fragment in path:
+            return path
+    raise AssertionError("no upload step containing %r" % fragment)
+
+
+def _posix_relative(path, root) -> str:
+    """Relative upload member names in the closed `/` contract, host-independent."""
+    return path.relative_to(root).as_posix()
 
 
 def _select(workspace: Path, path_value: str):
@@ -671,7 +767,7 @@ def _select(workspace: Path, path_value: str):
     rel = path_value.rstrip("/")
     target = workspace / rel
     if target.is_dir():
-        return {str(f.relative_to(target)) for f in target.rglob("*") if f.is_file()}
+        return {_posix_relative(f, target) for f in target.rglob("*") if f.is_file()}
     return {target.name} if target.is_file() else set()
 
 
@@ -805,6 +901,76 @@ class UploadSelectionRetainsEveryMember(unittest.TestCase):
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 hosted.load_envelope_collection(erased)
             self.assertEqual(str(ctx.exception), "envelope_collection_corrupt")
+
+
+class DiagnosticPackageUploadSelection(unittest.TestCase):
+    """The failure upload must select the closed package, not a source-string only."""
+
+    def test_posix_relative_uses_forward_slashes_on_windows_shape(self):
+        from pathlib import PureWindowsPath
+
+        root = PureWindowsPath(r"C:\workspace\artifacts") / DIAGNOSTIC_PACKAGE_DIRNAME
+        member = root / "collection" / collection.INDEX_FILENAME
+        self.assertEqual(
+            _posix_relative(member, root),
+            "collection/" + collection.INDEX_FILENAME,
+        )
+
+    def test_workflow_path_selects_manifest_index_and_every_member(self):
+        from tests.test_contained_hosted_publication import (
+            CANDIDATE, IMAGE, RUNNER, _permitted_envelope, _write_collection,
+            _write_packet,
+        )
+
+        tree = parse_workflow_yaml(WORKFLOW.read_text(encoding="utf-8"))
+        selection = _upload_selection_containing(tree, DIAGNOSTIC_PACKAGE_DIRNAME)
+        self.assertIn(DIAGNOSTIC_PACKAGE_DIRNAME, selection)
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def execute(**kwargs):
+                _write_collection(
+                    kwargs["envelope_dest"],
+                    _permitted_envelope(
+                        prepare_sha256=rels["prepare_sha256"],
+                        envelope_status="unverified",
+                        unverified_field="runtime_version",
+                    ),
+                )
+
+            hosted.run_gate(
+                candidate_revision=CANDIDATE,
+                runner_revision=RUNNER,
+                image_digest=IMAGE,
+                operator_profile=hosted.REQUIRED_PROFILE,
+                out_dir=base / "artifacts",
+                workspace_root=base,
+                packet_root="packet",
+                authorize_path=rels["authorize"],
+                prepare_path=rels["prepare"],
+                pins_dir=rels["pins_dir"],
+                packet_manifest_sha256=rels["manifest_sha256"],
+                docker_ready=lambda: "27.0.0",
+                sealed_execute=execute,
+                environ={
+                    "GITHUB_SHA": RUNNER, "GITHUB_WORKFLOW_SHA": RUNNER,
+                    "GITHUB_RUN_ID": "1001", "GITHUB_RUN_ATTEMPT": "1",
+                },
+            )
+            pkg = base / "artifacts" / DIAGNOSTIC_PACKAGE_DIRNAME
+            self.assertTrue(pkg.is_dir(), "non-publish must emit the diagnostic package")
+            selected = _select(base, selection)
+            self.assertIn("diagnostic-package.v0.json", selected)
+            coll = pkg / "collection"
+            self.assertTrue(coll.is_dir())
+            index = json.loads((coll / collection.INDEX_FILENAME).read_text("utf-8"))
+            self.assertIn("collection/" + collection.INDEX_FILENAME, selected)
+            addressed = {"collection/" + m["relpath"] for m in index["members"]}
+            self.assertTrue(addressed, "package must retain at least one member")
+            self.assertEqual(addressed - selected, set())
 
 
 PREPARE_RUN = (

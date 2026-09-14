@@ -23,9 +23,12 @@ from hosted_rail_contract import LEGACY_RAIL, OWNED_V1_RAIL  # noqa: E402
 from sealed_measurement_contract import OWNED_CONTAINED_V1_CONTRACT  # noqa: E402
 from tests.test_contained_hosted_workflow_contract import (  # noqa: E402
     CHECKOUT_ACTION,
+    DIAGNOSTIC_PACKAGE_DIRNAME,
+    DIAGNOSTIC_UPLOAD_IF,
     SETUP_PYTHON_ACTION,
     UPLOAD_ACTION,
     parse_workflow_yaml,
+    _upload_selection_containing,
 )
 
 
@@ -122,6 +125,13 @@ OWNED_PUBLICATION_WORKFLOW = {
              "with": {
                  "name": "owned-contained-v1-rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}",
                  "path": "owned-contained-v1-artifacts/rerun-evidence.jsonl",
+                 "retention-days": 14, "if-no-files-found": "error"}},
+            {"name": "Upload withheld diagnostic package",
+             "if": "always() && !cancelled() && steps.gate.outcome == 'failure'",
+             "uses": UPLOAD_ACTION,
+             "with": {
+                 "name": "owned-contained-v1-withheld-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}",
+                 "path": "owned-contained-v1-artifacts/withheld-diagnostic-package.v0/",
                  "retention-days": 14, "if-no-files-found": "error"}},
         ],
     }},
@@ -677,12 +687,14 @@ class OwnedHostedRailContract(unittest.TestCase):
                     packet_manifest_sha256="d" * 64, docker_ready=lambda: "ready",
                     sealed_execute=execute,
                     environ={"GITHUB_SHA": bindings["runner_revision"],
-                             "GITHUB_WORKFLOW_SHA": bindings["runner_revision"]},
+                             "GITHUB_WORKFLOW_SHA": bindings["runner_revision"],
+                             "GITHUB_RUN_ID": "1001",
+                             "GITHUB_RUN_ATTEMPT": "1"},
                     rail=OWNED_V1_RAIL)
             self.assertEqual(decision["decision"], "withhold")
             self.assertFalse((out / publication.COLLECTION_DIRNAME).exists())
-            retained = (out / publication.WITHHELD_COLLECTION_DIRNAME
-                        / "attempt-0000")
+            retained = (out / publication.DIAGNOSTIC_DIRNAME
+                        / publication.DIAGNOSTIC_COLLECTION_DIRNAME)
             loaded = publication.collection.load_collection(retained)
             self.assertEqual(publication.collection.withheld_reason(loaded),
                              "attempt_raised")
@@ -697,7 +709,7 @@ class OwnedHostedRailContract(unittest.TestCase):
             ".github/workflows/contained-hosted-prepare.yml":
                 "b069c7f94ad52c5e38b4706f51ab817bca791b0012e91c20493784e49fcd4c45",
             ".github/workflows/contained-hosted-publication.yml":
-                "9131258a39a6639c6be1a6b74e89853c18339b802b1c68484eb211a3f41addfa",
+                "99b1d57351b851120847abd7742061e5c62b031600d2c78792da9636c87bc929",
         }
         for rel, digest in expected.items():
             self.assertEqual(hashlib.sha256((ROOT / rel).read_bytes()).hexdigest(), digest)
@@ -754,6 +766,42 @@ class OwnedHostedRailContract(unittest.TestCase):
                 expected = (OWNED_PREPARE_WORKFLOW if text is prepare_text
                             else OWNED_PUBLICATION_WORKFLOW)
                 self.assertNotEqual(parse_workflow_yaml(text.replace(old, new, 1)), expected)
+
+    def test_mutation_omit_owned_diagnostic_upload_is_red(self):
+        publication_text = (
+            ROOT / ".github/workflows/owned-contained-v1-publication.yml").read_text()
+        block = (
+            "      - name: Upload withheld diagnostic package\n"
+            "        if: always() && !cancelled() && steps.gate.outcome == 'failure'\n"
+            "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
+            "        with:\n"
+            "          name: owned-contained-v1-withheld-diagnostic-"
+            "${{ github.run_id }}-${{ github.run_attempt }}\n"
+            "          path: owned-contained-v1-artifacts/withheld-diagnostic-package.v0/\n"
+            "          retention-days: 14\n"
+            "          if-no-files-found: error\n"
+        )
+        self.assertIn(block, publication_text)
+        mutated = parse_workflow_yaml(publication_text.replace(block, "", 1))
+        self.assertNotEqual(mutated, OWNED_PUBLICATION_WORKFLOW)
+        names = [
+            (step.get("with") or {}).get("name")
+            for step in mutated["jobs"]["owned-contained"]["steps"]
+            if str(step.get("uses") or "").startswith("actions/upload-artifact@")
+        ]
+        self.assertFalse(any(
+            isinstance(name, str) and "withheld-diagnostic" in name for name in names))
+
+    def test_owned_failure_upload_selects_the_diagnostic_package(self):
+        publish = (ROOT / ".github/workflows/owned-contained-v1-publication.yml").read_text()
+        tree = parse_workflow_yaml(publish)
+        selection = _upload_selection_containing(tree, DIAGNOSTIC_PACKAGE_DIRNAME)
+        self.assertIn("owned-contained-v1-artifacts/" + DIAGNOSTIC_PACKAGE_DIRNAME, selection)
+        self.assertEqual(
+            [step.get("if") for step in tree["jobs"]["owned-contained"]["steps"]
+             if "withheld-diagnostic" in str((step.get("with") or {}).get("name") or "")],
+            [DIAGNOSTIC_UPLOAD_IF],
+        )
 
 
 if __name__ == "__main__":
