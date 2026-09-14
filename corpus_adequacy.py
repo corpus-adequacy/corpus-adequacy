@@ -1725,7 +1725,7 @@ def _require_authoring(authoring, requested: str) -> None:
             "requested_class independent requires relationship independent")
 
 
-def _require_class_provenance_v0_document(doc) -> dict:
+def _require_class_provenance_v0_document(doc) -> tuple[str, str]:
     require_shape(doc, dict, "class provenance")
     _require_closed_keys(
         doc, _CLASS_PROVENANCE_KEYS, _CLASS_PROVENANCE_KEYS,
@@ -1752,11 +1752,11 @@ def _require_class_provenance_v0_document(doc) -> dict:
     _require_authoring(doc["authoring"], doc["requested_class"])
     _require_visibility_events(doc["visibility_events"])
     names = _require_visibility_chain_v0(doc)
-    _classify_visibility_v0(doc, names)
+    classified = _classify_visibility_v0(doc, names)
     _require_origin(doc["origin"], doc["requested_class"])
     _require_expected_distinctions_shape(doc["expected_distinctions"])
     _require_class_non_claims(doc["non_claims"], "non_claims")
-    return doc
+    return classified
 
 
 def _ordinary_declared_mutant(manifest: dict, group: str, label: str) -> dict:
@@ -1841,7 +1841,7 @@ def load_class_provenance_v0(provenance_path, *, manifest_path, mutation_bundle_
     raw = _read_class_input(provenance_path)
     doc = _parse_class_object(raw)
     _require_class_provenance_v0_document(doc)
-    _require_canonical_class_bytes(raw, encode_class_provenance_v0(doc))
+    _require_canonical_class_bytes(raw, _encode_class_artifact_v0(doc))
     manifest_raw = _read_class_input(manifest_path)
     _require_digest_match(manifest_raw, doc["manifest_sha256"], "manifest")
     _parse_class_object(manifest_raw)
@@ -2046,8 +2046,8 @@ def _derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
     if type(report_raw) is not bytes or type(environment_raw) is not bytes:
         raise ManifestError("class attempt inputs must be bytes")
     provenance = _parse_class_object(provenance_raw)
-    _require_class_provenance_v0_document(provenance)
-    _require_canonical_class_bytes(provenance_raw, encode_class_provenance_v0(provenance))
+    classified = _require_class_provenance_v0_document(provenance)
+    _require_canonical_class_bytes(provenance_raw, _encode_class_artifact_v0(provenance))
     _require_digest_match(manifest_raw, provenance["manifest_sha256"], "manifest")
     _parse_class_object(manifest_raw)
     manifest = load_manifest_bytes(manifest_raw, Path("manifest.json"))
@@ -2057,10 +2057,6 @@ def _derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
     _class_report_summary_parity(report)
     if report.get("manifest_sha256") != provenance["manifest_sha256"]:
         raise ManifestError("report/provenance manifest digest mismatch")
-    classified = _classify_visibility_v0(
-        provenance,
-        [event["event"] for event in provenance["visibility_events"]],
-    )
     if classification is not None:
         claimed = _classification_pair(classification)
         if claimed != classified:
@@ -2111,8 +2107,8 @@ def load_class_attempt_v0(attempt_path, *, provenance_path, manifest_path,
     provenance_raw = _read_class_input(provenance_path)
     _require_digest_match(provenance_raw, doc["provenance_sha256"], "provenance")
     provenance = _parse_class_object(provenance_raw)
-    _require_class_provenance_v0_document(provenance)
-    _require_canonical_class_bytes(provenance_raw, encode_class_provenance_v0(provenance))
+    classified = _require_class_provenance_v0_document(provenance)
+    _require_canonical_class_bytes(provenance_raw, _encode_class_artifact_v0(provenance))
     if provenance["class_id"] != doc["class_id"]:
         raise ManifestError("provenance class_id does not match the attempt")
     manifest_raw = _read_class_input(manifest_path)
@@ -2138,10 +2134,6 @@ def load_class_attempt_v0(attempt_path, *, provenance_path, manifest_path,
         raise ManifestError("attempt rows do not match the validated report")
     if doc["status"] != _class_attempt_status(report):
         raise ManifestError("attempt status does not match the validated report")
-    classified = _classify_visibility_v0(
-        provenance,
-        [event["event"] for event in provenance["visibility_events"]],
-    )
     if classified != (doc["effective_class"], doc["visibility_status"]):
         raise ManifestError(
             "stored effective class or visibility status does not match the classifier")

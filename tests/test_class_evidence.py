@@ -97,6 +97,30 @@ PINNED_UNICODE_EVENT_SHA256 = (
     "sha256:" + hashlib.sha256(PINNED_UNICODE_EVENT_BYTES).hexdigest()
 )
 
+# Hand-authored from docs/class-evidence-v0.md. Not imported from, and not a
+# rebuild of, corpus_adequacy._REQUESTED_CLASS_TRANSITION_V0.
+_PUBLIC_PATTERN_EVENTS = {
+    "held_out_chain": (
+        "selection-committed", "candidate-frozen", "selection-disclosed",
+    ),
+    "pre_freeze": (
+        "selection-committed", "selection-disclosed", "candidate-frozen",
+    ),
+}
+_PUBLIC_CLASS_TRANSITION_ORACLE = (
+    # requested, pattern, relationship, effective_class, visibility_status
+    ("held_out", "held_out_chain", "same", "held_out", "hidden-until-freeze"),
+    ("held_out", "held_out_chain", "independent", "held_out", "hidden-until-freeze"),
+    ("held_out", "held_out_chain", "unknown", "held_out", "hidden-until-freeze"),
+    ("held_out", "pre_freeze", "same", "declared", "disclosed-before-freeze"),
+    ("held_out", "pre_freeze", "independent", "independent", "disclosed-before-freeze"),
+    ("held_out", "pre_freeze", "unknown", "unknown", "disclosed-before-freeze"),
+    ("declared", "pre_freeze", "independent", "declared", "declared"),
+    ("real_fault", "pre_freeze", "independent", "real_fault", "declared"),
+    ("adaptive", "pre_freeze", "independent", "adaptive", "declared"),
+    ("independent", "held_out_chain", "independent", "independent", "declared"),
+)
+
 
 def _origin_for(requested: str):
     if requested == "real_fault":
@@ -918,7 +942,7 @@ class ClassAttemptV0(unittest.TestCase):
                             "killed", "survived", "denominator", "rows", "result",
                             "score_percent", "adequate", "status"):
             self.assertNotIn(forbidden, sig.parameters)
-        self.assertIn("_classify_visibility_v0",
+        self.assertIn("_require_class_provenance_v0_document",
                       inspect.getsource(ca.derive_class_attempt_v0)
                       + inspect.getsource(ca._derive_class_attempt_v0))
 
@@ -1421,7 +1445,7 @@ class ClassVisibilityV0(unittest.TestCase):
             self.assertEqual(derived["effective_class"], "held_out")
             self.assertEqual(derived["result"]["survived"], 1)
             self.assertIn(
-                "_classify_visibility_v0",
+                "_require_class_provenance_v0_document",
                 inspect.getsource(ca.derive_class_attempt_v0)
                 + inspect.getsource(ca._derive_class_attempt_v0)
                 + inspect.getsource(ca.load_class_attempt_v0),
@@ -1602,6 +1626,72 @@ class ClassVisibilityV0(unittest.TestCase):
             )
             derived = self._public_derive(ws)
             self.assertEqual(derived["effective_class"], "held_out")
+
+    def test_public_transition_oracle_through_derive_and_default_loader(self):
+        self.assertIn(
+            ("real_fault", "pre_freeze", "independent", "real_fault", "declared"),
+            _PUBLIC_CLASS_TRANSITION_ORACLE,
+        )
+        self.assertIn(
+            ("held_out", "held_out_chain", "independent",
+             "held_out", "hidden-until-freeze"),
+            _PUBLIC_CLASS_TRANSITION_ORACLE,
+        )
+        for (requested, pattern, relationship, effective,
+             visibility) in _PUBLIC_CLASS_TRANSITION_ORACLE:
+            with self.subTest(requested=requested, pattern=pattern,
+                              relationship=relationship):
+                with tempfile.TemporaryDirectory() as d:
+                    tmp = Path(d)
+                    bun = self._class_workspace(
+                        tmp, requested,
+                        relationship=relationship)["prov"]["mutation_bundle_sha256"]
+                    ws = self._class_workspace(
+                        tmp, requested, relationship=relationship,
+                        events=_visibility_events(
+                            *_PUBLIC_PATTERN_EVENTS[pattern], bundle=bun),
+                    )
+                    derived = self._public_derive(ws)
+                    self.assertEqual(derived["effective_class"], effective)
+                    self.assertEqual(derived["visibility_status"], visibility)
+                    loaded = self._load_default_attempt(tmp, ws, derived)
+                    self.assertEqual(loaded["effective_class"], effective)
+                    self.assertEqual(loaded["visibility_status"], visibility)
+
+    def test_public_routes_perform_one_chain_validation_and_one_classification(
+            self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ws = self._held_out_workspace(tmp)
+            derived = self._public_derive(ws)
+            attempt_path = tmp / "attempt.json"
+            attempt_path.write_bytes(ca.encode_class_attempt_v0(derived))
+            routes = (
+                ("encode", lambda: ca.encode_class_provenance_v0(
+                    copy.deepcopy(ws["prov"]))),
+                ("load_provenance", lambda: ca.load_class_provenance_v0(
+                    ws["prov_path"], manifest_path=ws["manifest_path"],
+                    mutation_bundle_path=ws["bundle_path"])),
+                ("derive", lambda: self._public_derive(ws)),
+                ("load_attempt", lambda: ca.load_class_attempt_v0(
+                    attempt_path,
+                    provenance_path=ws["prov_path"],
+                    manifest_path=ws["manifest_path"],
+                    report_path=ws["report_path"],
+                    environment_path=ws["env_path"],
+                )),
+            )
+            for label, call in routes:
+                with self.subTest(route=label):
+                    with mock.patch.object(
+                            ca, "_require_visibility_chain_v0",
+                            wraps=ca._require_visibility_chain_v0) as chain, \
+                            mock.patch.object(
+                                ca, "_classify_visibility_v0",
+                                wraps=ca._classify_visibility_v0) as classify:
+                        call()
+                    self.assertEqual(chain.call_count, 1, label)
+                    self.assertEqual(classify.call_count, 1, label)
 
 
 class ClassEvidenceHostileInputs(unittest.TestCase):
