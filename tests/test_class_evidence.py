@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""F1 closed codecs for class-provenance.v0 and class-attempt.v0 (#103).
+"""F1 codecs plus the F2 visibility classifier (#103, #165).
 
-Nonexecuting. No aggregate score. No CLI. No F2/F3/F4.
+Nonexecuting. No aggregate score. No CLI. No F3/F4.
 """
 
 from __future__ import annotations
@@ -69,6 +69,28 @@ PINNED_COMPLETED_ATTEMPT_SHA256 = (
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _event_artifact_sha256(event: dict) -> str:
+    raw = (json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True)
+           + "\n").encode("utf-8")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _visibility_events(*names, bundle, actor="author-a"):
+    events = []
+    predecessor = None
+    for i, name in enumerate(names):
+        event = {
+            "ordinal": i,
+            "event": name,
+            "mutation_bundle_sha256": bundle,
+            "actor": actor,
+            "predecessor_event_sha256": predecessor,
+        }
+        events.append(event)
+        predecessor = _event_artifact_sha256(event)
+    return events
 
 
 def _source(commit=COMMIT_A, tree=TREE_A, repository="owner/name"):
@@ -577,11 +599,15 @@ class ClassProvenanceV0(unittest.TestCase):
 
 
 class ClassAttemptV0(unittest.TestCase):
-    def _workspace(self, tmp: Path, report_factory=_healthy_survivor_report):
+    def _workspace(self, tmp: Path, report_factory=_healthy_survivor_report,
+                   provenance_factory=None):
         manifest_path, bundle_path, manifest_raw, bundle_raw = _write_module_workspace(tmp)
         man = ca._file_sha256(manifest_raw)
         bun = ca._file_sha256(bundle_raw)
-        prov = _provenance_doc(manifest_sha256=man, bundle_sha256=bun)
+        if provenance_factory is None:
+            prov = _provenance_doc(manifest_sha256=man, bundle_sha256=bun)
+        else:
+            prov = provenance_factory(man, bun)
         prov_raw = ca.encode_class_provenance_v0(prov)
         prov_path = tmp / "prov.json"
         prov_path.write_bytes(prov_raw)
@@ -694,19 +720,15 @@ class ClassAttemptV0(unittest.TestCase):
             with self.assertRaises(ca.ManifestError):
                 ca.encode_class_attempt_v0(rewritten)
 
-    def test_publishable_derive_is_unreachable_until_f2(self):
-        with self.assertRaises(ca.ManifestError) as cm:
-            ca.derive_class_attempt_v0(
-                attempt_id="attempt-0001",
-                provenance_raw=b"{}",
-                manifest_raw=b"{}",
-                report_raw=b"{}",
-                environment_raw=b"",
-                predecessor=None,
-                classification={"effective_class": "held_out",
-                                "visibility_status": "hidden-until-freeze"},
-            )
-        self.assertRegex(str(cm.exception).lower(), r"unreachable|f2")
+    def test_publishable_derive_is_the_f2_classifier_path(self):
+        sig = inspect.signature(ca.derive_class_attempt_v0)
+        for forbidden in ("classification", "effective_class", "visibility_status",
+                            "killed", "survived", "denominator", "rows", "result",
+                            "score_percent", "adequate", "status"):
+            self.assertNotIn(forbidden, sig.parameters)
+        self.assertIn("_classify_visibility_v0",
+                      inspect.getsource(ca.derive_class_attempt_v0)
+                      + inspect.getsource(ca._derive_class_attempt_v0))
 
     def test_caller_counts_cannot_enter_an_encoded_attempt(self):
         with tempfile.TemporaryDirectory() as d:
@@ -944,6 +966,267 @@ class ClassAttemptV0(unittest.TestCase):
                                     "visibility_status": "declared"},
                 )
             self.assertRegex(str(cm.exception).lower(), r"moved|negative|int")
+
+
+def _held_out_provenance(man, bun, *, events=None, requested="held_out",
+                           relationship="same", authoring=None):
+    return _provenance_doc(
+        requested=requested,
+        manifest_sha256=man,
+        bundle_sha256=bun,
+        relationship=relationship,
+        authoring=authoring,
+        events=events or _visibility_events(
+            "selection-committed", "candidate-frozen", "selection-disclosed",
+            bundle=bun),
+    )
+
+
+class ClassVisibilityV0(unittest.TestCase):
+    _workspace = ClassAttemptV0._workspace
+
+    def _public_derive(self, ws):
+        return ca.derive_class_attempt_v0(
+            attempt_id="attempt-0001",
+            provenance_raw=ws["prov_raw"],
+            manifest_raw=ws["manifest_raw"],
+            report_raw=ws["report_raw"],
+            environment_raw=ws["env_raw"],
+            predecessor=None,
+        )
+
+    def _held_out_workspace(self, tmp, **kwargs):
+        return self._workspace(
+            tmp,
+            provenance_factory=lambda man, bun: _held_out_provenance(
+                man, bun, **kwargs),
+        )
+
+    def test_valid_commit_freeze_disclose_derives_held_out_and_hidden_until_freeze(
+            self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self._held_out_workspace(Path(d))
+            events = ws["prov"]["visibility_events"]
+            self.assertEqual(
+                [event["event"] for event in events],
+                ["selection-committed", "candidate-frozen",
+                 "selection-disclosed"],
+            )
+            derived = self._public_derive(ws)
+            self.assertEqual(derived["effective_class"], "held_out")
+            self.assertEqual(derived["visibility_status"], "hidden-until-freeze")
+
+    def test_pre_freeze_disclosure_maps_same_to_declared(self):
+        with tempfile.TemporaryDirectory() as d:
+            bun_probe = self._held_out_workspace(Path(d))
+            bun = bun_probe["prov"]["mutation_bundle_sha256"]
+            ws = self._held_out_workspace(
+                Path(d),
+                events=_visibility_events(
+                    "selection-committed", "selection-disclosed",
+                    "candidate-frozen", bundle=bun),
+                relationship="same",
+            )
+            derived = self._public_derive(ws)
+            self.assertEqual(derived["effective_class"], "declared")
+            self.assertNotEqual(derived["effective_class"], "held_out")
+            self.assertEqual(
+                derived["visibility_status"], "disclosed-before-freeze")
+
+    def test_pre_freeze_disclosure_maps_independent_to_independent(self):
+        with tempfile.TemporaryDirectory() as d:
+            bun_probe = self._held_out_workspace(Path(d))
+            bun = bun_probe["prov"]["mutation_bundle_sha256"]
+            ws = self._held_out_workspace(
+                Path(d),
+                requested="held_out",
+                relationship="independent",
+                authoring={
+                    "mutation_author": "author-a",
+                    "candidate_builder": "builder-b",
+                    "relationship": "independent",
+                    "candidate_outcomes_seen": False,
+                },
+                events=_visibility_events(
+                    "selection-committed", "selection-disclosed",
+                    "candidate-frozen", bundle=bun),
+            )
+            derived = self._public_derive(ws)
+            self.assertEqual(derived["effective_class"], "independent")
+            self.assertEqual(
+                derived["visibility_status"], "disclosed-before-freeze")
+
+    def test_pre_freeze_disclosure_maps_unknown_to_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            bun_probe = self._held_out_workspace(Path(d))
+            bun = bun_probe["prov"]["mutation_bundle_sha256"]
+            ws = self._held_out_workspace(
+                Path(d),
+                requested="held_out",
+                relationship="unknown",
+                authoring={
+                    "mutation_author": "author-a",
+                    "candidate_builder": "builder-b",
+                    "relationship": "unknown",
+                    "candidate_outcomes_seen": False,
+                },
+                events=_visibility_events(
+                    "selection-committed", "selection-disclosed",
+                    "candidate-frozen", bundle=bun),
+            )
+            derived = self._public_derive(ws)
+            self.assertEqual(derived["effective_class"], "unknown")
+            self.assertNotEqual(derived["effective_class"], "independent")
+            self.assertEqual(
+                derived["visibility_status"], "disclosed-before-freeze")
+
+    def test_nonfirst_predecessor_is_sha256_of_canonical_complete_preceding_event(
+            self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self._held_out_workspace(Path(d))
+            events = ws["prov"]["visibility_events"]
+            self.assertIsNone(events[0]["predecessor_event_sha256"])
+            for i in range(1, len(events)):
+                self.assertEqual(
+                    events[i]["predecessor_event_sha256"],
+                    _event_artifact_sha256(events[i - 1]),
+                    "predecessor at ordinal %d" % i,
+                )
+            derived = self._public_derive(ws)
+            self.assertEqual(derived["effective_class"], "held_out")
+
+    def test_wrong_predecessor_digest_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self._held_out_workspace(Path(d))
+            events = copy.deepcopy(ws["prov"]["visibility_events"])
+            events[2]["predecessor_event_sha256"] = "sha256:" + "a" * 64
+            ws = self._held_out_workspace(Path(d), events=events)
+            with self.assertRaises(ca.ManifestError) as cm:
+                self._public_derive(ws)
+            self.assertRegex(str(cm.exception).lower(), r"predecessor")
+
+    def test_bundle_drift_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self._held_out_workspace(Path(d))
+            events = copy.deepcopy(ws["prov"]["visibility_events"])
+            events[2]["mutation_bundle_sha256"] = "sha256:" + "b" * 64
+            events[2]["predecessor_event_sha256"] = _event_artifact_sha256(
+                events[1])
+            ws = self._held_out_workspace(Path(d), events=events)
+            with self.assertRaises(ca.ManifestError) as cm:
+                self._public_derive(ws)
+            self.assertRegex(str(cm.exception).lower(), r"bundle|drift")
+
+    def test_duplicate_event_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self._held_out_workspace(Path(d))
+            bun = ws["prov"]["mutation_bundle_sha256"]
+            events = _visibility_events(
+                "selection-committed", "candidate-frozen", "candidate-frozen",
+                bundle=bun)
+            ws = self._held_out_workspace(Path(d), events=events)
+            with self.assertRaises(ca.ManifestError) as cm:
+                self._public_derive(ws)
+            self.assertRegex(str(cm.exception).lower(), r"duplicate")
+
+    def test_reordered_events_refuse(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self._held_out_workspace(Path(d))
+            bun = ws["prov"]["mutation_bundle_sha256"]
+            events = _visibility_events(
+                "candidate-frozen", "selection-committed",
+                "selection-disclosed", bundle=bun)
+            ws = self._held_out_workspace(Path(d), events=events)
+            with self.assertRaises(ca.ManifestError) as cm:
+                self._public_derive(ws)
+            self.assertRegex(
+                str(cm.exception).lower(), r"reorder|missing|committed")
+
+    def test_missing_events_refuse(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self._held_out_workspace(Path(d))
+            bun = ws["prov"]["mutation_bundle_sha256"]
+            events = _visibility_events(
+                "selection-committed", "candidate-frozen", bundle=bun)
+            ws = self._held_out_workspace(Path(d), events=events)
+            with self.assertRaises(ca.ManifestError) as cm:
+                self._public_derive(ws)
+            self.assertRegex(str(cm.exception).lower(), r"missing")
+
+    def test_missing_freeze_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self._held_out_workspace(Path(d))
+            bun = ws["prov"]["mutation_bundle_sha256"]
+            events = _visibility_events(
+                "selection-committed", "selection-disclosed", bundle=bun)
+            ws = self._held_out_workspace(
+                Path(d), requested="held_out", events=events)
+            with self.assertRaises(ca.ManifestError) as cm:
+                self._public_derive(ws)
+            self.assertRegex(str(cm.exception).lower(), r"freeze|missing")
+
+    def test_default_loader_refuses_stored_class_mismatch_without_classifier(
+            self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self._workspace(Path(d))
+            derived = ca._derive_class_attempt_v0(
+                attempt_id="attempt-0001",
+                provenance_raw=ws["prov_raw"],
+                manifest_raw=ws["manifest_raw"],
+                report_raw=ws["report_raw"],
+                environment_raw=ws["env_raw"],
+                predecessor=None,
+                classification={"effective_class": "declared",
+                                "visibility_status": "declared"},
+            )
+            derived["effective_class"] = "held_out"
+            derived["visibility_status"] = "hidden-until-freeze"
+            path = Path(d) / "attempt.json"
+            path.write_bytes(ca.encode_class_attempt_v0(derived))
+            sig = inspect.signature(ca.load_class_attempt_v0)
+            self.assertIn("classifier", sig.parameters)
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_class_attempt_v0(
+                    path,
+                    provenance_path=ws["prov_path"],
+                    manifest_path=ws["manifest_path"],
+                    report_path=ws["report_path"],
+                    environment_path=ws["env_path"],
+                )
+            self.assertRegex(
+                str(cm.exception).lower(), r"class|visibility|classif")
+
+    def test_public_derive_uses_classifier_and_rejects_caller_class_and_count_claims(
+            self):
+        sig = inspect.signature(ca.derive_class_attempt_v0)
+        for forbidden in ("classification", "effective_class",
+                            "visibility_status", "killed", "survived",
+                            "denominator", "rows", "result", "score_percent",
+                            "adequate", "status"):
+            self.assertNotIn(forbidden, sig.parameters)
+        with tempfile.TemporaryDirectory() as d:
+            ws = self._held_out_workspace(Path(d))
+            with self.assertRaises(TypeError):
+                ca.derive_class_attempt_v0(
+                    attempt_id="attempt-0001",
+                    provenance_raw=ws["prov_raw"],
+                    manifest_raw=ws["manifest_raw"],
+                    report_raw=ws["report_raw"],
+                    environment_raw=ws["env_raw"],
+                    predecessor=None,
+                    classification={"effective_class": "declared",
+                                    "visibility_status": "declared"},
+                    killed=99,
+                )
+            derived = self._public_derive(ws)
+            self.assertEqual(derived["effective_class"], "held_out")
+            self.assertEqual(derived["result"]["survived"], 1)
+            self.assertIn(
+                "_classify_visibility_v0",
+                inspect.getsource(ca.derive_class_attempt_v0)
+                + inspect.getsource(ca._derive_class_attempt_v0)
+                + inspect.getsource(ca.load_class_attempt_v0),
+            )
 
 
 class ClassEvidenceHostileInputs(unittest.TestCase):

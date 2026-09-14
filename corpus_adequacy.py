@@ -1533,6 +1533,67 @@ def _require_visibility_events(events) -> None:
             _require_canonical_sha256(pred, where + ".predecessor_event_sha256")
 
 
+def _visibility_event_sha256(event: dict) -> str:
+    return _file_sha256(_encode_class_artifact_v0(event))
+
+
+def _classify_pre_freeze_relationship(authoring: dict) -> tuple[str, str]:
+    relationship = authoring["relationship"]
+    if relationship == "same":
+        return "declared", "disclosed-before-freeze"
+    if relationship == "independent":
+        return "independent", "disclosed-before-freeze"
+    return "unknown", "disclosed-before-freeze"
+
+
+def _classify_visibility_v0(provenance) -> tuple[str, str]:
+    """Derive effective class from the closed visibility chain.
+
+    Establishes declared artifact order and relationship metadata only. It
+    does not authenticate people or prove absence of undisclosed access.
+    """
+    events = provenance["visibility_events"]
+    bundle = provenance["mutation_bundle_sha256"]
+    names = []
+    for i, event in enumerate(events):
+        if event["mutation_bundle_sha256"] != bundle:
+            raise ManifestError("visibility event mutation bundle drifted")
+        if i > 0:
+            expected = _visibility_event_sha256(events[i - 1])
+            if event["predecessor_event_sha256"] != expected:
+                raise ManifestError(
+                    "visibility predecessor digest does not match the preceding event")
+        name = event["event"]
+        if name in names:
+            raise ManifestError("duplicate visibility event")
+        names.append(name)
+    if not names or names[0] != "selection-committed":
+        raise ManifestError(
+            "visibility events are reordered: chain must start with selection-committed")
+    held_out = [
+        "selection-committed", "candidate-frozen", "selection-disclosed",
+    ]
+    pre_freeze = [
+        "selection-committed", "selection-disclosed", "candidate-frozen",
+    ]
+    if names == held_out:
+        return "held_out", "hidden-until-freeze"
+    if names == pre_freeze:
+        return _classify_pre_freeze_relationship(provenance["authoring"])
+    if names == ["selection-committed"]:
+        if provenance["requested_class"] == "held_out":
+            raise ManifestError("visibility chain is missing candidate-frozen")
+        relationship = provenance["authoring"]["relationship"]
+        if relationship == "unknown":
+            return "unknown", "unknown"
+        if relationship == "independent":
+            return "independent", "declared"
+        return provenance["requested_class"], "declared"
+    if "candidate-frozen" not in names:
+        raise ManifestError("visibility chain is missing candidate-frozen")
+    raise ManifestError("visibility events are missing or reordered")
+
+
 def _require_origin(origin, requested: str) -> None:
     require_shape(origin, dict, "origin")
     kind = origin.get("kind")
@@ -1935,7 +1996,7 @@ def _classification_pair(classification) -> tuple[str, str]:
 
 def _derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
                              report_raw, environment_raw, predecessor,
-                             classification) -> dict:
+                             classification=None) -> dict:
     if type(provenance_raw) is not bytes or type(manifest_raw) is not bytes:
         raise ManifestError("class attempt inputs must be bytes")
     if type(report_raw) is not bytes or type(environment_raw) is not bytes:
@@ -1952,7 +2013,13 @@ def _derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
     _class_report_summary_parity(report)
     if report.get("manifest_sha256") != provenance["manifest_sha256"]:
         raise ManifestError("report/provenance manifest digest mismatch")
-    effective, visibility = _classification_pair(classification)
+    classified = _classify_visibility_v0(provenance)
+    if classification is not None:
+        claimed = _classification_pair(classification)
+        if claimed != classified:
+            raise ManifestError(
+                "classification does not match the visibility classifier")
+    effective, visibility = classified
     _require_sha256_or_null(predecessor, "predecessor_attempt_sha256")
     result = _class_result_from_report(report)
     status = _class_attempt_status(report)
@@ -1977,10 +2044,15 @@ def _derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
 
 
 def derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
-                            report_raw, environment_raw, predecessor,
-                            classification) -> dict:
-    raise ManifestError(
-        "publishable class-attempt construction is unreachable until F2")
+                            report_raw, environment_raw, predecessor) -> dict:
+    return _derive_class_attempt_v0(
+        attempt_id=attempt_id,
+        provenance_raw=provenance_raw,
+        manifest_raw=manifest_raw,
+        report_raw=report_raw,
+        environment_raw=environment_raw,
+        predecessor=predecessor,
+    )
 
 
 def load_class_attempt_v0(attempt_path, *, provenance_path, manifest_path,
@@ -2019,10 +2091,14 @@ def load_class_attempt_v0(attempt_path, *, provenance_path, manifest_path,
         raise ManifestError("attempt rows do not match the validated report")
     if doc["status"] != _class_attempt_status(report):
         raise ManifestError("attempt status does not match the validated report")
+    classified = _classify_visibility_v0(provenance)
+    if classified != (doc["effective_class"], doc["visibility_status"]):
+        raise ManifestError(
+            "stored effective class or visibility status does not match the classifier")
     if classifier is not None:
-        classified = classifier(provenance, report)
-        if (classified != (doc["effective_class"], doc["visibility_status"])
-                and classified != {
+        extra = classifier(provenance, report)
+        if (extra != classified
+                and extra != {
                     "effective_class": doc["effective_class"],
                     "visibility_status": doc["visibility_status"],
                 }):

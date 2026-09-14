@@ -40,9 +40,9 @@ Exact top-level keys: `schema`, `class_id`, `requested_class`,
 | `expected_distinctions[]` | 1–8192; unique canonical Unicode order by `(group, label, channel, member-or-empty)` |
 
 `relationship=independent` requires distinct identity strings and
-`candidate_outcomes_seen=false`. F1 does not authenticate those strings. F2
-owns visibility-chain hashing and effective-class downgrade. Until F2, no
-`held_out` provenance may be used to construct a publishable attempt.
+`candidate_outcomes_seen=false`. Those strings are not authenticated. The F2
+classifier hashes the visibility chain and derives effective class. It does
+not authenticate people or prove absence of undisclosed access.
 
 ### Distinction binding (after exact manifest digest match)
 
@@ -74,9 +74,10 @@ Exact top-level keys: `schema`, `attempt_id`, `class_id`, `provenance_sha256`,
 positive-control `control_status=killed`, and no baseline/control abnormality.
 A healthy survivor is `completed` with `adequate=false`. It is not `unproved`.
 
-Publishable attempt construction (`derive_class_attempt_v0`) is unreachable
-until F2. F1 may encode and load codec bytes. Callers cannot supply result
-counts; the decoder refuses parity mismatches against the validated report.
+Publishable attempt construction (`derive_class_attempt_v0`) uses the same
+visibility classifier as loading. Callers cannot supply class, status, or
+result counts; the decoder refuses parity mismatches against the validated
+report and against the derived class.
 
 ## Loaders
 
@@ -88,8 +89,25 @@ either artifact. Encoders share one class-artifact byte contract: UTF-8,
 `ensure_ascii=False`, two-space indent, sorted keys, one trailing LF.
 `encode_report_v0` is unchanged.
 
+`_classify_visibility_v0` is the one F2 classifier. Each non-first
+`predecessor_event_sha256` must equal the class-artifact SHA-256 of the
+complete preceding event. Event `mutation_bundle_sha256` values must match
+the provenance bundle. Duplicate or reordered names refuse.
+
+Valid `selection-committed` → `candidate-frozen` → `selection-disclosed`
+over one bundle derives `held_out` and `hidden-until-freeze`. Disclosure
+before freeze cannot remain `held_out`: relationship `same` becomes
+`declared`; a valid `independent` relationship becomes `independent`;
+unknown authorship becomes `unknown`, with `disclosed-before-freeze`.
+Missing freeze, missing events, a wrong predecessor, or bundle drift refuse.
+A single `selection-committed` event is not held-out: unknown authorship
+never becomes independent.
+
+`load_class_attempt_v0` always recomputes that pair and refuses a stored
+class or status mismatch. An optional caller `classifier` is an extra check,
+not a bypass of the default.
+
 ## Out of scope
 
-F2 visibility state machine, F3 experiment, F4 recorder/publication, CLI
-registration, candidate/Docker execution, hosted dispatch, and any
-cross-class score.
+F3 experiment, F4 recorder/publication, CLI registration, candidate/Docker
+execution, hosted dispatch, and any cross-class score.
