@@ -664,6 +664,25 @@ def _require_bindings_pair(bindings, dispatch_bindings, expected=None) -> dict:
     return dict(bindings)
 
 
+def _require_attempt_ledger(entries, expected=None, expected_identity=None) -> tuple:
+    start = entries[0]
+    start_pair = _require_bindings_pair(
+        start.get("bindings"), start.get("dispatch_bindings"), expected)
+    start_identity = _require_run_identity({
+        "run_id": start.get("run_id"),
+        "run_attempt": start.get("run_attempt"),
+    })
+    if expected_identity is not None and start_identity != expected_identity:
+        raise HostedPublicationError("attempt_binding")
+    for entry in entries:
+        _require_bindings_pair(
+            entry.get("bindings"), entry.get("dispatch_bindings"), start_pair)
+        if (entry.get("run_id") != start_identity["run_id"]
+                or entry.get("run_attempt") != start_identity["run_attempt"]):
+            raise HostedPublicationError("attempt_binding")
+    return start_pair, start_identity
+
+
 def _require_reason(reason) -> str:
     if not isinstance(reason, str) or not reason:
         raise HostedPublicationError("reason")
@@ -1066,17 +1085,7 @@ def load_rerun_evidence(path, *, max_bytes: int = MAX_RERUN_EVIDENCE_BYTES,
         raise HostedPublicationError("rerun_terminal")
     if any(entry.get("kind") == RERUN_KIND_TERMINAL for entry in entries[:-1]):
         raise HostedPublicationError("rerun_terminal")
-    start = entries[0]
-    terminal = entries[-1]
-    if (start.get("run_id") != terminal.get("run_id")
-            or start.get("run_attempt") != terminal.get("run_attempt")):
-        raise HostedPublicationError("attempt_binding")
-    for entry in entries:
-        _require_bindings_pair(entry.get("bindings"), entry.get("dispatch_bindings"))
-    if start.get("bindings") != terminal.get("bindings"):
-        raise HostedPublicationError("bindings")
-    _require_run_identity({"run_id": terminal.get("run_id"),
-                            "run_attempt": terminal.get("run_attempt")})
+    _require_attempt_ledger(entries)
     return entries
 
 
@@ -1174,22 +1183,15 @@ def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
                            expected)
     _require_bindings_pair(package.get("bindings"), package.get("dispatch_bindings"),
                            expected)
-    start = entries[0]
-    terminal = entries[-1]
-    _require_bindings_pair(start.get("bindings"), start.get("dispatch_bindings"), expected)
-    _require_bindings_pair(terminal.get("bindings"), terminal.get("dispatch_bindings"),
-                           expected)
     identity = _require_run_identity({
         "run_id": expected_run_id,
         "run_attempt": expected_run_attempt,
     })
     if package["run_identity"] != identity:
         raise HostedPublicationError("attempt_binding")
-    if (start.get("run_id") != identity["run_id"]
-            or start.get("run_attempt") != identity["run_attempt"]
-            or terminal.get("run_id") != identity["run_id"]
-            or terminal.get("run_attempt") != identity["run_attempt"]):
-        raise HostedPublicationError("attempt_binding")
+    _require_attempt_ledger(entries, expected=expected, expected_identity=identity)
+    start = entries[0]
+    terminal = entries[-1]
     if setup.get("workflow_identity") != start.get("workflow_identity"):
         raise HostedPublicationError("workflow_identity")
     if package.get("workflow_identity") != start.get("workflow_identity"):

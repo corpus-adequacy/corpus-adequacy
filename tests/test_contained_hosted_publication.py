@@ -2297,6 +2297,56 @@ class WithheldDiagnosticPackage(unittest.TestCase):
         encoded.append(json.dumps(terminal, sort_keys=True).encode("utf-8"))
         log.write_bytes(b"".join(line + b"\n" for line in encoded))
 
+    def _out_post_execute_refusal(self, base: Path) -> Path:
+        packet = base / "packet"
+        packet.mkdir()
+        rels = _write_packet(packet)
+
+        def execute_wrong_prep(**kwargs):
+            _write_collection(
+                kwargs["envelope_dest"],
+                _permitted_envelope(prepare_sha256="ab" * 32),
+            )
+
+        with self.assertRaises(hosted.HostedPublicationError):
+            _run_ok(base, "packet", rels, execute=execute_wrong_prep,
+                    out_name="artifacts")
+        return base / "artifacts"
+
+    def _out_infrastructure_failure(self, base: Path) -> Path:
+        out = base / "artifacts"
+
+        def boom():
+            raise contained.DockerUnavailable("docker executable is not available")
+
+        hosted.run_gate(
+            candidate_revision=CANDIDATE, runner_revision=RUNNER,
+            image_digest=IMAGE, operator_profile=hosted.REQUIRED_PROFILE,
+            out_dir=out, docker_ready=boom,
+        )
+        return out
+
+    def _out_cleanup_failed_from_post_execute(self, base: Path) -> Path:
+        out = self._out_post_execute_refusal(base)
+        log = out / hosted.RERUN_EVIDENCE_FILENAME
+        lines = [line for line in log.read_bytes().splitlines() if line]
+        middle = json.loads(lines[1])
+        replacement = {
+            "kind": hosted.RERUN_KIND_CLEANUP_FAILED,
+            "reason": middle["reason"],
+            "cleanup_error_type": "OSError",
+            "bindings": middle["bindings"],
+            "dispatch_bindings": middle["dispatch_bindings"],
+            "run_id": middle["run_id"],
+            "run_attempt": middle["run_attempt"],
+        }
+        log.write_bytes(
+            lines[0] + b"\n"
+            + json.dumps(replacement, sort_keys=True).encode("utf-8") + b"\n"
+            + lines[-1] + b"\n"
+        )
+        return out
+
     def test_unverified_field_retention_refuses_semantic_drop(self):
         with tempfile.TemporaryDirectory() as raw:
             out, decision, _rels = self._withhold(
@@ -2462,6 +2512,46 @@ class WithheldDiagnosticPackage(unittest.TestCase):
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 hosted.load_hosted_attempt_artifacts(**kwargs)
             self.assertIn("bindings", str(ctx.exception))
+
+    def test_forged_intermediate_rerun_binding_and_attempt_refuse(self):
+        forged = {
+            "candidate_revision": OTHER_CANDIDATE,
+            "runner_revision": OTHER_RUNNER,
+            "image_digest": OTHER_IMAGE,
+        }
+        cases = (
+            ("post-execute-refusal", self._out_post_execute_refusal),
+            ("infrastructure-failure", self._out_infrastructure_failure),
+            ("post-execute-refusal-cleanup-failed",
+             self._out_cleanup_failed_from_post_execute),
+        )
+        for kind, factory in cases:
+            with self.subTest(kind=kind):
+                with tempfile.TemporaryDirectory() as raw:
+                    out = factory(Path(raw))
+                    kwargs = self._attempt_kwargs(out)
+                    hosted.load_hosted_attempt_artifacts(**kwargs)
+                    log = out / hosted.RERUN_EVIDENCE_FILENAME
+                    lines = [line for line in log.read_bytes().splitlines() if line]
+                    self.assertEqual(len(lines), 3)
+                    start = json.loads(lines[0])
+                    middle = json.loads(lines[1])
+                    terminal = json.loads(lines[2])
+                    self.assertEqual(start["kind"], "run-attempt-start")
+                    self.assertEqual(middle["kind"], kind)
+                    self.assertEqual(terminal["kind"], "run-attempt-terminal")
+                    middle["bindings"] = dict(forged)
+                    middle["dispatch_bindings"] = dict(forged)
+                    middle["run_id"] = "999"
+                    middle["run_attempt"] = "999"
+                    log.write_bytes(
+                        lines[0] + b"\n"
+                        + json.dumps(middle, sort_keys=True).encode("utf-8") + b"\n"
+                        + lines[2] + b"\n"
+                    )
+                    with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                        hosted.load_hosted_attempt_artifacts(**kwargs)
+                    self.assertIn(str(ctx.exception), ("bindings", "attempt_binding"))
 
     def test_aggregate_does_not_reopen_setup_or_candidate_via_path_read_bytes(self):
         with tempfile.TemporaryDirectory() as raw:
