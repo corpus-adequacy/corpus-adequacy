@@ -675,6 +675,10 @@ class ReportDiffEncoderClosure(unittest.TestCase):
         )
         return _project(report, _clone(report))
 
+    def _same_identity(self):
+        report = _report([producer_shaped_row("survived", "only")])
+        return _project(report, _clone(report))
+
     def test_encode_diff_v0_refuses_value_and_cross_field_corruptions(self):
         valid = self._valid()
         encoded = ca.encode_diff_v0(valid)
@@ -735,6 +739,80 @@ class ReportDiffEncoderClosure(unittest.TestCase):
             ("null-corpus-marked-same", mutate(self._null_identity(), lambda d: d["identity"]["corpus_digest"].__setitem__("status", "same"))),
         )
         self.assertGreaterEqual(len(corruptions), 15)
+        for name, malformed in corruptions:
+            with self.subTest(name=name):
+                with self.assertRaises(ca.ManifestError):
+                    ca.encode_diff_v0(malformed)
+
+    def test_encode_diff_v0_refuses_malformed_identity_values(self):
+        valid = self._valid()
+        same = self._same_identity()
+        self.assertEqual(json.loads(ca.encode_diff_v0(valid))["schema"], DIFF_SCHEMA)
+        self.assertEqual(json.loads(ca.encode_diff_v0(same))["schema"], DIFF_SCHEMA)
+        self.assertEqual(
+            json.loads(ca.encode_diff_v0(self._null_identity()))["schema"], DIFF_SCHEMA)
+        self.assertEqual(same["counts"]["added"], 0)
+        self.assertEqual(same["counts"]["removed"], 0)
+        self.assertEqual(same["identity"]["manifest_sha256"]["status"], "same")
+        with self.subTest(name="shared-identity-validators"):
+            document_src = inspect.getsource(ca._require_diff_v0_document)
+            self.assertIn("_require_diff_identity_values", document_src)
+            self.assertIn("_require_diff_component_status", document_src)
+            self.assertTrue(hasattr(ca, "_require_canonical_sha256"))
+            self.assertTrue(hasattr(ca, "_require_corpus_digest"))
+            self.assertTrue(hasattr(ca, "_require_diff_identity_values"))
+            values_fn = getattr(ca, "_require_diff_identity_values", None)
+            self.assertIsNotNone(values_fn)
+            report_src = inspect.getsource(ca._require_report_rows)
+            values_src = inspect.getsource(values_fn)
+            for helper in (
+                    "_require_canonical_sha256",
+                    "_require_corpus_digest",
+                    "_require_tool_identity_forms"):
+                self.assertIn(helper, report_src)
+                self.assertIn(helper, values_src)
+
+        def mutate(doc, fn):
+            cloned = _clone(doc)
+            fn(cloned)
+            return cloned
+
+        def set_both(path, value, status):
+            def fn(d):
+                node = d["identity"]
+                for key in path:
+                    node = node[key]
+                node["old"] = value
+                node["new"] = value
+                node["status"] = status
+            return fn
+
+        def exact_null_tool(d):
+            tool = d["identity"]["tool"]
+            for side in ("old", "new"):
+                tool["tool_source_state"][side] = "exact"
+                tool["tool_commit"][side] = None
+                tool["tool_content_sha256"][side] = None
+            tool["tool_source_state"]["status"] = "same"
+            tool["tool_commit"]["status"] = "unresolved"
+            tool["tool_content_sha256"]["status"] = "unresolved"
+
+        corruptions = (
+            ("both-manifest-bad", mutate(same, set_both(("manifest_sha256",), "bad", "same"))),
+            ("corpus-values-int", mutate(same, set_both(("corpus_digest",), 7, "same"))),
+            ("both-tool-commits-bad", mutate(
+                same, set_both(("tool", "tool_commit"), "bad", "same"))),
+            ("invented-tool-states", mutate(
+                same, set_both(("tool", "tool_source_state"), "invented", "same"))),
+            ("bad-content-digests", mutate(
+                same, set_both(("tool", "tool_content_sha256"), "bad", "same"))),
+            ("empty-tool-versions", mutate(
+                same, set_both(("tool", "tool_version"), "", "same"))),
+            ("exact-null-commit-content", mutate(same, exact_null_tool)),
+            ("old-input-unproved-negative", mutate(
+                same, lambda d: d["old_input"].__setitem__("unproved", -1))),
+        )
+        self.assertEqual(len(corruptions), 8)
         for name, malformed in corruptions:
             with self.subTest(name=name):
                 with self.assertRaises(ca.ManifestError):

@@ -725,32 +725,41 @@ def _require_closed_keys(obj, required, allowed, *, missing_token, extra_token):
         raise ManifestError("%s %s" % (extra_token, sorted(extra)[0]))
 
 
-def _require_sha256_or_null(value, where: str) -> None:
-    if value is None:
-        return
+def _require_canonical_sha256(value, where: str) -> None:
     if not isinstance(value, str) or _MANIFEST_DIGEST_RE.fullmatch(value) is None:
         raise ManifestError("%s is not a canonical sha256 digest" % where)
 
 
-def _require_tool_identity_forms(report) -> None:
-    version = report.get("tool_version")
+def _require_sha256_or_null(value, where: str) -> None:
+    if value is None:
+        return
+    _require_canonical_sha256(value, where)
+
+
+def _require_corpus_digest(value, where: str) -> None:
+    if value is not None and (not isinstance(value, str) or not value):
+        raise ManifestError("%s must be null or a non-empty string" % where)
+
+
+def _require_tool_identity_forms(fields, where: str) -> None:
+    version = fields.get("tool_version")
     if not isinstance(version, str) or not version:
-        raise ManifestError("report.tool_version must be a non-empty string")
-    state = report.get("tool_source_state")
+        raise ManifestError("%s.tool_version must be a non-empty string" % where)
+    state = fields.get("tool_source_state")
     if state not in TOOL_SOURCE_STATES:
-        raise ManifestError("report.tool_source_state is not a producer tool state")
-    commit = report.get("tool_commit")
+        raise ManifestError("%s.tool_source_state is not a producer tool state" % where)
+    commit = fields.get("tool_commit")
     if commit is not None and (
             not isinstance(commit, str) or _COMMIT_RE.fullmatch(commit) is None):
-        raise ManifestError("report.tool_commit is not a 40-hex commit id")
-    _require_sha256_or_null(report.get("tool_content_sha256"), "report.tool_content_sha256")
-    content = report.get("tool_content_sha256")
+        raise ManifestError("%s.tool_commit is not a 40-hex commit id" % where)
+    _require_sha256_or_null(fields.get("tool_content_sha256"), "%s.tool_content_sha256" % where)
+    content = fields.get("tool_content_sha256")
     if state == "exact":
         if commit is None or content is None:
-            raise ManifestError("report tool identity is not producer-consistent")
+            raise ManifestError("%s tool identity is not producer-consistent" % where)
         return
     if commit is not None:
-        raise ManifestError("report tool identity is not producer-consistent")
+        raise ManifestError("%s tool identity is not producer-consistent" % where)
 
 
 def _require_report_rows(report) -> list:
@@ -771,13 +780,9 @@ def _require_report_rows(report) -> list:
             raise ManifestError("report.%s must be an int" % key)
     if not isinstance(report.get("control_status"), str) or not report["control_status"]:
         raise ManifestError("report.control_status must be a non-empty string")
-    digest = report.get("manifest_sha256")
-    if not isinstance(digest, str) or _MANIFEST_DIGEST_RE.fullmatch(digest) is None:
-        raise ManifestError("report.manifest_sha256 is not a canonical sha256 digest")
-    corpus = report.get("corpus_digest")
-    if corpus is not None and (not isinstance(corpus, str) or not corpus):
-        raise ManifestError("report.corpus_digest must be null or a non-empty string")
-    _require_tool_identity_forms(report)
+    _require_canonical_sha256(report.get("manifest_sha256"), "report.manifest_sha256")
+    _require_corpus_digest(report.get("corpus_digest"), "report.corpus_digest")
+    _require_tool_identity_forms(report, "report")
     mutants = report.get("mutants")
     if not isinstance(mutants, list):
         raise ManifestError("report.mutants must be a list")
@@ -1169,11 +1174,24 @@ def _require_diff_input_block(block: dict, name: str) -> None:
         raise ManifestError("%s.control_status must be a non-empty string" % name)
     if type(block["unproved"]) is not int:
         raise ManifestError("%s.unproved must be an int" % name)
+    if block["unproved"] < 0:
+        raise ManifestError("%s.unproved must be a non-negative int" % name)
 
 
 def _require_diff_component_status(component: dict, status_fn, where: str) -> None:
     if component.get("status") != status_fn(component.get("old"), component.get("new")):
         raise ManifestError("%s has an invalid status" % where)
+
+
+def _require_diff_identity_values(identity: dict) -> None:
+    for side in ("old", "new"):
+        _require_canonical_sha256(
+            identity["manifest_sha256"][side], "identity.manifest_sha256." + side)
+        _require_corpus_digest(
+            identity["corpus_digest"][side], "identity.corpus_digest." + side)
+        _require_tool_identity_forms(
+            {key: identity["tool"][key][side] for key in _DIFF_TOOL_KEYS},
+            "identity.tool." + side)
 
 
 def _require_diff_mutant_row(row, where: str) -> None:
@@ -1232,6 +1250,7 @@ def _require_diff_v0_document(doc: dict) -> None:
             extra_token="identity component extra key")
         _require_diff_component_status(
             identity["tool"][name], _tool_component_status, "identity.tool." + name)
+    _require_diff_identity_values(identity)
     require_shape(doc["rows"], list, "rows")
     manifest_changed = identity["manifest_sha256"]["status"] == "changed"
     labels = []
