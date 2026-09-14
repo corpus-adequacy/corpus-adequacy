@@ -1,0 +1,21 @@
+{
+  "schema": "corpus-adequacy.manifest.v0",
+  "implementation": "subject.py",
+  "vectors": "vectors.json",
+  "minimum_execution_profile": "trusted-local",
+  "mutants": {
+    "demo": [
+      {
+        "label": "CONTROL refusal",
+        "anchor": "return value",
+        "replacement": "raise ValueError()",
+        "control": true
+      },
+      {
+        "label": "remove demo guard",
+        "anchor": "if value < 0",
+        "replacement": "if false"
+      }
+    ]
+  }
+}

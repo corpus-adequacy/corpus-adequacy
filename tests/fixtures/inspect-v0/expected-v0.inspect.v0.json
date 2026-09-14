@@ -1,0 +1,94 @@
+{
+  "declared": {
+    "commands": {
+      "build": null,
+      "entrypoint_command": null
+    },
+    "controls": [
+      {
+        "group": "demo",
+        "label": "CONTROL refusal",
+        "polarity": "positive"
+      }
+    ],
+    "corpus_digest_file": {
+      "status": "absent",
+      "value": null
+    },
+    "deadlines": {
+      "build_timeout": null,
+      "vector_timeout": 120
+    },
+    "implementation": "subject.py",
+    "implementation_sources": null,
+    "minimum_execution_profile": "trusted-local",
+    "operator_execution_profile": {
+      "status": "not-supplied-to-inspection",
+      "value": null
+    },
+    "resource_limits": {
+      "status": "not-represented-in-manifest",
+      "value": null
+    },
+    "rule_inventory": null,
+    "runner": "module",
+    "selectors": {
+      "diagnostic_from": {
+        "status": "absent",
+        "value": null
+      },
+      "outcome_from": {
+        "status": "absent",
+        "value": null
+      },
+      "outcome_parse": {
+        "status": "absent",
+        "value": null
+      }
+    },
+    "vectors": "vectors.json"
+  },
+  "execution_authorized": false,
+  "manifest": {
+    "bytes": 475,
+    "schema": "corpus-adequacy.manifest.v0",
+    "sha256": "sha256:78ab8b1437eb1fe9bd846905a5ab8264b5a37abb3e9bb9137066cf9fe56520bc"
+  },
+  "non_claims": [
+    "No manifest execution or execution authorization is established.",
+    "No sandbox or readiness result is established.",
+    "No corpus adequacy or rule completeness is established.",
+    "No owner ratification or runtime validation is established."
+  ],
+  "review_judgment": [
+    "manifest-trust",
+    "selector-fidelity",
+    "mutation-rule-ownership",
+    "rule-inventory-completeness",
+    "execution-permission"
+  ],
+  "runtime_unchecked": [
+    "declared-path-resolution",
+    "source-file-existence-and-bytes",
+    "vector-document",
+    "corpus-digest-file",
+    "operator-profile-selection",
+    "profile-downgrade",
+    "runner-and-build",
+    "baseline",
+    "controls",
+    "mutants",
+    "containment-envelope"
+  ],
+  "schema": "corpus-adequacy.inspect.v0",
+  "statically_checked": [
+    "json",
+    "manifest-schema",
+    "declaration-shapes",
+    "selector-contract",
+    "mutant-label-identity",
+    "control-declarations",
+    "minimum-profile-syntax",
+    "rule-inventory-absent"
+  ]
+}

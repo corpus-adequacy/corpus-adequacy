@@ -1,0 +1,44 @@
+{
+  "schema": "corpus-adequacy.manifest.v1",
+  "runner": "process",
+  "implementation": "src/check.py",
+  "implementation_sources": ["src/check.py"],
+  "vectors": "vectors.json",
+  "entrypoint_command": ["python3", "src/check.py", "{vector}"],
+  "build": [],
+  "outcome_from": ["verdict", "reason"],
+  "diagnostic_from": ["detail"],
+  "accepted_exit_codes": [0],
+  "unproved_exit_codes": [75],
+  "build_timeout": 30,
+  "vector_timeout": 5,
+  "mutants": {
+    "demo": [
+      {
+        "id": "control",
+        "label": "CONTROL refusal",
+        "anchor": "return value",
+        "replacement": "raise ValueError()",
+        "control": true,
+        "control_polarity": "positive"
+      },
+      {
+        "id": "guard",
+        "label": "remove demo guard",
+        "anchor": "if value < 0",
+        "replacement": "if false"
+      }
+    ]
+  },
+  "rules": {
+    "demo": [
+      {
+        "id": "demo.guard",
+        "text": "Negative values are refused.",
+        "url": "https://example.invalid/spec#negative",
+        "disposition": "mutated",
+        "mutants": ["remove demo guard"]
+      }
+    ]
+  }
+}

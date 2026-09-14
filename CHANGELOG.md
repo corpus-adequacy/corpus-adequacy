@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+Add `--inspect <manifest.json> [--json]`, a nonexecuting static declaration
+path. One pure parser now validates manifest-resident rules for both inspection
+and normal measurement; only normal measurement continues into a separate
+filesystem binder. The closed `corpus-adequacy.inspect.v0` document addresses
+the bounded input bytes, preserves declared path strings, distinguishes static
+checks from runtime-unknown facts and review judgments, preserves each
+selector's absent-versus-declared status before parser defaults, represents v0
+inventory as absent and v1 inventory as author-declared counts, and always sets
+`execution_authorized` false. Inspection does not resolve paths, read vectors or
+known-hole digest files, import, build, materialize, lock, select a backend, or
+execute. The shared parser now refuses non-boolean controls, non-positive or
+non-integer child deadlines, deadlines above the conservative `2^53 - 1` bound
+within binary64's contiguous exact-integer range, and scalar, empty-execution,
+empty-member or non-string argv shapes before binding. The ceiling does not
+claim that `2^53` itself is unrepresentable; it is representational, not tuned
+runtime policy.
+This is invalid-input hardening; valid manifest and report/projection bytes are
+unchanged. A declared known-hole digest path is reported only as its original
+relative string and remains runtime-unchecked. Inspection is not readiness and
+not sandbox evidence; it establishes no rule completeness, adequacy, or
+permission. Valid existing measurement and projection formats are unchanged.
+
 Publication finding dossiers now place digest-bound authored rule and anchor
 evidence beside each survivor or silent row. The renderer reads one bounded
 manifest snapshot for both derivations and binds accepted bytes, or a stable

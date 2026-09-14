@@ -105,6 +105,7 @@ REPORT_SCHEMA = "corpus-adequacy.report.v0"
 SURVIVORS_SCHEMA = "corpus-adequacy.survivors.v0"
 RULES_SCHEMA = "corpus-adequacy.rules.v0"
 DIFF_SCHEMA = "corpus-adequacy.diff.v0"
+INSPECT_SCHEMA = "corpus-adequacy.inspect.v0"
 ANCHOR_EXCERPT_MAX = 200
 # One place. The report, --version, and CHANGELOG name this.
 # A tag v+VERSION exists only after the documented cut.
@@ -299,9 +300,38 @@ def require_shape(obj, expected, where: str) -> None:
 
 
 def load_json_document(raw, *, root=None, where: str):
-    """One decoder: RecursionError is a refusal; optional root is require_shape once."""
+    """One strict decoder; optional root is checked exactly once."""
+    def refuse_const(value):
+        raise ManifestError("non-finite JSON number %s" % value)
+
+    def no_duplicate_keys(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ManifestError("duplicate JSON key %r" % key)
+            obj[key] = value
+        return obj
+
+    def refuse_nonfinite(value):
+        stack = [value]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, float) and (
+                    item != item or item in (float("inf"), -float("inf"))):
+                raise ManifestError("non-finite JSON number %r" % item)
+            if isinstance(item, dict):
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+        return value
+
     try:
-        doc = json.loads(raw)
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    except UnicodeDecodeError:
+        raise ManifestError("%s input is not UTF-8" % where) from None
+    try:
+        doc = refuse_nonfinite(json.loads(
+            text, parse_constant=refuse_const, object_pairs_hook=no_duplicate_keys))
     except RecursionError as exc:
         raise ManifestError(str(exc)) from None
     if root is not None:
@@ -312,11 +342,11 @@ def load_json_document(raw, *, root=None, where: str):
 def error_envelope(exc: BaseException, *, operation: str) -> dict:
     """Parseable --json body for a run that never produced a report.
 
-    `operation` is the verb (`measure` or `project`). One envelope, no
+    `operation` is the verb (`measure`, `project`, or `inspect`). One envelope, no
     second parser rule. The field and stderr share that verb.
     """
-    if operation not in ("measure", "project"):
-        raise ValueError("error_envelope operation must be measure or project")
+    if operation not in ("measure", "project", "inspect"):
+        raise ValueError("error_envelope operation must be measure, project or inspect")
     return {
         "schema": ERROR_SCHEMA,
         "ok": False,
@@ -581,49 +611,11 @@ def _control_stripped_one_line(text: str) -> str:
     return "".join(ch for ch in text if ord(ch) >= 32 and ch != "\x7f")
 
 
-_INF = float("inf")
 
 
 def _parse_projection_json(raw: bytes):
-    """One parser for --survivors report and digest-matched manifest bytes."""
-    def refuse_const(value):
-        raise ManifestError("non-finite JSON number %s" % value)
-
-    def refuse_nonfinite(value):
-        """One iterative finite walk. `parse_constant` sees the named NaN and
-        Infinity tokens only; an exponent that overflows, such as 1e999,
-        arrives as an ordinary float and would otherwise be accepted.
-        Iterative so a deep document cannot trade a refusal for a
-        RecursionError."""
-        stack = [value]
-        while stack:
-            item = stack.pop()
-            if isinstance(item, float):
-                if item != item or item in (_INF, -_INF):
-                    raise ManifestError("non-finite JSON number %r" % item)
-            elif isinstance(item, dict):
-                stack.extend(item.values())
-            elif isinstance(item, list):
-                stack.extend(item)
-        return value
-
-    def no_duplicate_keys(pairs):
-        obj = {}
-        for key, value in pairs:
-            if key in obj:
-                raise ManifestError("duplicate JSON key %r" % key)
-            obj[key] = value
-        return obj
-
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        raise ManifestError("projection input is not UTF-8") from None
-    try:
-        return refuse_nonfinite(json.loads(
-            text, parse_constant=refuse_const, object_pairs_hook=no_duplicate_keys))
-    except RecursionError as exc:
-        raise ManifestError(str(exc)) from None
+    """One strict parser for projection bytes, sharing the JSON decoder."""
+    return load_json_document(raw, where="projection")
 
 
 def _require_anchor_manifest(manifest_obj) -> dict:
@@ -2503,26 +2495,71 @@ def rule_inventory_index(manifest) -> dict | None:
     }
 
 
-def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
-                        path_root: Path | None = None) -> dict:
-    """Load exact manifest bytes while resolving logical paths at one root."""
+def _require_manifest_profile_declaration(manifest: dict) -> None:
+    """Manifest may state only its minimum; operator selection is external."""
+    if OPERATOR_PROFILE_KEY in manifest:
+        raise ManifestError(
+            "manifest must not declare operator key %s (got %r); "
+            "candidates may state only %s"
+            % (OPERATOR_PROFILE_KEY, manifest[OPERATOR_PROFILE_KEY],
+               MINIMUM_PROFILE_KEY))
+
+
+_MAX_EXACT_TIMEOUT_SECONDS = (1 << 53) - 1
+
+
+def _require_positive_timeout(value, where: str, *, allow_none: bool = False) -> None:
+    """Require a positive integer at most the conservative binary64 bound 2^53 - 1."""
+    if allow_none and value is None:
+        return
+    if (type(value) is not int or value <= 0
+            or value > _MAX_EXACT_TIMEOUT_SECONDS):
+        raise ManifestError(
+            "%s must be a positive integer no greater than %d"
+            % (where, _MAX_EXACT_TIMEOUT_SECONDS))
+
+
+def _require_argv(value, where: str, *, allow_empty: bool,
+                  allow_none: bool = False) -> None:
+    """Require a JSON argv array without coercing scalars or member types."""
+    if allow_none and value is None:
+        return
+    if (not isinstance(value, list) or (not allow_empty and not value)
+            or not all(isinstance(member, str) and member for member in value)):
+        qualifier = "possibly empty" if allow_empty else "non-empty"
+        raise ManifestError(
+            "%s must be a %s JSON array of non-empty strings" % (where, qualifier))
+
+
+def _require_control_boolean(value, where: str) -> None:
+    if type(value) is not bool:
+        raise ManifestError("%s control must be a boolean" % where)
+
+
+def parse_manifest_declaration(manifest_bytes: bytes) -> dict:
+    """Validate only declarations carried by exact manifest bytes.
+
+    This boundary is intentionally free of path resolution and file reads. The
+    normal measurement loader and static inspection both call it, so manifest
+    rules have one implementation while only measurement proceeds to binding.
+    """
     if type(manifest_bytes) is not bytes:
         raise ManifestError("manifest bytes must be bytes")
-    path = Path(artifact_path)
     m = load_json_document(manifest_bytes, root=dict, where="manifest")
+    m["_declared_selector_keys"] = tuple(
+        key for key in ("outcome_from", "diagnostic_from", "outcome_parse")
+        if key in m)
     if m.get("schema") not in (SCHEMA, MANIFEST_V1_SCHEMA):
         raise ManifestError(
             "schema must be %r or %r, got %r"
             % (SCHEMA, MANIFEST_V1_SCHEMA, m.get("schema")))
-    base = Path(path_root) if path_root is not None else path.parent
+    _require_manifest_profile_declaration(m)
     # Exact on-disk bytes are the input parsed above. Whitespace and key order
     # therefore remain addressable rather than being silently canonicalised.
     m["_manifest_sha256"] = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
     _req(m, "vectors", "manifest")
     if m.get("runner", "module") == "module":
         _req(m, "implementation", "manifest")
-    m["_impl_path"] = (base / m["implementation"]).resolve() if m.get("implementation") else None
-    m["_vectors_path"] = (base / m["vectors"]).resolve()
     m.setdefault("entrypoint", "evaluate")
     # group_key is OPTIONAL. A corpus with no axis column is one group; forcing it to invent
     # an axis would be the tool bending the corpus to fit itself.
@@ -2535,26 +2572,15 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
     m.setdefault("entrypoint_args",
                  [k for k in (m["group_key"], m["inputs_key"]) if k is not None])
     m.setdefault("default_group", "all")
+    if MINIMUM_PROFILE_KEY in m:
+        m[MINIMUM_PROFILE_KEY] = _canonical_execution_profile(
+            m[MINIMUM_PROFILE_KEY], which=MINIMUM_PROFILE_KEY)
     m.setdefault("known_holes", {})
     require_shape(m["known_holes"], dict, "known_holes")
     m["_corpus_digest"] = None
     if m["known_holes"]:
         for key in ("corpus_digest_file", "corpus_digest_key"):
             _req(m, key, "manifest (known_holes declared)")
-        dp = (base / m["corpus_digest_file"]).resolve()
-        if not dp.is_file():
-            raise ManifestError("corpus_digest_file not found: %s" % dp)
-        digest_doc = load_json_document(
-            dp.read_bytes(), root=dict, where="corpus_digest_file")
-        key = m["corpus_digest_key"]
-        if key not in digest_doc:
-            raise ManifestError("corpus_digest_key %r is missing" % key)
-        digest_value = digest_doc[key]
-        if not isinstance(digest_value, str):
-            raise ManifestError(
-                "corpus_digest_key %r must be a string, got %s"
-                % (key, type(digest_value).__name__))
-        m["_corpus_digest"] = digest_value
         for digest, entries in m["known_holes"].items():
             require_shape(entries, list, "known_holes[%s]" % digest)
             for i, e in enumerate(entries):
@@ -2617,13 +2643,6 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
             _req(m, "build", "manifest (runner=process)")
         m.setdefault("build", [])
         m.setdefault("repo_root", ".")
-        m["_repo_root"] = (base / m["repo_root"]).resolve()
-        srcs = m.get("implementation_sources") or [m["implementation"]]
-        m["_source_paths"] = []
-        for source in srcs:
-            declared = base / source
-            m["_source_paths"].append(
-                _resolved_contained_source(declared, m["_repo_root"]))
         m.setdefault("vector_path_key", "path")
         m.setdefault("build_timeout", 1800)
         m.setdefault("vector_timeout", 120)
@@ -2635,6 +2654,14 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
                 "unproved_exit_codes overlaps accepted_exit_codes: %s" % overlap)
     # One deadline per child, on every runner. The module runner has a child too.
     m.setdefault("vector_timeout", 120)
+    _require_positive_timeout(m["vector_timeout"], "vector_timeout")
+    if "build_timeout" in m:
+        _require_positive_timeout(m["build_timeout"], "build_timeout")
+    if "build" in m:
+        _require_argv(m["build"], "build", allow_empty=True)
+    if "entrypoint_command" in m:
+        _require_argv(
+            m["entrypoint_command"], "entrypoint_command", allow_empty=False)
     m.setdefault("mutants", {})
     m.setdefault("equivalent", {})
     require_shape(m["mutants"], dict, "mutants")
@@ -2649,6 +2676,7 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
                 _req(e, key, "mutants[%s][%d]" % (group, i))
             e.setdefault("scope", "declared")
             e.setdefault("control", False)
+            _require_control_boolean(e["control"], "mutants[%s][%d]" % (group, i))
             _require_expected_mover(m, e)
             if "control_polarity" in e and e["control"] is not True:
                 raise ManifestError(
@@ -2693,6 +2721,308 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
     _require_unique_labels(m)
     m["_rule_inventory"] = rule_inventory_index(m)
     return m
+
+
+def bind_manifest_files(declaration: dict, artifact_path: Path, *,
+                        path_root: Path | None = None) -> dict:
+    """Bind a validated declaration to filesystem inputs for measurement."""
+    # Binding adds only top-level private fields. Keep the validated declaration
+    # observable as the parser returned it while preserving nested identities.
+    m = declaration.copy()
+    path = Path(artifact_path)
+    base = Path(path_root) if path_root is not None else path.parent
+    m["_impl_path"] = ((base / m["implementation"]).resolve()
+                       if m.get("implementation") else None)
+    m["_vectors_path"] = (base / m["vectors"]).resolve()
+    if m["known_holes"]:
+        dp = (base / m["corpus_digest_file"]).resolve()
+        if not dp.is_file():
+            raise ManifestError("corpus_digest_file not found: %s" % dp)
+        digest_doc = load_json_document(
+            dp.read_bytes(), root=dict, where="corpus_digest_file")
+        key = m["corpus_digest_key"]
+        if key not in digest_doc:
+            raise ManifestError("corpus_digest_key %r is missing" % key)
+        digest_value = digest_doc[key]
+        if not isinstance(digest_value, str):
+            raise ManifestError(
+                "corpus_digest_key %r must be a string, got %s"
+                % (key, type(digest_value).__name__))
+        m["_corpus_digest"] = digest_value
+    if m["runner"] in ("process", "batch"):
+        m["_repo_root"] = (base / m["repo_root"]).resolve()
+        srcs = m.get("implementation_sources") or [m["implementation"]]
+        m["_source_paths"] = []
+        for source in srcs:
+            declared = base / source
+            m["_source_paths"].append(
+                _resolved_contained_source(declared, m["_repo_root"]))
+    return m
+
+
+def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
+                        path_root: Path | None = None) -> dict:
+    """Parse exact manifest bytes once, then bind their logical paths."""
+    return bind_manifest_files(
+        parse_manifest_declaration(manifest_bytes), artifact_path, path_root=path_root)
+
+
+_INSPECT_TOP_KEYS = frozenset({
+    "schema", "manifest", "declared", "statically_checked", "runtime_unchecked",
+    "review_judgment", "execution_authorized", "non_claims",
+})
+_INSPECT_MANIFEST_KEYS = frozenset({"schema", "sha256", "bytes"})
+_INSPECT_DECLARED_KEYS = frozenset({
+    "runner", "implementation", "implementation_sources", "vectors", "selectors",
+    "controls", "minimum_execution_profile", "operator_execution_profile", "deadlines",
+    "commands", "resource_limits", "corpus_digest_file", "rule_inventory",
+})
+_INSPECT_STATUS_KEYS = frozenset({"status", "value"})
+_INSPECT_SELECTOR_KEYS = frozenset({"outcome_from", "diagnostic_from", "outcome_parse"})
+_INSPECT_CONTROL_KEYS = frozenset({"group", "label", "polarity"})
+_INSPECT_DEADLINE_KEYS = frozenset({"build_timeout", "vector_timeout"})
+_INSPECT_COMMAND_KEYS = frozenset({"build", "entrypoint_command"})
+_INSPECT_INVENTORY_KEYS = frozenset({
+    "rules_declared", "rules_mutation_linked", "rules_excluded", "linked_mutants", "groups"})
+_INSPECT_INVENTORY_GROUP_KEYS = frozenset({
+    "group", "rules_declared", "rules_mutation_linked", "rules_excluded", "linked_mutants"})
+_INSPECT_STATIC_BASE = (
+    "json", "manifest-schema", "declaration-shapes", "selector-contract",
+    "mutant-label-identity", "control-declarations", "minimum-profile-syntax",
+)
+_INSPECT_RUNTIME_UNCHECKED = (
+    "declared-path-resolution", "source-file-existence-and-bytes", "vector-document",
+    "corpus-digest-file", "operator-profile-selection", "profile-downgrade",
+    "runner-and-build", "baseline", "controls", "mutants", "containment-envelope",
+)
+_INSPECT_REVIEW_JUDGMENT = (
+    "manifest-trust", "selector-fidelity", "mutation-rule-ownership",
+    "rule-inventory-completeness", "execution-permission",
+)
+_INSPECT_NON_CLAIMS = (
+    "No manifest execution or execution authorization is established.",
+    "No sandbox or readiness result is established.",
+    "No corpus adequacy or rule completeness is established.",
+    "No owner ratification or runtime validation is established.",
+)
+
+
+def _inspect_inventory_summary(inventory):
+    if inventory is None:
+        return None
+    return {key: copy.deepcopy(inventory[key]) for key in (
+        "rules_declared", "rules_mutation_linked", "rules_excluded",
+        "linked_mutants", "groups")}
+
+
+def inspect_manifest_declaration(manifest_bytes: bytes) -> dict:
+    """Project validated manifest declarations without binding or execution."""
+    m = parse_manifest_declaration(manifest_bytes)
+    controls = []
+    for group, entries in m["mutants"].items():
+        for entry in entries:
+            if entry.get("control"):
+                controls.append({
+                    "group": group,
+                    "label": label_identity(entry),
+                    "polarity": _control_polarity(entry),
+                })
+    present_selectors = frozenset(m["_declared_selector_keys"])
+    selectors = {
+        key: {
+            "status": "declared" if key in present_selectors else "absent",
+            "value": copy.deepcopy(m.get(key)) if key in present_selectors else None,
+        }
+        for key in ("outcome_from", "diagnostic_from", "outcome_parse")
+    }
+    static_tail = ("rule-inventory" if m["schema"] == MANIFEST_V1_SCHEMA
+                   else "rule-inventory-absent")
+    return {
+        "schema": INSPECT_SCHEMA,
+        "manifest": {
+            "schema": m["schema"],
+            "sha256": m["_manifest_sha256"],
+            "bytes": len(manifest_bytes),
+        },
+        "declared": {
+            "runner": m["runner"],
+            "implementation": m.get("implementation"),
+            "implementation_sources": copy.deepcopy(m.get("implementation_sources")),
+            "vectors": m["vectors"],
+            "selectors": selectors,
+            "controls": controls,
+            "minimum_execution_profile": m.get(MINIMUM_PROFILE_KEY),
+            "operator_execution_profile": {
+                "status": "not-supplied-to-inspection", "value": None},
+            "deadlines": {
+                "build_timeout": m.get("build_timeout"),
+                "vector_timeout": m["vector_timeout"],
+            },
+            "commands": {
+                "build": copy.deepcopy(m.get("build")),
+                "entrypoint_command": copy.deepcopy(m.get("entrypoint_command")),
+            },
+            "resource_limits": {
+                "status": "not-represented-in-manifest", "value": None},
+            "corpus_digest_file": {
+                "status": ("declared" if "corpus_digest_file" in m else "absent"),
+                "value": copy.deepcopy(m.get("corpus_digest_file")),
+            },
+            "rule_inventory": _inspect_inventory_summary(m["_rule_inventory"]),
+        },
+        "statically_checked": list(_INSPECT_STATIC_BASE + (static_tail,)),
+        "runtime_unchecked": list(_INSPECT_RUNTIME_UNCHECKED),
+        "review_judgment": list(_INSPECT_REVIEW_JUDGMENT),
+        "execution_authorized": False,
+        "non_claims": list(_INSPECT_NON_CLAIMS),
+    }
+
+
+def _require_inspect_v0(doc: dict) -> None:
+    require_shape(doc, dict, "inspection")
+    _require_closed_keys(doc, _INSPECT_TOP_KEYS, _INSPECT_TOP_KEYS,
+                         missing_token="inspection missing key",
+                         extra_token="inspection extra key")
+    if doc["schema"] != INSPECT_SCHEMA:
+        raise ManifestError("inspection has an invalid schema")
+    _require_closed_keys(doc["manifest"], _INSPECT_MANIFEST_KEYS, _INSPECT_MANIFEST_KEYS,
+                         missing_token="inspection manifest missing key",
+                         extra_token="inspection manifest extra key")
+    _require_closed_keys(doc["declared"], _INSPECT_DECLARED_KEYS, _INSPECT_DECLARED_KEYS,
+                         missing_token="inspection declared missing key",
+                         extra_token="inspection declared extra key")
+    manifest = doc["manifest"]
+    if manifest["schema"] not in (SCHEMA, MANIFEST_V1_SCHEMA):
+        raise ManifestError("inspection manifest schema is invalid")
+    _require_canonical_sha256(manifest["sha256"], "inspection manifest sha256")
+    if type(manifest["bytes"]) is not int or manifest["bytes"] < 0:
+        raise ManifestError("inspection manifest bytes must be a non-negative integer")
+    declared = doc["declared"]
+    if declared["runner"] not in ("module", "process", "batch"):
+        raise ManifestError("inspection runner is invalid")
+    for key in ("implementation", "vectors", "minimum_execution_profile"):
+        if declared[key] is not None and not isinstance(declared[key], str):
+            raise ManifestError("inspection declared %s must be a string or null" % key)
+    sources = declared["implementation_sources"]
+    if sources is not None and (not isinstance(sources, list)
+                                or not all(isinstance(v, str) for v in sources)):
+        raise ManifestError("inspection implementation_sources must be strings or null")
+    require_shape(declared["selectors"], dict, "inspection selectors")
+    _require_closed_keys(declared["selectors"], _INSPECT_SELECTOR_KEYS, _INSPECT_SELECTOR_KEYS,
+                         missing_token="inspection selectors missing key",
+                         extra_token="inspection selectors extra key")
+    for key, selector in declared["selectors"].items():
+        require_shape(selector, dict, "inspection selector %s" % key)
+        _require_closed_keys(
+            selector, _INSPECT_STATUS_KEYS, _INSPECT_STATUS_KEYS,
+            missing_token="inspection selector missing key",
+            extra_token="inspection selector extra key")
+        status, value = selector["status"], selector["value"]
+        if status == "absent":
+            if value is not None:
+                raise ManifestError("absent inspection selector %s must be null" % key)
+            continue
+        if status != "declared":
+            raise ManifestError("inspection selector %s status is invalid" % key)
+        if key == "outcome_parse":
+            if not isinstance(value, str) or not value:
+                raise ManifestError(
+                    "declared inspection selector outcome_parse must be a string")
+            continue
+        valid_string = isinstance(value, str) and bool(value)
+        valid_list = (isinstance(value, list)
+                      and all(isinstance(member, str) and member for member in value))
+        if not (valid_string or valid_list):
+            raise ManifestError(
+                "declared inspection selector %s must be a string or list of strings" % key)
+        if key == "diagnostic_from" and value == []:
+            raise ManifestError(
+                "declared inspection selector diagnostic_from must not be empty")
+    require_shape(declared["controls"], list, "inspection controls")
+    for control in declared["controls"]:
+        require_shape(control, dict, "inspection control")
+        _require_closed_keys(control, _INSPECT_CONTROL_KEYS, _INSPECT_CONTROL_KEYS,
+                             missing_token="inspection control missing key",
+                             extra_token="inspection control extra key")
+        if not isinstance(control["group"], str):
+            raise ManifestError("inspection control group must be a string")
+        label_identity(control, "inspection control")
+        if control["polarity"] not in ("positive", "inert"):
+            raise ManifestError("inspection control polarity is invalid")
+    for key, keys in (("deadlines", _INSPECT_DEADLINE_KEYS),
+                      ("commands", _INSPECT_COMMAND_KEYS)):
+        require_shape(declared[key], dict, "inspection %s" % key)
+        _require_closed_keys(declared[key], keys, keys,
+                             missing_token="inspection %s missing key" % key,
+                             extra_token="inspection %s extra key" % key)
+    _require_positive_timeout(
+        declared["deadlines"]["build_timeout"], "inspection build_timeout",
+        allow_none=declared["runner"] == "module")
+    _require_positive_timeout(
+        declared["deadlines"]["vector_timeout"], "inspection vector_timeout")
+    _require_argv(
+        declared["commands"]["build"], "inspection build", allow_empty=True,
+        allow_none=declared["runner"] == "module")
+    _require_argv(
+        declared["commands"]["entrypoint_command"],
+        "inspection entrypoint_command", allow_empty=False,
+        allow_none=declared["runner"] == "module")
+    inventory = declared["rule_inventory"]
+    if manifest["schema"] == SCHEMA:
+        if inventory is not None:
+            raise ManifestError("inspection manifest.v0 inventory must be null")
+    else:
+        require_shape(inventory, dict, "inspection rule inventory")
+        _require_closed_keys(inventory, _INSPECT_INVENTORY_KEYS, _INSPECT_INVENTORY_KEYS,
+                             missing_token="inspection inventory missing key",
+                             extra_token="inspection inventory extra key")
+        require_shape(inventory["groups"], list, "inspection inventory groups")
+        for group in inventory["groups"]:
+            _require_closed_keys(group, _INSPECT_INVENTORY_GROUP_KEYS,
+                                 _INSPECT_INVENTORY_GROUP_KEYS,
+                                 missing_token="inspection inventory group missing key",
+                                 extra_token="inspection inventory group extra key")
+    for key, expected in (("statically_checked",
+                           _INSPECT_STATIC_BASE + (("rule-inventory",)
+                           if doc["manifest"]["schema"] == MANIFEST_V1_SCHEMA
+                           else ("rule-inventory-absent",))),
+                          ("runtime_unchecked", _INSPECT_RUNTIME_UNCHECKED),
+                          ("review_judgment", _INSPECT_REVIEW_JUDGMENT),
+                          ("non_claims", _INSPECT_NON_CLAIMS)):
+        if doc[key] != list(expected):
+            raise ManifestError("inspection %s is not the closed v0 vocabulary" % key)
+    if doc["execution_authorized"] is not False:
+        raise ManifestError("inspection cannot authorize execution")
+    for key, status in (("operator_execution_profile", "not-supplied-to-inspection"),
+                        ("resource_limits", "not-represented-in-manifest")):
+        value = doc["declared"][key]
+        _require_closed_keys(value, _INSPECT_STATUS_KEYS, _INSPECT_STATUS_KEYS,
+                             missing_token="inspection status missing key",
+                             extra_token="inspection status extra key")
+        if value != {"status": status, "value": None}:
+            raise ManifestError("inspection %s is not unavailable" % key)
+    digest_file = declared["corpus_digest_file"]
+    _require_closed_keys(digest_file, _INSPECT_STATUS_KEYS, _INSPECT_STATUS_KEYS,
+                         missing_token="inspection corpus digest file missing key",
+                         extra_token="inspection corpus digest file extra key")
+    if digest_file["status"] == "absent":
+        if digest_file["value"] is not None:
+            raise ManifestError("absent inspection corpus digest file must be null")
+    elif digest_file["status"] == "declared":
+        if not isinstance(digest_file["value"], str) or not digest_file["value"]:
+            raise ManifestError("declared inspection corpus digest file must be a string")
+    else:
+        raise ManifestError("inspection corpus digest file status is invalid")
+
+
+def encode_inspect_v0(doc: dict) -> bytes:
+    _require_inspect_v0(doc)
+    try:
+        return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8")
+    except UnicodeEncodeError:
+        raise ReportEncodingError(
+            "inspection contains text that cannot be encoded as valid UTF-8") from None
 
 
 def load_manifest(path: Path) -> dict:
@@ -3709,12 +4039,7 @@ def resolve_execution_profile(*, operator, manifest) -> str:
     if type(manifest) is not dict:
         raise ManifestError(
             "manifest must be an object, got %s" % type(manifest).__name__)
-    if OPERATOR_PROFILE_KEY in manifest:
-        raise ManifestError(
-            "manifest must not declare operator key %s (got %r); "
-            "candidates may state only %s"
-            % (OPERATOR_PROFILE_KEY, manifest[OPERATOR_PROFILE_KEY],
-               MINIMUM_PROFILE_KEY))
+    _require_manifest_profile_declaration(manifest)
     profile = _canonical_execution_profile(operator, which=OPERATOR_PROFILE_KEY)
     if MINIMUM_PROFILE_KEY not in manifest:
         return profile
@@ -4264,6 +4589,42 @@ def _write_encoded(encoded: bytes) -> None:
         sys.stdout.write(encoded.decode("utf-8"))
 
 
+def _render_inspect_v0(doc: dict) -> None:
+    """Render only the validated static inspection document."""
+    _require_inspect_v0(doc)
+    manifest = doc["manifest"]
+    declared = doc["declared"]
+    print("Manifest: %s (%d bytes, %s)"
+          % (manifest["schema"], manifest["bytes"], manifest["sha256"]))
+    print("Runner: %s" % declared["runner"])
+    print("Implementation: %s" % declared["implementation"])
+    print("Vectors: %s" % declared["vectors"])
+    print("Statically checked: %s" % ", ".join(doc["statically_checked"]))
+    print("Runtime unchecked: %s" % ", ".join(doc["runtime_unchecked"]))
+    print("Review judgment: %s" % ", ".join(doc["review_judgment"]))
+    print("Inspected only: nothing executed or authorized; every runtime_unchecked item "
+          "remains unchecked.")
+
+
+def _inspect_cli(args) -> int:
+    """Bounded static declaration path; never binds files or calls run()."""
+    try:
+        raw = read_bounded_regular_file(args.inspect)
+        projected = inspect_manifest_declaration(raw)
+        encoded = encode_inspect_v0(projected) if args.json else None
+    except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError, ValueError) as exc:
+        print("could not inspect: %s" % exc, file=sys.stderr)
+        if args.json:
+            print(json.dumps(error_envelope(exc, operation="inspect"), indent=2, sort_keys=True))
+        return 2
+    if args.json:
+        assert encoded is not None
+        _write_encoded(encoded)
+    else:
+        _render_inspect_v0(projected)
+    return 0
+
+
 def _survivors_cli(args, ap) -> int:
     """Early sibling path: read a report.v0 file. Never calls run()."""
     if args.manifest is None:
@@ -4410,9 +4771,27 @@ def main() -> int:
                             help="project rules.v0 from an existing report.v0 and manifest")
     projection.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), type=Path,
                             help="project diff.v0 from two existing report.v0 files")
+    projection.add_argument("--inspect", type=Path,
+                            help="inspect manifest declarations without binding or execution")
     ap.add_argument("--manifest", dest="anchor_manifest", type=Path,
                     help="digest-matched manifest for --rules or optional --survivors anchors")
     args = ap.parse_args()
+    if args.inspect is not None:
+        if args.version:
+            exc = ManifestError("--inspect is mutually exclusive with --version")
+            print("could not inspect: %s" % exc, file=sys.stderr)
+            if args.json:
+                print(json.dumps(error_envelope(exc, operation="inspect"), indent=2,
+                                 sort_keys=True))
+            return 2
+        if args.manifest is not None or args.anchor_manifest is not None:
+            exc = ManifestError("--inspect does not take a positional or --manifest input")
+            print("could not inspect: %s" % exc, file=sys.stderr)
+            if args.json:
+                print(json.dumps(error_envelope(exc, operation="inspect"), indent=2,
+                                 sort_keys=True))
+            return 2
+        return _inspect_cli(args)
     if args.version:
         print(format_tool_identity())
         return 0

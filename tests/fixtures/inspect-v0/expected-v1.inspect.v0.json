@@ -1,0 +1,119 @@
+{
+  "declared": {
+    "commands": {
+      "build": [],
+      "entrypoint_command": [
+        "python3",
+        "src/check.py",
+        "{vector}"
+      ]
+    },
+    "controls": [
+      {
+        "group": "demo",
+        "label": "CONTROL refusal",
+        "polarity": "positive"
+      }
+    ],
+    "corpus_digest_file": {
+      "status": "absent",
+      "value": null
+    },
+    "deadlines": {
+      "build_timeout": 30,
+      "vector_timeout": 5
+    },
+    "implementation": "src/check.py",
+    "implementation_sources": [
+      "src/check.py"
+    ],
+    "minimum_execution_profile": null,
+    "operator_execution_profile": {
+      "status": "not-supplied-to-inspection",
+      "value": null
+    },
+    "resource_limits": {
+      "status": "not-represented-in-manifest",
+      "value": null
+    },
+    "rule_inventory": {
+      "groups": [
+        {
+          "group": "demo",
+          "linked_mutants": 1,
+          "rules_declared": 1,
+          "rules_excluded": 0,
+          "rules_mutation_linked": 1
+        }
+      ],
+      "linked_mutants": 1,
+      "rules_declared": 1,
+      "rules_excluded": 0,
+      "rules_mutation_linked": 1
+    },
+    "runner": "process",
+    "selectors": {
+      "diagnostic_from": {
+        "status": "declared",
+        "value": [
+          "detail"
+        ]
+      },
+      "outcome_from": {
+        "status": "declared",
+        "value": [
+          "verdict",
+          "reason"
+        ]
+      },
+      "outcome_parse": {
+        "status": "absent",
+        "value": null
+      }
+    },
+    "vectors": "vectors.json"
+  },
+  "execution_authorized": false,
+  "manifest": {
+    "bytes": 1108,
+    "schema": "corpus-adequacy.manifest.v1",
+    "sha256": "sha256:8e6399591721260e2e7f3fb86da03d1140380ca5d30ff05754efb1003fe600a5"
+  },
+  "non_claims": [
+    "No manifest execution or execution authorization is established.",
+    "No sandbox or readiness result is established.",
+    "No corpus adequacy or rule completeness is established.",
+    "No owner ratification or runtime validation is established."
+  ],
+  "review_judgment": [
+    "manifest-trust",
+    "selector-fidelity",
+    "mutation-rule-ownership",
+    "rule-inventory-completeness",
+    "execution-permission"
+  ],
+  "runtime_unchecked": [
+    "declared-path-resolution",
+    "source-file-existence-and-bytes",
+    "vector-document",
+    "corpus-digest-file",
+    "operator-profile-selection",
+    "profile-downgrade",
+    "runner-and-build",
+    "baseline",
+    "controls",
+    "mutants",
+    "containment-envelope"
+  ],
+  "schema": "corpus-adequacy.inspect.v0",
+  "statically_checked": [
+    "json",
+    "manifest-schema",
+    "declaration-shapes",
+    "selector-contract",
+    "mutant-label-identity",
+    "control-declarations",
+    "minimum-profile-syntax",
+    "rule-inventory"
+  ]
+}

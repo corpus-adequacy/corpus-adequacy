@@ -5818,7 +5818,11 @@ class RuleInventoryV1Contract(unittest.TestCase):
             with mock.patch.object(ca, "rule_inventory_index", return_value=sentinel) as indexer:
                 loaded = ca.load_manifest(path)
         self.assertIs(loaded["_rule_inventory"], sentinel)
-        indexer.assert_called_once_with(loaded)
+        indexer.assert_called_once()
+        declaration = indexer.call_args.args[0]
+        self.assertIsNot(declaration, loaded)
+        self.assertNotIn("_impl_path", declaration)
+        self.assertNotIn("_vectors_path", declaration)
 
     def test_v0_malformed_rules_keeps_measurement_and_survivors_bytes_identical(self):
         with tempfile.TemporaryDirectory() as d:
