@@ -92,19 +92,27 @@ class FirstRedDeepLinks(unittest.TestCase):
             self.assertNotIn("killed-rule", run_page)
             self.assertNotIn("CONTROL keep path", run_page)
 
+            report_doc = json.loads(
+                (SURVIVED_SILENT / "report.v0.json").read_text(encoding="utf-8")
+            )
+            survived_how = report_doc["mutants"][0]["how"]
+            silent_how = report_doc["mutants"][1]["how"]
+            self.assertEqual(survived_how, "no vector distinguishes the survived rule")
+            self.assertEqual(silent_how, "diagnostic moved, declared outcome did not")
+
             survived = _text(files, SURVIVED)
             silent = _text(files, SILENT)
             self.assertIn("survived-rule", survived)
             self.assertIn(">survived<", survived)
-            self.assertIn("no vector distinguishes the survived rule", survived)
             self.assertIn(ca.SURVIVED_OBLIGATION, survived)
+            self.assertNotIn(survived_how, survived)
             self.assertNotIn(ca.SILENT_OBLIGATION, survived)
             self.assertIn("axis-a", survived)
 
             self.assertIn("silent-rule", silent)
             self.assertIn(">silent<", silent)
-            self.assertIn("diagnostic moved, declared outcome did not", silent)
             self.assertIn(ca.SILENT_OBLIGATION, silent)
+            self.assertNotIn(silent_how, silent)
             self.assertNotIn(ca.SURVIVED_OBLIGATION, silent)
             self.assertIn("moved_diagnostic", silent)
             self.assertIn(">2<", silent)

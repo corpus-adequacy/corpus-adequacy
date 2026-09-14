@@ -3305,8 +3305,9 @@ class SurvivorFindings(unittest.TestCase):
         self.assertEqual(survived["moved_diagnostic"], 0)
         self.assertEqual(
             survived["obligation"],
-            "A future vector must distinguish this rule on a declared outcome. "
-            "This projection does not name such a vector.",
+            "After a valid run, the declared mutation did not change the declared "
+            "outcome on the pinned inputs. A contract-hole reading also needs a "
+            "faithful owner-pinned declaration and rule ownership.",
         )
 
         silent = by_rule["diagnostic-only rule"]
@@ -3316,9 +3317,10 @@ class SurvivorFindings(unittest.TestCase):
         self.assertEqual(silent["moved_diagnostic"], 2)
         self.assertEqual(
             silent["obligation"],
-            "A future vector must distinguish this rule on a declared outcome, "
-            "not only the diagnostic channel. "
-            "This projection does not name such a vector.",
+            "After a valid run, the declared mutation moved only the diagnostic "
+            "channel. Silent is diagnostic-only and never a numerator. A "
+            "contract-hole reading also needs a faithful owner-pinned declaration "
+            "and rule ownership.",
         )
         self.assertNotEqual(survived["obligation"], silent["obligation"])
 
@@ -4406,7 +4408,7 @@ class SurvivorConsumerClosedSet(unittest.TestCase):
     VALID_REPORT_SHA256 = (
         "c65f8a6c6dcc4a56dea31e7fc0de241a8cbbdcf36cd4cf98c220d23a894fe5ae")
     VALID_SURVIVORS_SHA256 = (
-        "caf3c2345a229d9f76367753ed7e856627fdd8f55aa00e6fbfad2ee502f9e9bb")
+        "9f4f575efb1a9eae9aed019c2de2f508625bd30445e8a9f4b3e6d194f5f21bfb")
 
     def _valid_doc(self):
         return json.loads(self.VALID_REPORT.read_text(encoding="utf-8"))

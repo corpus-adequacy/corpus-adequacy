@@ -1,0 +1,46 @@
+{
+  "schema": "corpus-adequacy.manifest.v0",
+  "runner": "process",
+  "repo_root": ".",
+  "implementation": "check.py",
+  "implementation_sources": [
+    "check.py"
+  ],
+  "build": [],
+  "entrypoint_command": [
+    "python3",
+    "check.py",
+    "{vector}"
+  ],
+  "outcome_from": [
+    "accepted",
+    "wire_code"
+  ],
+  "vectors": "vectors.json",
+  "id_key": "vector_id",
+  "vector_path_key": "path",
+  "default_group": "g",
+  "mutants": {
+    "g": [
+      {
+        "label": "reason-token",
+        "anchor": "wire_code = \"refusal.a\"",
+        "replacement": "wire_code = \"refusal.b\""
+      },
+      {
+        "label": "CONTROL accepted",
+        "control": true,
+        "control_polarity": "positive",
+        "anchor": "accepted = False",
+        "replacement": "accepted = True"
+      },
+      {
+        "label": "CONTROL unused",
+        "control": true,
+        "control_polarity": "inert",
+        "anchor": "unused = \"constant\"",
+        "replacement": "unused = \"other\""
+      }
+    ]
+  }
+}
