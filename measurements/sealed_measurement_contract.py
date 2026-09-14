@@ -57,6 +57,7 @@ class SealedMeasurementContract:
     container_context_relpath: str
     candidate_build: tuple[str, ...]
     candidate_entrypoint: tuple[str, ...]
+    candidate_complete_returncodes: tuple[int, ...]
     vendor_tree_requirement: str
 
     def __post_init__(self) -> None:
@@ -134,6 +135,13 @@ class SealedMeasurementContract:
             _require_tuple(command, where)
             if any(not isinstance(value, str) or not value for value in command):
                 raise ValueError(where)
+        _require_tuple(
+            self.candidate_complete_returncodes, "candidate_complete_returncodes")
+        if (len(self.candidate_complete_returncodes) !=
+                len(set(self.candidate_complete_returncodes)) or any(
+                    type(value) is not int or value < 0 or value > 255
+                    for value in self.candidate_complete_returncodes)):
+            raise ValueError("candidate_complete_returncodes")
         if type(self.vendor_tree_requirement) is not str or self.vendor_tree_requirement not in (
                 "nonempty", "canonical-empty"):
             raise ValueError("vendor_tree_requirement")
@@ -197,6 +205,7 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
     candidate_entrypoint=(
         "/work/target/release/aee-checker", "/input/vectors", "--json", "/work/report.json",
     ),
+    candidate_complete_returncodes=(0, 1),
     vendor_tree_requirement="nonempty",
 )
 
@@ -237,5 +246,6 @@ OWNED_CONTAINED_V1_CONTRACT = SealedMeasurementContract(
         "/work/target/release/corpus-adequacy-owned-fixture",
         "/input/vectors", "--json", "/work/report.json",
     ),
+    candidate_complete_returncodes=(0,),
     vendor_tree_requirement="canonical-empty",
 )

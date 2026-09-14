@@ -51,6 +51,27 @@ VENDOR_TOOLCHAIN_KEYS = (
     "cargo_V", "image_id", "index", "observation", "platform", "rustc_Vv",
 )
 COPY_CHUNK_BYTES = 65536
+READONLY_BIND_DIRECTORY_MODE = 0o755
+READONLY_BIND_FILE_MODE = 0o644
+
+
+def normalize_readonly_bind_modes(root: Path) -> None:
+    """Make one verified bind tree readable by the container's distinct uid."""
+    root = Path(root)
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        directory = Path(dirpath)
+        if directory.is_symlink() or not directory.is_dir():
+            raise PrepareError("non-regular in readonly bind tree")
+        directory.chmod(READONLY_BIND_DIRECTORY_MODE)
+        for name in dirnames:
+            path = directory / name
+            if path.is_symlink() or not path.is_dir():
+                raise PrepareError("non-regular in readonly bind tree")
+        for name in filenames:
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                raise PrepareError("non-regular in readonly bind tree")
+            path.chmod(READONLY_BIND_FILE_MODE)
 
 
 def _unlink_preserving(dest: Path, primary: BaseException) -> None:
@@ -559,6 +580,8 @@ def materialize_pinned(pins: dict, dest: Path, *, template: Path, budget=None,
     verified["vendor_sha256"] = vendored["vendor_sha256"]
     verified["toolchain"] = vendored["toolchain"]
     verified["tool_config_sha256"] = bind_vendor_config(tool, template)
+    for readonly_bind in (subject, corpus, vendor, tool):
+        normalize_readonly_bind_modes(readonly_bind)
     verified["subject"] = subject
     verified["corpus"] = corpus
     verified["vendor"] = vendor

@@ -50,6 +50,26 @@ CANDIDATE_MOUNT_SPEC = DEFAULT_MOUNT_SPEC + (("subject", "/subject"),)
 CANDIDATE_ENTRYPOINT = "/bin/sh"
 CONTAINER_BUILD = AEE_CHECKER_SEALED_CONTRACT.candidate_build
 CONTAINER_ENTRYPOINT = AEE_CHECKER_SEALED_CONTRACT.candidate_entrypoint
+UNPROVED_EXIT = 75
+WRAPPER_STAGES = (
+    "preflight", "copy", "build", "report-missing", "report-empty", "report-read",
+)
+_WRAPPER_STAGE_PREFIX = "candidate-wrapper-stage.v0:"
+
+
+def wrapper_stage_frame(stage: str) -> str:
+    if stage not in WRAPPER_STAGES:
+        raise PrepareError("candidate wrapper stage")
+    return _WRAPPER_STAGE_PREFIX + stage + "\n"
+
+
+def _wrapper_stage(stdout) -> str | None:
+    if type(stdout) is not str:
+        return None
+    for stage in WRAPPER_STAGES:
+        if stdout == wrapper_stage_frame(stage):
+            return stage
+    return None
 
 
 def candidate_script(execution_contract: dict,
@@ -61,18 +81,22 @@ def candidate_script(execution_contract: dict,
     if (build != list(contract.candidate_build) or
             entrypoint != list(contract.candidate_entrypoint)):
         raise PrepareError("candidate execution contract")
+    complete = "|".join(str(value) for value in contract.candidate_complete_returncodes)
     return (
-    "set -eu; "
-    "test -d /input/vectors; test -d /vendor; test -f /tool/config.toml; test -d /subject; "
-    "cp -R /subject/. /work/; "
-    "cd /work; "
+    "set -u; "
+    "candidate_stage() { printf 'candidate-wrapper-stage.v0:%s\\n' \"$1\"; exit 75; }; "
+    "test -d /input/vectors && test -d /vendor && test -f /tool/config.toml "
+    "&& test -d /subject || candidate_stage preflight; "
+    "cp -R /subject/. /work/ || candidate_stage copy; "
+    "cd /work || candidate_stage copy; "
     "PATH=/usr/local/cargo/bin:$PATH CARGO_HOME=/tool "
-    + shlex.join(build) + " 1>&2; "
-    "set +e; "
+    + shlex.join(build) + " 1>&2 || candidate_stage build; "
     + shlex.join(entrypoint) + " 1>&2; "
     "status=$?; "
-    "set -e; "
-    "cat /work/report.json; "
+    "case \"$status\" in " + complete + ") ;; *) exit \"$status\" ;; esac; "
+    "test -e /work/report.json || candidate_stage report-missing; "
+    "test -s /work/report.json || candidate_stage report-empty; "
+    "cat /work/report.json || candidate_stage report-read; "
     "exit $status"
     )
 
@@ -82,8 +106,6 @@ DEFAULT_EXECUTION_CONTRACT = {
     "entrypoint_command": list(CONTAINER_ENTRYPOINT),
 }
 CANDIDATE_SCRIPT = candidate_script(DEFAULT_EXECUTION_CONTRACT)
-UNPROVED_EXIT = 75
-COMPLETE_RETURNCODES = (0, 1)
 
 
 def _unproved(reason: str = "malformed") -> subprocess.CompletedProcess:
@@ -157,7 +179,10 @@ def sealed_adapter_for(contract):
 def normalize_inner_event(*, returncode, stdout, vectors,
                           contract=AEE_CHECKER_SEALED_CONTRACT) -> subprocess.CompletedProcess:
     """Parse the inner report once, then reuse adapter expected_ids/project."""
-    if returncode not in COMPLETE_RETURNCODES:
+    stage = _wrapper_stage(stdout)
+    if returncode == UNPROVED_EXIT and stage is not None:
+        return _unproved("candidate-" + stage)
+    if returncode not in contract.candidate_complete_returncodes:
         return _unproved("inner-exit")
     body = inner_protocol_stdout(stdout)
     if body is INNER_STDOUT_OUTPUT_CAP:
