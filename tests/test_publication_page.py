@@ -247,6 +247,19 @@ class PublicationPage(unittest.TestCase):
             page = _render(root, source_commit="a" * 40)
             self.assertEqual(rpp.projection_digest_from_html(page), digest_a)
 
+    def test_projection_digest_binds_manifest_unavailable_state_not_poison_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [VALID / "report.v0.json"])
+            manifest = root / "measurements" / "valid-tersign" / "manifest.json"
+            manifest.write_bytes(b'{"poison":"one"}\n')
+            mismatch_one = rpp.projection_digest_from_html(_render(root))
+            manifest.write_bytes(b'{"poison":"two"}\n')
+            mismatch_two = rpp.projection_digest_from_html(_render(root))
+            self.assertEqual(mismatch_one, mismatch_two)
+            manifest.unlink()
+            absent = rpp.projection_digest_from_html(_render(root))
+            self.assertNotEqual(mismatch_one, absent)
+
     def test_projection_digest_uses_published_release_not_checkout_version(self):
         with tempfile.TemporaryDirectory() as d:
             root = _write_tree(Path(d), [VALID / "report.v0.json"])

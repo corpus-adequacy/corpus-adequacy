@@ -113,6 +113,12 @@ CEILING_LINES = (
     'silent:0 without diagnostic_channel_declared is not "no silent rules"',
     "score_percent is percent of author-declared in-scope rules, not of the implementation",
 )
+DOSSIER_NON_CLAIMS = (
+    "Rule linkage is author-declared traceability at one pin; it does not prove normative completeness, formal compliance, or engine correctness.",
+    "An anchor is an author-declared source excerpt at one pin; it does not prove reachability or execution flow.",
+    "An unavailable manifest is unavailable evidence, not an empty or compliant rule set.",
+    "A manifest digest mismatch leaves rule and anchor evidence unavailable; report observations remain unaltered.",
+)
 SHARED_STYLE = """
 :root { color-scheme: light; }
 html, body { max-width: 100%; overflow-x: hidden; margin: 0; }
@@ -320,6 +326,50 @@ def _load_json_object(path: Path, *, label: str) -> tuple[bytes, dict]:
     return raw, doc
 
 
+def _load_manifest_snapshot(report_path: Path, expected_digest: str) -> dict:
+    """Read at most one bounded manifest snapshot and classify its evidence state."""
+    path = report_path.parent / "manifest.json"
+    try:
+        raw = read_bounded_regular_file(path)
+    except ca.ManifestError as exc:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return {
+                "state": "absent",
+                "reason": "manifest absent",
+                "projection_bytes": b"manifest-unavailable:absent",
+                "object": None,
+            }
+        except OSError:
+            pass
+        return {
+            "state": "unavailable",
+            "reason": "manifest unavailable",
+            "projection_bytes": b"manifest-unavailable:unavailable",
+            "object": None,
+        }
+    if ca._file_sha256(raw) != expected_digest:
+        return {
+            "state": "digest-mismatch",
+            "reason": "manifest digest mismatch",
+            "projection_bytes": b"manifest-unavailable:digest-mismatch",
+            "object": None,
+        }
+    try:
+        parsed = ca._require_anchor_manifest(_parse_projection_json(raw))
+        inventory = ca.rule_inventory_index(parsed)
+    except (ca.ManifestError, json.JSONDecodeError) as exc:
+        raise PublicationError("manifest: %s" % exc) from exc
+    return {
+        "state": "accepted",
+        "reason": "",
+        "projection_bytes": raw,
+        "object": parsed,
+        "inventory": inventory,
+    }
+
+
 def load_record(
     report_path: Path,
     *,
@@ -355,6 +405,9 @@ def load_record(
     silent = doc.get("silent")
     silent_label = "not measured" if (silent == 0 and not diagnostic) else str(silent)
     control = doc.get("control_status")
+    manifest_snapshot = _load_manifest_snapshot(
+        report_path, doc.get("manifest_sha256") or ""
+    )
     rel_report = "measurements/%s/report.v0.json" % directory
     command = published_local_command(report_path)
     review_rel = "measurements/%s/PROVENANCE.md" % directory
@@ -385,6 +438,8 @@ def load_record(
         "tool_content_sha256": doc.get("tool_content_sha256") or "",
         "tool_version": doc.get("tool_version") or "",
         "manifest_sha256": doc.get("manifest_sha256") or "",
+        "manifest_snapshot": manifest_snapshot,
+        "manifest_projection_bytes": manifest_snapshot["projection_bytes"],
         "kind": KIND_COMPLETED_MEASUREMENT,
     }
 
@@ -585,6 +640,19 @@ def discover_records(root: Path) -> list[dict]:
 def actionable_findings(record: dict) -> list[dict]:
     """Actionable rows from survivor_findings, addressed by report mutants[] index."""
     projected = survivor_findings(record["doc"])
+    snapshot = record["manifest_snapshot"]
+    manifest_obj = snapshot.get("object")
+    inventory = snapshot.get("inventory")
+    linked_rules = {}
+    if inventory is not None:
+        for rule in inventory["rules"]:
+            if rule["disposition"] != "mutated":
+                continue
+            for label in rule["mutants"]:
+                linked_rules[(rule["group"], label)] = rule
+    if manifest_obj is not None:
+        for finding in projected["findings"]:
+            ca._apply_anchor(finding, manifest_obj)
     buckets: dict[tuple[str, str, str], list[dict]] = {}
     for finding in projected["findings"]:
         key = (finding["group"], finding["rule"], finding["verdict"])
@@ -609,9 +677,62 @@ def actionable_findings(record: dict) -> list[dict]:
             "obligation": finding["obligation"],
             "moved": finding["moved"],
             "moved_diagnostic": finding["moved_diagnostic"],
+            "observation": {
+                "runner": record["runner"],
+                "diagnostic_channel_declared": record[
+                    "diagnostic_channel_declared"
+                ],
+                "mechanism": (
+                    "declared outcome unchanged; declared diagnostic changed"
+                    if finding["verdict"] == "silent"
+                    else "declared outcome unchanged"
+                ),
+            },
+            "control": {
+                "status": record["control_status"],
+                "valid": (
+                    record["control_status"] == "killed"
+                    and record["doc"].get("score_percent") is not None
+                ),
+                "unproved": record["unproved"],
+            },
         }
+        rule = linked_rules.get((finding["group"], finding["rule"]))
+        if rule is not None:
+            item["rule_evidence"] = {
+                "status": "linked",
+                "id": rule["id"],
+                "text": rule["text"],
+                "url": rule["url"],
+            }
+        elif snapshot["state"] != "accepted":
+            item["rule_evidence"] = {
+                "status": "unavailable", "reason": snapshot["reason"]
+            }
+        elif inventory is None:
+            item["rule_evidence"] = {
+                "status": "unavailable", "reason": "manifest.v0"
+            }
+        else:
+            item["rule_evidence"] = {
+                "status": "unavailable", "reason": "unlinked"
+            }
         if "anchor_excerpt" in finding:
-            item["anchor_excerpt"] = finding["anchor_excerpt"]
+            item["anchor_evidence"] = {
+                "status": "present", "excerpt": finding["anchor_excerpt"]
+            }
+        elif "anchor_omitted" in finding:
+            item["anchor_evidence"] = {
+                "status": "omitted", "reason": finding["anchor_omitted"]
+            }
+        elif snapshot["state"] != "accepted":
+            item["anchor_evidence"] = {
+                "status": "unavailable", "reason": snapshot["reason"]
+            }
+        else:
+            item["anchor_evidence"] = {
+                "status": "omitted", "reason": "not declared"
+            }
         rows.append(item)
     leftover = [key for key, bucket in buckets.items() if bucket]
     if leftover:
@@ -1092,6 +1213,7 @@ def compute_projection_digest(
         elif kind == KIND_COMPLETED_MEASUREMENT:
             _add(b"report", record["report_bytes"])
             _add(b"source", record["source_bytes"])
+            _add(b"manifest_projection", record["manifest_projection_bytes"])
         else:
             raise PublicationError("unknown publication kind %r" % kind)
     _add(b"renderer", renderer_bytes)
@@ -1220,12 +1342,60 @@ def _rule_page(record: dict, finding: dict, build_commit: str) -> str:
             '<p>moved_diagnostic <span class="mono">%s</span></p>\n'
             % _esc(finding["moved_diagnostic"])
         )
-    excerpt = ""
-    if finding.get("anchor_excerpt"):
-        excerpt = (
-            '<p>anchor <span class="mono">%s</span></p>\n'
-            % _esc(finding["anchor_excerpt"])
+    rule = finding["rule_evidence"]
+    if rule["status"] == "linked":
+        if rule["url"] is None:
+            rule_url_html = (
+                '<p>rule_url <span class="unavailable">unavailable (not declared)</span></p>\n'
+            )
+        else:
+            rule_url_html = (
+                '<p>rule_url <a href="%s">%s</a></p>\n'
+                % (_esc(rule["url"]), _esc(rule["url"]))
+            )
+        rule_html = (
+            '<div class="rule-link">\n'
+            '<p>rule_id <span class="mono">%s</span></p>\n'
+            '<p>rule_text <span>%s</span></p>\n'
+            '%s'
+            '</div>\n'
+            % (_esc(rule["id"]), _esc(rule["text"]), rule_url_html)
         )
+    else:
+        rule_html = (
+            '<p>rule <span class="unavailable">unavailable (%s)</span></p>\n'
+            % _esc(rule["reason"])
+        )
+    anchor = finding["anchor_evidence"]
+    if anchor["status"] == "present":
+        anchor_html = (
+            '<p>anchor <span class="mono">%s</span></p>\n'
+            % _esc(anchor["excerpt"])
+        )
+    else:
+        anchor_html = (
+            '<p>anchor <span class="unavailable">omitted (%s)</span></p>\n'
+            % _esc(anchor["reason"])
+        )
+    observation = finding["observation"]
+    observation_html = (
+        '<p>runner <span class="mono">%s</span></p>\n'
+        '<p>diagnostic_channel_declared <span class="mono">%s</span></p>\n'
+        '<p>verdict mechanism %s</p>\n'
+        % (
+            _esc(observation["runner"]),
+            _esc(str(observation["diagnostic_channel_declared"]).lower()),
+            _esc(observation["mechanism"]),
+        )
+    )
+    control = finding["control"]
+    control_html = (
+        '<p>control_status <span>%s</span></p>\n'
+        '<p>unproved <span class="mono">%s</span></p>\n'
+        % (_esc(control["status"]), _esc(control["unproved"]))
+    )
+    if not control["valid"]:
+        control_html += '<p class="warning">control invalid: run is unscored</p>\n'
     body = (
         "<header>\n"
         "<h1>%s</h1>\n"
@@ -1234,22 +1404,26 @@ def _rule_page(record: dict, finding: dict, build_commit: str) -> str:
         "</header>\n"
         "%s\n"
         '<main id="finding" class="finding">\n'
+        "%s"
         "<p>verdict <span>%s</span></p>\n"
         "<p>group <span class=\"mono\">%s</span></p>\n"
         "<p>obligation %s</p>\n"
         "<p>moved <span class=\"mono\">%s</span></p>\n"
-        "%s%s"
+        "%s%s%s%s"
         "%s\n"
         "</main>"
         % (
             _esc(finding["rule"]),
-            _non_claims_html([record]),
+            _non_claims_html([record], ceilings=CEILING_LINES + DOSSIER_NON_CLAIMS),
+            rule_html,
             _esc(finding["verdict"]),
             _esc(finding["group"]),
             _esc(finding["obligation"]),
             _esc(finding["moved"]),
             diagnostic,
-            excerpt,
+            anchor_html,
+            observation_html,
+            control_html,
             _evidence_links_html(record, build_commit),
         )
     )
@@ -1423,6 +1597,7 @@ def _hash_object_oid(root: Path, data: bytes) -> str:
     if not oid:
         raise PublicationError("git hash-object returned no object id")
     return oid
+
 
 def _require_recorded_link_commit(root: Path, recorded: str, records: list[dict]) -> None:
     """Refuse an implicit --check commit that is not a real ancestor with matching bytes."""

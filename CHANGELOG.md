@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+Publication finding dossiers now place digest-bound authored rule and anchor
+evidence beside each survivor or silent row. The renderer reads one bounded
+manifest snapshot for both derivations and binds accepted bytes, or a stable
+unavailable state, into the publication projection digest. Missing,
+non-regular, or digest-mismatched manifests leave rule and anchor evidence
+explicitly unavailable without changing report observations; mismatched bytes
+are neither parsed nor hashed. Invalid controls and null scores remain visibly
+unscored. This is author-declared traceability at one pin, not reachability,
+normative completeness, formal compliance, or engine correctness.
+
 Offline reason-token projections example: the same process-runner
 implementation, vector, mutation and control bytes under three first-party
 manifests in `examples/reason-token-projections/`. Pinning `accepted` and
