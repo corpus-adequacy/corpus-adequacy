@@ -16,6 +16,7 @@ for candidate in (str(ROOT), str(ROOT / "measurements")):
         sys.path.insert(0, candidate)
 
 import contained_hosted_publication as publication  # noqa: E402
+import candidate_diagnostics as diagnostics  # noqa: E402
 import contained_oci  # noqa: E402
 import hosted_packet  # noqa: E402
 import owned_contained_v1_hosted as owned  # noqa: E402
@@ -196,6 +197,100 @@ class OwnedHostedRailContract(unittest.TestCase):
         }
         report.update(overrides)
         return report
+
+    def test_forced_unproved_reaches_v1_package_and_pinned_readback(self):
+        from tests.test_effective_envelope import _requested_v2, _v2_effective
+
+        requested = _requested_v2()
+        bindings = {"candidate_revision": "a" * 40, "runner_revision": "b" * 40,
+                    "image_digest": requested["image_id"]}
+        report = self.report(control_status="absent-or-invalid", killed=0,
+                             declared_total=0, adequate=False,
+                             failures=["baseline unproved"])
+        report_sha = hashlib.sha256(publication.ca.encode_report_v0(report)).hexdigest()
+        prepare_raw = json.dumps({"schema": owned.sealed_run.PREPARE_V2_SCHEMA}).encode()
+        authorize_raw = b"authorize"
+        prepare_sha = hashlib.sha256(prepare_raw).hexdigest()
+        member = publication.effective_envelope.build_envelope_record(
+            requested=requested, setup_status="ready", envelope_status="verified",
+            unverified_field=None, effective=_v2_effective(), candidate_outcome="unproved",
+            cleanup="removed-and-absent", prepare_sha256=prepare_sha,
+            execution_commit=bindings["runner_revision"], report_sha256=None,
+            schema=publication.effective_envelope.ENVELOPE_SCHEMA_V1)
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw)
+            packet = workspace / OWNED_V1_RAIL.packet_dirname
+            packet.mkdir()
+            (packet / OWNED_V1_RAIL.prepare_filename).write_bytes(prepare_raw)
+            (packet / OWNED_V1_RAIL.authorize_filename).write_bytes(authorize_raw)
+            (packet / "pins").mkdir()
+            out = workspace / "out"
+
+            def execute(**kwargs):
+                kwargs["diagnostic_sink"](
+                    diagnostics.observation(0, "unproved", "inner-exit"))
+                ledger = publication.collection.Ledger()
+                ledger.recorded(ledger.register(), member)
+                publication.collection.write_collection(
+                    ledger, kwargs["envelope_dest"], report_sha256=report_sha)
+                return report
+
+            packet_files = {
+                OWNED_V1_RAIL.prepare_filename: prepare_sha,
+                OWNED_V1_RAIL.authorize_filename: hashlib.sha256(authorize_raw).hexdigest(),
+            }
+            with mock.patch.object(publication, "check_packet_manifest",
+                                   return_value=packet_files), \
+                    mock.patch.object(publication, "load_dispatch_bindings"), \
+                    mock.patch.object(publication, "check_prepare_bindings"), \
+                    mock.patch.object(owned.sealed_run, "load_prepare_for_profile",
+                                      return_value={}):
+                decision = publication.run_gate(
+                    **bindings, operator_profile=OWNED_V1_RAIL.execution_profile,
+                    out_dir=out, workspace_root=workspace,
+                    packet_root=OWNED_V1_RAIL.packet_dirname,
+                    authorize_path=OWNED_V1_RAIL.authorize_filename,
+                    prepare_path=OWNED_V1_RAIL.prepare_filename, pins_dir="pins",
+                    packet_manifest_sha256="d" * 64, docker_ready=lambda: "ready",
+                    sealed_execute=execute,
+                    environ={"GITHUB_SHA": bindings["runner_revision"],
+                             "GITHUB_WORKFLOW_SHA": bindings["runner_revision"],
+                             "GITHUB_RUN_ID": "1001", "GITHUB_RUN_ATTEMPT": "2"},
+                    rail=OWNED_V1_RAIL)
+            self.assertEqual(decision["decision"], "withhold")
+            with mock.patch.object(
+                    publication.candidate_diagnostics, "load_document",
+                    wraps=publication.candidate_diagnostics.load_document) as validate:
+                loaded = publication.load_hosted_attempt_artifacts(
+                    setup_path=out / publication.SETUP_STATUS_FILENAME,
+                    candidate_path=out / publication.CANDIDATE_RESULT_FILENAME,
+                    rerun_path=out / publication.RERUN_EVIDENCE_FILENAME,
+                    diagnostic_dir=out / publication.DIAGNOSTIC_DIRNAME,
+                    expected_bindings=bindings, expected_run_id="1001",
+                    expected_run_attempt="2")
+            validate.assert_called_once()
+            self.assertEqual(loaded["package"]["schema"],
+                             publication.DIAGNOSTIC_SCHEMA_V1)
+            self.assertEqual(loaded["package"]["candidate_diagnostics"]["members"][0], {
+                "ordinal": 0, "candidate_outcome": "unproved",
+                "unproved_reason": "inner-exit"})
+            self.assertEqual(
+                publication._readback_summary(loaded["package"])["candidate_diagnostics"],
+                [{"ordinal": 0, "candidate_outcome": "unproved",
+                  "unproved_reason": "inner-exit"}])
+            sidecar = (out / publication.DIAGNOSTIC_DIRNAME / diagnostics.FILENAME)
+            tampered = sidecar.read_bytes().replace(b"inner-exit", b"output-cap", 1)
+            self.assertEqual(len(tampered), sidecar.stat().st_size)
+            sidecar.write_bytes(tampered)
+            with self.assertRaisesRegex(publication.HostedPublicationError,
+                                        "candidate_diagnostics_digest"):
+                publication.load_hosted_attempt_artifacts(
+                    setup_path=out / publication.SETUP_STATUS_FILENAME,
+                    candidate_path=out / publication.CANDIDATE_RESULT_FILENAME,
+                    rerun_path=out / publication.RERUN_EVIDENCE_FILENAME,
+                    diagnostic_dir=out / publication.DIAGNOSTIC_DIRNAME,
+                    expected_bindings=bindings, expected_run_id="1001",
+                    expected_run_attempt="2")
 
     def test_rails_are_closed_immutable_and_namespace_disjoint(self):
         self.assertIs(OWNED_V1_RAIL.measurement, OWNED_CONTAINED_V1_CONTRACT)
@@ -487,15 +582,18 @@ class OwnedHostedRailContract(unittest.TestCase):
 
     def test_owned_execute_forwards_one_contract_and_profile_and_returns_report(self):
         expected = self.report()
+        diagnostic_rows = []
+        diagnostic_sink = diagnostic_rows.append
         with mock.patch("aee_checker_sealed_driver.run_authorized", return_value=expected) as call, \
                 mock.patch.object(publication.ca, "read_bounded_regular_file", return_value=b"{}"):
             result = publication.default_sealed_execute(
                 authorize_path="a", prepare_path="p", pins_dir="pins", root=ROOT,
                 envelope_dest="envelopes", materialize_dest="materialize",
-                rail=OWNED_V1_RAIL)
+                diagnostic_sink=diagnostic_sink, rail=OWNED_V1_RAIL)
         self.assertIs(result, expected)
         self.assertEqual(call.call_args.kwargs["execution_profile"], "contained-oci-v1")
         self.assertIs(call.call_args.kwargs["contract"], OWNED_CONTAINED_V1_CONTRACT)
+        self.assertIs(call.call_args.kwargs["diagnostic_sink"], diagnostic_sink)
 
     def test_owned_gate_facade_forwards_the_closed_rail_exactly(self):
         with mock.patch.object(publication, "run_gate",

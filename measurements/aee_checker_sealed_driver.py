@@ -89,6 +89,7 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
                    pins_dir: Path, materialize_dest: Path, root: Path,
                    execution_profile, transport=None,
                    envelope_dest: Path | None = None,
+                   diagnostic_sink=None,
                    contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     """Validate, rematerialize, then invoke the sole generic process engine.
 
@@ -133,6 +134,7 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
             prepare_raw=prepare_raw, materialized=materialized,
             execution_profile=execution_profile,
             transport=transport, envelope_sink=records.append, ledger=ledger,
+            diagnostic_sink=diagnostic_sink,
             contract=contract)
         try:
             report = execute.run_execution_funnel(
