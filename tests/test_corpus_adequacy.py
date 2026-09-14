@@ -4356,11 +4356,15 @@ class PositionalManifestInputBounds(unittest.TestCase):
             "fixtures/algovoi-jcs-edge-aa53149c/manifest.json": 43225,
             "measurements/aee-checker-25b9dfa/manifest.json": 2952,
             "measurements/owned-contained-v1/manifest.json": 1846,
+            "measurements/owned-independent-v0/manifest.json": 1759,
             "measurements/tersign-0e560c1/manifest.json": 4502,
             "measurements/tersign-1cc5ea32/manifest.json": 4502,
         }
         self.assertEqual(manifests, sorted(expected))
-        observed = {name: (repository / name).stat().st_size for name in manifests}
+        observed = {
+            name: len((repository / name).read_text(encoding="utf-8").encode("utf-8"))
+            for name in manifests
+        }
         self.assertEqual(observed, expected)
         self.assertEqual(max(observed.values()), 43225)
         self.assertLess(max(observed.values()), ca.OUTPUT_CAP_BYTES)

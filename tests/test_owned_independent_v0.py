@@ -8,7 +8,10 @@ the mutation engine.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -56,6 +59,29 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def crlf_checkout_bytes(raw: bytes) -> bytes:
+    """Simulate Git's Windows checkout form without rewriting CR-bearing input."""
+    if b"\r" in raw:
+        return raw
+    buffer = io.BytesIO()
+    with io.TextIOWrapper(buffer, encoding="utf-8", newline="\r\n") as wrapper:
+        wrapper.write(raw.decode("utf-8"))
+        wrapper.flush()
+        return buffer.getvalue()
+
+
+def canonical_checkout_bytes(path: Path) -> bytes:
+    with path.open(encoding="utf-8", newline=None) as stream:
+        return stream.read().encode("utf-8")
+
+
+def git_blob_bytes(path: Path) -> bytes:
+    relative = path.resolve().relative_to(ROOT).as_posix()
+    return subprocess.check_output(
+        ["git", "cat-file", "blob", "HEAD:" + relative], cwd=ROOT
+    )
+
+
 class OwnedIndependentV0Selection(unittest.TestCase):
     def setUp(self) -> None:
         self.manifest_raw = MANIFEST_PATH.read_bytes()
@@ -64,8 +90,26 @@ class OwnedIndependentV0Selection(unittest.TestCase):
         self.bundle = json.loads(self.bundle_raw)
 
     def test_selection_files_are_canonical_json(self):
-        self.assertEqual(self.manifest_raw, canonical_json_bytes(self.manifest))
-        self.assertEqual(self.bundle_raw, canonical_json_bytes(self.bundle))
+        for path, document in (
+            (MANIFEST_PATH, self.manifest),
+            (BUNDLE_PATH, self.bundle),
+        ):
+            with self.subTest(path=path.name):
+                blob = git_blob_bytes(path)
+                self.assertNotIn(b"\r", blob)
+                self.assertEqual(blob, canonical_json_bytes(document))
+                self.assertEqual(canonical_checkout_bytes(path), blob)
+
+    def test_crlf_checkout_simulation_normalizes_to_canonical_json(self):
+        for source in (MANIFEST_PATH, BUNDLE_PATH):
+            with self.subTest(path=source.name), tempfile.TemporaryDirectory() as directory:
+                clone = Path(directory) / source.name
+                clone.write_bytes(crlf_checkout_bytes(source.read_bytes()))
+                parsed = json.loads(clone.read_bytes())
+                self.assertEqual(
+                    canonical_checkout_bytes(clone),
+                    canonical_json_bytes(parsed),
+                )
 
     def test_manifest_has_one_positive_one_inert_and_one_ordinary_mutation(self):
         mutants = self.manifest["mutants"]["independent"]
