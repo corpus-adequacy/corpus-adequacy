@@ -138,6 +138,28 @@ def _write_report(directory: Path, name: str, report: dict) -> Path:
     return path
 
 
+def _git_blob_bytes(path: Path) -> bytes:
+    rel = path.resolve().relative_to(REPO_ROOT).as_posix()
+    return subprocess.check_output(
+        ["git", "cat-file", "blob", "HEAD:" + rel], cwd=REPO_ROOT)
+
+
+def _crlf_checkout_bytes(raw: bytes) -> bytes:
+    """Working-tree CRLF form of Git object bytes, without rewriting CR-bearing input."""
+    if b"\r" in raw:
+        return raw
+    buffer = io.BytesIO()
+    with io.TextIOWrapper(buffer, encoding="utf-8", newline="\r\n") as wrapper:
+        wrapper.write(raw.decode("utf-8"))
+        wrapper.flush()
+        return buffer.getvalue()
+
+
+def _canonical_utf8_bytes(path: Path) -> bytes:
+    with path.open(encoding="utf-8", newline=None) as fh:
+        return fh.read().encode("utf-8")
+
+
 def _assert_closed_diff(doc):
     unittest.TestCase().assertEqual(set(doc), DIFF_TOP_KEYS)
     unittest.TestCase().assertEqual(doc["schema"], DIFF_SCHEMA)
@@ -181,7 +203,20 @@ class ReportDiffFixtureBytes(unittest.TestCase):
     def test_json_fixture_exact_bytes(self):
         proc = _cli("--diff", str(OLD_FIXTURE), str(NEW_FIXTURE), "--json")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout, EXPECTED_DIFF.read_bytes())
+        blob = _git_blob_bytes(EXPECTED_DIFF)
+        self.assertIn(b"\n", blob)
+        self.assertNotIn(b"\r", blob)
+        checkout = _crlf_checkout_bytes(EXPECTED_DIFF.read_bytes())
+        with tempfile.TemporaryDirectory() as d:
+            crlf_copy = Path(d) / EXPECTED_DIFF.name
+            crlf_copy.write_bytes(checkout)
+            self.assertNotEqual(proc.stdout, crlf_copy.read_bytes())
+            expected = _canonical_utf8_bytes(crlf_copy)
+            self.assertIn(b"\n", expected)
+            self.assertNotIn(b"\r", expected)
+            self.assertEqual(expected, blob)
+            self.assertEqual(proc.stdout, expected)
+        self.assertEqual(proc.stdout, _canonical_utf8_bytes(EXPECTED_DIFF))
         self.assertTrue(proc.stdout.endswith(b"\n"))
 
     def test_fixture_pair_retains_every_simultaneous_fact(self):
