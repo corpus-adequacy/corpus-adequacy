@@ -698,6 +698,14 @@ class DockerTransport:
         return image_env_names(image_id)
 
 
+def resolve_transport(image_id: str, transport):
+    """Return the injected transport or materialize the production transport once."""
+    if transport is None:
+        require_local_image(require_image_id(image_id))
+        return DockerTransport()
+    return transport
+
+
 def require_observed_start(inspect, outcome: str, process) -> None:
     """Prove Docker started the container before classifying its outcome."""
     state = inspect.get("State") if type(inspect) is dict else None
@@ -752,9 +760,7 @@ def run_contained(
     """
     image_id = require_image_id(image_id)
     profile = require_versioned_resource_profile(resource_profile)
-    if transport is None:
-        require_local_image(image_id)
-        transport = DockerTransport()
+    transport = resolve_transport(image_id, transport)
     if getattr(transport, "skip_absent", False):
         raise PrepareError("absence proof skipped")
     name = "%s%s" % (name_prefix, token_hex(4))

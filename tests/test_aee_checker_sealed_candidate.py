@@ -1148,6 +1148,21 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
             (100000, 100000, 0, {"soft": 1024, "hard": 1024}))
         self.assertEqual(record["effective"]["daemon"]["kernel_version"], "synthetic-kernel")
 
+    def test_recorded_default_transport_is_reused_for_envelope_observations(self):
+        transport = ObservingTransport(
+            inspect=_observed_inspect(contained.CANDIDATE_RESOURCE_PROFILE_V2))
+        with (mock.patch.object(contained, "require_local_image") as require_image,
+              mock.patch.object(contained, "DockerTransport", return_value=transport) as factory):
+            completed, _ = self._admit(
+                _prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2),
+                V1_PROFILE, None)
+
+        require_image.assert_called_once_with(TOOLCHAIN_IMAGE)
+        factory.assert_called_once_with()
+        self.assertEqual(len(transport.started), 1)
+        self.assertEqual(completed.envelope_record["envelope_status"], "verified")
+        self.assertIsNotNone(completed.envelope_record["effective"])
+
     def test_v2_prepare_under_v0_refuses_before_create(self):
         with self.assertRaisesRegex(PrepareError, "prepare.v2 requires contained-oci-v1"):
             self._admit(_prepare_raw(contained.CANDIDATE_RESOURCE_PROFILE_V2),
