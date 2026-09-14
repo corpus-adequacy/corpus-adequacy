@@ -75,6 +75,26 @@ COLLECTION_DIRNAME = "effective-envelope-collection.v0"
 WITHHELD_COLLECTION_DIRNAME = "withheld-collection.diagnostic.v0"
 QUARANTINE_ATTEMPT_TEMPLATE = "attempt-%04d"
 MAX_QUARANTINE_ATTEMPTS = 256
+DIAGNOSTIC_DIRNAME = "withheld-diagnostic-package.v0"
+DIAGNOSTIC_MANIFEST_FILENAME = "diagnostic-package.v0.json"
+DIAGNOSTIC_COLLECTION_DIRNAME = "collection"
+DIAGNOSTIC_SCHEMA = "corpus-adequacy.hosted-withhold-diagnostic.v0"
+DIAGNOSTIC_KIND = "hosted-withhold-diagnostic"
+DIAGNOSTIC_PERMISSION = "withheld"
+DIAGNOSTIC_ARTIFACT_CLASS = "quarantined-diagnostic"
+DIAGNOSTIC_DECISIONS = ("withhold", "unavailable", "refuse")
+COLLECTION_PRESENT = "collection_present"
+COLLECTION_ABSENT = "collection_absent"
+MAX_DIAGNOSTIC_MANIFEST_BYTES = 262144
+MAX_DIAGNOSTIC_ENTRIES = collection.MAX_COLLECTION_MEMBERS + 2
+MAX_DIAGNOSTIC_PACKAGE_BYTES = (
+    collection.MAX_INDEX_BYTES
+    + collection.MAX_MEMBER_TOTAL_BYTES
+    + MAX_DIAGNOSTIC_MANIFEST_BYTES
+)
+MAX_RERUN_EVIDENCE_BYTES = 262144
+MAX_RERUN_EVIDENCE_ENTRIES = 256
+MAX_RERUN_ENTRY_BYTES = 65536
 CANDIDATE_RESULT_FILENAME = "candidate-result.json"
 RERUN_EVIDENCE_FILENAME = "rerun-evidence.jsonl"
 # One name for the bindings file: the packet module's closed file-name set carries it.
@@ -112,6 +132,64 @@ NON_CLAIMS = (
     "Not a third-party quality score.",
     "Hosted intake is not hosted execution authorization beyond this gate.",
 )
+DIAGNOSTIC_NON_CLAIMS = (
+    "Retains observations from one hosted attempt; it does not verify an unverified member.",
+    "Does not authorize publication or execution.",
+    "Does not prove kernel-applied limits or cleanup beyond recorded observations.",
+    "Not adequacy, endorsement, audit, or certification.",
+)
+DIAGNOSTIC_MANIFEST_KEYS = (
+    "schema", "kind", "artifact_class", "publication_permission", "decision",
+    "reason", "execution_began", "collection_state", "run_identity",
+    "workflow_identity", "bindings", "dispatch_bindings", "report_sha256",
+    "artifacts", "collection", "non_claims",
+)
+RUN_IDENTITY_KEYS = ("run_id", "run_attempt")
+FILE_DIGEST_KEYS = ("bytes", "sha256")
+COLLECTION_BINDING_KEYS = ("relpath", "index", "members")
+INDEX_BINDING_KEYS = ("relpath", "bytes", "sha256")
+MEMBER_BINDING_KEYS = ("ordinal", "relpath", "bytes", "sha256")
+SETUP_STATUS_KEYS = (
+    "schema", "kind", "setup_status", "reason", "bindings", "dispatch_bindings",
+    "operator_profile", "workflow_identity", "non_claims",
+)
+VOID_CANDIDATE_KEYS = (
+    "schema", "kind", "score_status", "mutant_status", "reason", "bindings",
+    "dispatch_bindings", "non_claims",
+)
+LEGACY_CANDIDATE_KEYS = (
+    "schema", "kind", "score_status", "decision", "bindings", "dispatch_bindings",
+    "non_claims",
+)
+OWNED_CANDIDATE_KEYS = (
+    "schema", "kind", "decision", "score_status", "bindings", "dispatch_bindings",
+    "report_sha256", "control_status", "unproved", "adequate", "outcomes",
+    "non_claims",
+)
+RERUN_START_KEYS = (
+    "kind", "bindings", "dispatch_bindings", "workflow_identity", "run_id",
+    "run_attempt",
+)
+RERUN_TERMINAL_KEYS = (
+    "kind", "decision", "reason", "collection_state", "diagnostic_package_sha256",
+    "bindings", "dispatch_bindings", "run_id", "run_attempt",
+)
+RERUN_POST_EXECUTE_KEYS = (
+    "kind", "reason", "setup_status", "bindings", "dispatch_bindings", "run_id",
+    "run_attempt",
+)
+RERUN_CLEANUP_FAILED_KEYS = (
+    "kind", "reason", "cleanup_error_type", "bindings", "dispatch_bindings",
+    "run_id", "run_attempt",
+)
+RERUN_INFRA_KEYS = RERUN_POST_EXECUTE_KEYS
+RERUN_KIND_START = "run-attempt-start"
+RERUN_KIND_TERMINAL = "run-attempt-terminal"
+RERUN_KIND_POST_EXECUTE = "post-execute-refusal"
+RERUN_KIND_CLEANUP_FAILED = "post-execute-refusal-cleanup-failed"
+RERUN_KIND_INFRA = "infrastructure-failure"
+ARTIFACT_SETUP_NAME = SETUP_STATUS_FILENAME
+ARTIFACT_CANDIDATE_NAME = CANDIDATE_RESULT_FILENAME
 
 
 class HostedPublicationError(Exception):
@@ -538,6 +616,628 @@ def _encode_json(doc) -> bytes:
             + "\n").encode("utf-8")
 
 
+def _require_exact(doc, keys, where: str) -> None:
+    if type(doc) is not dict:
+        raise HostedPublicationError(where)
+    if set(doc) != set(keys):
+        raise HostedPublicationError(where)
+
+
+def _is_decimal_id(value) -> bool:
+    return isinstance(value, str) and value != "" and value.isdigit()
+
+
+def _require_run_identity(identity) -> dict:
+    if type(identity) is not dict:
+        raise HostedPublicationError("run_identity")
+    closed = {
+        "run_id": identity.get("run_id"),
+        "run_attempt": identity.get("run_attempt"),
+    }
+    if set(closed) != set(RUN_IDENTITY_KEYS):
+        raise HostedPublicationError("run_identity")
+    if not _is_decimal_id(closed["run_id"]) or not _is_decimal_id(closed["run_attempt"]):
+        raise HostedPublicationError("run_identity")
+    return closed
+
+
+def _require_sha256(value, where: str) -> str:
+    if (not isinstance(value, str) or len(value) != 64 or
+            any(ch not in "0123456789abcdef" for ch in value)):
+        raise HostedPublicationError(where)
+    return value
+
+
+def _require_bindings_pair(bindings, dispatch_bindings, expected=None) -> dict:
+    if type(bindings) is not dict or type(dispatch_bindings) is not dict:
+        raise HostedPublicationError("bindings")
+    if bindings != dispatch_bindings:
+        raise HostedPublicationError("bindings")
+    if expected is not None and bindings != expected:
+        raise HostedPublicationError("bindings")
+    return dict(bindings)
+
+
+def _require_reason(reason) -> str:
+    if not isinstance(reason, str) or not reason:
+        raise HostedPublicationError("reason")
+    return reason
+
+
+def _is_member_filename(name: str) -> bool:
+    if not isinstance(name, str) or not name.startswith("member-") or not name.endswith(".json"):
+        return False
+    mid = name[7:-5]
+    return len(mid) == 4 and mid.isdigit()
+
+
+def _load_json_file(path, *, max_bytes: int):
+    path = Path(path)
+    return load_json_confined(path.parent, path.name, max_bytes=max_bytes)
+
+
+def _preflight_files(root: Path, *, max_entries: int, max_total: int) -> list[Path]:
+    """Count, type, and size-check before any read or hash."""
+    root = Path(root)
+    if not root.is_dir() or root.is_symlink():
+        raise HostedPublicationError("diagnostic_package")
+    files = []
+    total = 0
+
+    def walk(directory: Path):
+        nonlocal total
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise HostedPublicationError("diagnostic_preflight") from exc
+                if stat.S_ISLNK(st.st_mode):
+                    raise HostedPublicationError("diagnostic_symlink")
+                if stat.S_ISDIR(st.st_mode):
+                    walk(path)
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    raise HostedPublicationError("diagnostic_not_regular")
+                files.append(path)
+                if len(files) > max_entries:
+                    raise HostedPublicationError("diagnostic_entry_ceiling")
+                total += st.st_size
+                if total > max_total:
+                    raise HostedPublicationError("diagnostic_package_ceiling")
+
+    walk(root)
+    return files
+
+
+def _preflight_collection_dir(directory: Path) -> None:
+    directory = Path(directory)
+    files = _preflight_files(
+        directory,
+        max_entries=MAX_DIAGNOSTIC_ENTRIES,
+        max_total=collection.MAX_INDEX_BYTES + collection.MAX_MEMBER_TOTAL_BYTES,
+    )
+    names = []
+    for path in files:
+        rel = path.relative_to(directory).as_posix()
+        if "/" in rel:
+            raise HostedPublicationError("diagnostic_unexpected_path")
+        names.append(rel)
+        cap = (collection.MAX_INDEX_BYTES if rel == collection.INDEX_FILENAME
+               else collection.MAX_MEMBER_BYTES)
+        if path.lstat().st_size > cap:
+            raise HostedPublicationError("diagnostic_file_ceiling")
+        if rel != collection.INDEX_FILENAME and not _is_member_filename(rel):
+            raise HostedPublicationError("diagnostic_unexpected_path")
+    if collection.INDEX_FILENAME not in names:
+        raise HostedPublicationError("collection index absent")
+
+
+def _digest_file(path: Path, *, cap: int) -> tuple[bytes, str]:
+    raw = ca.read_bounded_regular_file(Path(path), cap=cap)
+    return raw, hashlib.sha256(raw).hexdigest()
+
+
+def _file_digest_doc(path: Path, *, cap: int) -> dict:
+    raw, digest = _digest_file(path, cap=cap)
+    return {"bytes": len(raw), "sha256": digest}
+
+
+def _outer_collection_binding(coll: Path, loaded: dict) -> dict:
+    index_path = Path(coll) / collection.INDEX_FILENAME
+    index_raw, index_digest = _digest_file(
+        index_path, cap=collection.MAX_INDEX_BYTES)
+    members = []
+    index_members = loaded["index"]["members"]
+    if type(index_members) is not list:
+        raise HostedPublicationError("diagnostic_collection")
+    for entry in index_members:
+        if type(entry) is not dict:
+            raise HostedPublicationError("diagnostic_collection")
+        relpath = entry.get("relpath")
+        ordinal = entry.get("ordinal")
+        if not isinstance(relpath, str) or type(ordinal) is not int:
+            raise HostedPublicationError("diagnostic_collection")
+        member_path = Path(coll) / relpath
+        raw, digest = _digest_file(member_path, cap=collection.MAX_MEMBER_BYTES)
+        if entry.get("sha256") != digest:
+            raise HostedPublicationError("diagnostic_inventory")
+        members.append({
+            "ordinal": ordinal,
+            "relpath": "%s/%s" % (DIAGNOSTIC_COLLECTION_DIRNAME, relpath),
+            "bytes": len(raw),
+            "sha256": digest,
+        })
+    members.sort(key=lambda row: row["ordinal"])
+    return {
+        "relpath": DIAGNOSTIC_COLLECTION_DIRNAME,
+        "index": {
+            "relpath": "%s/%s" % (DIAGNOSTIC_COLLECTION_DIRNAME, collection.INDEX_FILENAME),
+            "bytes": len(index_raw),
+            "sha256": index_digest,
+        },
+        "members": members,
+    }
+
+
+def _inspect_live_collection(out: Path):
+    live = Path(out) / COLLECTION_DIRNAME
+    if not live.exists():
+        return None
+    if live.is_symlink() or not live.is_dir():
+        raise HostedPublicationError("diagnostic_not_regular")
+    _preflight_collection_dir(live)
+    try:
+        loaded = collection.load_collection(live)
+    except collection.CollectionError as exc:
+        raise HostedPublicationError(_collection_refusal_reason(exc)) from exc
+    return loaded
+
+
+def _artifact_digests(setup_raw: bytes, candidate_raw: bytes) -> dict:
+    return {
+        SETUP_STATUS_FILENAME: {
+            "bytes": len(setup_raw),
+            "sha256": hashlib.sha256(setup_raw).hexdigest(),
+        },
+        CANDIDATE_RESULT_FILENAME: {
+            "bytes": len(candidate_raw),
+            "sha256": hashlib.sha256(candidate_raw).hexdigest(),
+        },
+    }
+
+
+def _report_sha256_from(loaded, candidate_doc):
+    claimed = None
+    if loaded is not None:
+        claimed = loaded["index"].get("report_sha256")
+    carried = candidate_doc.get("report_sha256") if type(candidate_doc) is dict else None
+    if claimed is not None:
+        _require_sha256(claimed, "report_sha256")
+    if carried is not None:
+        _require_sha256(carried, "report_sha256")
+        if claimed is not None and carried != claimed:
+            raise HostedPublicationError("report_sha256")
+        if claimed is None:
+            claimed = carried
+    return claimed
+
+
+def _closed_manifest(*, decision, reason, execute_began, collection_state,
+                     identity, workflow_identity, bindings, report_sha256,
+                     artifacts, collection_binding):
+    if decision not in DIAGNOSTIC_DECISIONS:
+        raise HostedPublicationError("diagnostic_decision")
+    if type(execute_began) is not bool:
+        raise HostedPublicationError("execution_began")
+    if collection_state == COLLECTION_PRESENT:
+        if execute_began is not True or collection_binding is None:
+            raise HostedPublicationError("collection_state")
+    elif collection_state == COLLECTION_ABSENT:
+        if collection_binding is not None:
+            raise HostedPublicationError("collection_state")
+    else:
+        raise HostedPublicationError("collection_state")
+    return {
+        "schema": DIAGNOSTIC_SCHEMA,
+        "kind": DIAGNOSTIC_KIND,
+        "artifact_class": DIAGNOSTIC_ARTIFACT_CLASS,
+        "publication_permission": DIAGNOSTIC_PERMISSION,
+        "decision": decision,
+        "reason": _require_reason(reason),
+        "execution_began": execute_began,
+        "collection_state": collection_state,
+        "run_identity": _require_run_identity(identity),
+        "workflow_identity": (
+            dict(workflow_identity) if workflow_identity is not None else None),
+        "bindings": dict(bindings),
+        "dispatch_bindings": dict(bindings),
+        "report_sha256": report_sha256,
+        "artifacts": artifacts,
+        "collection": collection_binding,
+        "non_claims": list(DIAGNOSTIC_NON_CLAIMS),
+    }
+
+
+def finalize_nonpublish_attempt(
+        *, out, setup_doc, candidate_doc, decision, reason,
+        execute_began, identity, workflow_identity, bindings,
+        rerun_log, max_artifact_bytes=MAX_ARTIFACT_BYTES,
+        envelope_doc=None) -> dict:
+    """One closed diagnostic package, then separately uploaded setup/candidate bytes."""
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    if setup_doc is None or candidate_doc is None:
+        raise HostedPublicationError("collapsed_artifacts")
+    setup_raw = _encode_json(setup_doc)
+    candidate_raw = _encode_json(candidate_doc)
+    if len(setup_raw) > max_artifact_bytes or len(candidate_raw) > max_artifact_bytes:
+        raise HostedPublicationError("max_artifact_bytes")
+    if envelope_doc is None:
+        envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
+    artifacts_written = False
+
+    def _write_setup_and_candidate():
+        nonlocal artifacts_written
+        write_separate_artifacts(
+            out, setup_doc, envelope_doc, candidate_doc,
+            max_bytes=max_artifact_bytes)
+        artifacts_written = True
+
+    try:
+        loaded = _inspect_live_collection(out)
+        collection_state = COLLECTION_PRESENT if loaded is not None else COLLECTION_ABSENT
+        collection_binding = None
+        live = out / COLLECTION_DIRNAME
+        if loaded is not None:
+            collection_binding = _outer_collection_binding(live, loaded)
+        report_sha256 = _report_sha256_from(loaded, candidate_doc)
+        artifacts = _artifact_digests(setup_raw, candidate_raw)
+        try:
+            closed_identity = _require_run_identity(identity)
+        except HostedPublicationError:
+            _write_setup_and_candidate()
+            return {
+                "decision": decision,
+                "collection_state": collection_state,
+                "diagnostic_package_sha256": None,
+            }
+        manifest = _closed_manifest(
+            decision=decision, reason=reason, execute_began=execute_began,
+            collection_state=collection_state, identity=closed_identity,
+            workflow_identity=workflow_identity, bindings=bindings,
+            report_sha256=report_sha256, artifacts=artifacts,
+            collection_binding=collection_binding,
+        )
+        manifest_raw = _encode_json(manifest)
+        if len(manifest_raw) > MAX_DIAGNOSTIC_MANIFEST_BYTES:
+            raise HostedPublicationError("diagnostic_manifest_ceiling")
+        package_total = len(manifest_raw)
+        if collection_binding is not None:
+            package_total += collection_binding["index"]["bytes"]
+            package_total += sum(row["bytes"] for row in collection_binding["members"])
+        if package_total > MAX_DIAGNOSTIC_PACKAGE_BYTES:
+            raise HostedPublicationError("diagnostic_package_ceiling")
+        dest = out / DIAGNOSTIC_DIRNAME
+        if dest.exists():
+            raise HostedPublicationError("diagnostic_package_occupied")
+        staging = out / (".%s.staging" % DIAGNOSTIC_DIRNAME)
+        if staging.exists():
+            raise HostedPublicationError("diagnostic_staging_occupied")
+        staging.mkdir()
+        (staging / DIAGNOSTIC_MANIFEST_FILENAME).write_bytes(manifest_raw)
+        if loaded is not None:
+            live.rename(staging / DIAGNOSTIC_COLLECTION_DIRNAME)
+        staging.rename(dest)
+        _write_setup_and_candidate()
+        digest = hashlib.sha256(manifest_raw).hexdigest()
+        append_rerun_evidence(rerun_log, {
+            "kind": RERUN_KIND_TERMINAL,
+            "decision": decision,
+            "reason": reason,
+            "collection_state": collection_state,
+            "diagnostic_package_sha256": digest,
+            "bindings": dict(bindings),
+            "dispatch_bindings": dict(bindings),
+            "run_id": closed_identity["run_id"],
+            "run_attempt": closed_identity["run_attempt"],
+        })
+        return {
+            "decision": decision,
+            "collection_state": collection_state,
+            "diagnostic_package_sha256": digest,
+            "manifest": manifest,
+        }
+    except BaseException:
+        if not artifacts_written:
+            try:
+                write_separate_artifacts(
+                    out, setup_doc, envelope_doc, candidate_doc,
+                    max_bytes=max_artifact_bytes, move_live_collection=False)
+            except BaseException:
+                pass
+        raise
+
+
+def load_setup_status(path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
+    doc = _load_json_file(path, max_bytes=max_bytes)
+    _require_exact(doc, SETUP_STATUS_KEYS, "setup_status")
+    if doc.get("schema") != HOSTED_SCHEMA or doc.get("kind") != "setup-status":
+        raise HostedPublicationError("setup_status")
+    return doc
+
+
+def load_candidate_result(path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
+    doc = _load_json_file(path, max_bytes=max_bytes)
+    kind = doc.get("kind")
+    if kind == "void-hosted-result":
+        _require_exact(doc, VOID_CANDIDATE_KEYS, "candidate_result")
+        if doc.get("schema") != HOSTED_SCHEMA:
+            raise HostedPublicationError("candidate_result")
+        return doc
+    if kind != "hosted-candidate-result":
+        raise HostedPublicationError("candidate_result")
+    if doc.get("schema") == HOSTED_SCHEMA:
+        _require_exact(doc, LEGACY_CANDIDATE_KEYS, "candidate_result")
+        return doc
+    _require_exact(doc, OWNED_CANDIDATE_KEYS, "candidate_result")
+    _require_sha256(doc.get("report_sha256"), "report_sha256")
+    return doc
+
+
+def _rerun_closed_keys(kind):
+    if kind == RERUN_KIND_START:
+        return RERUN_START_KEYS
+    if kind == RERUN_KIND_TERMINAL:
+        return RERUN_TERMINAL_KEYS
+    if kind == RERUN_KIND_POST_EXECUTE:
+        return RERUN_POST_EXECUTE_KEYS
+    if kind == RERUN_KIND_CLEANUP_FAILED:
+        return RERUN_CLEANUP_FAILED_KEYS
+    if kind == RERUN_KIND_INFRA:
+        return RERUN_INFRA_KEYS
+    return None
+
+
+def load_rerun_evidence(path, *, max_bytes: int = MAX_RERUN_EVIDENCE_BYTES,
+                       max_entries: int = MAX_RERUN_EVIDENCE_ENTRIES,
+                       max_entry_bytes: int = MAX_RERUN_ENTRY_BYTES,
+                       mode: str = "complete") -> list:
+    path = Path(path)
+    try:
+        st = path.lstat()
+    except OSError as exc:
+        raise HostedPublicationError("rerun_evidence") from exc
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise HostedPublicationError("rerun_evidence")
+    if st.st_size > max_bytes:
+        raise HostedPublicationError("rerun_evidence_ceiling")
+    try:
+        raw = ca.read_bounded_regular_file(path, cap=max_bytes)
+    except ca.ManifestError as exc:
+        raise HostedPublicationError("rerun_evidence_ceiling") from exc
+    lines = raw.splitlines()
+    if len(lines) > max_entries:
+        raise HostedPublicationError("rerun_evidence_entries")
+    entries = []
+    for line in lines:
+        if len(line) > max_entry_bytes:
+            raise HostedPublicationError("rerun_entry_ceiling")
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line.decode("utf-8"))
+        except (UnicodeError, ValueError) as exc:
+            raise HostedPublicationError("rerun_evidence") from exc
+        if type(entry) is not dict:
+            raise HostedPublicationError("rerun_evidence")
+        kind = entry.get("kind")
+        keys = _rerun_closed_keys(kind)
+        if keys is None:
+            raise HostedPublicationError("rerun_kind")
+        _require_exact(entry, keys, "rerun_keys")
+        entries.append(entry)
+    if not entries:
+        raise HostedPublicationError("rerun_evidence")
+    if entries[0].get("kind") != RERUN_KIND_START:
+        raise HostedPublicationError("rerun_start")
+    if mode == "legacy":
+        return entries
+    if mode != "complete":
+        raise HostedPublicationError("rerun_mode")
+    if entries[-1].get("kind") != RERUN_KIND_TERMINAL:
+        raise HostedPublicationError("rerun_terminal")
+    if any(entry.get("kind") == RERUN_KIND_TERMINAL for entry in entries[:-1]):
+        raise HostedPublicationError("rerun_terminal")
+    start = entries[0]
+    terminal = entries[-1]
+    if (start.get("run_id") != terminal.get("run_id")
+            or start.get("run_attempt") != terminal.get("run_attempt")):
+        raise HostedPublicationError("attempt_binding")
+    if start.get("bindings") != terminal.get("bindings"):
+        raise HostedPublicationError("bindings")
+    if start.get("dispatch_bindings") != terminal.get("dispatch_bindings"):
+        raise HostedPublicationError("bindings")
+    _require_run_identity({"run_id": terminal.get("run_id"),
+                            "run_attempt": terminal.get("run_attempt")})
+    return entries
+
+
+def load_diagnostic_package(directory, *, max_bytes: int = MAX_DIAGNOSTIC_PACKAGE_BYTES,
+                             max_entries: int = MAX_DIAGNOSTIC_ENTRIES) -> dict:
+    directory = Path(directory)
+    files = _preflight_files(directory, max_entries=max_entries, max_total=max_bytes)
+    names = {path.relative_to(directory).as_posix() for path in files}
+    if DIAGNOSTIC_MANIFEST_FILENAME not in names:
+        raise HostedPublicationError("diagnostic_manifest")
+    with os.scandir(directory) as entries:
+        root_names = {entry.name for entry in entries}
+    allowed = {DIAGNOSTIC_MANIFEST_FILENAME, DIAGNOSTIC_COLLECTION_DIRNAME}
+    if any(name not in allowed for name in root_names):
+        raise HostedPublicationError("diagnostic_unexpected_path")
+    manifest_path = directory / DIAGNOSTIC_MANIFEST_FILENAME
+    if manifest_path.lstat().st_size > MAX_DIAGNOSTIC_MANIFEST_BYTES:
+        raise HostedPublicationError("diagnostic_manifest_ceiling")
+    manifest = _load_json_file(manifest_path, max_bytes=MAX_DIAGNOSTIC_MANIFEST_BYTES)
+    _require_exact(manifest, DIAGNOSTIC_MANIFEST_KEYS, "diagnostic_manifest")
+    if (manifest.get("schema") != DIAGNOSTIC_SCHEMA
+            or manifest.get("kind") != DIAGNOSTIC_KIND
+            or manifest.get("artifact_class") != DIAGNOSTIC_ARTIFACT_CLASS
+            or manifest.get("publication_permission") != DIAGNOSTIC_PERMISSION):
+        raise HostedPublicationError("diagnostic_permission")
+    if manifest.get("decision") not in DIAGNOSTIC_DECISIONS:
+        raise HostedPublicationError("diagnostic_decision")
+    if type(manifest.get("execution_began")) is not bool:
+        raise HostedPublicationError("execution_began")
+    _require_reason(manifest.get("reason"))
+    identity = _require_run_identity(manifest.get("run_identity"))
+    _require_bindings_pair(manifest.get("bindings"), manifest.get("dispatch_bindings"))
+    artifacts = manifest.get("artifacts")
+    if type(artifacts) is not dict or set(artifacts) != {
+            SETUP_STATUS_FILENAME, CANDIDATE_RESULT_FILENAME}:
+        raise HostedPublicationError("diagnostic_artifacts")
+    for name, spec in artifacts.items():
+        _require_exact(spec, FILE_DIGEST_KEYS, "diagnostic_artifacts")
+        if type(spec.get("bytes")) is not int or spec["bytes"] < 0:
+            raise HostedPublicationError("diagnostic_artifacts")
+        _require_sha256(spec.get("sha256"), "diagnostic_artifacts")
+    collection_state = manifest.get("collection_state")
+    binding = manifest.get("collection")
+    loaded_collection = None
+    coll_dir = directory / DIAGNOSTIC_COLLECTION_DIRNAME
+    if collection_state == COLLECTION_ABSENT:
+        if binding is not None or coll_dir.exists():
+            raise HostedPublicationError("collection_state")
+        if manifest.get("execution_began") is True:
+            pass
+        if manifest.get("report_sha256") not in (None,):
+            if manifest.get("report_sha256") is not None:
+                _require_sha256(manifest.get("report_sha256"), "report_sha256")
+    elif collection_state == COLLECTION_PRESENT:
+        if manifest.get("execution_began") is not True:
+            raise HostedPublicationError("collection_state")
+        if type(binding) is not dict:
+            raise HostedPublicationError("collection_state")
+        _require_exact(binding, COLLECTION_BINDING_KEYS, "diagnostic_collection")
+        if binding.get("relpath") != DIAGNOSTIC_COLLECTION_DIRNAME:
+            raise HostedPublicationError("diagnostic_collection")
+        _preflight_collection_dir(coll_dir)
+        try:
+            loaded_collection = collection.load_collection(coll_dir)
+        except collection.CollectionError as exc:
+            raise HostedPublicationError(_collection_refusal_reason(exc)) from exc
+        derived = _outer_collection_binding(coll_dir, loaded_collection)
+        if derived != binding:
+            raise HostedPublicationError("diagnostic_inventory")
+        claimed = loaded_collection["index"].get("report_sha256")
+        if claimed != manifest.get("report_sha256"):
+            raise HostedPublicationError("report_sha256")
+    else:
+        raise HostedPublicationError("collection_state")
+    raw, digest = _digest_file(manifest_path, cap=MAX_DIAGNOSTIC_MANIFEST_BYTES)
+    result = dict(manifest)
+    result["collection"] = loaded_collection
+    result["diagnostic_package_sha256"] = digest
+    result["manifest_bytes"] = raw
+    return result
+
+
+def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
+                                 diagnostic_dir, expected_bindings,
+                                 expected_run_id, expected_run_attempt) -> dict:
+    setup = load_setup_status(setup_path)
+    candidate = load_candidate_result(candidate_path)
+    package = load_diagnostic_package(diagnostic_dir)
+    entries = load_rerun_evidence(rerun_path)
+    expected = _require_bindings_pair(
+        expected_bindings, expected_bindings, expected=expected_bindings)
+    _require_bindings_pair(setup.get("bindings"), setup.get("dispatch_bindings"), expected)
+    _require_bindings_pair(candidate.get("bindings"), candidate.get("dispatch_bindings"),
+                           expected)
+    _require_bindings_pair(package.get("bindings"), package.get("dispatch_bindings"),
+                           expected)
+    start = entries[0]
+    terminal = entries[-1]
+    if start.get("bindings") != expected or terminal.get("bindings") != expected:
+        raise HostedPublicationError("bindings")
+    identity = _require_run_identity({
+        "run_id": expected_run_id,
+        "run_attempt": expected_run_attempt,
+    })
+    if package["run_identity"] != identity:
+        raise HostedPublicationError("attempt_binding")
+    if (start.get("run_id") != identity["run_id"]
+            or start.get("run_attempt") != identity["run_attempt"]
+            or terminal.get("run_id") != identity["run_id"]
+            or terminal.get("run_attempt") != identity["run_attempt"]):
+        raise HostedPublicationError("attempt_binding")
+    if setup.get("workflow_identity") != start.get("workflow_identity"):
+        raise HostedPublicationError("workflow_identity")
+    if package.get("workflow_identity") != start.get("workflow_identity"):
+        raise HostedPublicationError("workflow_identity")
+    setup_raw = Path(setup_path).read_bytes()
+    candidate_raw = Path(candidate_path).read_bytes()
+    declared = package["artifacts"]
+    if hashlib.sha256(setup_raw).hexdigest() != declared[SETUP_STATUS_FILENAME]["sha256"]:
+        raise HostedPublicationError("diagnostic_artifacts")
+    if len(setup_raw) != declared[SETUP_STATUS_FILENAME]["bytes"]:
+        raise HostedPublicationError("diagnostic_artifacts")
+    if hashlib.sha256(candidate_raw).hexdigest() != declared[CANDIDATE_RESULT_FILENAME]["sha256"]:
+        raise HostedPublicationError("diagnostic_artifacts")
+    if len(candidate_raw) != declared[CANDIDATE_RESULT_FILENAME]["bytes"]:
+        raise HostedPublicationError("diagnostic_artifacts")
+    carried = candidate.get("report_sha256")
+    if carried is not None and carried != package.get("report_sha256"):
+        raise HostedPublicationError("report_sha256")
+    if package.get("collection") is not None:
+        claimed = package["collection"]["index"].get("report_sha256")
+        if claimed != package.get("report_sha256"):
+            raise HostedPublicationError("report_sha256")
+    if terminal.get("diagnostic_package_sha256") != package["diagnostic_package_sha256"]:
+        raise HostedPublicationError("diagnostic_package_sha256")
+    if terminal.get("decision") != package.get("decision"):
+        raise HostedPublicationError("diagnostic_decision")
+    if terminal.get("collection_state") != package.get("collection_state"):
+        raise HostedPublicationError("collection_state")
+    if package.get("decision") not in DIAGNOSTIC_DECISIONS:
+        raise HostedPublicationError("diagnostic_decision")
+    return {
+        "setup": setup,
+        "candidate": candidate,
+        "rerun": entries,
+        "package": package,
+    }
+
+
+def _readback_summary(package) -> dict:
+    loaded = package.get("collection")
+    observations = []
+    attempts = 0
+    members = 0
+    if loaded is not None:
+        attempts = loaded["index"].get("attempts") or 0
+        members = len(loaded.get("members") or [])
+        index_members = loaded["index"].get("members") or []
+        for entry, member in zip(index_members, loaded.get("members") or []):
+            observations.append({
+                "ordinal": entry.get("ordinal"),
+                "envelope_status": member.get("envelope_status"),
+                "unverified_field": member.get("unverified_field"),
+                "candidate_outcome": member.get("candidate_outcome"),
+                "cleanup": member.get("cleanup"),
+            })
+    return {
+        "decision": package.get("decision"),
+        "collection_state": package.get("collection_state"),
+        "attempts": attempts,
+        "members": members,
+        "report_sha256": package.get("report_sha256"),
+        "publication_permission": DIAGNOSTIC_PERMISSION,
+        "member_observations": observations,
+    }
+
+
 def _quarantine_current_run_collection(out: Path) -> Path | None:
     """Move THIS invocation's collection out of every upload selection, byte for byte.
 
@@ -573,7 +1273,8 @@ def _refuse_collection_at_legacy_path(doc) -> None:
 
 
 def write_separate_artifacts(out_dir, setup_doc, envelope_doc, candidate_doc,
-                             *, max_bytes: int = MAX_ARTIFACT_BYTES) -> dict:
+                             *, max_bytes: int = MAX_ARTIFACT_BYTES,
+                             move_live_collection: bool = True) -> dict:
     """`envelope_doc=None` means the collection directory is the authoritative artifact.
 
     The legacy single-envelope file is then not written, and any file left there by an earlier
@@ -590,13 +1291,11 @@ def write_separate_artifacts(out_dir, setup_doc, envelope_doc, candidate_doc,
     out.mkdir(parents=True, exist_ok=True)
     written = {}
     if envelope_doc is not None:
-        # A withheld/refused stub at the legacy path and a live collection on the upload surface
-        # must never coexist: the stub says the run was refused while the uploaded directory
-        # still carries permitted, verified members -- the exact bytes the refusal rejected.
-        # Sanitizing the legacy file alone stopped being sufficient when the upload was
-        # retargeted at the collection. The observations are moved, not rewritten, so nothing
-        # honest is lost and nothing publishable survives.
-        _quarantine_current_run_collection(out)
+        # Production non-publish paths move the live collection into the diagnostic package
+        # first. This helper remains for callers that still write a stub without that package:
+        # the live directory must not share the success upload surface.
+        if move_live_collection and not (out / DIAGNOSTIC_DIRNAME).is_dir():
+            _quarantine_current_run_collection(out)
     if envelope_doc is None:
         stale = out / EFFECTIVE_ENVELOPE_FILENAME
         if stale.exists():
@@ -726,12 +1425,12 @@ def collection_publication_decision(loaded, *, setup_status) -> dict:
     return decisions[0]
 
 
-def _run_attempt_identity() -> dict:
+def _run_attempt_identity(environ=None) -> dict:
+    env = os.environ if environ is None else {**os.environ, **environ}
     return {
-        "run_id": os.environ.get("GITHUB_RUN_ID") or os.environ.get("HOSTED_RUN_ID"),
+        "run_id": env.get("GITHUB_RUN_ID") or env.get("HOSTED_RUN_ID"),
         "run_attempt": (
-            os.environ.get("GITHUB_RUN_ATTEMPT")
-            or os.environ.get("HOSTED_RUN_ATTEMPT")),
+            env.get("GITHUB_RUN_ATTEMPT") or env.get("HOSTED_RUN_ATTEMPT")),
     }
 
 
@@ -823,12 +1522,13 @@ def _record_cleanup_failure(rerun_log, primary_reason, cleanup_exc, identity, bi
     """Append the cleanup failure as its own distinguished evidence, never as the outcome."""
     try:
         append_rerun_evidence(rerun_log, {
-            "kind": "post-execute-refusal-cleanup-failed",
+            "kind": RERUN_KIND_CLEANUP_FAILED,
             "reason": primary_reason,
             "cleanup_error_type": type(cleanup_exc).__name__,
             "bindings": bindings,
             "dispatch_bindings": bindings,
-            **{k: v for k, v in identity.items() if v is not None},
+            "run_id": identity.get("run_id") if type(identity) is dict else None,
+            "run_attempt": identity.get("run_attempt") if type(identity) is dict else None,
         })
     except BaseException:
         # Evidence appending is best-effort here; it must never mask the primary refusal.
@@ -851,16 +1551,22 @@ def materialize_post_execute_refusal(*, out, reason, bindings, rerun_log,
     envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
     candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
     append_rerun_evidence(rerun_log, {
-        "kind": "post-execute-refusal",
+        "kind": RERUN_KIND_POST_EXECUTE,
         "reason": reason,
         "setup_status": "refused",
         "bindings": bindings,
         "dispatch_bindings": bindings,
-        **{k: v for k, v in identity.items() if v is not None},
+        "run_id": identity.get("run_id"),
+        "run_attempt": identity.get("run_attempt"),
     })
-    write_separate_artifacts(
-        out, setup_doc, envelope_doc, candidate_doc,
-        max_bytes=max_artifact_bytes)
+    finalize_nonpublish_attempt(
+        out=out, setup_doc=setup_doc, candidate_doc=candidate_doc,
+        decision="refuse", reason=reason, execute_began=True,
+        identity=identity, workflow_identity=workflow_identity,
+        bindings=bindings, rerun_log=rerun_log,
+        max_artifact_bytes=max_artifact_bytes,
+        envelope_doc=envelope_doc,
+    )
 
 
 def _materialize_void(*, out, reason, setup_status, bindings, rerun_log,
@@ -870,7 +1576,6 @@ def _materialize_void(*, out, reason, setup_status, bindings, rerun_log,
     setup_doc = setup_status_doc(
         status=setup_status, reason=reason, bindings=bindings,
         workflow_identity=workflow_identity, rail=rail)
-    envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
     candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
     append_rerun_evidence(rerun_log, {
         "kind": kind,
@@ -878,11 +1583,16 @@ def _materialize_void(*, out, reason, setup_status, bindings, rerun_log,
         "setup_status": setup_status,
         "bindings": bindings,
         "dispatch_bindings": bindings,
-        **{k: v for k, v in identity.items() if v is not None},
+        "run_id": identity.get("run_id"),
+        "run_attempt": identity.get("run_attempt"),
     })
-    write_separate_artifacts(
-        out, setup_doc, envelope_doc, candidate_doc,
-        max_bytes=max_artifact_bytes)
+    finalize_nonpublish_attempt(
+        out=out, setup_doc=setup_doc, candidate_doc=candidate_doc,
+        decision=decision["decision"], reason=reason, execute_began=False,
+        identity=identity, workflow_identity=workflow_identity,
+        bindings=bindings, rerun_log=rerun_log,
+        max_artifact_bytes=max_artifact_bytes,
+    )
     return decision
 
 
@@ -908,14 +1618,15 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     else:
         rerun_log = Path(rerun_log)
 
-    identity = _run_attempt_identity()
+    identity = _run_attempt_identity(environ)
     workflow_identity = observe_workflow_identity(environ)
     append_rerun_evidence(rerun_log, {
-        "kind": "run-attempt-start",
+        "kind": RERUN_KIND_START,
         "bindings": bindings,
         "dispatch_bindings": bindings,
         "workflow_identity": dict(workflow_identity),
-        **{k: v for k, v in identity.items() if v is not None},
+        "run_id": identity.get("run_id"),
+        "run_attempt": identity.get("run_attempt"),
     })
     # Recorded above whatever it says; refused here before containment is even probed.
     check_workflow_identity(
@@ -1050,12 +1761,13 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         setup_status = "unavailable"
         envelope = None
         append_rerun_evidence(rerun_log, {
-            "kind": "infrastructure-failure",
+            "kind": RERUN_KIND_INFRA,
             "reason": reason,
             "setup_status": setup_status,
             "bindings": bindings,
             "dispatch_bindings": bindings,
-            **{k: v for k, v in identity.items() if v is not None},
+            "run_id": identity.get("run_id"),
+            "run_attempt": identity.get("run_attempt"),
         })
 
     # Quantified over every member. `publication_decision` stays the one rule; this only
@@ -1080,37 +1792,47 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             bindings=bindings,
             workflow_identity=workflow_identity, rail=rail,
         )
-        envelope_doc = withheld_envelope_stub(reason=reason, bindings=bindings)
         candidate_doc = void_candidate_result(reason=reason, bindings=bindings)
-    elif decision["decision"] == "withhold":
+        finalize_nonpublish_attempt(
+            out=out, setup_doc=setup_doc, candidate_doc=candidate_doc,
+            decision="unavailable", reason=reason, execute_began=execute_began,
+            identity=identity, workflow_identity=workflow_identity,
+            bindings=bindings, rerun_log=rerun_log,
+            max_artifact_bytes=max_artifact_bytes)
+        return decision
+    if decision["decision"] == "withhold":
+        withheld_reason = "publication-withheld"
         setup_doc = setup_status_doc(
             status="ready" if setup_status == "ready" else setup_status,
-            reason="publication-withheld",
+            reason=withheld_reason,
             bindings=bindings,
             workflow_identity=workflow_identity, rail=rail)
-        envelope_doc = withheld_envelope_stub(
-            reason="publication-withheld", bindings=bindings)
         candidate_doc = (safe_projection if safe_projection is not None
                          else void_candidate_result(
-                             reason="publication-withheld", bindings=bindings))
-    else:
-        setup_doc = setup_status_doc(
-            status="ready", reason="publication-permitted", bindings=bindings,
-            workflow_identity=workflow_identity, rail=rail)
-        # The collection directory is the authoritative artifact. Writing a derived aggregate
-        # to the legacy single-envelope path would be a second, weaker authority for the same
-        # facts, so nothing is written there on the success path.
-        envelope_doc = None
-        candidate_doc = (safe_projection if safe_projection is not None else {
-            "schema": HOSTED_SCHEMA,
-            "kind": "hosted-candidate-result",
-            "score_status": "none",
-            "decision": "publish",
-            "bindings": dict(bindings),
-            "dispatch_bindings": dict(bindings),
-            "non_claims": list(NON_CLAIMS),
-        })
-
+                             reason=withheld_reason, bindings=bindings))
+        finalize_nonpublish_attempt(
+            out=out, setup_doc=setup_doc, candidate_doc=candidate_doc,
+            decision="withhold", reason=withheld_reason, execute_began=execute_began,
+            identity=identity, workflow_identity=workflow_identity,
+            bindings=bindings, rerun_log=rerun_log,
+            max_artifact_bytes=max_artifact_bytes)
+        return decision
+    setup_doc = setup_status_doc(
+        status="ready", reason="publication-permitted", bindings=bindings,
+        workflow_identity=workflow_identity, rail=rail)
+    # The collection directory is the authoritative artifact. Writing a derived aggregate
+    # to the legacy single-envelope path would be a second, weaker authority for the same
+    # facts, so nothing is written there on the success path.
+    envelope_doc = None
+    candidate_doc = (safe_projection if safe_projection is not None else {
+        "schema": HOSTED_SCHEMA,
+        "kind": "hosted-candidate-result",
+        "score_status": "none",
+        "decision": "publish",
+        "bindings": dict(bindings),
+        "dispatch_bindings": dict(bindings),
+        "non_claims": list(NON_CLAIMS),
+    })
     write_separate_artifacts(
         out, setup_doc, envelope_doc, candidate_doc,
         max_bytes=max_artifact_bytes,
@@ -1143,6 +1865,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-artifact-bytes", type=int, default=MAX_ARTIFACT_BYTES)
     gate.add_argument(
         "--max-input-bytes", type=int, default=MAX_INPUT_BYTES)
+
+    readback = sub.add_parser(
+        "readback",
+        help="Validate downloaded hosted-attempt artifacts without executing",
+    )
+    readback.add_argument("--setup", required=True)
+    readback.add_argument("--candidate", required=True)
+    readback.add_argument("--rerun", required=True)
+    readback.add_argument("--diagnostic", required=True)
+    readback.add_argument("--candidate-revision", required=True)
+    readback.add_argument("--runner-revision", required=True)
+    readback.add_argument("--image-digest", required=True)
+    readback.add_argument("--run-id", required=True)
+    readback.add_argument("--run-attempt", required=True)
     return parser
 
 
@@ -1150,6 +1886,20 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "readback":
+            loaded = load_hosted_attempt_artifacts(
+                setup_path=args.setup,
+                candidate_path=args.candidate,
+                rerun_path=args.rerun,
+                diagnostic_dir=args.diagnostic,
+                expected_bindings=require_bindings(
+                    args.candidate_revision, args.runner_revision, args.image_digest),
+                expected_run_id=args.run_id,
+                expected_run_attempt=args.run_attempt,
+            )
+            summary = _readback_summary(loaded["package"])
+            sys.stdout.write(_encode_json(summary).decode("utf-8"))
+            return 0
         if args.command != "gate":
             parser.error("unsupported command")
         decision = run_gate(

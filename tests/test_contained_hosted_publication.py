@@ -88,7 +88,12 @@ BINDINGS = {
 # the tests about the binding pass an explicit `environ` instead. A CI runner's own GITHUB_SHA
 # must never leak into these runs.
 _WORKFLOW_ENV = mock.patch.dict(
-    os.environ, {"GITHUB_SHA": RUNNER, "GITHUB_WORKFLOW_SHA": RUNNER})
+    os.environ, {
+        "GITHUB_SHA": RUNNER,
+        "GITHUB_WORKFLOW_SHA": RUNNER,
+        "GITHUB_RUN_ID": "1001",
+        "GITHUB_RUN_ATTEMPT": "1",
+    })
 
 
 def setUpModule():
@@ -1758,10 +1763,10 @@ class QuarantineFailureKeepsThePrimaryRefusal(unittest.TestCase):
 
     def test_rename_failure_does_not_mask_the_refusal_reason(self):
         original = Path(hosted.__file__).read_text(encoding="utf-8")
-        anchor = "    live.rename(attempt)\n"
+        anchor = "            live.rename(staging / DIAGNOSTIC_COLLECTION_DIRNAME)\n"
         self.assertEqual(original.count(anchor), 1)
         mutated = original.replace(
-            anchor, '    raise OSError("injected rename failure")\n', 1)
+            anchor, '            raise OSError("injected rename failure")\n', 1)
         bad = _load_mutated_module(mutated, "mut_rename_fail")
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)
@@ -2169,3 +2174,423 @@ class WorkflowIdentityBinding(unittest.TestCase):
             setup = json.loads((base / "o" / hosted.SETUP_STATUS_FILENAME).read_text())
             self.assertEqual(setup["setup_status"], "refused")
             self.assertEqual(setup["workflow_identity"]["github_workflow_sha"], RUNNER)
+
+
+HOSTED_RUN_ID = "1001"
+HOSTED_RUN_ATTEMPT = "1"
+
+
+def _recompute_collection_index(coll: Path):
+    index_path = coll / collection.INDEX_FILENAME
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    for entry in index["members"]:
+        raw = (coll / entry["relpath"]).read_bytes()
+        entry["sha256"] = collection.member_digest(raw)
+    encoded = (json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8")
+    index_path.write_bytes(encoded)
+    return index
+
+
+def _rewrite_outer_inventory(pkg: Path):
+    manifest_path = pkg / hosted.DIAGNOSTIC_MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    coll = pkg / hosted.DIAGNOSTIC_COLLECTION_DIRNAME
+    if not coll.is_dir():
+        manifest["collection"] = None
+        raw = hosted._encode_json(manifest)
+        manifest_path.write_bytes(raw)
+        return
+    index_path = coll / collection.INDEX_FILENAME
+    index_raw = index_path.read_bytes()
+    index = json.loads(index_raw.decode("utf-8"))
+    members = []
+    for entry in sorted(index["members"], key=lambda row: row["ordinal"]):
+        raw = (coll / entry["relpath"]).read_bytes()
+        members.append({
+            "ordinal": entry["ordinal"],
+            "relpath": "%s/%s" % (hosted.DIAGNOSTIC_COLLECTION_DIRNAME, entry["relpath"]),
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        })
+    manifest["collection"] = {
+        "relpath": hosted.DIAGNOSTIC_COLLECTION_DIRNAME,
+        "index": {
+            "relpath": "%s/%s" % (
+                hosted.DIAGNOSTIC_COLLECTION_DIRNAME, collection.INDEX_FILENAME),
+            "bytes": len(index_raw),
+            "sha256": hashlib.sha256(index_raw).hexdigest(),
+        },
+        "members": members,
+    }
+    manifest_path.write_bytes(hosted._encode_json(manifest))
+
+
+class WithheldDiagnosticPackage(unittest.TestCase):
+    """Closed diagnostic retention (#154). Generated fixtures only; no hosted run 34809912513."""
+
+    def _withhold(self, base, *, envelope_over=None, execute=None, out_name="artifacts"):
+        packet = base / "packet"
+        packet.mkdir()
+        rels = _write_packet(packet)
+        over = dict(envelope_over or {})
+        if execute is None:
+            def execute(**kwargs):
+                _write_collection(
+                    kwargs["envelope_dest"],
+                    _permitted_envelope(prepare_sha256=rels["prepare_sha256"], **over),
+                )
+        decision = _run_ok(base, "packet", rels, execute=execute, out_name=out_name)
+        return base / out_name, decision, rels
+
+    def _package(self, out: Path) -> Path:
+        return out / hosted.DIAGNOSTIC_DIRNAME
+
+    def _readback_cmd(self, download: Path, out: Path):
+        return [
+            sys.executable, str(Path(hosted.__file__)),
+            "readback",
+            "--setup", str(download / hosted.SETUP_STATUS_FILENAME),
+            "--candidate", str(download / hosted.CANDIDATE_RESULT_FILENAME),
+            "--rerun", str(download / hosted.RERUN_EVIDENCE_FILENAME),
+            "--diagnostic", str(download / hosted.DIAGNOSTIC_DIRNAME),
+            "--candidate-revision", CANDIDATE,
+            "--runner-revision", RUNNER,
+            "--image-digest", IMAGE,
+            "--run-id", HOSTED_RUN_ID,
+            "--run-attempt", HOSTED_RUN_ATTEMPT,
+        ]
+
+    def _copy_downloaded(self, out: Path, dest: Path):
+        dest.mkdir(parents=True)
+        shutil.copy2(out / hosted.SETUP_STATUS_FILENAME, dest / hosted.SETUP_STATUS_FILENAME)
+        shutil.copy2(out / hosted.CANDIDATE_RESULT_FILENAME,
+                     dest / hosted.CANDIDATE_RESULT_FILENAME)
+        shutil.copy2(out / hosted.RERUN_EVIDENCE_FILENAME, dest / hosted.RERUN_EVIDENCE_FILENAME)
+        shutil.copytree(self._package(out), dest / hosted.DIAGNOSTIC_DIRNAME)
+
+    def test_unverified_field_retention_refuses_semantic_drop(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            self.assertEqual(decision["decision"], "withhold")
+            pkg = self._package(out)
+            coll = pkg / hosted.DIAGNOSTIC_COLLECTION_DIRNAME
+            member = next(coll.glob("member-*.json"))
+            doc = json.loads(member.read_text(encoding="utf-8"))
+            self.assertEqual(doc["unverified_field"], "runtime_version")
+            del doc["unverified_field"]
+            member.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _recompute_collection_index(coll)
+            _rewrite_outer_inventory(pkg)
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_diagnostic_package(pkg)
+
+    def test_cleanup_retention_refuses_closed_keyset_drop(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            self.assertEqual(decision["decision"], "withhold")
+            pkg = self._package(out)
+            coll = pkg / hosted.DIAGNOSTIC_COLLECTION_DIRNAME
+            member = next(coll.glob("member-*.json"))
+            doc = json.loads(member.read_text(encoding="utf-8"))
+            del doc["cleanup"]
+            member.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _recompute_collection_index(coll)
+            _rewrite_outer_inventory(pkg)
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_diagnostic_package(pkg)
+
+    def test_package_never_returns_publish_authorization(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            self.assertEqual(decision["decision"], "withhold")
+            pkg = self._package(out)
+            loaded = hosted.load_diagnostic_package(pkg)
+            self.assertEqual(loaded["publication_permission"], "withheld")
+            self.assertNotEqual(loaded.get("artifact_class"), "effective-envelope")
+            manifest_path = pkg / hosted.DIAGNOSTIC_MANIFEST_FILENAME
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["publication_permission"] = "permitted"
+            manifest_path.write_bytes(hosted._encode_json(manifest))
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_diagnostic_package(pkg)
+            manifest["publication_permission"] = "withheld"
+            manifest["artifact_class"] = "effective-envelope-collection"
+            manifest_path.write_bytes(hosted._encode_json(manifest))
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_diagnostic_package(pkg)
+
+    def test_permitted_member_inside_withheld_package_stays_diagnostic(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def execute_cred(**kwargs):
+                _write_collection(
+                    kwargs["envelope_dest"],
+                    _permitted_envelope(
+                        prepare_sha256=rels["prepare_sha256"],
+                        effective={"env_names": ["GITHUB_TOKEN"],
+                                   "image_env_names": ["GITHUB_TOKEN"]},
+                    ),
+                )
+
+            with self.assertRaises(hosted.HostedPublicationError):
+                _run_ok(base, "packet", rels, execute=execute_cred, out_name="artifacts")
+            out = base / "artifacts"
+            loaded = hosted.load_diagnostic_package(self._package(out))
+            self.assertEqual(loaded["publication_permission"], "withheld")
+            self.assertEqual(loaded["decision"], "refuse")
+            member = loaded["collection"]["members"][0]
+            self.assertEqual(member["publication_permission"], "permitted")
+            self.assertEqual(loaded["kind"], hosted.DIAGNOSTIC_KIND)
+
+    def test_attempt_binding_mismatch_refuses(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, _decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            pkg = self._package(out)
+            expected = {
+                "candidate_revision": CANDIDATE,
+                "runner_revision": RUNNER,
+                "image_digest": IMAGE,
+            }
+            hosted.load_hosted_attempt_artifacts(
+                setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                diagnostic_dir=pkg,
+                expected_bindings=expected,
+                expected_run_id=HOSTED_RUN_ID,
+                expected_run_attempt=HOSTED_RUN_ATTEMPT,
+            )
+            manifest_path = pkg / hosted.DIAGNOSTIC_MANIFEST_FILENAME
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["run_identity"]["run_id"] = "0"
+            manifest_path.write_bytes(hosted._encode_json(manifest))
+            new_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            log = out / hosted.RERUN_EVIDENCE_FILENAME
+            lines = [line for line in log.read_bytes().splitlines() if line]
+            terminal = json.loads(lines[-1])
+            terminal["diagnostic_package_sha256"] = new_digest
+            log.write_bytes(
+                b"".join(line + b"\n" for line in lines[:-1])
+                + (json.dumps(terminal, sort_keys=True) + "\n").encode("utf-8"))
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_hosted_attempt_artifacts(
+                    setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                    candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                    rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                    diagnostic_dir=pkg,
+                    expected_bindings=expected,
+                    expected_run_id=HOSTED_RUN_ID,
+                    expected_run_attempt=HOSTED_RUN_ATTEMPT,
+                )
+            self.assertIn("attempt_binding", str(ctx.exception))
+
+    def test_terminal_entry_required_last_and_digest_bound(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, _decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            log = out / hosted.RERUN_EVIDENCE_FILENAME
+            original = log.read_bytes()
+            lines = [line for line in original.splitlines() if line]
+            self.assertEqual(json.loads(lines[-1])["kind"], "run-attempt-terminal")
+            expected = {
+                "candidate_revision": CANDIDATE,
+                "runner_revision": RUNNER,
+                "image_digest": IMAGE,
+            }
+            kwargs = dict(
+                setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                rerun_path=log,
+                diagnostic_dir=self._package(out),
+                expected_bindings=expected,
+                expected_run_id=HOSTED_RUN_ID,
+                expected_run_attempt=HOSTED_RUN_ATTEMPT,
+            )
+            hosted.load_hosted_attempt_artifacts(**kwargs)
+            log.write_bytes(b"".join(line + b"\n" for line in lines[:-1]))
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_hosted_attempt_artifacts(**kwargs)
+            extra = json.loads(lines[-1])
+            extra["kind"] = "run-attempt-start"
+            log.write_bytes(original + json.dumps(extra, sort_keys=True).encode() + b"\n")
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_hosted_attempt_artifacts(**kwargs)
+            terminal = json.loads(lines[-1])
+            terminal["diagnostic_package_sha256"] = "0" * 64
+            log.write_bytes(
+                b"".join(line + b"\n" for line in lines[:-1])
+                + (json.dumps(terminal, sort_keys=True) + "\n").encode("utf-8"))
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_hosted_attempt_artifacts(**kwargs)
+
+    def test_index_or_member_substitution_refuses(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, _decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            pkg = self._package(out)
+            coll = pkg / hosted.DIAGNOSTIC_COLLECTION_DIRNAME
+            member = next(coll.glob("member-*.json"))
+            original_member = member.read_bytes()
+            other = json.loads(original_member)
+            other["candidate_outcome"] = "timeout"
+            member.write_text(json.dumps(other, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_diagnostic_package(pkg)
+            _recompute_collection_index(coll)
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_diagnostic_package(pkg)
+            member.write_bytes(original_member)
+
+    def test_ceilings_refuse_before_read_or_hash(self):
+        with tempfile.TemporaryDirectory() as raw:
+            pkg = Path(raw) / hosted.DIAGNOSTIC_DIRNAME
+            pkg.mkdir()
+            (pkg / hosted.DIAGNOSTIC_MANIFEST_FILENAME).write_bytes(b"{}")
+            extra = pkg / "padding"
+            extra.mkdir()
+            for i in range(hosted.MAX_DIAGNOSTIC_ENTRIES + 1):
+                (extra / ("%04d.bin" % i)).write_bytes(b"x")
+            calls = []
+
+            def sentinel_sha(*_a, **_k):
+                calls.append("sha256")
+                raise AssertionError("hash sentinel reached before ceiling")
+
+            def sentinel_read(*_a, **_k):
+                calls.append("read")
+                raise AssertionError("read sentinel reached before ceiling")
+
+            with mock.patch.object(hashlib, "sha256", side_effect=sentinel_sha), \
+                    mock.patch.object(hosted.ca, "read_bounded_regular_file",
+                                     side_effect=sentinel_read):
+                with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                    hosted.load_diagnostic_package(pkg)
+            self.assertEqual(calls, [])
+            self.assertIn("ceiling", str(ctx.exception))
+
+            oversized = Path(raw) / "rerun.jsonl"
+            oversized.write_bytes(b"x" * (hosted.MAX_RERUN_EVIDENCE_BYTES + 1))
+            calls.clear()
+            with mock.patch.object(hashlib, "sha256", side_effect=sentinel_sha), \
+                    mock.patch.object(hosted.ca, "read_bounded_regular_file",
+                                     side_effect=sentinel_read):
+                with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                    hosted.load_rerun_evidence(oversized)
+            self.assertEqual(calls, [])
+
+    def test_pre_execute_refusal_is_collection_absent(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "artifacts"
+
+            def boom():
+                raise contained.DockerUnavailable("docker executable is not available")
+
+            decision = hosted.run_gate(
+                candidate_revision=CANDIDATE, runner_revision=RUNNER,
+                image_digest=IMAGE, operator_profile=hosted.REQUIRED_PROFILE,
+                out_dir=out, docker_ready=boom,
+            )
+            self.assertEqual(decision["decision"], "unavailable")
+            loaded = hosted.load_diagnostic_package(self._package(out))
+            self.assertIs(loaded["execution_began"], False)
+            self.assertEqual(loaded["collection_state"], "collection_absent")
+            self.assertIsNone(loaded["collection"])
+            self.assertFalse((self._package(out) / hosted.DIAGNOSTIC_COLLECTION_DIRNAME).exists())
+            lines = [
+                json.loads(line) for line in
+                (out / hosted.RERUN_EVIDENCE_FILENAME).read_text().splitlines() if line
+            ]
+            self.assertEqual(lines[0]["kind"], "run-attempt-start")
+            self.assertEqual(lines[-1]["kind"], "run-attempt-terminal")
+            self.assertEqual(lines[-1]["collection_state"], "collection_absent")
+
+    def test_post_execute_missing_collection_stays_distinct(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def execute_none(**kwargs):
+                return None
+
+            with self.assertRaises(hosted.HostedPublicationError):
+                _run_ok(base, "packet", rels, execute=execute_none)
+            loaded = hosted.load_diagnostic_package(self._package(base / "artifacts"))
+            self.assertIs(loaded["execution_began"], True)
+            self.assertEqual(loaded["collection_state"], "collection_absent")
+            self.assertIsNone(loaded["collection"])
+
+    def test_success_creates_no_diagnostic_package(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+            decision = _run_ok(base, "packet", rels)
+            self.assertEqual(decision["decision"], "publish")
+            out = base / "artifacts"
+            self.assertFalse(self._package(out).exists())
+            self.assertTrue((out / hosted.COLLECTION_DIRNAME).is_dir())
+            setup = json.loads((out / hosted.SETUP_STATUS_FILENAME).read_text())
+            self.assertEqual(setup["reason"], "publication-permitted")
+            lines = (out / hosted.RERUN_EVIDENCE_FILENAME).read_text().splitlines()
+            kinds = [json.loads(line)["kind"] for line in lines if line]
+            self.assertNotIn("run-attempt-terminal", kinds)
+
+    def test_downloaded_bytes_cli_readback(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            self.assertEqual(decision["decision"], "withhold")
+            download = Path(raw) / "download"
+            self._copy_downloaded(out, download)
+            proc = subprocess.run(
+                self._readback_cmd(download, out),
+                cwd=download,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            summary = json.loads(proc.stdout)
+            self.assertEqual(summary["decision"], "withhold")
+            self.assertEqual(summary["collection_state"], "collection_present")
+            self.assertGreaterEqual(summary["members"], 1)
+            self.assertEqual(summary["member_observations"][0]["unverified_field"],
+                             "runtime_version")
+            self.assertEqual(summary["member_observations"][0]["cleanup"],
+                             "removed-and-absent")
+            self.assertNotIn("docker", proc.stdout.lower())
+            self.assertFalse((download / hosted.COLLECTION_DIRNAME).exists())

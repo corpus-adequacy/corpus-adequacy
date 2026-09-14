@@ -91,3 +91,11 @@ jobs:
           path: owned-contained-v1-artifacts/rerun-evidence.jsonl
           retention-days: 14
           if-no-files-found: error
+      - name: Upload withheld diagnostic package
+        if: always() && !cancelled() && steps.gate.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: owned-contained-v1-withheld-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: owned-contained-v1-artifacts/withheld-diagnostic-package.v0/
+          retention-days: 14
+          if-no-files-found: error

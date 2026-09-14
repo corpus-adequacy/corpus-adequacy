@@ -94,6 +94,8 @@ jobs:
         # only on a publish decision; a withheld or unavailable run exits 3, so this step
         # does not run for it either. The setup,
         # candidate and rerun diagnostics stay always-on so a refusal remains observable.
+        # A withheld diagnostic package is uploaded only when the gate failed, never as
+        # the verified collection.
         if: steps.gate.outcome == 'success' && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -118,5 +120,13 @@ jobs:
         with:
           name: rerun-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/rerun-evidence.jsonl
+          retention-days: 14
+          if-no-files-found: error
+      - name: Upload withheld diagnostic package
+        if: always() && !cancelled() && steps.gate.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: withheld-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/withheld-diagnostic-package.v0/
           retention-days: 14
           if-no-files-found: error
