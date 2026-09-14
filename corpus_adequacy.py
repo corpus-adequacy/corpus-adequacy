@@ -176,6 +176,80 @@ RULE_ROWS_PER_GROUP_MAX = 1024
 RULE_ROWS_TOTAL_MAX = 4096
 RULE_MUTANTS_PER_ROW_MAX = 256
 RULE_MUTANT_REFERENCES_MAX = 8192
+CLASS_PROVENANCE_SCHEMA = "corpus-adequacy.class-provenance.v0"
+CLASS_ATTEMPT_SCHEMA = "corpus-adequacy.class-attempt.v0"
+CLASS_IDS = frozenset({"declared", "independent", "held_out", "real_fault", "adaptive"})
+CLASS_EFFECTIVE_IDS = CLASS_IDS | frozenset({"unknown"})
+CLASS_VISIBILITY_STATUSES = frozenset({
+    "declared", "hidden-until-freeze", "disclosed-before-freeze", "unknown",
+})
+CLASS_INPUT_CAP_BYTES = OUTPUT_CAP_BYTES
+CLASS_EVENTS_MAX = 64
+CLASS_EXPECTED_DISTINCTIONS_MAX = RULE_MUTANT_REFERENCES_MAX
+CLASS_ROWS_MAX = RULE_MUTANT_REFERENCES_MAX
+CLASS_AUTHORING_ID_MAX = 256
+CLASS_NON_CLAIMS = (
+    "No evidence class proves rule completeness, corpus quality, implementation correctness, real-world prevalence, security, conformance, or author independence.",
+    "Each denominator is one declared selection and is not a population estimate.",
+    "This artifact defines one class only; no aggregate score or overall adequacy exists.",
+)
+_CLASS_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+_CLASS_ORIGIN_BY_REQUEST = {
+    "declared": "authored",
+    "independent": "authored",
+    "held_out": "authored",
+    "real_fault": "historical_fault",
+    "adaptive": "adaptive",
+}
+_CLASS_EVENT_NAMES = frozenset({
+    "selection-committed", "candidate-frozen", "selection-disclosed",
+})
+_CLASS_RELATIONSHIPS = frozenset({"same", "independent", "unknown"})
+_CLASS_PROVENANCE_KEYS = frozenset({
+    "schema", "class_id", "requested_class", "manifest_sha256",
+    "mutation_bundle_sha256", "candidate_freeze", "authoring",
+    "visibility_events", "origin", "expected_distinctions", "non_claims",
+})
+_CLASS_FREEZE_KEYS = frozenset({
+    "candidate", "corpus", "observation_declaration_sha256",
+})
+_CLASS_SOURCE_KEYS = frozenset({"repository", "commit", "tree_sha256"})
+_CLASS_AUTHORING_KEYS = frozenset({
+    "mutation_author", "candidate_builder", "relationship",
+    "candidate_outcomes_seen",
+})
+_CLASS_EVENT_KEYS = frozenset({
+    "ordinal", "event", "mutation_bundle_sha256", "actor",
+    "predecessor_event_sha256",
+})
+_CLASS_AUTHORED_ORIGIN_KEYS = frozenset({"kind", "source"})
+_CLASS_FAULT_ORIGIN_KEYS = frozenset({
+    "kind", "repository", "faulty_commit", "fixed_commit", "reference",
+})
+_CLASS_ADAPTIVE_ORIGIN_KEYS = frozenset({
+    "kind", "source", "predecessor_attempt_sha256",
+})
+_CLASS_DISTINCTION_KEYS = frozenset({"group", "label", "channel", "member"})
+_CLASS_ATTEMPT_KEYS = frozenset({
+    "schema", "attempt_id", "class_id", "provenance_sha256", "manifest_sha256",
+    "report_sha256", "environment_sha256", "effective_class",
+    "visibility_status", "predecessor_attempt_sha256", "status", "result",
+    "rows", "non_claims",
+})
+_CLASS_RESULT_KEYS = frozenset({
+    "control_status", "killed", "survived", "silent", "equivalent",
+    "unexercised_out_of_scope", "unproved", "known_holes", "denominator",
+    "score_percent", "adequate", "failures",
+})
+_ORDINARY_VERDICT_TO_COUNT = {
+    "killed": "killed",
+    "survived": "survived",
+    "silent": "silent",
+    "equivalent": "equivalent",
+    "unexercised": "unexercised_out_of_scope",
+    "unproved": "unproved",
+    "known-hole": "known_holes",
+}
 
 OPERATOR_PROFILE_KEY = "execution_profile"
 MINIMUM_PROFILE_KEY = "minimum_execution_profile"
@@ -776,8 +850,8 @@ def _require_report_rows(report) -> list:
         if type(report[key]) is not bool:
             raise ManifestError("report.%s must be a bool" % key)
     for key in _REPORT_INT_KEYS:
-        if type(report[key]) is not int:
-            raise ManifestError("report.%s must be an int" % key)
+        if type(report[key]) is not int or report[key] < 0:
+            raise ManifestError("report.%s must be a non-negative int" % key)
     if not isinstance(report.get("control_status"), str) or not report["control_status"]:
         raise ManifestError("report.control_status must be a non-empty string")
     _require_canonical_sha256(report.get("manifest_sha256"), "report.manifest_sha256")
@@ -803,9 +877,9 @@ def _require_report_rows(report) -> list:
             raise ManifestError(
                 "report.mutants[%d].verdict is not a producer verdict" % i)
         for key in ("moved", "moved_diagnostic"):
-            if key in row and type(row[key]) is not int:
+            if key in row and (type(row[key]) is not int or row[key] < 0):
                 raise ManifestError(
-                    "report.mutants[%d].%s must be an int" % (i, key))
+                    "report.mutants[%d].%s must be a non-negative int" % (i, key))
         label = row["label"]
         if label in seen_labels:
             raise ManifestError("duplicate mutant label %r" % label)
@@ -1334,6 +1408,632 @@ def encode_diff_v0(doc: dict) -> bytes:
     except UnicodeEncodeError:
         raise ReportEncodingError(
             "diff projection contains text that cannot be encoded as valid UTF-8") from None
+
+
+def _read_class_input(path) -> bytes:
+    return read_bounded_regular_file(Path(path), cap=CLASS_INPUT_CAP_BYTES)
+
+
+def _require_digest_match(raw: bytes, expected, where: str) -> str:
+    digest = _file_sha256(raw)
+    if not isinstance(expected, str) or digest != expected:
+        raise ManifestError("%s digest mismatch" % where)
+    return digest
+
+
+def _parse_class_object(raw: bytes):
+    try:
+        doc = _parse_projection_json(raw)
+    except ManifestError:
+        raise
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ManifestError("class artifact is not valid JSON: %s" % exc) from None
+    if not isinstance(doc, dict):
+        raise ManifestError(
+            "class artifact must be a JSON object, got %s" % type(doc).__name__)
+    return doc
+
+
+def _encode_class_artifact_v0(doc: dict) -> bytes:
+    try:
+        return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8")
+    except UnicodeEncodeError:
+        raise ReportEncodingError(
+            "class artifact contains text that cannot be encoded as valid UTF-8") from None
+
+
+def _require_canonical_class_bytes(raw: bytes, encoded: bytes) -> None:
+    if raw != encoded:
+        raise ManifestError("class artifact input is not the canonical codec byte form")
+
+
+def _require_exact_bool(value, where: str) -> bool:
+    if type(value) is not bool:
+        raise ManifestError("%s must be a JSON boolean" % where)
+    return value
+
+
+def _require_exact_nonneg_int(value, where: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ManifestError("%s must be a non-negative integer" % where)
+    return value
+
+
+def _require_class_id_token(value, where: str) -> str:
+    if not isinstance(value, str) or _RULE_ID_RE.fullmatch(value) is None:
+        raise ManifestError("%s does not match the closed id syntax" % where)
+    return value
+
+
+def _require_repository_identity(value, where: str) -> str:
+    _utf8_len(value, where, maximum=256, nonblank=True)
+    if _CLASS_REPOSITORY_RE.fullmatch(value) is None:
+        raise ManifestError("%s must be a syntactic owner/name repository identity" % where)
+    return value
+
+
+def _require_commit_id(value, where: str) -> str:
+    if not isinstance(value, str) or _COMMIT_RE.fullmatch(value) is None:
+        raise ManifestError("%s is not a 40-hex commit id" % where)
+    return value
+
+
+def _require_source_identity(obj, where: str) -> None:
+    require_shape(obj, dict, where)
+    _require_closed_keys(
+        obj, _CLASS_SOURCE_KEYS, _CLASS_SOURCE_KEYS,
+        missing_token="%s missing key" % where, extra_token="%s extra key" % where)
+    _require_repository_identity(obj["repository"], where + ".repository")
+    _require_commit_id(obj["commit"], where + ".commit")
+    _require_canonical_sha256(obj["tree_sha256"], where + ".tree_sha256")
+
+
+def _require_class_non_claims(value, where: str) -> None:
+    if not isinstance(value, list) or list(value) != list(CLASS_NON_CLAIMS):
+        raise ManifestError("%s must be the fixed class non_claims list" % where)
+
+
+def _require_score_percent_form(value, where: str):
+    if value is None:
+        return None
+    if type(value) is bool or type(value) not in (int, float):
+        raise ManifestError("%s must be null or a finite number in [0, 100]" % where)
+    if value != value or value < 0 or value > 100:
+        raise ManifestError("%s must be null or a finite number in [0, 100]" % where)
+    return value
+
+
+def _distinction_sort_key(row: dict):
+    member = row.get("member")
+    return (row.get("group") or "", row.get("label") or "",
+            row.get("channel") or "", "" if member is None else member)
+
+
+def _require_visibility_events(events) -> None:
+    require_shape(events, list, "visibility_events")
+    if not events or len(events) > CLASS_EVENTS_MAX:
+        raise ManifestError(
+            "visibility_events must contain 1-%d events" % CLASS_EVENTS_MAX)
+    for i, event in enumerate(events):
+        where = "visibility_events[%d]" % i
+        require_shape(event, dict, where)
+        _require_closed_keys(
+            event, _CLASS_EVENT_KEYS, _CLASS_EVENT_KEYS,
+            missing_token="%s missing key" % where, extra_token="%s extra key" % where)
+        ordinal = event["ordinal"]
+        if type(ordinal) is not int or ordinal != i:
+            raise ManifestError(
+                "%s.ordinal must be the contiguous integer %d" % (where, i))
+        if event["event"] not in _CLASS_EVENT_NAMES:
+            raise ManifestError("%s.event is not a closed visibility event" % where)
+        _require_canonical_sha256(
+            event["mutation_bundle_sha256"], where + ".mutation_bundle_sha256")
+        _utf8_len(event["actor"], where + ".actor", maximum=CLASS_AUTHORING_ID_MAX)
+        pred = event["predecessor_event_sha256"]
+        if i == 0:
+            if pred is not None:
+                raise ManifestError(
+                    "%s.predecessor_event_sha256 must be null at ordinal 0" % where)
+        else:
+            _require_canonical_sha256(pred, where + ".predecessor_event_sha256")
+
+
+def _require_origin(origin, requested: str) -> None:
+    require_shape(origin, dict, "origin")
+    kind = origin.get("kind")
+    expected_kind = _CLASS_ORIGIN_BY_REQUEST.get(requested)
+    if kind != expected_kind:
+        raise ManifestError(
+            "origin.kind must be %s for requested_class %s" % (expected_kind, requested))
+    if kind == "authored":
+        _require_closed_keys(
+            origin, _CLASS_AUTHORED_ORIGIN_KEYS, _CLASS_AUTHORED_ORIGIN_KEYS,
+            missing_token="origin missing key", extra_token="origin extra key")
+        _require_source_identity(origin["source"], "origin.source")
+        return
+    if kind == "historical_fault":
+        _require_closed_keys(
+            origin, _CLASS_FAULT_ORIGIN_KEYS, _CLASS_FAULT_ORIGIN_KEYS,
+            missing_token="origin missing key", extra_token="origin extra key")
+        _require_repository_identity(origin["repository"], "origin.repository")
+        _require_commit_id(origin["faulty_commit"], "origin.faulty_commit")
+        _require_commit_id(origin["fixed_commit"], "origin.fixed_commit")
+        if origin["faulty_commit"] == origin["fixed_commit"]:
+            raise ManifestError("origin.faulty_commit must differ from origin.fixed_commit")
+        _require_rule_url(origin["reference"], "origin.reference")
+        return
+    if kind == "adaptive":
+        _require_closed_keys(
+            origin, _CLASS_ADAPTIVE_ORIGIN_KEYS, _CLASS_ADAPTIVE_ORIGIN_KEYS,
+            missing_token="origin missing key", extra_token="origin extra key")
+        _require_source_identity(origin["source"], "origin.source")
+        _require_canonical_sha256(
+            origin["predecessor_attempt_sha256"], "origin.predecessor_attempt_sha256")
+        return
+    raise ManifestError("origin.kind is not a closed origin variant")
+
+
+def _require_expected_distinctions_shape(rows) -> None:
+    require_shape(rows, list, "expected_distinctions")
+    if not rows or len(rows) > CLASS_EXPECTED_DISTINCTIONS_MAX:
+        raise ManifestError(
+            "expected_distinctions must contain 1-%d rows"
+            % CLASS_EXPECTED_DISTINCTIONS_MAX)
+    seen = []
+    for i, row in enumerate(rows):
+        where = "expected_distinctions[%d]" % i
+        require_shape(row, dict, where)
+        _require_closed_keys(
+            row, _CLASS_DISTINCTION_KEYS, _CLASS_DISTINCTION_KEYS,
+            missing_token="%s missing key" % where, extra_token="%s extra key" % where)
+        _utf8_len(row["group"], where + ".group", maximum=128)
+        _utf8_len(row["label"], where + ".label", maximum=None)
+        if row["channel"] not in ("outcome", "diagnostic"):
+            raise ManifestError("%s.channel must be outcome or diagnostic" % where)
+        member = row["member"]
+        if member is not None:
+            _utf8_len(member, where + ".member", maximum=None)
+        key = _distinction_sort_key(row)
+        if key in seen:
+            raise ManifestError("%s repeats the distinction tuple" % where)
+        seen.append(key)
+    expected = sorted(rows, key=_distinction_sort_key)
+    if rows != expected:
+        raise ManifestError("expected_distinctions are not in canonical Unicode order")
+
+
+def _require_authoring(authoring, requested: str) -> None:
+    require_shape(authoring, dict, "authoring")
+    _require_closed_keys(
+        authoring, _CLASS_AUTHORING_KEYS, _CLASS_AUTHORING_KEYS,
+        missing_token="authoring missing key", extra_token="authoring extra key")
+    _utf8_len(authoring["mutation_author"], "authoring.mutation_author",
+              maximum=CLASS_AUTHORING_ID_MAX)
+    _utf8_len(authoring["candidate_builder"], "authoring.candidate_builder",
+              maximum=CLASS_AUTHORING_ID_MAX)
+    if authoring["relationship"] not in _CLASS_RELATIONSHIPS:
+        raise ManifestError("authoring.relationship is not a closed relationship")
+    _require_exact_bool(authoring["candidate_outcomes_seen"],
+                        "authoring.candidate_outcomes_seen")
+    if authoring["relationship"] == "independent":
+        if (authoring["mutation_author"] == authoring["candidate_builder"]
+                or authoring["candidate_outcomes_seen"] is not False):
+            raise ManifestError(
+                "independent provenance cannot validate as independent")
+        if requested == "independent":
+            return
+    if requested == "independent" and authoring["relationship"] != "independent":
+        raise ManifestError(
+            "requested_class independent requires relationship independent")
+
+
+def _require_class_provenance_v0_document(doc) -> dict:
+    require_shape(doc, dict, "class provenance")
+    _require_closed_keys(
+        doc, _CLASS_PROVENANCE_KEYS, _CLASS_PROVENANCE_KEYS,
+        missing_token="class provenance missing key",
+        extra_token="class provenance extra key")
+    if doc.get("schema") != CLASS_PROVENANCE_SCHEMA:
+        raise ManifestError("class provenance schema must be %s" % CLASS_PROVENANCE_SCHEMA)
+    _require_class_id_token(doc["class_id"], "class_id")
+    if doc["requested_class"] not in CLASS_IDS:
+        raise ManifestError("requested_class is not a closed class id")
+    _require_canonical_sha256(doc["manifest_sha256"], "manifest_sha256")
+    _require_canonical_sha256(doc["mutation_bundle_sha256"], "mutation_bundle_sha256")
+    freeze = doc["candidate_freeze"]
+    require_shape(freeze, dict, "candidate_freeze")
+    _require_closed_keys(
+        freeze, _CLASS_FREEZE_KEYS, _CLASS_FREEZE_KEYS,
+        missing_token="candidate_freeze missing key",
+        extra_token="candidate_freeze extra key")
+    _require_source_identity(freeze["candidate"], "candidate_freeze.candidate")
+    _require_source_identity(freeze["corpus"], "candidate_freeze.corpus")
+    _require_canonical_sha256(
+        freeze["observation_declaration_sha256"],
+        "candidate_freeze.observation_declaration_sha256")
+    _require_authoring(doc["authoring"], doc["requested_class"])
+    _require_visibility_events(doc["visibility_events"])
+    _require_origin(doc["origin"], doc["requested_class"])
+    _require_expected_distinctions_shape(doc["expected_distinctions"])
+    _require_class_non_claims(doc["non_claims"], "non_claims")
+    return doc
+
+
+def _ordinary_declared_mutant(manifest: dict, group: str, label: str) -> dict:
+    found = None
+    for declared_group, entries in (manifest.get("mutants") or {}).items():
+        require_shape(entries, list, "mutants[%s]" % declared_group)
+        for entry in entries:
+            if entry.get("label") == label:
+                if declared_group != group:
+                    raise ManifestError(
+                        "expected distinction label %r is not in group %r" % (label, group))
+                found = entry
+    if found is None:
+        for declared_group, entries in (manifest.get("equivalent") or {}).items():
+            for entry in entries:
+                if entry.get("label") == label:
+                    raise ManifestError(
+                        "expected distinction names equivalent mutation %r" % label)
+        raise ManifestError("expected distinction names unknown mutation %r" % label)
+    if found.get("control") is True:
+        raise ManifestError("expected distinction names a control %r" % label)
+    if found.get("scope", "declared") != "declared":
+        raise ManifestError(
+            "expected distinction names an out-of-scope mutation %r" % label)
+    return found
+
+
+def _bind_expected_distinctions(doc: dict, manifest: dict) -> None:
+    runner = manifest.get("runner", "module")
+    for i, dist in enumerate(doc["expected_distinctions"]):
+        where = "expected_distinctions[%d]" % i
+        mutant = _ordinary_declared_mutant(manifest, dist["group"], dist["label"])
+        channel = dist["channel"]
+        member = dist["member"]
+        if runner == "module":
+            if channel != "outcome" or member is not None:
+                raise ManifestError(
+                    "%s: module provenance admits only channel=outcome with member=null"
+                    % where)
+            continue
+        if manifest.get("outcome_parse") == "test-names":
+            if channel == "diagnostic":
+                raise ManifestError(
+                    "%s: test-names provenance cannot use channel=diagnostic" % where)
+            mover = mutant.get("expected_mover")
+            if member is None:
+                if mover is not None:
+                    raise ManifestError(
+                        "%s: a declared expected_mover requires that test member" % where)
+                continue
+            if not isinstance(mover, str) or member != mover:
+                raise ManifestError(
+                    "%s: test-names member must equal the existing expected_mover" % where)
+            continue
+        if channel == "outcome":
+            if member is None:
+                continue
+            members = selector_members(manifest.get("outcome_from"))
+            if member not in members:
+                raise ManifestError(
+                    "%s: outcome member %r is not declared in outcome_from"
+                    % (where, member))
+            continue
+        if member is None:
+            raise ManifestError("%s: diagnostic member is required" % where)
+        diagnostic = manifest.get("diagnostic_from")
+        if diagnostic is None:
+            raise ManifestError("%s: diagnostic channel is not declared" % where)
+        members = selector_members(diagnostic)
+        if member not in members:
+            raise ManifestError(
+                "%s: diagnostic member %r is not declared in diagnostic_from"
+                % (where, member))
+
+
+def encode_class_provenance_v0(doc: dict) -> bytes:
+    _require_class_provenance_v0_document(doc)
+    return _encode_class_artifact_v0(doc)
+
+
+def load_class_provenance_v0(provenance_path, *, manifest_path, mutation_bundle_path) -> dict:
+    raw = _read_class_input(provenance_path)
+    doc = _parse_class_object(raw)
+    _require_class_provenance_v0_document(doc)
+    _require_canonical_class_bytes(raw, encode_class_provenance_v0(doc))
+    manifest_raw = _read_class_input(manifest_path)
+    _require_digest_match(manifest_raw, doc["manifest_sha256"], "manifest")
+    _parse_class_object(manifest_raw)
+    manifest = load_manifest_bytes(manifest_raw, Path(manifest_path))
+    _bind_expected_distinctions(doc, manifest)
+    bundle_raw = _read_class_input(mutation_bundle_path)
+    _require_digest_match(bundle_raw, doc["mutation_bundle_sha256"], "mutation bundle")
+    return doc
+
+
+def _control_statuses_from_rows(rows: list) -> list[str]:
+    statuses = []
+    for row in rows:
+        verdict = row.get("verdict")
+        if verdict == "control-error":
+            statuses.append("error")
+        elif verdict == "control-SURVIVED":
+            statuses.append("survived")
+        elif verdict == "control-MOVED":
+            statuses.append("moved")
+        elif verdict in ("control-killed", "control-unchanged"):
+            statuses.append("killed")
+        elif isinstance(verdict, str) and verdict.startswith("control-"):
+            raise ManifestError("unsupported control verdict %r" % verdict)
+    return statuses
+
+
+def _class_counts_from_rows(rows: list) -> dict:
+    counts = {
+        "killed": 0, "survived": 0, "silent": 0, "equivalent": 0,
+        "unexercised_out_of_scope": 0, "unproved": 0, "known_holes": 0,
+    }
+    for row in rows:
+        verdict = row["verdict"]
+        if isinstance(verdict, str) and verdict.startswith("control-"):
+            continue
+        field = _ORDINARY_VERDICT_TO_COUNT.get(verdict)
+        if field is None:
+            raise ManifestError("mutant verdict %r is not an ordinary class count" % verdict)
+        counts[field] += 1
+    return counts
+
+
+def _class_report_summary_parity(report: dict) -> None:
+    rows = report["mutants"]
+    if len(rows) > CLASS_ROWS_MAX:
+        raise ManifestError("report.mutants exceeds %d rows" % CLASS_ROWS_MAX)
+    counts = _class_counts_from_rows(rows)
+    for field, value in counts.items():
+        if report[field] != value:
+            raise ManifestError("report.%s does not match mutant rows" % field)
+    declared_total = sum(counts.values())
+    if report["declared_total"] != declared_total:
+        raise ManifestError("report.declared_total does not match mutant rows")
+    if type(report["failures"]) is not list or any(
+            not isinstance(item, str) for item in report["failures"]):
+        raise ManifestError("report.failures must be a list of strings")
+    denom = _scored_denominator(counts["killed"], counts["survived"], counts["silent"])
+    expected_score = None if denom == 0 else round(100.0 * counts["killed"] / denom, 1)
+    expected_score = _score_or_none(expected_score, rows, report["failures"])
+    if report["score_percent"] != expected_score:
+        raise ManifestError("report.score_percent does not match derived score")
+    if report["adequate"] is not (not report["failures"]):
+        raise ManifestError("report.adequate does not match failures")
+    statuses = _control_statuses_from_rows(rows)
+    derived_control = _control_status(statuses, len(statuses))
+    if report["control_status"] != derived_control:
+        raise ManifestError("report.control_status does not match control rows")
+
+
+def _class_attempt_status(report: dict) -> str:
+    if (report["score_percent"] is None
+            or report["unproved"] != 0
+            or report["control_status"] != "killed"):
+        return "unproved"
+    if any(row.get("verdict") in ("control-error", "control-MOVED")
+           for row in report["mutants"]):
+        return "unproved"
+    if any("UNMUTATED" in item for item in report["failures"]):
+        return "unproved"
+    return "completed"
+
+
+def _class_result_from_report(report: dict) -> dict:
+    counts = _class_counts_from_rows(report["mutants"])
+    return {
+        "control_status": report["control_status"],
+        "killed": counts["killed"],
+        "survived": counts["survived"],
+        "silent": counts["silent"],
+        "equivalent": counts["equivalent"],
+        "unexercised_out_of_scope": counts["unexercised_out_of_scope"],
+        "unproved": counts["unproved"],
+        "known_holes": counts["known_holes"],
+        "denominator": _scored_denominator(
+            counts["killed"], counts["survived"], counts["silent"]),
+        "score_percent": report["score_percent"],
+        "adequate": report["adequate"],
+        "failures": list(report["failures"]),
+    }
+
+
+def _require_class_result(result, rows, status: str) -> None:
+    require_shape(result, dict, "result")
+    _require_closed_keys(
+        result, _CLASS_RESULT_KEYS, _CLASS_RESULT_KEYS,
+        missing_token="result missing key", extra_token="result extra key")
+    _utf8_len(result["control_status"], "result.control_status", maximum=None)
+    for key in ("killed", "survived", "silent", "equivalent",
+                "unexercised_out_of_scope", "unproved", "known_holes",
+                "denominator"):
+        _require_exact_nonneg_int(result[key], "result.%s" % key)
+    _require_score_percent_form(result["score_percent"], "result.score_percent")
+    _require_exact_bool(result["adequate"], "result.adequate")
+    if type(result["failures"]) is not list or any(
+            not isinstance(item, str) for item in result["failures"]):
+        raise ManifestError("result.failures must be a list of strings")
+    counts = _class_counts_from_rows(rows)
+    for key, value in counts.items():
+        if result[key] != value:
+            raise ManifestError("result.%s does not match attempt rows" % key)
+    denom = _scored_denominator(counts["killed"], counts["survived"], counts["silent"])
+    if result["denominator"] != denom:
+        raise ManifestError("result.denominator does not match scored rows")
+    if result["adequate"] is not (not result["failures"]):
+        raise ManifestError("result.adequate does not match failures")
+    if status not in ("completed", "unproved"):
+        raise ManifestError("status must be completed or unproved")
+
+
+def _require_class_attempt_v0_document(doc) -> dict:
+    require_shape(doc, dict, "class attempt")
+    _require_closed_keys(
+        doc, _CLASS_ATTEMPT_KEYS, _CLASS_ATTEMPT_KEYS,
+        missing_token="class attempt missing key",
+        extra_token="class attempt extra key")
+    if doc.get("schema") != CLASS_ATTEMPT_SCHEMA:
+        raise ManifestError("class attempt schema must be %s" % CLASS_ATTEMPT_SCHEMA)
+    _require_class_id_token(doc["attempt_id"], "attempt_id")
+    _require_class_id_token(doc["class_id"], "class_id")
+    for key in ("provenance_sha256", "manifest_sha256", "report_sha256",
+                "environment_sha256"):
+        _require_canonical_sha256(doc[key], key)
+    if doc["effective_class"] not in CLASS_EFFECTIVE_IDS:
+        raise ManifestError("effective_class is not a closed class id")
+    if doc["visibility_status"] not in CLASS_VISIBILITY_STATUSES:
+        raise ManifestError("visibility_status is not a closed visibility status")
+    _require_sha256_or_null(
+        doc["predecessor_attempt_sha256"], "predecessor_attempt_sha256")
+    require_shape(doc["rows"], list, "rows")
+    if len(doc["rows"]) > CLASS_ROWS_MAX:
+        raise ManifestError("rows exceeds %d entries" % CLASS_ROWS_MAX)
+    for i, row in enumerate(doc["rows"]):
+        require_shape(row, dict, "rows[%d]" % i)
+        verdict = row.get("verdict") if isinstance(row.get("verdict"), str) else ""
+        _require_closed_keys(
+            row, _mutant_row_required_keys(verdict), _mutant_row_allowed_keys(verdict),
+            missing_token="mutant missing key", extra_token="mutant extra key")
+    _require_class_result(doc["result"], doc["rows"], doc["status"])
+    expected_status = "unproved"
+    result = doc["result"]
+    if (result["score_percent"] is not None
+            and result["unproved"] == 0
+            and result["control_status"] == "killed"
+            and not any(row.get("verdict") in ("control-error", "control-MOVED")
+                        for row in doc["rows"])
+            and not any("UNMUTATED" in item for item in result["failures"])):
+        expected_status = "completed"
+    if doc["status"] != expected_status:
+        raise ManifestError("status does not match result")
+    _require_class_non_claims(doc["non_claims"], "non_claims")
+    return doc
+
+
+def encode_class_attempt_v0(doc: dict) -> bytes:
+    _require_class_attempt_v0_document(doc)
+    return _encode_class_artifact_v0(doc)
+
+
+def _classification_pair(classification) -> tuple[str, str]:
+    require_shape(classification, dict, "classification")
+    keys = frozenset({"effective_class", "visibility_status"})
+    _require_closed_keys(
+        classification, keys, keys,
+        missing_token="classification missing key",
+        extra_token="classification extra key")
+    effective = classification["effective_class"]
+    visibility = classification["visibility_status"]
+    if effective not in CLASS_EFFECTIVE_IDS:
+        raise ManifestError("classification.effective_class is not a closed class id")
+    if visibility not in CLASS_VISIBILITY_STATUSES:
+        raise ManifestError(
+            "classification.visibility_status is not a closed visibility status")
+    return effective, visibility
+
+
+def _derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
+                             report_raw, environment_raw, predecessor,
+                             classification) -> dict:
+    if type(provenance_raw) is not bytes or type(manifest_raw) is not bytes:
+        raise ManifestError("class attempt inputs must be bytes")
+    if type(report_raw) is not bytes or type(environment_raw) is not bytes:
+        raise ManifestError("class attempt inputs must be bytes")
+    provenance = _parse_class_object(provenance_raw)
+    _require_class_provenance_v0_document(provenance)
+    _require_canonical_class_bytes(provenance_raw, encode_class_provenance_v0(provenance))
+    _require_digest_match(manifest_raw, provenance["manifest_sha256"], "manifest")
+    _parse_class_object(manifest_raw)
+    manifest = load_manifest_bytes(manifest_raw, Path("manifest.json"))
+    _bind_expected_distinctions(provenance, manifest)
+    report = _parse_class_object(report_raw)
+    _require_report_rows(report)
+    _class_report_summary_parity(report)
+    if report.get("manifest_sha256") != provenance["manifest_sha256"]:
+        raise ManifestError("report/provenance manifest digest mismatch")
+    effective, visibility = _classification_pair(classification)
+    _require_sha256_or_null(predecessor, "predecessor_attempt_sha256")
+    result = _class_result_from_report(report)
+    status = _class_attempt_status(report)
+    doc = {
+        "schema": CLASS_ATTEMPT_SCHEMA,
+        "attempt_id": attempt_id,
+        "class_id": provenance["class_id"],
+        "provenance_sha256": _file_sha256(provenance_raw),
+        "manifest_sha256": _file_sha256(manifest_raw),
+        "report_sha256": _file_sha256(report_raw),
+        "environment_sha256": _file_sha256(environment_raw),
+        "effective_class": effective,
+        "visibility_status": visibility,
+        "predecessor_attempt_sha256": predecessor,
+        "status": status,
+        "result": result,
+        "rows": copy.deepcopy(report["mutants"]),
+        "non_claims": list(CLASS_NON_CLAIMS),
+    }
+    _require_class_attempt_v0_document(doc)
+    return doc
+
+
+def derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
+                            report_raw, environment_raw, predecessor,
+                            classification) -> dict:
+    raise ManifestError(
+        "publishable class-attempt construction is unreachable until F2")
+
+
+def load_class_attempt_v0(attempt_path, *, provenance_path, manifest_path,
+                          report_path, environment_path, classifier=None) -> dict:
+    attempt_raw = _read_class_input(attempt_path)
+    doc = _parse_class_object(attempt_raw)
+    _require_class_attempt_v0_document(doc)
+    _require_canonical_class_bytes(attempt_raw, encode_class_attempt_v0(doc))
+    provenance_raw = _read_class_input(provenance_path)
+    _require_digest_match(provenance_raw, doc["provenance_sha256"], "provenance")
+    provenance = _parse_class_object(provenance_raw)
+    _require_class_provenance_v0_document(provenance)
+    _require_canonical_class_bytes(provenance_raw, encode_class_provenance_v0(provenance))
+    if provenance["class_id"] != doc["class_id"]:
+        raise ManifestError("provenance class_id does not match the attempt")
+    manifest_raw = _read_class_input(manifest_path)
+    _require_digest_match(manifest_raw, doc["manifest_sha256"], "manifest")
+    if provenance["manifest_sha256"] != doc["manifest_sha256"]:
+        raise ManifestError("provenance/attempt manifest digest mismatch")
+    _parse_class_object(manifest_raw)
+    manifest = load_manifest_bytes(manifest_raw, Path(manifest_path))
+    _bind_expected_distinctions(provenance, manifest)
+    report_raw = _read_class_input(report_path)
+    _require_digest_match(report_raw, doc["report_sha256"], "report")
+    report = _parse_class_object(report_raw)
+    _require_report_rows(report)
+    _class_report_summary_parity(report)
+    if report.get("manifest_sha256") != doc["manifest_sha256"]:
+        raise ManifestError("report/manifest digest mismatch")
+    environment_raw = _read_class_input(environment_path)
+    _require_digest_match(environment_raw, doc["environment_sha256"], "environment")
+    expected_result = _class_result_from_report(report)
+    if doc["result"] != expected_result:
+        raise ManifestError("attempt result does not match the validated report")
+    if doc["rows"] != report["mutants"]:
+        raise ManifestError("attempt rows do not match the validated report")
+    if doc["status"] != _class_attempt_status(report):
+        raise ManifestError("attempt status does not match the validated report")
+    if classifier is not None:
+        classified = classifier(provenance, report)
+        if (classified != (doc["effective_class"], doc["visibility_status"])
+                and classified != {
+                    "effective_class": doc["effective_class"],
+                    "visibility_status": doc["visibility_status"],
+                }):
+            raise ManifestError("classifier does not match stored class status")
+    return doc
 
 
 def _control_result(group: str, label: str, scope: str, *, polarity: str,

@@ -87,6 +87,15 @@ files. It classifies by pinned identities only and never reads the corpus or the
 label, and counts that are not one denominator. It does not print a percentage delta, does not infer a cause, and does not change `report.v0` or
 `survivors.v0` bytes. `corpus_digest` remains an author-declared string.
 
+Closed offline codecs `corpus-adequacy.class-provenance.v0` and
+`corpus-adequacy.class-attempt.v0` address one evidence class beside `report.v0`,
+not inside it. Loaders bound every path to the existing 4 MiB no-follow reader
+and compare a dependent digest before parsing those bytes. They do not execute a
+candidate, register a CLI, or emit an aggregate or overall adequacy score.
+Field tables live in `docs/class-evidence-v0.md`. Publishable attempt
+construction remains unreachable until a later visibility slice. `report.v0`,
+`survivors.v0`, `rules.v0` and `diff.v0` bytes are unchanged.
+
 ```
 python3 adapters/tersign_evidence_record.py <tersign-checkout> <empty-dest>
 ```
