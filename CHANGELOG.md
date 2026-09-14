@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+Class evidence codecs (#103): adds nonexecuting closed codecs
+`corpus-adequacy.class-provenance.v0` and `corpus-adequacy.class-attempt.v0` for
+one declared evidence class. Loaders reuse the shared 4 MiB no-follow reader
+and the one central report validator; a dependent digest is compared before
+those bytes are parsed. Result counts are derived from a validated `report.v0`
+and cannot be supplied by a caller. There is no aggregate or overall adequacy
+score, no CLI, and no publishable attempt factory. `report.v0`, `survivors.v0`,
+`rules.v0` and `diff.v0` bytes are unchanged. Field tables are in
+`docs/class-evidence-v0.md`.
+
 Hosted withhold diagnostic retention (#154): a non-publish hosted attempt now commits one closed `withheld-diagnostic-package.v0` (manifest plus an optional byte-preserved `collection/`) and a last `run-attempt-terminal` rerun-evidence line. Both publication workflows upload that package only when the gate fails, under an attempt-scoped name; the verified collection remains success-only. Canonical loaders and a nonexecuting `readback` command reconstruct the attempt from downloaded bytes. Diagnostics never become verified, publishable, scored, or adequacy evidence. The missing collection from hosted run `34809912513` is not reconstructed.
 
 Report diff projection (#122): adds the nonexecuting sibling `--diff OLD NEW` that reads two existing `report.v0` files and writes `corpus-adequacy.diff.v0`. Identity is reported as independent facts (`manifest_sha256` same|changed, `corpus_digest` same|changed|undeclared, each tool component same|changed|unresolved) rather than a causal class. Rows match on globally unique labels, retain group moves as one common row, and refuse added or removed labels unless the manifest digest changed. The closed report validator is shared with `--survivors` and `--rules`. The projection never executes a run, never reads the corpus or the manifest, and does not print a percentage delta. `report.v0`, `survivors.v0` and `rules.v0` bytes are unchanged.
