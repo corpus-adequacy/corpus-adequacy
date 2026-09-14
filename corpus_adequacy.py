@@ -104,6 +104,7 @@ ERROR_SCHEMA = "corpus-adequacy.error.v0"
 REPORT_SCHEMA = "corpus-adequacy.report.v0"
 SURVIVORS_SCHEMA = "corpus-adequacy.survivors.v0"
 RULES_SCHEMA = "corpus-adequacy.rules.v0"
+DIFF_SCHEMA = "corpus-adequacy.diff.v0"
 ANCHOR_EXCERPT_MAX = 200
 # One place. The report, --version, and CHANGELOG name this.
 # A tag v+VERSION exists only after the documented cut.
@@ -125,6 +126,49 @@ TOOL_SOURCE_PATHS = (
 TOOL_SOURCE_DIGEST_TAG = b"corpus-adequacy.tool-source.v0\n"
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _MANIFEST_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+REPORT_VERDICTS = frozenset({
+    "equivalent",
+    "unproved",
+    "killed",
+    "unexercised",
+    "known-hole",
+    "silent",
+    "survived",
+    "control-killed",
+    "control-SURVIVED",
+    "control-unchanged",
+    "control-MOVED",
+    "control-error",
+})
+TOOL_SOURCE_STATES = frozenset({"exact", "dirty", "unresolved"})
+DIFF_NON_CLAIMS = (
+    "This projection does not establish causation for any verdict transition.",
+    "This projection does not establish mutation identity beyond the report label.",
+    "This projection does not recompute corpus identity; corpus_digest is an author-declared string.",
+    "This projection does not establish that an inadequate or unproved input is a valid completed comparison.",
+)
+_DIFF_TOP_KEYS = frozenset({
+    "schema", "old_input", "new_input", "identity", "rows", "counts", "non_claims",
+})
+_DIFF_INPUT_KEYS = frozenset({"adequate", "control_status", "unproved"})
+_DIFF_IDENTITY_KEYS = frozenset({"manifest_sha256", "corpus_digest", "tool"})
+_DIFF_COMPONENT_KEYS = frozenset({"old", "new", "status"})
+_DIFF_TOOL_KEYS = frozenset({
+    "tool_version", "tool_commit", "tool_source_state", "tool_content_sha256",
+})
+_DIFF_ROW_KEYS = frozenset({
+    "label", "presence", "old", "new", "verdict_transition",
+    "changed_fields", "acknowledgement_retired",
+})
+_DIFF_COUNT_KEYS = frozenset({
+    "common", "added", "removed", "verdict_changed", "verdict_same",
+    "acknowledgement_retired",
+})
+_REPORT_BOOL_KEYS = ("adequate", "diagnostic_channel_declared")
+_REPORT_INT_KEYS = (
+    "killed", "survived", "silent", "known_holes", "acknowledged_digests",
+    "equivalent", "unexercised_out_of_scope", "unproved", "declared_total",
+)
 _RULE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 RULE_GROUPS_MAX = 128
@@ -681,19 +725,63 @@ def _require_closed_keys(obj, required, allowed, *, missing_token, extra_token):
         raise ManifestError("%s %s" % (extra_token, sorted(extra)[0]))
 
 
+def _require_sha256_or_null(value, where: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or _MANIFEST_DIGEST_RE.fullmatch(value) is None:
+        raise ManifestError("%s is not a canonical sha256 digest" % where)
+
+
+def _require_tool_identity_forms(report) -> None:
+    version = report.get("tool_version")
+    if not isinstance(version, str) or not version:
+        raise ManifestError("report.tool_version must be a non-empty string")
+    state = report.get("tool_source_state")
+    if state not in TOOL_SOURCE_STATES:
+        raise ManifestError("report.tool_source_state is not a producer tool state")
+    commit = report.get("tool_commit")
+    if commit is not None and (
+            not isinstance(commit, str) or _COMMIT_RE.fullmatch(commit) is None):
+        raise ManifestError("report.tool_commit is not a 40-hex commit id")
+    _require_sha256_or_null(report.get("tool_content_sha256"), "report.tool_content_sha256")
+    content = report.get("tool_content_sha256")
+    if state == "exact":
+        if commit is None or content is None:
+            raise ManifestError("report tool identity is not producer-consistent")
+        return
+    if commit is not None:
+        raise ManifestError("report tool identity is not producer-consistent")
+
+
 def _require_report_rows(report) -> list:
     """Refuse hostile report shapes before they become KeyError or []."""
     if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
         raise ManifestError(
-            "survivors input must be %s, got %r"
+            "report input must be %s, got %r"
             % (REPORT_SCHEMA, report.get("schema") if isinstance(report, dict) else type(report).__name__))
     runner = report.get("runner") if isinstance(report.get("runner"), str) else ""
     _require_closed_keys(
         report, _report_v0_required_keys(runner), _report_v0_allowed_keys(runner),
         missing_token=REPORT_MISSING_KEY, extra_token=REPORT_EXTRA_KEY)
+    for key in _REPORT_BOOL_KEYS:
+        if type(report[key]) is not bool:
+            raise ManifestError("report.%s must be a bool" % key)
+    for key in _REPORT_INT_KEYS:
+        if type(report[key]) is not int:
+            raise ManifestError("report.%s must be an int" % key)
+    if not isinstance(report.get("control_status"), str) or not report["control_status"]:
+        raise ManifestError("report.control_status must be a non-empty string")
+    digest = report.get("manifest_sha256")
+    if not isinstance(digest, str) or _MANIFEST_DIGEST_RE.fullmatch(digest) is None:
+        raise ManifestError("report.manifest_sha256 is not a canonical sha256 digest")
+    corpus = report.get("corpus_digest")
+    if corpus is not None and (not isinstance(corpus, str) or not corpus):
+        raise ManifestError("report.corpus_digest must be null or a non-empty string")
+    _require_tool_identity_forms(report)
     mutants = report.get("mutants")
     if not isinstance(mutants, list):
         raise ManifestError("report.mutants must be a list")
+    seen_labels = set()
     for i, row in enumerate(mutants):
         if not isinstance(row, dict):
             raise ManifestError("report.mutants[%d] must be an object" % i)
@@ -706,10 +794,17 @@ def _require_report_rows(report) -> list:
             if not isinstance(val, str) or not val:
                 raise ManifestError(
                     "report.mutants[%d].%s must be a non-empty string" % (i, key))
+        if row["verdict"] not in REPORT_VERDICTS:
+            raise ManifestError(
+                "report.mutants[%d].verdict is not a producer verdict" % i)
         for key in ("moved", "moved_diagnostic"):
             if key in row and type(row[key]) is not int:
                 raise ManifestError(
                     "report.mutants[%d].%s must be an int" % (i, key))
+        label = row["label"]
+        if label in seen_labels:
+            raise ManifestError("duplicate mutant label %r" % label)
+        seen_labels.add(label)
     return mutants
 
 
@@ -929,6 +1024,200 @@ def encode_rules_v0(doc: dict) -> bytes:
     except UnicodeEncodeError:
         raise ReportEncodingError(
             "rules projection contains text that cannot be encoded as valid UTF-8") from None
+
+
+def _identity_component(old, new, status: str) -> dict:
+    return {"old": old, "new": new, "status": status}
+
+
+def _manifest_identity_status(old, new) -> str:
+    return "same" if old == new else "changed"
+
+
+def _corpus_identity_status(old, new) -> str:
+    if old is None or new is None:
+        return "undeclared"
+    return "same" if old == new else "changed"
+
+
+def _tool_component_status(old, new) -> str:
+    if old is None or new is None:
+        return "unresolved"
+    return "same" if old == new else "changed"
+
+
+def _row_changed_fields(old_row, new_row, presence: str) -> list:
+    if presence != "common":
+        present = new_row if presence == "added" else old_row
+        return sorted(key for key in present if key != "label")
+    keys = (set(old_row) | set(new_row)) - {"label"}
+    changed = []
+    for key in sorted(keys):
+        old_present = key in old_row
+        new_present = key in new_row
+        if old_present != new_present:
+            changed.append(key)
+        elif old_row[key] != new_row[key]:
+            changed.append(key)
+    return changed
+
+
+def _verdict_transition(old_row, new_row, presence: str) -> str:
+    if presence != "common":
+        return "unavailable"
+    if old_row["verdict"] == new_row["verdict"]:
+        return "same"
+    return "changed"
+
+
+def _acknowledgement_retired(old_row, new_row, presence: str, manifest_changed: bool) -> bool:
+    return (
+        presence == "common"
+        and old_row["verdict"] == "known-hole"
+        and new_row["verdict"] != "known-hole"
+        and manifest_changed
+    )
+
+
+def _input_block(report: dict) -> dict:
+    return {
+        "adequate": report["adequate"],
+        "control_status": report["control_status"],
+        "unproved": report["unproved"],
+    }
+
+
+def diff_reports(old_report, new_report) -> dict:
+    """Compare two validated report.v0 documents. Never executes a run."""
+    old_rows = _require_report_rows(old_report)
+    new_rows = _require_report_rows(new_report)
+    old_by = {row["label"]: row for row in old_rows}
+    new_by = {row["label"]: row for row in new_rows}
+    added = set(new_by) - set(old_by)
+    removed = set(old_by) - set(new_by)
+    manifest_changed = old_report["manifest_sha256"] != new_report["manifest_sha256"]
+    if (added or removed) and not manifest_changed:
+        raise ManifestError("added or removed labels require a changed manifest")
+    rows = []
+    for label in sorted(set(old_by) | set(new_by)):
+        if label in old_by and label in new_by:
+            presence = "common"
+            old_row, new_row = old_by[label], new_by[label]
+        elif label in new_by:
+            presence = "added"
+            old_row, new_row = None, new_by[label]
+        else:
+            presence = "removed"
+            old_row, new_row = old_by[label], None
+        rows.append({
+            "label": label,
+            "presence": presence,
+            "old": old_row,
+            "new": new_row,
+            "verdict_transition": _verdict_transition(old_row, new_row, presence),
+            "changed_fields": _row_changed_fields(old_row, new_row, presence),
+            "acknowledgement_retired": _acknowledgement_retired(
+                old_row, new_row, presence, manifest_changed),
+        })
+    counts = {
+        "common": sum(row["presence"] == "common" for row in rows),
+        "added": sum(row["presence"] == "added" for row in rows),
+        "removed": sum(row["presence"] == "removed" for row in rows),
+        "verdict_changed": sum(
+            row["presence"] == "common" and row["verdict_transition"] == "changed"
+            for row in rows),
+        "verdict_same": sum(
+            row["presence"] == "common" and row["verdict_transition"] == "same"
+            for row in rows),
+        "acknowledgement_retired": sum(row["acknowledgement_retired"] for row in rows),
+    }
+    tool_old, tool_new = {}, {}
+    tool_status = {}
+    for key in ("tool_version", "tool_commit", "tool_source_state", "tool_content_sha256"):
+        tool_old[key] = old_report[key]
+        tool_new[key] = new_report[key]
+        tool_status[key] = _tool_component_status(old_report[key], new_report[key])
+    return {
+        "schema": DIFF_SCHEMA,
+        "old_input": _input_block(old_report),
+        "new_input": _input_block(new_report),
+        "identity": {
+            "manifest_sha256": _identity_component(
+                old_report["manifest_sha256"], new_report["manifest_sha256"],
+                _manifest_identity_status(
+                    old_report["manifest_sha256"], new_report["manifest_sha256"])),
+            "corpus_digest": _identity_component(
+                old_report["corpus_digest"], new_report["corpus_digest"],
+                _corpus_identity_status(
+                    old_report["corpus_digest"], new_report["corpus_digest"])),
+            "tool": {
+                key: _identity_component(tool_old[key], tool_new[key], tool_status[key])
+                for key in (
+                    "tool_version", "tool_commit", "tool_source_state", "tool_content_sha256")
+            },
+        },
+        "rows": rows,
+        "counts": counts,
+        "non_claims": list(DIFF_NON_CLAIMS),
+    }
+
+
+def _require_diff_v0_document(doc: dict) -> None:
+    require_shape(doc, dict, "diff projection")
+    _require_closed_keys(
+        doc, _DIFF_TOP_KEYS, _DIFF_TOP_KEYS,
+        missing_token="diff projection missing key", extra_token="diff projection extra key")
+    if doc.get("schema") != DIFF_SCHEMA:
+        raise ManifestError("diff projection has an invalid schema")
+    for name in ("old_input", "new_input"):
+        require_shape(doc[name], dict, name)
+        _require_closed_keys(
+            doc[name], _DIFF_INPUT_KEYS, _DIFF_INPUT_KEYS,
+            missing_token=name + " missing key", extra_token=name + " extra key")
+    identity = doc["identity"]
+    require_shape(identity, dict, "identity")
+    _require_closed_keys(
+        identity, _DIFF_IDENTITY_KEYS, _DIFF_IDENTITY_KEYS,
+        missing_token="identity missing key", extra_token="identity extra key")
+    for name in ("manifest_sha256", "corpus_digest"):
+        require_shape(identity[name], dict, "identity." + name)
+        _require_closed_keys(
+            identity[name], _DIFF_COMPONENT_KEYS, _DIFF_COMPONENT_KEYS,
+            missing_token="identity component missing key",
+            extra_token="identity component extra key")
+    require_shape(identity["tool"], dict, "identity.tool")
+    _require_closed_keys(
+        identity["tool"], _DIFF_TOOL_KEYS, _DIFF_TOOL_KEYS,
+        missing_token="identity.tool missing key", extra_token="identity.tool extra key")
+    for name in _DIFF_TOOL_KEYS:
+        require_shape(identity["tool"][name], dict, "identity.tool." + name)
+        _require_closed_keys(
+            identity["tool"][name], _DIFF_COMPONENT_KEYS, _DIFF_COMPONENT_KEYS,
+            missing_token="identity component missing key",
+            extra_token="identity component extra key")
+    require_shape(doc["rows"], list, "rows")
+    for i, row in enumerate(doc["rows"]):
+        require_shape(row, dict, "rows[%d]" % i)
+        _require_closed_keys(
+            row, _DIFF_ROW_KEYS, _DIFF_ROW_KEYS,
+            missing_token="diff row missing key", extra_token="diff row extra key")
+    require_shape(doc["counts"], dict, "counts")
+    _require_closed_keys(
+        doc["counts"], _DIFF_COUNT_KEYS, _DIFF_COUNT_KEYS,
+        missing_token="counts missing key", extra_token="counts extra key")
+    if list(doc["non_claims"]) != list(DIFF_NON_CLAIMS):
+        raise ManifestError("diff projection has invalid non_claims")
+
+
+def encode_diff_v0(doc: dict) -> bytes:
+    """Sole closed UTF-8 byte form of a diff.v0 projection. Never calls encode_report_v0."""
+    _require_diff_v0_document(doc)
+    try:
+        return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8")
+    except UnicodeEncodeError:
+        raise ReportEncodingError(
+            "diff projection contains text that cannot be encoded as valid UTF-8") from None
 
 
 def _control_result(group: str, label: str, scope: str, *, polarity: str,
@@ -3233,6 +3522,61 @@ def _rules_cli(args) -> int:
     return 0
 
 
+def _render_diff_v0(projected: dict) -> None:
+    """Render identity and row facts already projected; never infers a cause."""
+    old_input = projected["old_input"]
+    new_input = projected["new_input"]
+    print("old_input: adequate=%s control_status=%s unproved=%s"
+          % (str(old_input["adequate"]).lower(), old_input["control_status"],
+             old_input["unproved"]))
+    print("new_input: adequate=%s control_status=%s unproved=%s"
+          % (str(new_input["adequate"]).lower(), new_input["control_status"],
+             new_input["unproved"]))
+    identity = projected["identity"]
+    print("identity:")
+    print("  manifest_sha256: %s" % identity["manifest_sha256"]["status"])
+    print("  corpus_digest: %s" % identity["corpus_digest"]["status"])
+    for key in ("tool_version", "tool_commit", "tool_source_state", "tool_content_sha256"):
+        print("  %s: %s" % (key, identity["tool"][key]["status"]))
+    print("rows:")
+    for row in projected["rows"]:
+        print("%s presence=%s verdict_transition=%s acknowledgement_retired=%s changed_fields=%s"
+              % (row["label"], row["presence"], row["verdict_transition"],
+                 str(row["acknowledgement_retired"]).lower(),
+                 ",".join(row["changed_fields"])))
+    counts = projected["counts"]
+    print("counts: common=%d added=%d removed=%d verdict_changed=%d verdict_same=%d "
+          "acknowledgement_retired=%d"
+          % (counts["common"], counts["added"], counts["removed"],
+             counts["verdict_changed"], counts["verdict_same"],
+             counts["acknowledgement_retired"]))
+    print("non_claims:")
+    for claim in projected["non_claims"]:
+        print("  %s" % claim)
+
+
+def _diff_cli(args) -> int:
+    """Early sibling path: read two report.v0 files. Never calls run()."""
+    try:
+        old_raw = read_bounded_regular_file(args.diff[0])
+        new_raw = read_bounded_regular_file(args.diff[1])
+        old_report = _parse_projection_json(old_raw)
+        new_report = _parse_projection_json(new_raw)
+        projected = diff_reports(old_report, new_report)
+        encoded = encode_diff_v0(projected) if args.json else None
+    except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError, ValueError) as exc:
+        print("could not project: %s" % exc, file=sys.stderr)
+        if args.json:
+            print(json.dumps(error_envelope(exc, operation="project"), indent=2, sort_keys=True))
+        return 2
+    if args.json:
+        assert encoded is not None
+        _write_encoded(encoded)
+        return 0
+    _render_diff_v0(projected)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--version", action="store_true",
@@ -3244,6 +3588,8 @@ def main() -> int:
                             help="project survivors.v0 from an existing report.v0 file")
     projection.add_argument("--rules", action="store_true",
                             help="project rules.v0 from an existing report.v0 and manifest")
+    projection.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), type=Path,
+                            help="project diff.v0 from two existing report.v0 files")
     ap.add_argument("--manifest", dest="anchor_manifest", type=Path,
                     help="digest-matched manifest for --rules or optional --survivors anchors")
     args = ap.parse_args()
@@ -3260,6 +3606,8 @@ def main() -> int:
         return _survivors_cli(args, ap)
     if args.rules:
         return _rules_cli(args)
+    if args.diff is not None:
+        return _diff_cli(args)
     if args.manifest is None:
         ap.error("manifest is required")
     try:

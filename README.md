@@ -32,6 +32,8 @@ python3 corpus_adequacy.py --survivors <report.json>
 python3 corpus_adequacy.py --survivors <report.json> --json
 python3 corpus_adequacy.py --rules <report.json> --manifest <manifest.json>
 python3 corpus_adequacy.py --rules <report.json> --manifest <manifest.json> --json
+python3 corpus_adequacy.py --diff <old.report.v0> <new.report.v0>
+python3 corpus_adequacy.py --diff <old.report.v0> <new.report.v0> --json
 ```
 
 `--survivors` is a sibling projection over an existing `report.v0` file. It does
@@ -78,6 +80,12 @@ This inventory is author-declared traceability. It is not rule coverage,
 adequacy, owner ratification, certification, endorsement, partnership,
 execution, remeasurement, or a change to historical evidence. `report.v0`, its
 score and denominator, and `survivors.v0` do not gain inventory fields.
+
+`--diff` is a nonexecuting sibling projection over two existing `report.v0`
+files. It classifies by pinned identities only and never reads the corpus or the manifest. `--json` writes `corpus-adequacy.diff.v0`. It reports identity facts
+(`same`, `changed`, `undeclared`, `unresolved`), one row per globally unique
+label, and counts that are not one denominator. It does not print a percentage delta, does not infer a cause, and does not change `report.v0` or
+`survivors.v0` bytes. `corpus_digest` remains an author-declared string.
 
 ```
 python3 adapters/tersign_evidence_record.py <tersign-checkout> <empty-dest>
