@@ -90,6 +90,7 @@ except ImportError:                          # pragma: no cover - non-POSIX
     fcntl = None
 from collections import namedtuple
 from pathlib import Path
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_run import (  # noqa: E402
@@ -98,9 +99,11 @@ from bounded_run import (  # noqa: E402
 from isolated_tree import IsolationError, IsolatedMutationTree  # noqa: E402
 
 SCHEMA = "corpus-adequacy.manifest.v0"
+MANIFEST_V1_SCHEMA = "corpus-adequacy.manifest.v1"
 ERROR_SCHEMA = "corpus-adequacy.error.v0"
 REPORT_SCHEMA = "corpus-adequacy.report.v0"
 SURVIVORS_SCHEMA = "corpus-adequacy.survivors.v0"
+RULES_SCHEMA = "corpus-adequacy.rules.v0"
 ANCHOR_EXCERPT_MAX = 200
 # One place. The report, --version, and CHANGELOG name this.
 # A tag v+VERSION exists only after the documented cut.
@@ -121,6 +124,14 @@ TOOL_SOURCE_PATHS = (
 # of the same bytes under some other rule.
 TOOL_SOURCE_DIGEST_TAG = b"corpus-adequacy.tool-source.v0\n"
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_MANIFEST_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_RULE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+RULE_GROUPS_MAX = 128
+RULE_ROWS_PER_GROUP_MAX = 1024
+RULE_ROWS_TOTAL_MAX = 4096
+RULE_MUTANTS_PER_ROW_MAX = 256
+RULE_MUTANT_REFERENCES_MAX = 8192
 
 OPERATOR_PROFILE_KEY = "execution_profile"
 MINIMUM_PROFILE_KEY = "minimum_execution_profile"
@@ -747,6 +758,32 @@ def survivor_findings(report, manifest=None):
     }
 
 
+def rule_inventory_projection(report, manifest) -> dict:
+    """Project rules.v0 from one exact-byte-matched manifest; never executes a run."""
+    _require_report_rows(report)
+    digest = report.get("manifest_sha256")
+    if not isinstance(digest, str) or _MANIFEST_DIGEST_RE.fullmatch(digest) is None:
+        raise ManifestError("report.manifest_sha256 is not a canonical sha256 digest")
+    if isinstance(manifest, (str, Path)):
+        raw = read_bounded_regular_file(Path(manifest))
+    elif type(manifest) is bytes:
+        raw = manifest
+    else:
+        raise ManifestError("rules manifest input must be bytes or a path")
+    if _file_sha256(raw) != digest:
+        raise ManifestError("report/manifest exact-byte digest mismatch")
+    manifest_obj = _parse_projection_json(raw)
+    require_shape(manifest_obj, dict, "manifest")
+    inventory = rule_inventory_index(manifest_obj)
+    return {
+        "schema": RULES_SCHEMA,
+        "source_schema": REPORT_SCHEMA,
+        "manifest_schema": manifest_obj.get("schema"),
+        "manifest_sha256": digest,
+        "inventory": inventory,
+    }
+
+
 def encode_report_v0(report: dict) -> bytes:
     """Return the sole byte representation of a successful report.
 
@@ -775,6 +812,123 @@ def encode_survivors_v0(doc: dict) -> bytes:
     except UnicodeEncodeError:
         raise ReportEncodingError(
             "survivors projection contains text that cannot be encoded as valid UTF-8") from None
+
+
+def _require_rules_v0_document(doc: dict) -> None:
+    require_shape(doc, dict, "rules projection")
+    top_keys = frozenset({
+        "schema", "source_schema", "manifest_schema", "manifest_sha256", "inventory"})
+    _require_closed_keys(
+        doc, top_keys, top_keys,
+        missing_token="rules projection missing key", extra_token="rules projection extra key")
+    if doc.get("schema") != RULES_SCHEMA or doc.get("source_schema") != REPORT_SCHEMA:
+        raise ManifestError("rules projection has an invalid schema")
+    inventory = doc["inventory"]
+    if inventory is None:
+        if doc.get("manifest_schema") != SCHEMA:
+            raise ManifestError("only manifest.v0 may project an absent inventory")
+        return
+    require_shape(inventory, dict, "inventory")
+    inv_keys = frozenset({
+        "rules_declared", "rules_mutation_linked", "rules_excluded",
+        "linked_mutants", "groups", "rules"})
+    _require_closed_keys(
+        inventory, inv_keys, inv_keys,
+        missing_token="inventory missing key", extra_token="inventory extra key")
+    if doc.get("manifest_schema") != MANIFEST_V1_SCHEMA:
+        raise ManifestError("only manifest.v1 may project a rule inventory")
+    count_keys = (
+        "rules_declared", "rules_mutation_linked", "rules_excluded", "linked_mutants")
+    for key in count_keys:
+        if type(inventory[key]) is not int or inventory[key] < 0:
+            raise ManifestError("inventory.%s must be a non-negative int" % key)
+    require_shape(inventory["groups"], list, "inventory.groups")
+    require_shape(inventory["rules"], list, "inventory.rules")
+    group_keys = frozenset({"group", *count_keys})
+    group_order = []
+    for i, group in enumerate(inventory["groups"]):
+        require_shape(group, dict, "inventory.groups[%d]" % i)
+        _require_closed_keys(
+            group, group_keys, group_keys,
+            missing_token="group missing key", extra_token="group extra key")
+        _utf8_len(group["group"], "inventory.groups[%d].group" % i,
+                  maximum=128)
+        group_order.append(group["group"])
+        for key in count_keys:
+            if type(group[key]) is not int or group[key] < 0:
+                raise ManifestError("inventory.groups[%d].%s must be a non-negative int" % (i, key))
+        if group["rules_declared"] != group["rules_mutation_linked"] + group["rules_excluded"]:
+            raise ManifestError("inventory group rule-count invariant failed")
+    if group_order != sorted(group_order) or len(group_order) != len(set(group_order)):
+        raise ManifestError("inventory groups are not unique exact Unicode order")
+    linked_from_rows = 0
+    mutated_rows = 0
+    excluded_rows = 0
+    by_group = {}
+    order = []
+    for i, row in enumerate(inventory["rules"]):
+        require_shape(row, dict, "inventory.rules[%d]" % i)
+        disposition = row.get("disposition")
+        base = {"group", "id", "text", "url", "disposition"}
+        expected = frozenset(base | ({"mutants"} if disposition == "mutated" else {"reason"}))
+        if disposition not in ("mutated", "excluded"):
+            raise ManifestError("inventory.rules[%d] has invalid disposition" % i)
+        _require_closed_keys(
+            row, expected, expected,
+            missing_token="rule missing key", extra_token="rule extra key")
+        _utf8_len(row["group"], "inventory.rules[%d].group" % i, maximum=128)
+        if not isinstance(row["id"], str) or _RULE_ID_RE.fullmatch(row["id"]) is None:
+            raise ManifestError("inventory.rules[%d].id is invalid" % i)
+        order.append((row["group"], row["id"]))
+        counts = by_group.setdefault(row["group"], {
+            "rules_declared": 0, "rules_mutation_linked": 0,
+            "rules_excluded": 0, "linked_mutants": 0})
+        counts["rules_declared"] += 1
+        if disposition == "mutated":
+            require_shape(row["mutants"], list, "inventory.rules[%d].mutants" % i)
+            for j, label in enumerate(row["mutants"]):
+                _utf8_len(label, "inventory.rules[%d].mutants[%d]" % (i, j),
+                          maximum=None)
+            if row["mutants"] != sorted(row["mutants"]):
+                raise ManifestError("inventory rule mutants are not in exact label order")
+            linked_from_rows += len(row["mutants"])
+            mutated_rows += 1
+            counts["rules_mutation_linked"] += 1
+            counts["linked_mutants"] += len(row["mutants"])
+        else:
+            excluded_rows += 1
+            counts["rules_excluded"] += 1
+    if order != sorted(order) or len(order) != len(set(order)):
+        raise ManifestError("inventory rules are not unique exact (group, id) order")
+    if inventory["rules_declared"] != len(inventory["rules"]):
+        raise ManifestError("inventory declared-rule invariant failed")
+    if inventory["rules_mutation_linked"] != mutated_rows:
+        raise ManifestError("inventory mutation-linked-rule invariant failed")
+    if inventory["rules_excluded"] != excluded_rows:
+        raise ManifestError("inventory excluded-rule invariant failed")
+    if inventory["linked_mutants"] != linked_from_rows:
+        raise ManifestError("inventory linked-mutant invariant failed")
+    for key in count_keys:
+        if inventory[key] != sum(group[key] for group in inventory["groups"]):
+            raise ManifestError("inventory top-level %s invariant failed" % key)
+    if set(by_group) != {group["group"] for group in inventory["groups"]
+                         if group["rules_declared"]}:
+        raise ManifestError("inventory group summaries do not match projected rules")
+    for group in inventory["groups"]:
+        if group["rules_declared"] and any(
+                group[key] != by_group[group["group"]][key] for key in count_keys):
+            raise ManifestError("inventory group %r count invariant failed" % group["group"])
+
+
+def encode_rules_v0(doc: dict) -> bytes:
+    """Sole closed UTF-8 byte form of a rules.v0 projection."""
+    _require_rules_v0_document(doc)
+    try:
+        return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8")
+    except UnicodeEncodeError:
+        raise ReportEncodingError(
+            "rules projection contains text that cannot be encoded as valid UTF-8") from None
 
 
 def _control_result(group: str, label: str, scope: str, *, polarity: str,
@@ -1048,6 +1202,200 @@ def _require_expected_mover(m: dict, mutant: dict) -> None:
             "batch test-names mutant")
 
 
+def _utf8_len(value, where: str, *, maximum: int | None,
+              nonblank: bool = True) -> int:
+    if not isinstance(value, str):
+        raise ManifestError("%s must be a string" % where)
+    if nonblank and not value.strip():
+        raise ManifestError("%s must not be empty or whitespace-only" % where)
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ManifestError("%s is not valid UTF-8" % where) from None
+    if maximum is not None and size > maximum:
+        raise ManifestError("%s exceeds %d UTF-8 bytes" % (where, maximum))
+    return size
+
+
+def _require_rule_url(value, where: str) -> None:
+    if value is None:
+        return
+    _utf8_len(value, where, maximum=2048, nonblank=True)
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise ManifestError("%s must be an absolute HTTPS URL: %s" % (where, exc)) from None
+    if (parsed.scheme != "https" or not hostname or parsed.username is not None
+            or parsed.password is not None):
+        raise ManifestError(
+            "%s must be an absolute HTTPS URL with a hostname and no userinfo" % where)
+
+
+def _eligible_rule_labels(manifest: dict) -> tuple[dict, dict]:
+    """Return exact eligible labels by group and every declared label's group/class."""
+    eligible = {}
+    declared = {}
+    for declaration in ("mutants", "equivalent"):
+        groups = manifest.get(declaration, {})
+        require_shape(groups, dict, declaration)
+        for group, entries in groups.items():
+            require_shape(entries, list, "%s[%s]" % (declaration, group))
+            for i, entry in enumerate(entries):
+                require_shape(entry, dict, "%s[%s][%d]" % (declaration, group, i))
+                label = label_identity(entry, "%s[%s][%d]" % (declaration, group, i))
+                _utf8_len(label, "%s[%s][%d].label" % (declaration, group, i),
+                          maximum=None)
+                if label in declared:
+                    raise ManifestError("mutant label %r is declared more than once" % label)
+                if declaration == "equivalent":
+                    is_eligible = True
+                else:
+                    scope = entry.get("scope", "declared")
+                    if scope not in ("declared", "out_of_scope"):
+                        raise ManifestError(
+                            "%s[%s][%d].scope must be declared or out_of_scope"
+                            % (declaration, group, i))
+                    is_eligible = (entry.get("control", False) is False
+                                   and scope == "declared")
+                declared[label] = (group, is_eligible)
+                if is_eligible:
+                    eligible.setdefault(group, set()).add(label)
+    return eligible, declared
+
+
+def rule_inventory_index(manifest) -> dict | None:
+    """Validate and project the one author-declared rule inventory, without side effects."""
+    require_shape(manifest, dict, "manifest")
+    schema = manifest.get("schema")
+    if schema == SCHEMA:
+        return None
+    if schema != MANIFEST_V1_SCHEMA:
+        raise ManifestError(
+            "schema must be %r or %r, got %r" % (SCHEMA, MANIFEST_V1_SCHEMA, schema))
+    if "rules" not in manifest:
+        raise ManifestError("manifest.v1: missing required key 'rules'")
+    rules = manifest["rules"]
+    require_shape(rules, dict, "rules")
+    if len(rules) > RULE_GROUPS_MAX:
+        raise ManifestError("rules exceeds the maximum of %d groups" % RULE_GROUPS_MAX)
+
+    eligible, declared = _eligible_rule_labels(manifest)
+    all_eligible = {(group, label) for group, labels in eligible.items() for label in labels}
+    linked = set()
+    projected_rules = []
+    groups = []
+    total_rows = 0
+    total_references = 0
+    mutated_keys = frozenset({"id", "text", "url", "disposition", "mutants"})
+    excluded_keys = frozenset({"id", "text", "url", "disposition", "reason"})
+
+    for group in rules:
+        _utf8_len(group, "rules group", maximum=128, nonblank=True)
+    for group in sorted(rules):
+        rows = rules[group]
+        require_shape(rows, list, "rules[%r]" % group)
+        if len(rows) > RULE_ROWS_PER_GROUP_MAX:
+            raise ManifestError(
+                "rules[%r] exceeds the maximum of %d rows"
+                % (group, RULE_ROWS_PER_GROUP_MAX))
+        total_rows += len(rows)
+        if total_rows > RULE_ROWS_TOTAL_MAX:
+            raise ManifestError("rules exceeds the maximum of %d total rows" % RULE_ROWS_TOTAL_MAX)
+        seen_ids = set()
+        group_rows = []
+        group_mutated = 0
+        group_excluded = 0
+        group_links = 0
+        for i, source_row in enumerate(rows):
+            where = "rules[%r][%d]" % (group, i)
+            require_shape(source_row, dict, where)
+            disposition = source_row.get("disposition")
+            if disposition == "mutated":
+                required = mutated_keys
+            elif disposition == "excluded":
+                required = excluded_keys
+            else:
+                raise ManifestError("%s.disposition must be mutated or excluded" % where)
+            _require_closed_keys(
+                source_row, required, required,
+                missing_token="rule missing key", extra_token="rule extra key")
+            rule_id = source_row["id"]
+            if not isinstance(rule_id, str) or _RULE_ID_RE.fullmatch(rule_id) is None:
+                raise ManifestError("%s.id does not match the closed rule id syntax" % where)
+            if rule_id in seen_ids:
+                raise ManifestError("rules[%r] repeats rule id %r" % (group, rule_id))
+            seen_ids.add(rule_id)
+            _utf8_len(source_row["text"], where + ".text", maximum=8192)
+            _require_rule_url(source_row["url"], where + ".url")
+            row = copy.deepcopy(source_row)
+            if disposition == "excluded":
+                _utf8_len(source_row["reason"], where + ".reason", maximum=2048)
+                group_excluded += 1
+            else:
+                refs = source_row["mutants"]
+                require_shape(refs, list, where + ".mutants")
+                if not refs or len(refs) > RULE_MUTANTS_PER_ROW_MAX:
+                    raise ManifestError(
+                        "%s.mutants must contain 1-%d labels"
+                        % (where, RULE_MUTANTS_PER_ROW_MAX))
+                row_seen = set()
+                for j, label in enumerate(refs):
+                    label_where = "%s.mutants[%d]" % (where, j)
+                    _utf8_len(label, label_where, maximum=None)
+                    if label in row_seen:
+                        raise ManifestError("%s repeats mutation label %r" % (where, label))
+                    row_seen.add(label)
+                    declaration = declared.get(label)
+                    if declaration is None:
+                        raise ManifestError(
+                            "%s references unknown mutation label %r" % (where, label))
+                    declared_group, is_eligible = declaration
+                    if declared_group != group:
+                        raise ManifestError(
+                            "%s references cross-group mutation label %r" % (where, label))
+                    if not is_eligible:
+                        raise ManifestError(
+                            "%s references a control or out_of_scope label %r" % (where, label))
+                    identity = (group, label)
+                    if identity in linked:
+                        raise ManifestError("mutation label %r is linked by two rules" % label)
+                    linked.add(identity)
+                total_references += len(refs)
+                if total_references > RULE_MUTANT_REFERENCES_MAX:
+                    raise ManifestError(
+                        "rules exceeds the maximum of %d mutation-label references"
+                        % RULE_MUTANT_REFERENCES_MAX)
+                row["mutants"] = sorted(refs)
+                group_mutated += 1
+                group_links += len(refs)
+            row["group"] = group
+            group_rows.append(row)
+        group_rows.sort(key=lambda item: item["id"])
+        projected_rules.extend(group_rows)
+        groups.append({
+            "group": group,
+            "rules_declared": len(group_rows),
+            "rules_mutation_linked": group_mutated,
+            "rules_excluded": group_excluded,
+            "linked_mutants": group_links,
+        })
+
+    missing = sorted(all_eligible - linked)
+    if missing:
+        group, label = missing[0]
+        raise ManifestError(
+            "eligible mutation label %r in group %r is not linked by any rule" % (label, group))
+    return {
+        "rules_declared": total_rows,
+        "rules_mutation_linked": sum(g["rules_mutation_linked"] for g in groups),
+        "rules_excluded": sum(g["rules_excluded"] for g in groups),
+        "linked_mutants": total_references,
+        "groups": groups,
+        "rules": projected_rules,
+    }
+
+
 def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
                         path_root: Path | None = None) -> dict:
     """Load exact manifest bytes while resolving logical paths at one root."""
@@ -1055,8 +1403,10 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
         raise ManifestError("manifest bytes must be bytes")
     path = Path(artifact_path)
     m = load_json_document(manifest_bytes, root=dict, where="manifest")
-    if m.get("schema") != SCHEMA:
-        raise ManifestError("schema must be %r, got %r" % (SCHEMA, m.get("schema")))
+    if m.get("schema") not in (SCHEMA, MANIFEST_V1_SCHEMA):
+        raise ManifestError(
+            "schema must be %r or %r, got %r"
+            % (SCHEMA, MANIFEST_V1_SCHEMA, m.get("schema")))
     base = Path(path_root) if path_root is not None else path.parent
     # Exact on-disk bytes are the input parsed above. Whitespace and key order
     # therefore remain addressable rather than being silently canonicalised.
@@ -1234,6 +1584,7 @@ def load_manifest_bytes(manifest_bytes: bytes, artifact_path: Path, *,
                     "equivalent[%s][%d] %r: an equivalence needs a stated reason, never a bare claim"
                     % (group, i, e["label"]))
     _require_unique_labels(m)
+    m["_rule_inventory"] = rule_inventory_index(m)
     return m
 
 
@@ -2836,28 +3187,79 @@ def _survivors_cli(args, ap) -> int:
     return 0
 
 
+def _render_rules_v0(projected: dict) -> None:
+    """Render only values already supplied by the index; never recompute a tally."""
+    inventory = projected["inventory"]
+    if inventory is None:
+        print("Rule inventory: absent (manifest.v0); no zero was measured.")
+        return
+    print("Rule inventory: %d declared, %d mutation-linked, %d excluded, %d linked mutants"
+          % (inventory["rules_declared"], inventory["rules_mutation_linked"],
+             inventory["rules_excluded"], inventory["linked_mutants"]))
+    for group in inventory["groups"]:
+        print("%-22s %d declared, %d mutation-linked, %d excluded, %d linked mutants"
+              % (group["group"], group["rules_declared"],
+                 group["rules_mutation_linked"], group["rules_excluded"],
+                 group["linked_mutants"]))
+    for rule in inventory["rules"]:
+        detail = (", ".join(rule["mutants"])
+                  if rule["disposition"] == "mutated" else rule["reason"])
+        print("%-22s %-9s %s: %s"
+              % (rule["group"], rule["disposition"], rule["id"], detail))
+
+
+def _rules_cli(args) -> int:
+    """Early sibling path: read report and manifest files. Never calls run()."""
+    try:
+        if args.manifest is None:
+            raise ManifestError("report is required for --rules")
+        if args.anchor_manifest is None:
+            raise ManifestError("--manifest is required for --rules")
+        report_raw = read_bounded_regular_file(args.manifest)
+        manifest_raw = read_bounded_regular_file(args.anchor_manifest)
+        report = _parse_projection_json(report_raw)
+        projected = rule_inventory_projection(report, manifest_raw)
+        encoded = encode_rules_v0(projected) if args.json else None
+    except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError, ValueError) as exc:
+        print("could not project: %s" % exc, file=sys.stderr)
+        if args.json:
+            print(json.dumps(error_envelope(exc, operation="project"), indent=2, sort_keys=True))
+        return 2
+    if args.json:
+        assert encoded is not None
+        _write_encoded(encoded)
+    else:
+        _render_rules_v0(projected)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--version", action="store_true",
                     help="print tool version (and commit, if resolvable) and exit")
     ap.add_argument("manifest", type=Path, nargs="?")
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--survivors", action="store_true",
-                    help="project survivors.v0 from an existing report.v0 file")
+    projection = ap.add_mutually_exclusive_group()
+    projection.add_argument("--survivors", action="store_true",
+                            help="project survivors.v0 from an existing report.v0 file")
+    projection.add_argument("--rules", action="store_true",
+                            help="project rules.v0 from an existing report.v0 and manifest")
     ap.add_argument("--manifest", dest="anchor_manifest", type=Path,
-                    help="optional manifest used only for a digest-matched anchor")
+                    help="digest-matched manifest for --rules or optional --survivors anchors")
     args = ap.parse_args()
     if args.version:
         print(format_tool_identity())
         return 0
-    if args.anchor_manifest is not None and not args.survivors:
-        exc = ManifestError("--manifest requires --survivors")
+    if args.anchor_manifest is not None and not (args.survivors or args.rules):
+        exc = ManifestError("--manifest requires --survivors or --rules")
         print("could not measure: %s" % exc, file=sys.stderr)
         if args.json:
             print(json.dumps(error_envelope(exc, operation="measure"), indent=2, sort_keys=True))
         return 2
     if args.survivors:
         return _survivors_cli(args, ap)
+    if args.rules:
+        return _rules_cli(args)
     if args.manifest is None:
         ap.error("manifest is required")
     try:
