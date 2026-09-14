@@ -51,6 +51,7 @@ if str(_ROOT) not in sys.path:
 
 import contained_oci as contained  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
+import candidate_diagnostics  # noqa: E402
 import envelope_collection as collection  # noqa: E402
 import effective_envelope  # noqa: E402
 import hosted_packet as packet_delivery  # noqa: E402
@@ -79,6 +80,7 @@ DIAGNOSTIC_DIRNAME = "withheld-diagnostic-package.v0"
 DIAGNOSTIC_MANIFEST_FILENAME = "diagnostic-package.v0.json"
 DIAGNOSTIC_COLLECTION_DIRNAME = "collection"
 DIAGNOSTIC_SCHEMA = "corpus-adequacy.hosted-withhold-diagnostic.v0"
+DIAGNOSTIC_SCHEMA_V1 = "corpus-adequacy.hosted-withhold-diagnostic.v1"
 DIAGNOSTIC_KIND = "hosted-withhold-diagnostic"
 DIAGNOSTIC_PERMISSION = "withheld"
 DIAGNOSTIC_ARTIFACT_CLASS = "quarantined-diagnostic"
@@ -86,11 +88,12 @@ DIAGNOSTIC_DECISIONS = ("withhold", "unavailable", "refuse")
 COLLECTION_PRESENT = "collection_present"
 COLLECTION_ABSENT = "collection_absent"
 MAX_DIAGNOSTIC_MANIFEST_BYTES = 262144
-MAX_DIAGNOSTIC_ENTRIES = collection.MAX_COLLECTION_MEMBERS + 2
+MAX_DIAGNOSTIC_ENTRIES = collection.MAX_COLLECTION_MEMBERS + 3
 MAX_DIAGNOSTIC_PACKAGE_BYTES = (
     collection.MAX_INDEX_BYTES
     + collection.MAX_MEMBER_TOTAL_BYTES
     + MAX_DIAGNOSTIC_MANIFEST_BYTES
+    + candidate_diagnostics.MAX_BYTES
 )
 MAX_RERUN_EVIDENCE_BYTES = 262144
 MAX_RERUN_EVIDENCE_ENTRIES = 256
@@ -144,6 +147,10 @@ DIAGNOSTIC_MANIFEST_KEYS = (
     "workflow_identity", "bindings", "dispatch_bindings", "report_sha256",
     "artifacts", "collection", "non_claims",
 )
+DIAGNOSTIC_MANIFEST_KEYS_V1 = DIAGNOSTIC_MANIFEST_KEYS + ("candidate_diagnostics",)
+CANDIDATE_DIAGNOSTIC_STATE_KEYS = ("state", "artifact")
+CANDIDATE_DIAGNOSTIC_BINDING_KEYS = ("relpath", "bytes", "sha256")
+CANDIDATE_DIAGNOSTIC_STATES = ("present", "unavailable")
 RUN_IDENTITY_KEYS = ("run_id", "run_attempt")
 FILE_DIGEST_KEYS = ("bytes", "sha256")
 COLLECTION_BINDING_KEYS = ("relpath", "index", "members")
@@ -851,7 +858,7 @@ def _report_sha256_from(loaded, candidate_doc):
 
 def _closed_manifest(*, decision, reason, execute_began, collection_state,
                      identity, workflow_identity, bindings, report_sha256,
-                     artifacts, collection_binding):
+                     artifacts, collection_binding, candidate_diagnostic_binding=None):
     if decision not in DIAGNOSTIC_DECISIONS:
         raise HostedPublicationError("diagnostic_decision")
     if type(execute_began) is not bool:
@@ -864,8 +871,9 @@ def _closed_manifest(*, decision, reason, execute_began, collection_state,
             raise HostedPublicationError("collection_state")
     else:
         raise HostedPublicationError("collection_state")
-    return {
-        "schema": DIAGNOSTIC_SCHEMA,
+    result = {
+        "schema": (DIAGNOSTIC_SCHEMA_V1 if candidate_diagnostic_binding is not None
+                   else DIAGNOSTIC_SCHEMA),
         "kind": DIAGNOSTIC_KIND,
         "artifact_class": DIAGNOSTIC_ARTIFACT_CLASS,
         "publication_permission": DIAGNOSTIC_PERMISSION,
@@ -883,13 +891,16 @@ def _closed_manifest(*, decision, reason, execute_began, collection_state,
         "collection": collection_binding,
         "non_claims": list(DIAGNOSTIC_NON_CLAIMS),
     }
+    if candidate_diagnostic_binding is not None:
+        result["candidate_diagnostics"] = candidate_diagnostic_binding
+    return result
 
 
 def finalize_nonpublish_attempt(
         *, out, setup_doc, candidate_doc, decision, reason,
         execute_began, identity, workflow_identity, bindings,
         rerun_log, max_artifact_bytes=MAX_ARTIFACT_BYTES,
-        envelope_doc=None) -> dict:
+        envelope_doc=None, candidate_diagnostic_rows=None) -> dict:
     """One closed diagnostic package, then separately uploaded setup/candidate bytes."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -928,17 +939,52 @@ def finalize_nonpublish_attempt(
                 "collection_state": collection_state,
                 "diagnostic_package_sha256": None,
             }
+        candidate_diagnostic_raw = None
+        candidate_diagnostic_binding = None
+        if candidate_diagnostic_rows:
+            if loaded is None or collection_binding is None or report_sha256 is None:
+                raise HostedPublicationError("candidate_diagnostics_binding")
+            diagnostic_bindings = {
+                "candidate_revision": bindings["candidate_revision"],
+                "runner_revision": bindings["runner_revision"],
+                "image_digest": bindings["image_digest"],
+                "prepare_sha256": loaded["index"]["prepare_sha256"],
+                "report_sha256": report_sha256,
+                "collection_index_sha256": collection_binding["index"]["sha256"],
+                "workflow_run_id": closed_identity["run_id"],
+                "run_attempt": closed_identity["run_attempt"],
+            }
+            try:
+                candidate_diagnostic_raw = candidate_diagnostics.encode_document(
+                    candidate_diagnostics.build_document(
+                        bindings=diagnostic_bindings,
+                        members=list(candidate_diagnostic_rows)))
+            except candidate_diagnostics.DiagnosticError as exc:
+                raise HostedPublicationError("candidate_diagnostics") from exc
+            candidate_diagnostic_binding = {
+                "state": "present",
+                "artifact": {
+                    "relpath": candidate_diagnostics.FILENAME,
+                    "bytes": len(candidate_diagnostic_raw),
+                    "sha256": hashlib.sha256(candidate_diagnostic_raw).hexdigest(),
+                },
+            }
+        elif execute_began:
+            candidate_diagnostic_binding = {"state": "unavailable", "artifact": None}
         manifest = _closed_manifest(
             decision=decision, reason=reason, execute_began=execute_began,
             collection_state=collection_state, identity=closed_identity,
             workflow_identity=workflow_identity, bindings=bindings,
             report_sha256=report_sha256, artifacts=artifacts,
             collection_binding=collection_binding,
+            candidate_diagnostic_binding=candidate_diagnostic_binding,
         )
         manifest_raw = _encode_json(manifest)
         if len(manifest_raw) > MAX_DIAGNOSTIC_MANIFEST_BYTES:
             raise HostedPublicationError("diagnostic_manifest_ceiling")
         package_total = len(manifest_raw)
+        if candidate_diagnostic_raw is not None:
+            package_total += len(candidate_diagnostic_raw)
         if collection_binding is not None:
             package_total += collection_binding["index"]["bytes"]
             package_total += sum(row["bytes"] for row in collection_binding["members"])
@@ -952,6 +998,8 @@ def finalize_nonpublish_attempt(
             raise HostedPublicationError("diagnostic_staging_occupied")
         staging.mkdir()
         (staging / DIAGNOSTIC_MANIFEST_FILENAME).write_bytes(manifest_raw)
+        if candidate_diagnostic_raw is not None:
+            (staging / candidate_diagnostics.FILENAME).write_bytes(candidate_diagnostic_raw)
         if loaded is not None:
             live.rename(staging / DIAGNOSTIC_COLLECTION_DIRNAME)
         staging.rename(dest)
@@ -1098,7 +1146,8 @@ def load_diagnostic_package(directory, *, max_bytes: int = MAX_DIAGNOSTIC_PACKAG
         raise HostedPublicationError("diagnostic_manifest")
     with os.scandir(directory) as entries:
         root_names = {entry.name for entry in entries}
-    allowed = {DIAGNOSTIC_MANIFEST_FILENAME, DIAGNOSTIC_COLLECTION_DIRNAME}
+    allowed = {DIAGNOSTIC_MANIFEST_FILENAME, DIAGNOSTIC_COLLECTION_DIRNAME,
+               candidate_diagnostics.FILENAME}
     if any(name not in allowed for name in root_names):
         raise HostedPublicationError("diagnostic_unexpected_path")
     manifest_path = directory / DIAGNOSTIC_MANIFEST_FILENAME
@@ -1106,8 +1155,16 @@ def load_diagnostic_package(directory, *, max_bytes: int = MAX_DIAGNOSTIC_PACKAG
         raise HostedPublicationError("diagnostic_manifest_ceiling")
     manifest, _manifest_raw = _load_json_file(
         manifest_path, max_bytes=MAX_DIAGNOSTIC_MANIFEST_BYTES)
-    _require_exact(manifest, DIAGNOSTIC_MANIFEST_KEYS, "diagnostic_manifest")
-    if (manifest.get("schema") != DIAGNOSTIC_SCHEMA
+    schema = manifest.get("schema")
+    if schema == DIAGNOSTIC_SCHEMA:
+        _require_exact(manifest, DIAGNOSTIC_MANIFEST_KEYS, "diagnostic_manifest")
+        if candidate_diagnostics.FILENAME in names:
+            raise HostedPublicationError("diagnostic_unexpected_path")
+    elif schema == DIAGNOSTIC_SCHEMA_V1:
+        _require_exact(manifest, DIAGNOSTIC_MANIFEST_KEYS_V1, "diagnostic_manifest")
+    else:
+        raise HostedPublicationError("diagnostic_permission")
+    if (schema not in (DIAGNOSTIC_SCHEMA, DIAGNOSTIC_SCHEMA_V1)
             or manifest.get("kind") != DIAGNOSTIC_KIND
             or manifest.get("artifact_class") != DIAGNOSTIC_ARTIFACT_CLASS
             or manifest.get("publication_permission") != DIAGNOSTIC_PERMISSION):
@@ -1161,11 +1218,74 @@ def load_diagnostic_package(directory, *, max_bytes: int = MAX_DIAGNOSTIC_PACKAG
             raise HostedPublicationError("report_sha256")
     else:
         raise HostedPublicationError("collection_state")
+    loaded_candidate_diagnostics = None
+    if schema == DIAGNOSTIC_SCHEMA_V1:
+        state_doc = manifest.get("candidate_diagnostics")
+        _require_exact(state_doc, CANDIDATE_DIAGNOSTIC_STATE_KEYS,
+                       "candidate_diagnostics")
+        state = state_doc.get("state")
+        if state not in CANDIDATE_DIAGNOSTIC_STATES:
+            raise HostedPublicationError("candidate_diagnostics")
+        descriptor = state_doc.get("artifact")
+        if state == "unavailable":
+            if descriptor is not None or candidate_diagnostics.FILENAME in names:
+                raise HostedPublicationError("candidate_diagnostics")
+            loaded_candidate_diagnostics = {"state": "unavailable", "members": None}
+        else:
+            _require_exact(descriptor, CANDIDATE_DIAGNOSTIC_BINDING_KEYS,
+                           "candidate_diagnostics")
+            if descriptor.get("relpath") != candidate_diagnostics.FILENAME:
+                raise HostedPublicationError("candidate_diagnostics")
+            _require_sha256(descriptor.get("sha256"), "candidate_diagnostics")
+            sidecar_path = directory / candidate_diagnostics.FILENAME
+            try:
+                sidecar_raw = ca.read_bounded_regular_file(
+                    sidecar_path, cap=candidate_diagnostics.MAX_BYTES)
+            except ca.ManifestError as exc:
+                raise HostedPublicationError("candidate_diagnostics") from exc
+            if (len(sidecar_raw) != descriptor.get("bytes")
+                    or hashlib.sha256(sidecar_raw).hexdigest() != descriptor.get("sha256")):
+                raise HostedPublicationError("candidate_diagnostics_digest")
+            if loaded_collection is None or manifest.get("report_sha256") is None:
+                raise HostedPublicationError("candidate_diagnostics_binding")
+            dispatch = manifest.get("bindings")
+            if type(dispatch) is not dict or set(dispatch) != set(DISPATCH_BINDING_KEYS):
+                raise HostedPublicationError("candidate_diagnostics_binding")
+            dispatch = require_bindings(
+                dispatch.get("candidate_revision"), dispatch.get("runner_revision"),
+                dispatch.get("image_digest"))
+            expected_diagnostic_bindings = {
+                "candidate_revision": dispatch["candidate_revision"],
+                "runner_revision": dispatch["runner_revision"],
+                "image_digest": dispatch["image_digest"],
+                "prepare_sha256": loaded_collection["index"]["prepare_sha256"],
+                "report_sha256": manifest["report_sha256"],
+                "collection_index_sha256": manifest["collection"]["index"]["sha256"],
+                "workflow_run_id": identity["run_id"],
+                "run_attempt": identity["run_attempt"],
+            }
+            try:
+                loaded_doc = candidate_diagnostics.load_document(
+                    sidecar_path, expected_bindings=expected_diagnostic_bindings)
+            except candidate_diagnostics.DiagnosticError as exc:
+                raise HostedPublicationError("candidate_diagnostics") from exc
+            diagnostic_members = loaded_doc["members"]
+            collection_entries = loaded_collection["index"]["members"]
+            collection_members = loaded_collection["members"]
+            if (len(diagnostic_members) != len(collection_members)
+                    or [row["ordinal"] for row in diagnostic_members]
+                    != [row["ordinal"] for row in collection_entries]
+                    or [row["candidate_outcome"] for row in diagnostic_members]
+                    != [row["candidate_outcome"] for row in collection_members]):
+                raise HostedPublicationError("candidate_diagnostics_outcome")
+            loaded_candidate_diagnostics = {
+                "state": "present", "members": loaded_doc["members"]}
     digest = hashlib.sha256(_manifest_raw).hexdigest()
     result = dict(manifest)
     result["collection"] = loaded_collection
     result["diagnostic_package_sha256"] = digest
     result["manifest_bytes"] = _manifest_raw
+    result["candidate_diagnostics"] = loaded_candidate_diagnostics
     return result
 
 
@@ -1247,7 +1367,7 @@ def _readback_summary(package) -> dict:
                 "candidate_outcome": member.get("candidate_outcome"),
                 "cleanup": member.get("cleanup"),
             })
-    return {
+    result = {
         "decision": package.get("decision"),
         "collection_state": package.get("collection_state"),
         "attempts": attempts,
@@ -1256,6 +1376,10 @@ def _readback_summary(package) -> dict:
         "publication_permission": DIAGNOSTIC_PERMISSION,
         "member_observations": observations,
     }
+    diagnostic = package.get("candidate_diagnostics")
+    if isinstance(diagnostic, dict):
+        result["candidate_diagnostics"] = list(diagnostic.get("members") or [])
+    return result
 
 
 def _quarantine_current_run_collection(out: Path) -> Path | None:
@@ -1460,6 +1584,7 @@ def default_docker_ready() -> str:
 
 def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
                            envelope_dest, materialize_dest,
+                           diagnostic_sink=None,
                            max_bytes: int = MAX_INPUT_BYTES,
                            rail=LEGACY_RAIL):
     rail = require_rail(rail)
@@ -1475,6 +1600,7 @@ def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
         materialize_dest=Path(materialize_dest),
         root=Path(root),
         envelope_dest=Path(envelope_dest),
+        diagnostic_sink=diagnostic_sink,
         # Explicit: the driver has no default profile; the closed rail selects one.
         execution_profile=rail.execution_profile,
         contract=rail.measurement,
@@ -1633,6 +1759,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     envelope_dest = out / COLLECTION_DIRNAME
+    candidate_diagnostic_rows = []
     if rerun_log is None:
         rerun_log = out / RERUN_EVIDENCE_FILENAME
     else:
@@ -1734,6 +1861,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             pins_dir=pins_resolved,
             root=root or _ROOT,
             envelope_dest=envelope_dest,
+            diagnostic_sink=candidate_diagnostic_rows.append,
             materialize_dest=materialize_dest,
             max_bytes=max_input_bytes,
             **({"rail": rail} if sealed_execute is None else {}),
@@ -1835,7 +1963,8 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             decision="withhold", reason=withheld_reason, execute_began=execute_began,
             identity=identity, workflow_identity=workflow_identity,
             bindings=bindings, rerun_log=rerun_log,
-            max_artifact_bytes=max_artifact_bytes)
+            max_artifact_bytes=max_artifact_bytes,
+            candidate_diagnostic_rows=(candidate_diagnostic_rows or None))
         return decision
     setup_doc = setup_status_doc(
         status="ready", reason="publication-permitted", bindings=bindings,

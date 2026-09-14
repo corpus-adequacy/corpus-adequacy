@@ -163,11 +163,14 @@ class DriverHappyPath(unittest.TestCase):
                     mock.patch.object(driver.ca, "load_manifest_bytes", return_value=manifest) as load, \
                     mock.patch.object(driver.runtime, "make_sealed_backend", return_value=backend_value) as backend, \
                     mock.patch.object(driver.execute, "run_execution_funnel", return_value=expected) as funnel:
+                diagnostic_rows = []
+                diagnostic_sink = diagnostic_rows.append
                 result = driver.run_authorized(
                     authorize_raw=authorize_raw, prepare_raw=prepare_raw,
                     pins_dir=PREREG, materialize_dest=dest,
                     root=REPO_ROOT, transport=object(),
-                    execution_profile="contained-oci-v0")
+                    execution_profile="contained-oci-v0",
+                    diagnostic_sink=diagnostic_sink)
         self.assertIs(result, expected)
         self.assertEqual(materialize.call_count, 1)
         self.assertEqual(materialize.call_args.args[1], dest)
@@ -176,6 +179,7 @@ class DriverHappyPath(unittest.TestCase):
         self.assertEqual(load.call_args.kwargs["path_root"], dest)
         self.assertEqual(backend.call_args.kwargs["prepare_raw"], prepare_raw)
         self.assertEqual(backend.call_args.kwargs["execution_profile"], "contained-oci-v0")
+        self.assertIs(backend.call_args.kwargs["diagnostic_sink"], diagnostic_sink)
         funnel.assert_called_once()
         self.assertIs(funnel.call_args.kwargs["execution_backend"], backend_value)
         self.assertEqual(funnel.call_args.kwargs["execution_profile"], "contained-oci-v0")

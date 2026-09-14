@@ -580,6 +580,60 @@ class HostileWorkflowRefusals(unittest.TestCase):
 
 
 class PublicationDecisionAndArtifacts(unittest.TestCase):
+    def _execute_began_without_collection(self, exc):
+        temporary = tempfile.TemporaryDirectory()
+        base = Path(temporary.name)
+        packet = base / "packet"
+        packet.mkdir()
+        rels = _write_packet(packet)
+
+        def execute(**_kwargs):
+            raise exc
+
+        environ = {
+            "GITHUB_SHA": RUNNER, "GITHUB_WORKFLOW_SHA": RUNNER,
+            "GITHUB_RUN_ID": "1001", "GITHUB_RUN_ATTEMPT": "2",
+        }
+        return temporary, base, rels, execute, environ
+
+    def test_execute_began_unavailable_emits_v1_unavailable_diagnostics(self):
+        temporary, base, rels, execute, environ = self._execute_began_without_collection(
+            RuntimeError("synthetic infrastructure failure"))
+        with temporary:
+            decision = _run_ok(
+                base, "packet", rels, execute=execute, environ=environ)
+            self.assertEqual(decision["decision"], "unavailable")
+            out = base / "artifacts"
+            loaded = hosted.load_hosted_attempt_artifacts(
+                setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                diagnostic_dir=out / hosted.DIAGNOSTIC_DIRNAME,
+                expected_bindings=BINDINGS, expected_run_id="1001",
+                expected_run_attempt="2")
+            self.assertEqual(loaded["package"]["schema"], hosted.DIAGNOSTIC_SCHEMA_V1)
+            self.assertEqual(loaded["package"]["candidate_diagnostics"], {
+                "state": "unavailable", "members": None})
+
+    def test_post_execute_refusal_emits_v1_unavailable_diagnostics(self):
+        temporary, base, rels, execute, environ = self._execute_began_without_collection(
+            hosted.HostedPublicationError("synthetic-post-execute"))
+        with temporary:
+            with self.assertRaisesRegex(hosted.HostedPublicationError,
+                                        "synthetic-post-execute"):
+                _run_ok(base, "packet", rels, execute=execute, environ=environ)
+            out = base / "artifacts"
+            loaded = hosted.load_hosted_attempt_artifacts(
+                setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                diagnostic_dir=out / hosted.DIAGNOSTIC_DIRNAME,
+                expected_bindings=BINDINGS, expected_run_id="1001",
+                expected_run_attempt="2")
+            self.assertEqual(loaded["package"]["schema"], hosted.DIAGNOSTIC_SCHEMA_V1)
+            self.assertEqual(loaded["package"]["candidate_diagnostics"], {
+                "state": "unavailable", "members": None})
+
     def test_verified_envelope_only_publication_guard(self):
         self.assertEqual(
             hosted.publication_decision(_permitted_envelope(), setup_status="ready")["decision"],

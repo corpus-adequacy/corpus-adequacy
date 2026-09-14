@@ -20,6 +20,7 @@ import aee_checker_sealed_common as common  # noqa: E402
 import aee_checker_sealed_runtime as runtime  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
+import envelope_collection as collection  # noqa: E402
 
 PREPARE_V0 = REPO_ROOT / "measurements" / "aee-go-run" / "prepare.v0.json"
 
@@ -413,6 +414,67 @@ class ClosedUnprovedRuntime(unittest.TestCase):
         result = self._backend_result(completed)
         self.assertEqual(result.raised, {})
         self.assertEqual(result.detail, "sealed candidate completed")
+
+    def test_diagnostic_sink_receives_only_closed_reason_and_ordinal(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=75, stdout="/host/secret", stderr="trace")
+        completed.unproved_reason = "inner-exit"
+        rows = []
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            materialized = {key: root / key for key in ("corpus", "vendor", "tool")}
+            for path in materialized.values():
+                path.mkdir()
+            subject = root / "subject"
+            subject.mkdir()
+            manifest = {
+                "_repo_root": subject,
+                "accepted_exit_codes": [0], "unproved_exit_codes": [75],
+                "runner": "batch", "outcome_from": ["rows"],
+                "build": list(runtime.candidate.CONTAINER_BUILD),
+                "entrypoint_command": list(runtime.candidate.CONTAINER_ENTRYPOINT),
+            }
+            with mock.patch.object(
+                    runtime.candidate, "run_sealed_candidate", return_value=completed):
+                backend = runtime.make_sealed_backend(
+                    prepare_raw=_prepare_v1(), materialized=materialized,
+                    execution_profile="contained-oci-v0", ledger=collection.Ledger(),
+                    diagnostic_sink=rows.append)
+                backend(manifest, [{"vector_id": "<batch>"}], rebuild=True)
+        self.assertEqual(rows, [{
+            "ordinal": 0, "candidate_outcome": "unproved",
+            "unproved_reason": "inner-exit",
+        }])
+        self.assertNotIn("/host/secret", repr(rows))
+
+    def test_diagnostic_sink_replaces_foreign_reason_with_unknown(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=75, stdout="/host/secret", stderr="trace")
+        completed.unproved_reason = "/host/secret"
+        rows = []
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            materialized = {key: root / key for key in ("corpus", "vendor", "tool")}
+            for path in materialized.values():
+                path.mkdir()
+            subject = root / "subject"
+            subject.mkdir()
+            manifest = {
+                "_repo_root": subject,
+                "accepted_exit_codes": [0], "unproved_exit_codes": [75],
+                "runner": "batch", "outcome_from": ["rows"],
+                "build": list(runtime.candidate.CONTAINER_BUILD),
+                "entrypoint_command": list(runtime.candidate.CONTAINER_ENTRYPOINT),
+            }
+            with mock.patch.object(
+                    runtime.candidate, "run_sealed_candidate", return_value=completed):
+                runtime.make_sealed_backend(
+                    prepare_raw=_prepare_v1(), materialized=materialized,
+                    execution_profile="contained-oci-v0", ledger=collection.Ledger(),
+                    diagnostic_sink=rows.append)(
+                        manifest, [{"vector_id": "<batch>"}], rebuild=True)
+        self.assertEqual(rows[0]["unproved_reason"], "unknown")
+        self.assertNotIn("/host/secret", repr(rows))
 
 
 class ClosedUnprovedVoidSuffix(unittest.TestCase):

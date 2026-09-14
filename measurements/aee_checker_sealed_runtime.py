@@ -7,6 +7,7 @@ from pathlib import Path
 
 import corpus_adequacy as ca
 import aee_checker_sealed_candidate as candidate
+import candidate_diagnostics as diagnostics
 from aee_checker_sealed_common import PrepareError
 from aee_checker_sealed_run import load_prepare_for_profile
 from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT
@@ -14,6 +15,7 @@ from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT
 
 def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_profile,
                         transport=None, envelope_sink=None, ledger=None,
+                        diagnostic_sink=None,
                         contract=AEE_CHECKER_SEALED_CONTRACT):
     """Return a backend that executes only the PREPARE-bound sealed candidate.
 
@@ -30,6 +32,8 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
     if type(prepare_raw) is not bytes or any(
             not isinstance(materialized.get(key), Path) for key in required):
         raise PrepareError("sealed runtime materialization")
+    if diagnostic_sink is not None and ledger is None:
+        raise PrepareError("candidate diagnostics require invocation ledger")
     binding = None
     if envelope_sink is not None:
         prepare = load_prepare_for_profile(
@@ -89,7 +93,15 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
             envelope_sink(record)
         outcome, diagnostic, kind = ca.child_outcome(execution_manifest, completed)
         seen = execution_manifest.get("_selector_keys_seen", {})
-        reason = ca.sanitize_unproved_reason(getattr(completed, "unproved_reason", None))
+        raw_reason = getattr(completed, "unproved_reason", None)
+        reason = ca.sanitize_unproved_reason(raw_reason)
+        if diagnostic_sink is not None:
+            candidate_outcome = (
+                record.get("candidate_outcome") if isinstance(record, dict)
+                else ("unproved" if kind is not None else "completed"))
+            diagnostic_sink(diagnostics.observation(
+                ordinal, candidate_outcome,
+                raw_reason if candidate_outcome != "completed" else None))
         if kind is not None:
             detail = reason if (kind == "unproved" and reason) else "sealed candidate completed"
             return ca._ProcessExecution(
