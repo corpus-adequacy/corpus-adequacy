@@ -1,0 +1,36 @@
+{
+  "authoring": {
+    "candidate_builder": "Rul1an",
+    "candidate_outcomes_seen": false,
+    "mutation_author": "Codex delegated selection writer",
+    "relationship": "independent"
+  },
+  "authorship_non_claim": "Names are descriptive and unauthenticated.",
+  "candidate_freeze": {
+    "selection_base": "95365a731d6abdca8a43f23553d228dbcf077d27",
+    "sha256": {
+      "fixtures/contained-v1-owned/candidate/src/check.rs": "27063bf9ca3ae862121e456105c9af943bafd46dca1b9600a3603ea9a4a8c5c9",
+      "fixtures/contained-v1-owned/corpus/vectors/MANIFEST.json": "979b9367f9662d2df45ec1078f0b4b4466e77a0dca163ea19ca2a60c44c267ec",
+      "fixtures/contained-v1-owned/corpus/vectors/allow.json": "e1a0149d8f579ff00de0e4abe2a7aaed95a9bbb4b987a8a7b8f3e97713cb2854",
+      "fixtures/contained-v1-owned/corpus/vectors/boundary.json": "8c80d63385a4c0e597f162d68c0407a3d03f8f37b9fd4ff1d0b136279950447a",
+      "fixtures/contained-v1-owned/corpus/vectors/negative.json": "1dee49a803f0b1d4ce4845bac187c0640935ec03630229113d66d9e19f703bfd",
+      "fixtures/contained-v1-owned/corpus/vectors/over-limit.json": "6161c51b4b23291fe486ad3ab8f3e83ce9809e21266846610066666200f64a5f",
+      "measurements/owned-contained-v1/manifest.json": "d73dbef6b535bc61ecb8855a59bed8228c760fc9c978d6e26dc50b3162c8ac26"
+    },
+    "source_commit": "0e69b834aa62c7f0fb2bff331884d6ee66a97bfe"
+  },
+  "conceptual_counterexample": {
+    "included_in_corpus": false,
+    "maximum": 10,
+    "value": 12
+  },
+  "execution_observed": false,
+  "mutation": {
+    "anchor": "if value > maximum",
+    "id": "upper-guard-first-overflow-only",
+    "label": "truncate owned-fixture upper guard to the first value above maximum",
+    "replacement": "if value > maximum && value <= maximum.saturating_add(1)",
+    "scope": "declared"
+  },
+  "schema": "corpus-adequacy.mutation-bundle.v0"
+}

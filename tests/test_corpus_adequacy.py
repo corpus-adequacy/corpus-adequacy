@@ -62,6 +62,17 @@ def _batch_python() -> str:
     return sys.executable
 
 
+def _normalized_manifest_sizes(
+        repository: Path, manifests: list[str], *, cap=None) -> dict:
+    observed = {}
+    for name in manifests:
+        raw = ca.read_bounded_regular_file(repository / name, cap=cap)
+        with io.TextIOWrapper(
+                io.BytesIO(raw), encoding="utf-8", newline=None) as stream:
+            observed[name] = len(stream.read().encode("utf-8"))
+    return observed
+
+
 def _assert_process_batch_lock_verdict(test: unittest.TestCase, rep: dict) -> None:
     """A completed process/batch score is only legal when the lock was available.
 
@@ -4356,14 +4367,26 @@ class PositionalManifestInputBounds(unittest.TestCase):
             "fixtures/algovoi-jcs-edge-aa53149c/manifest.json": 43225,
             "measurements/aee-checker-25b9dfa/manifest.json": 2952,
             "measurements/owned-contained-v1/manifest.json": 1846,
+            "measurements/owned-independent-v0/manifest.json": 1759,
             "measurements/tersign-0e560c1/manifest.json": 4502,
             "measurements/tersign-1cc5ea32/manifest.json": 4502,
         }
         self.assertEqual(manifests, sorted(expected))
-        observed = {name: (repository / name).stat().st_size for name in manifests}
+        observed = _normalized_manifest_sizes(repository, manifests)
         self.assertEqual(observed, expected)
         self.assertEqual(max(observed.values()), 43225)
         self.assertLess(max(observed.values()), ca.OUTPUT_CAP_BYTES)
+
+        canonical = b'{\n  "value": 1\n}\n'
+        crlf = canonical.replace(b"\n", b"\r\n")
+        cap = len(canonical) + 1
+        self.assertLess(len(canonical), cap)
+        self.assertGreater(len(crlf), cap)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "near-cap.json").write_bytes(crlf)
+            with self.assertRaisesRegex(ca.ManifestError, "exceeds the input cap"):
+                _normalized_manifest_sizes(root, ["near-cap.json"], cap=cap)
 
     def _assert_loader_route_preserves_report_bytes(self, runner):
         fixture = ReportShapeParityAcrossRunners()
