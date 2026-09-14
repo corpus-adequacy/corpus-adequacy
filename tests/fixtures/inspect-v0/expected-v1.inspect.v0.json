@@ -53,14 +53,23 @@
     },
     "runner": "process",
     "selectors": {
-      "diagnostic_from": [
-        "detail"
-      ],
-      "outcome_from": [
-        "verdict",
-        "reason"
-      ],
-      "outcome_parse": null
+      "diagnostic_from": {
+        "status": "declared",
+        "value": [
+          "detail"
+        ]
+      },
+      "outcome_from": {
+        "status": "declared",
+        "value": [
+          "verdict",
+          "reason"
+        ]
+      },
+      "outcome_parse": {
+        "status": "absent",
+        "value": null
+      }
     },
     "vectors": "vectors.json"
   },

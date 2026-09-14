@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import io
 import json
 import os
@@ -42,6 +43,78 @@ class ManifestInspection(unittest.TestCase):
             with mock.patch.object(ca, "bind_manifest_files", side_effect=lambda m, *a, **k: m):
                 ca.load_manifest_bytes(raw, Path("manifest.json"))
             self.assertEqual(parser.call_count, 1)
+
+    def test_binder_returns_a_distinct_mapping_without_mutating_declaration(self):
+        raw = fixture("manifest.v0.json")
+        declaration = ca.parse_manifest_declaration(raw)
+        before = copy.deepcopy(declaration)
+        bound = ca.bind_manifest_files(
+            declaration, Path("manifest.json"), path_root=Path("fixture-root"))
+        self.assertEqual(declaration, before)
+        self.assertIsNot(bound, declaration)
+        self.assertIs(bound["_rule_inventory"], declaration["_rule_inventory"])
+        self.assertEqual(
+            bound,
+            ca.load_manifest_bytes(
+                raw, Path("manifest.json"), path_root=Path("fixture-root")))
+
+    def test_selector_presence_distinguishes_absent_empty_and_nonempty(self):
+        manifest = json.loads(fixture("manifest.v0.json"))
+        manifest.update({
+            "runner": "batch",
+            "entrypoint_command": ["python3", "runner.py"],
+            "outcome_parse": "test-names",
+            "accepted_exit_codes": [0, 101],
+        })
+
+        absent = ca.inspect_manifest_declaration(json.dumps(manifest).encode())
+        manifest["outcome_from"] = []
+        empty = ca.inspect_manifest_declaration(json.dumps(manifest).encode())
+        manifest["outcome_from"] = ["verdict", "reason"]
+        nonempty = ca.inspect_manifest_declaration(json.dumps(manifest).encode())
+
+        self.assertEqual(absent["declared"]["selectors"]["outcome_from"], {
+            "status": "absent", "value": None})
+        self.assertEqual(empty["declared"]["selectors"]["outcome_from"], {
+            "status": "declared", "value": []})
+        self.assertEqual(nonempty["declared"]["selectors"]["outcome_from"], {
+            "status": "declared", "value": ["verdict", "reason"]})
+        self.assertNotEqual(absent["declared"]["selectors"],
+                            empty["declared"]["selectors"])
+        selector_bytes = [
+            json.dumps(doc["declared"]["selectors"], sort_keys=True,
+                       separators=(",", ":")).encode()
+            for doc in (absent, empty, nonempty)
+        ]
+        self.assertEqual(selector_bytes, [
+            (b'{"diagnostic_from":{"status":"absent","value":null},'
+             b'"outcome_from":{"status":"absent","value":null},'
+             b'"outcome_parse":{"status":"declared","value":"test-names"}}'),
+            (b'{"diagnostic_from":{"status":"absent","value":null},'
+             b'"outcome_from":{"status":"declared","value":[]},'
+             b'"outcome_parse":{"status":"declared","value":"test-names"}}'),
+            (b'{"diagnostic_from":{"status":"absent","value":null},'
+             b'"outcome_from":{"status":"declared","value":["verdict","reason"]},'
+             b'"outcome_parse":{"status":"declared","value":"test-names"}}'),
+        ])
+
+    def test_selector_status_value_grammar_is_closed(self):
+        doc = ca.inspect_manifest_declaration(fixture("manifest.v1.json"))
+        doc["declared"]["selectors"]["outcome_from"] = 7
+        with self.assertRaisesRegex(ca.ManifestError, "inspection selector"):
+            ca.encode_inspect_v0(doc)
+
+        doc = ca.inspect_manifest_declaration(fixture("manifest.v1.json"))
+        doc["declared"]["selectors"]["outcome_from"] = {
+            "status": "declared", "value": {"unexpected": "shape"}}
+        with self.assertRaisesRegex(ca.ManifestError, "inspection selector"):
+            ca.encode_inspect_v0(doc)
+
+        doc = ca.inspect_manifest_declaration(fixture("manifest.v0.json"))
+        doc["declared"]["selectors"]["outcome_parse"] = {
+            "status": "absent", "value": []}
+        with self.assertRaisesRegex(ca.ManifestError, "inspection selector"):
+            ca.encode_inspect_v0(doc)
 
     def test_declaration_refusal_precedes_binding(self):
         raw = json.dumps({"schema": ca.SCHEMA, "vectors": "missing", "implementation":

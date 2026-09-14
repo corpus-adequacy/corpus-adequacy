@@ -2515,6 +2515,9 @@ def parse_manifest_declaration(manifest_bytes: bytes) -> dict:
     if type(manifest_bytes) is not bytes:
         raise ManifestError("manifest bytes must be bytes")
     m = load_json_document(manifest_bytes, root=dict, where="manifest")
+    m["_declared_selector_keys"] = tuple(
+        key for key in ("outcome_from", "diagnostic_from", "outcome_parse")
+        if key in m)
     if m.get("schema") not in (SCHEMA, MANIFEST_V1_SCHEMA):
         raise ManifestError(
             "schema must be %r or %r, got %r"
@@ -2683,9 +2686,9 @@ def parse_manifest_declaration(manifest_bytes: bytes) -> dict:
 def bind_manifest_files(declaration: dict, artifact_path: Path, *,
                         path_root: Path | None = None) -> dict:
     """Bind a validated declaration to filesystem inputs for measurement."""
-    # The normal loader owns this fresh parser result. Adding private binding
-    # fields in place preserves the historical one-object loader contract.
-    m = declaration
+    # Binding adds only top-level private fields. Keep the validated declaration
+    # observable as the parser returned it while preserving nested identities.
+    m = declaration.copy()
     path = Path(artifact_path)
     base = Path(path_root) if path_root is not None else path.parent
     m["_impl_path"] = ((base / m["implementation"]).resolve()
@@ -2784,10 +2787,13 @@ def inspect_manifest_declaration(manifest_bytes: bytes) -> dict:
                     "label": label_identity(entry),
                     "polarity": _control_polarity(entry),
                 })
+    present_selectors = frozenset(m["_declared_selector_keys"])
     selectors = {
-        "outcome_from": copy.deepcopy(m.get("outcome_from")),
-        "diagnostic_from": copy.deepcopy(m.get("diagnostic_from")),
-        "outcome_parse": copy.deepcopy(m.get("outcome_parse")),
+        key: {
+            "status": "declared" if key in present_selectors else "absent",
+            "value": copy.deepcopy(m.get(key)) if key in present_selectors else None,
+        }
+        for key in ("outcome_from", "diagnostic_from", "outcome_parse")
     }
     static_tail = ("rule-inventory" if m["schema"] == MANIFEST_V1_SCHEMA
                    else "rule-inventory-absent")
@@ -2861,9 +2867,37 @@ def _require_inspect_v0(doc: dict) -> None:
     if sources is not None and (not isinstance(sources, list)
                                 or not all(isinstance(v, str) for v in sources)):
         raise ManifestError("inspection implementation_sources must be strings or null")
+    require_shape(declared["selectors"], dict, "inspection selectors")
     _require_closed_keys(declared["selectors"], _INSPECT_SELECTOR_KEYS, _INSPECT_SELECTOR_KEYS,
                          missing_token="inspection selectors missing key",
                          extra_token="inspection selectors extra key")
+    for key, selector in declared["selectors"].items():
+        require_shape(selector, dict, "inspection selector %s" % key)
+        _require_closed_keys(
+            selector, _INSPECT_STATUS_KEYS, _INSPECT_STATUS_KEYS,
+            missing_token="inspection selector missing key",
+            extra_token="inspection selector extra key")
+        status, value = selector["status"], selector["value"]
+        if status == "absent":
+            if value is not None:
+                raise ManifestError("absent inspection selector %s must be null" % key)
+            continue
+        if status != "declared":
+            raise ManifestError("inspection selector %s status is invalid" % key)
+        if key == "outcome_parse":
+            if not isinstance(value, str) or not value:
+                raise ManifestError(
+                    "declared inspection selector outcome_parse must be a string")
+            continue
+        valid_string = isinstance(value, str) and bool(value)
+        valid_list = (isinstance(value, list)
+                      and all(isinstance(member, str) and member for member in value))
+        if not (valid_string or valid_list):
+            raise ManifestError(
+                "declared inspection selector %s must be a string or list of strings" % key)
+        if key == "diagnostic_from" and value == []:
+            raise ManifestError(
+                "declared inspection selector diagnostic_from must not be empty")
     require_shape(declared["controls"], list, "inspection controls")
     for control in declared["controls"]:
         _require_closed_keys(control, _INSPECT_CONTROL_KEYS, _INSPECT_CONTROL_KEYS,

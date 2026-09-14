@@ -33,9 +33,18 @@
     "rule_inventory": null,
     "runner": "module",
     "selectors": {
-      "diagnostic_from": null,
-      "outcome_from": null,
-      "outcome_parse": null
+      "diagnostic_from": {
+        "status": "absent",
+        "value": null
+      },
+      "outcome_from": {
+        "status": "absent",
+        "value": null
+      },
+      "outcome_parse": {
+        "status": "absent",
+        "value": null
+      }
     },
     "vectors": "vectors.json"
   },

@@ -42,7 +42,9 @@ python3 examples/reason-token-projections/walkthrough.py
 `--inspect` bounded-reads one regular manifest file and validates only the
 declarations in those exact bytes. Its JSON form is the closed,
 deterministic `corpus-adequacy.inspect.v0` document. It keeps declared values,
-static checks, runtime-unchecked facts, and review judgments separate;
+static checks, runtime-unchecked facts, and review judgments separate. Each
+selector is closed as `{status, value}` so an absent declaration remains
+distinct from an explicitly declared empty or non-empty selector;
 operator profile and contained resource settings are unavailable because the
 manifest does not carry them. Manifest v0 reports rule inventory as absent,
 while v1 summarizes only its validated author-declared inventory. Inspection
