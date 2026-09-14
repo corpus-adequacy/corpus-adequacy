@@ -749,6 +749,11 @@ def _upload_selection_containing(tree, fragment):
     raise AssertionError("no upload step containing %r" % fragment)
 
 
+def _posix_relative(path, root) -> str:
+    """Relative upload member names in the closed `/` contract, host-independent."""
+    return path.relative_to(root).as_posix()
+
+
 def _select(workspace: Path, path_value: str):
     """Resolve an upload-artifact `path:` over a real tree, as the uploader would.
 
@@ -762,7 +767,7 @@ def _select(workspace: Path, path_value: str):
     rel = path_value.rstrip("/")
     target = workspace / rel
     if target.is_dir():
-        return {str(f.relative_to(target)) for f in target.rglob("*") if f.is_file()}
+        return {_posix_relative(f, target) for f in target.rglob("*") if f.is_file()}
     return {target.name} if target.is_file() else set()
 
 
@@ -900,6 +905,16 @@ class UploadSelectionRetainsEveryMember(unittest.TestCase):
 
 class DiagnosticPackageUploadSelection(unittest.TestCase):
     """The failure upload must select the closed package, not a source-string only."""
+
+    def test_posix_relative_uses_forward_slashes_on_windows_shape(self):
+        from pathlib import PureWindowsPath
+
+        root = PureWindowsPath(r"C:\workspace\artifacts") / DIAGNOSTIC_PACKAGE_DIRNAME
+        member = root / "collection" / collection.INDEX_FILENAME
+        self.assertEqual(
+            _posix_relative(member, root),
+            "collection/" + collection.INDEX_FILENAME,
+        )
 
     def test_workflow_path_selects_manifest_index_and_every_member(self):
         from tests.test_contained_hosted_publication import (
