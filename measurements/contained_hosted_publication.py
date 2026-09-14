@@ -380,7 +380,7 @@ def resolve_confined_input(root, relpath, *, max_bytes: int | None = None) -> Pa
     return resolved
 
 
-def load_json_confined(root, relpath, *, max_bytes: int):
+def _load_json_confined_bytes(root, relpath, *, max_bytes: int):
     """Size-check then read+parse JSON under a confined root (before loads)."""
     path = resolve_confined_input(root, relpath, max_bytes=max_bytes)
     try:
@@ -391,6 +391,12 @@ def load_json_confined(root, relpath, *, max_bytes: int):
         doc = json.loads(raw.decode("utf-8"))
     except (UnicodeError, ValueError) as exc:
         raise HostedPublicationError("json_input") from exc
+    return doc, raw
+
+
+def load_json_confined(root, relpath, *, max_bytes: int):
+    """Size-check then read+parse JSON under a confined root (before loads)."""
+    doc, _raw = _load_json_confined_bytes(root, relpath, max_bytes=max_bytes)
     return doc
 
 
@@ -630,12 +636,12 @@ def _is_decimal_id(value) -> bool:
 def _require_run_identity(identity) -> dict:
     if type(identity) is not dict:
         raise HostedPublicationError("run_identity")
+    if set(identity) != set(RUN_IDENTITY_KEYS):
+        raise HostedPublicationError("run_identity")
     closed = {
         "run_id": identity.get("run_id"),
         "run_attempt": identity.get("run_attempt"),
     }
-    if set(closed) != set(RUN_IDENTITY_KEYS):
-        raise HostedPublicationError("run_identity")
     if not _is_decimal_id(closed["run_id"]) or not _is_decimal_id(closed["run_attempt"]):
         raise HostedPublicationError("run_identity")
     return closed
@@ -673,7 +679,7 @@ def _is_member_filename(name: str) -> bool:
 
 def _load_json_file(path, *, max_bytes: int):
     path = Path(path)
-    return load_json_confined(path.parent, path.name, max_bytes=max_bytes)
+    return _load_json_confined_bytes(path.parent, path.name, max_bytes=max_bytes)
 
 
 def _preflight_files(root: Path, *, max_entries: int, max_total: int) -> list[Path]:
@@ -960,29 +966,39 @@ def finalize_nonpublish_attempt(
         raise
 
 
-def load_setup_status(path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
-    doc = _load_json_file(path, max_bytes=max_bytes)
+def _load_setup_status(path, *, max_bytes: int = MAX_INPUT_BYTES):
+    doc, raw = _load_json_file(path, max_bytes=max_bytes)
     _require_exact(doc, SETUP_STATUS_KEYS, "setup_status")
     if doc.get("schema") != HOSTED_SCHEMA or doc.get("kind") != "setup-status":
         raise HostedPublicationError("setup_status")
+    return doc, raw
+
+
+def load_setup_status(path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
+    doc, _raw = _load_setup_status(path, max_bytes=max_bytes)
     return doc
 
 
-def load_candidate_result(path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
-    doc = _load_json_file(path, max_bytes=max_bytes)
+def _load_candidate_result(path, *, max_bytes: int = MAX_INPUT_BYTES):
+    doc, raw = _load_json_file(path, max_bytes=max_bytes)
     kind = doc.get("kind")
     if kind == "void-hosted-result":
         _require_exact(doc, VOID_CANDIDATE_KEYS, "candidate_result")
         if doc.get("schema") != HOSTED_SCHEMA:
             raise HostedPublicationError("candidate_result")
-        return doc
+        return doc, raw
     if kind != "hosted-candidate-result":
         raise HostedPublicationError("candidate_result")
     if doc.get("schema") == HOSTED_SCHEMA:
         _require_exact(doc, LEGACY_CANDIDATE_KEYS, "candidate_result")
-        return doc
+        return doc, raw
     _require_exact(doc, OWNED_CANDIDATE_KEYS, "candidate_result")
     _require_sha256(doc.get("report_sha256"), "report_sha256")
+    return doc, raw
+
+
+def load_candidate_result(path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
+    doc, _raw = _load_candidate_result(path, max_bytes=max_bytes)
     return doc
 
 
@@ -1055,9 +1071,9 @@ def load_rerun_evidence(path, *, max_bytes: int = MAX_RERUN_EVIDENCE_BYTES,
     if (start.get("run_id") != terminal.get("run_id")
             or start.get("run_attempt") != terminal.get("run_attempt")):
         raise HostedPublicationError("attempt_binding")
+    for entry in entries:
+        _require_bindings_pair(entry.get("bindings"), entry.get("dispatch_bindings"))
     if start.get("bindings") != terminal.get("bindings"):
-        raise HostedPublicationError("bindings")
-    if start.get("dispatch_bindings") != terminal.get("dispatch_bindings"):
         raise HostedPublicationError("bindings")
     _require_run_identity({"run_id": terminal.get("run_id"),
                             "run_attempt": terminal.get("run_attempt")})
@@ -1079,7 +1095,8 @@ def load_diagnostic_package(directory, *, max_bytes: int = MAX_DIAGNOSTIC_PACKAG
     manifest_path = directory / DIAGNOSTIC_MANIFEST_FILENAME
     if manifest_path.lstat().st_size > MAX_DIAGNOSTIC_MANIFEST_BYTES:
         raise HostedPublicationError("diagnostic_manifest_ceiling")
-    manifest = _load_json_file(manifest_path, max_bytes=MAX_DIAGNOSTIC_MANIFEST_BYTES)
+    manifest, _manifest_raw = _load_json_file(
+        manifest_path, max_bytes=MAX_DIAGNOSTIC_MANIFEST_BYTES)
     _require_exact(manifest, DIAGNOSTIC_MANIFEST_KEYS, "diagnostic_manifest")
     if (manifest.get("schema") != DIAGNOSTIC_SCHEMA
             or manifest.get("kind") != DIAGNOSTIC_KIND
@@ -1135,19 +1152,19 @@ def load_diagnostic_package(directory, *, max_bytes: int = MAX_DIAGNOSTIC_PACKAG
             raise HostedPublicationError("report_sha256")
     else:
         raise HostedPublicationError("collection_state")
-    raw, digest = _digest_file(manifest_path, cap=MAX_DIAGNOSTIC_MANIFEST_BYTES)
+    digest = hashlib.sha256(_manifest_raw).hexdigest()
     result = dict(manifest)
     result["collection"] = loaded_collection
     result["diagnostic_package_sha256"] = digest
-    result["manifest_bytes"] = raw
+    result["manifest_bytes"] = _manifest_raw
     return result
 
 
 def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
                                  diagnostic_dir, expected_bindings,
                                  expected_run_id, expected_run_attempt) -> dict:
-    setup = load_setup_status(setup_path)
-    candidate = load_candidate_result(candidate_path)
+    setup, setup_raw = _load_setup_status(setup_path)
+    candidate, candidate_raw = _load_candidate_result(candidate_path)
     package = load_diagnostic_package(diagnostic_dir)
     entries = load_rerun_evidence(rerun_path)
     expected = _require_bindings_pair(
@@ -1159,8 +1176,9 @@ def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
                            expected)
     start = entries[0]
     terminal = entries[-1]
-    if start.get("bindings") != expected or terminal.get("bindings") != expected:
-        raise HostedPublicationError("bindings")
+    _require_bindings_pair(start.get("bindings"), start.get("dispatch_bindings"), expected)
+    _require_bindings_pair(terminal.get("bindings"), terminal.get("dispatch_bindings"),
+                           expected)
     identity = _require_run_identity({
         "run_id": expected_run_id,
         "run_attempt": expected_run_attempt,
@@ -1176,8 +1194,6 @@ def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
         raise HostedPublicationError("workflow_identity")
     if package.get("workflow_identity") != start.get("workflow_identity"):
         raise HostedPublicationError("workflow_identity")
-    setup_raw = Path(setup_path).read_bytes()
-    candidate_raw = Path(candidate_path).read_bytes()
     declared = package["artifacts"]
     if hashlib.sha256(setup_raw).hexdigest() != declared[SETUP_STATUS_FILENAME]["sha256"]:
         raise HostedPublicationError("diagnostic_artifacts")
@@ -1200,6 +1216,8 @@ def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
         raise HostedPublicationError("diagnostic_decision")
     if terminal.get("collection_state") != package.get("collection_state"):
         raise HostedPublicationError("collection_state")
+    if _require_reason(terminal.get("reason")) != package.get("reason"):
+        raise HostedPublicationError("reason")
     if package.get("decision") not in DIAGNOSTIC_DECISIONS:
         raise HostedPublicationError("diagnostic_decision")
     return {

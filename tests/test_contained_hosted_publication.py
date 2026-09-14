@@ -2269,6 +2269,34 @@ class WithheldDiagnosticPackage(unittest.TestCase):
         shutil.copy2(out / hosted.RERUN_EVIDENCE_FILENAME, dest / hosted.RERUN_EVIDENCE_FILENAME)
         shutil.copytree(self._package(out), dest / hosted.DIAGNOSTIC_DIRNAME)
 
+    def _attempt_kwargs(self, out: Path):
+        return dict(
+            setup_path=out / hosted.SETUP_STATUS_FILENAME,
+            candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+            rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+            diagnostic_dir=self._package(out),
+            expected_bindings={
+                "candidate_revision": CANDIDATE,
+                "runner_revision": RUNNER,
+                "image_digest": IMAGE,
+            },
+            expected_run_id=HOSTED_RUN_ID,
+            expected_run_attempt=HOSTED_RUN_ATTEMPT,
+        )
+
+    def _rewrite_rerun(self, log: Path, mutate_start=None, mutate_terminal=None):
+        lines = [line for line in log.read_bytes().splitlines() if line]
+        start = json.loads(lines[0])
+        terminal = json.loads(lines[-1])
+        if mutate_start is not None:
+            mutate_start(start)
+        if mutate_terminal is not None:
+            mutate_terminal(terminal)
+        encoded = [json.dumps(start, sort_keys=True).encode("utf-8")]
+        encoded.extend(lines[1:-1])
+        encoded.append(json.dumps(terminal, sort_keys=True).encode("utf-8"))
+        log.write_bytes(b"".join(line + b"\n" for line in encoded))
+
     def test_unverified_field_retention_refuses_semantic_drop(self):
         with tempfile.TemporaryDirectory() as raw:
             out, decision, _rels = self._withhold(
@@ -2404,6 +2432,125 @@ class WithheldDiagnosticPackage(unittest.TestCase):
                     expected_run_attempt=HOSTED_RUN_ATTEMPT,
                 )
             self.assertIn("attempt_binding", str(ctx.exception))
+
+    def test_forged_matching_rerun_dispatch_bindings_refuse(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, _decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            kwargs = self._attempt_kwargs(out)
+            hosted.load_hosted_attempt_artifacts(**kwargs)
+            forged = {
+                "candidate_revision": OTHER_CANDIDATE,
+                "runner_revision": OTHER_RUNNER,
+                "image_digest": OTHER_IMAGE,
+            }
+
+            def mutate_start(entry):
+                entry["dispatch_bindings"] = dict(forged)
+
+            def mutate_terminal(entry):
+                entry["dispatch_bindings"] = dict(forged)
+
+            self._rewrite_rerun(
+                out / hosted.RERUN_EVIDENCE_FILENAME,
+                mutate_start=mutate_start,
+                mutate_terminal=mutate_terminal,
+            )
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_hosted_attempt_artifacts(**kwargs)
+            self.assertIn("bindings", str(ctx.exception))
+
+    def test_aggregate_does_not_reopen_setup_or_candidate_via_path_read_bytes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, _decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            kwargs = self._attempt_kwargs(out)
+            hosted.load_hosted_attempt_artifacts(**kwargs)
+            calls = []
+
+            def sentinel(self):
+                calls.append(os.fspath(self))
+                raise AssertionError("unbounded reopen reached: %s" % self)
+
+            with mock.patch.object(hosted.Path, "read_bytes", sentinel):
+                hosted.load_hosted_attempt_artifacts(**kwargs)
+            self.assertEqual(calls, [])
+
+    def test_between_read_symlink_oversized_replacement_keeps_first_bounded_bytes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, _decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            kwargs = self._attempt_kwargs(out)
+            hosted.load_hosted_attempt_artifacts(**kwargs)
+            setup = Path(kwargs["setup_path"])
+            candidate = Path(kwargs["candidate_path"])
+            real_read = hosted.Path.read_bytes
+
+            def replace_then_read(self):
+                path = Path(self)
+                if path == setup or path == candidate:
+                    oversized = Path(raw) / ("oversized-%s.bin" % path.name)
+                    oversized.write_bytes(b"x" * (hosted.MAX_INPUT_BYTES + 1))
+                    path.unlink()
+                    path.symlink_to(oversized)
+                return real_read(self)
+
+            with mock.patch.object(hosted.Path, "read_bytes", replace_then_read):
+                try:
+                    hosted.load_hosted_attempt_artifacts(**kwargs)
+                except hosted.HostedPublicationError as exc:
+                    self.fail("between-read replacement reached digest: %s" % exc)
+            self.assertTrue(setup.is_file())
+            self.assertFalse(setup.is_symlink())
+            self.assertTrue(candidate.is_file())
+            self.assertFalse(candidate.is_symlink())
+
+    def test_load_diagnostic_package_refuses_extra_run_identity_key(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, _decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            pkg = self._package(out)
+            hosted.load_diagnostic_package(pkg)
+            manifest_path = pkg / hosted.DIAGNOSTIC_MANIFEST_FILENAME
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["run_identity"]["extra"] = "accepted?"
+            manifest_path.write_bytes(hosted._encode_json(manifest))
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_diagnostic_package(pkg)
+            self.assertIn("run_identity", str(ctx.exception))
+
+    def test_terminal_reason_mismatch_refuses(self):
+        with tempfile.TemporaryDirectory() as raw:
+            out, _decision, _rels = self._withhold(
+                Path(raw),
+                envelope_over={"envelope_status": "unverified",
+                              "unverified_field": "runtime_version"},
+            )
+            kwargs = self._attempt_kwargs(out)
+            hosted.load_hosted_attempt_artifacts(**kwargs)
+
+            def mutate_terminal(entry):
+                entry["reason"] = "different-terminal-reason"
+
+            self._rewrite_rerun(
+                out / hosted.RERUN_EVIDENCE_FILENAME,
+                mutate_terminal=mutate_terminal,
+            )
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_hosted_attempt_artifacts(**kwargs)
+            self.assertIn("reason", str(ctx.exception))
 
     def test_terminal_entry_required_last_and_digest_bound(self):
         with tempfile.TemporaryDirectory() as raw:
