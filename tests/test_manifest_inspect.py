@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -42,6 +43,21 @@ class ManifestInspection(unittest.TestCase):
                           ["declared"]["rule_inventory"])
         self.assertEqual(json.loads(fixture("expected-v1.inspect.v0.json"))
                          ["declared"]["rule_inventory"]["rules_declared"], 1)
+
+    def test_crlf_manifest_bytes_are_addressed_without_normalization(self):
+        canonical = fixture("manifest.v0.json")
+        crlf = canonical.replace(b"\n", b"\r\n")
+        self.assertNotEqual(crlf, canonical)
+
+        inspected = ca.inspect_manifest_declaration(crlf)
+
+        self.assertEqual(inspected["manifest"]["bytes"], len(crlf))
+        self.assertEqual(
+            inspected["manifest"]["sha256"],
+            "sha256:" + hashlib.sha256(crlf).hexdigest())
+        self.assertNotEqual(
+            inspected["manifest"]["sha256"],
+            "sha256:" + hashlib.sha256(canonical).hexdigest())
 
     def test_parser_is_shared_by_inspection_and_normal_loading(self):
         raw = fixture("manifest.v0.json")
@@ -313,11 +329,14 @@ class ManifestInspection(unittest.TestCase):
             symlink.symlink_to(regular)
             directory = root / "directory"
             directory.mkdir()
-            fifo = root / "fifo"
-            os.mkfifo(fifo)
             oversized = root / "oversized"
             oversized.write_bytes(b"x" * (ca.OUTPUT_CAP_BYTES + 1))
-            for path in (root / "missing", symlink, directory, fifo, oversized):
+            paths = [root / "missing", symlink, directory, oversized]
+            if hasattr(os, "mkfifo"):
+                fifo = root / "fifo"
+                os.mkfifo(fifo)
+                paths.append(fifo)
+            for path in paths:
                 stdout, stderr = io.StringIO(), io.StringIO()
                 argv = ["corpus_adequacy.py", "--inspect", str(path), "--json"]
                 with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(stdout), \
