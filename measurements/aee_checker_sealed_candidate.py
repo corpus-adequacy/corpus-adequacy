@@ -372,6 +372,7 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
         resource_profile=resource_profile, sealed=sealed)
     schema = envelope.envelope_schema_for_profile(execution_profile)
     try:
+        transport = contained.resolve_transport(image_id, transport)
         raw = _contained_candidate_run(
             image_id=image_id, mounts=mounts,
             resource_profile=resource_profile, name_prefix=name_prefix,
