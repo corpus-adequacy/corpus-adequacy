@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+Add `--inspect <manifest.json> [--json]`, a nonexecuting static declaration
+path. One pure parser now validates manifest-resident rules for both inspection
+and normal measurement; only normal measurement continues into a separate
+filesystem binder. The closed `corpus-adequacy.inspect.v0` document addresses
+the bounded input bytes, preserves declared path strings, distinguishes static
+checks from runtime-unknown facts and review judgments, represents v0 inventory
+as absent and v1 inventory as author-declared counts, and always sets
+`execution_authorized` false. Inspection does not resolve paths, read vectors or
+known-hole digest files, import, build, materialize, lock, select a backend, or
+execute. A declared known-hole digest path is reported only as its original
+relative string and remains runtime-unchecked. Inspection is not readiness and
+not sandbox evidence; it establishes no rule completeness, adequacy, or
+permission. Valid existing measurement and projection formats are unchanged.
+
 Publication finding dossiers now place digest-bound authored rule and anchor
 evidence beside each survivor or silent row. The renderer reads one bounded
 manifest snapshot for both derivations and binds accepted bytes, or a stable

@@ -34,8 +34,26 @@ python3 corpus_adequacy.py --rules <report.json> --manifest <manifest.json>
 python3 corpus_adequacy.py --rules <report.json> --manifest <manifest.json> --json
 python3 corpus_adequacy.py --diff <old.report.v0> <new.report.v0>
 python3 corpus_adequacy.py --diff <old.report.v0> <new.report.v0> --json
+python3 corpus_adequacy.py --inspect <manifest.json>
+python3 corpus_adequacy.py --inspect <manifest.json> --json
 python3 examples/reason-token-projections/walkthrough.py
 ```
+
+`--inspect` bounded-reads one regular manifest file and validates only the
+declarations in those exact bytes. Its JSON form is the closed,
+deterministic `corpus-adequacy.inspect.v0` document. It keeps declared values,
+static checks, runtime-unchecked facts, and review judgments separate;
+operator profile and contained resource settings are unavailable because the
+manifest does not carry them. Manifest v0 reports rule inventory as absent,
+while v1 summarizes only its validated author-declared inventory. Inspection
+does not resolve or check paths, read vectors or a known-hole digest file;
+when that digest path is declared, inspection shows only its original relative
+string and marks the target runtime-unchecked. It does not open that path,
+select a backend, build, materialize, lock, import, or run anything.
+`execution_authorized` is always false. Success is a static declaration result,
+not readiness, sandbox evidence, execution permission, runtime validation,
+rule completeness, or adequacy. Input or contract refusal exits 2; success
+exits 0 without an adequacy verdict.
 
 `examples/reason-token-projections/` is one offline process-runner example: the
 same implementation, vector, mutation and control bytes under three
