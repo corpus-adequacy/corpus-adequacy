@@ -2505,6 +2505,37 @@ def _require_manifest_profile_declaration(manifest: dict) -> None:
                MINIMUM_PROFILE_KEY))
 
 
+_MAX_EXACT_TIMEOUT_SECONDS = (1 << 53) - 1
+
+
+def _require_positive_timeout(value, where: str, *, allow_none: bool = False) -> None:
+    """Require a positive integer exactly representable by the float deadline."""
+    if allow_none and value is None:
+        return
+    if (type(value) is not int or value <= 0
+            or value > _MAX_EXACT_TIMEOUT_SECONDS):
+        raise ManifestError(
+            "%s must be a positive integer no greater than %d"
+            % (where, _MAX_EXACT_TIMEOUT_SECONDS))
+
+
+def _require_argv(value, where: str, *, allow_empty: bool,
+                  allow_none: bool = False) -> None:
+    """Require a JSON argv array without coercing scalars or member types."""
+    if allow_none and value is None:
+        return
+    if (not isinstance(value, list) or (not allow_empty and not value)
+            or not all(isinstance(member, str) and member for member in value)):
+        qualifier = "possibly empty" if allow_empty else "non-empty"
+        raise ManifestError(
+            "%s must be a %s JSON array of non-empty strings" % (where, qualifier))
+
+
+def _require_control_boolean(value, where: str) -> None:
+    if type(value) is not bool:
+        raise ManifestError("%s control must be a boolean" % where)
+
+
 def parse_manifest_declaration(manifest_bytes: bytes) -> dict:
     """Validate only declarations carried by exact manifest bytes.
 
@@ -2623,6 +2654,14 @@ def parse_manifest_declaration(manifest_bytes: bytes) -> dict:
                 "unproved_exit_codes overlaps accepted_exit_codes: %s" % overlap)
     # One deadline per child, on every runner. The module runner has a child too.
     m.setdefault("vector_timeout", 120)
+    _require_positive_timeout(m["vector_timeout"], "vector_timeout")
+    if "build_timeout" in m:
+        _require_positive_timeout(m["build_timeout"], "build_timeout")
+    if "build" in m:
+        _require_argv(m["build"], "build", allow_empty=True)
+    if "entrypoint_command" in m:
+        _require_argv(
+            m["entrypoint_command"], "entrypoint_command", allow_empty=False)
     m.setdefault("mutants", {})
     m.setdefault("equivalent", {})
     require_shape(m["mutants"], dict, "mutants")
@@ -2637,6 +2676,7 @@ def parse_manifest_declaration(manifest_bytes: bytes) -> dict:
                 _req(e, key, "mutants[%s][%d]" % (group, i))
             e.setdefault("scope", "declared")
             e.setdefault("control", False)
+            _require_control_boolean(e["control"], "mutants[%s][%d]" % (group, i))
             _require_expected_mover(m, e)
             if "control_polarity" in e and e["control"] is not True:
                 raise ManifestError(
@@ -2900,16 +2940,33 @@ def _require_inspect_v0(doc: dict) -> None:
                 "declared inspection selector diagnostic_from must not be empty")
     require_shape(declared["controls"], list, "inspection controls")
     for control in declared["controls"]:
+        require_shape(control, dict, "inspection control")
         _require_closed_keys(control, _INSPECT_CONTROL_KEYS, _INSPECT_CONTROL_KEYS,
                              missing_token="inspection control missing key",
                              extra_token="inspection control extra key")
+        if not isinstance(control["group"], str):
+            raise ManifestError("inspection control group must be a string")
+        label_identity(control, "inspection control")
         if control["polarity"] not in ("positive", "inert"):
             raise ManifestError("inspection control polarity is invalid")
     for key, keys in (("deadlines", _INSPECT_DEADLINE_KEYS),
                       ("commands", _INSPECT_COMMAND_KEYS)):
+        require_shape(declared[key], dict, "inspection %s" % key)
         _require_closed_keys(declared[key], keys, keys,
                              missing_token="inspection %s missing key" % key,
                              extra_token="inspection %s extra key" % key)
+    _require_positive_timeout(
+        declared["deadlines"]["build_timeout"], "inspection build_timeout",
+        allow_none=declared["runner"] == "module")
+    _require_positive_timeout(
+        declared["deadlines"]["vector_timeout"], "inspection vector_timeout")
+    _require_argv(
+        declared["commands"]["build"], "inspection build", allow_empty=True,
+        allow_none=declared["runner"] == "module")
+    _require_argv(
+        declared["commands"]["entrypoint_command"],
+        "inspection entrypoint_command", allow_empty=False,
+        allow_none=declared["runner"] == "module")
     inventory = declared["rule_inventory"]
     if manifest["schema"] == SCHEMA:
         if inventory is not None:

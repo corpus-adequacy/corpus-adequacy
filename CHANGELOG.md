@@ -12,7 +12,12 @@ selector's absent-versus-declared status before parser defaults, represents v0
 inventory as absent and v1 inventory as author-declared counts, and always sets
 `execution_authorized` false. Inspection does not resolve paths, read vectors or
 known-hole digest files, import, build, materialize, lock, select a backend, or
-execute. A declared known-hole digest path is reported only as its original
+execute. The shared parser now refuses non-boolean controls, non-positive or
+non-integer child deadlines, deadlines beyond the exact float representation,
+and scalar, empty-execution, empty-member or non-string argv shapes before
+binding. The deadline ceiling is representational, not tuned runtime policy.
+This is invalid-input hardening; valid manifest and report/projection bytes are
+unchanged. A declared known-hole digest path is reported only as its original
 relative string and remains runtime-unchecked. Inspection is not readiness and
 not sandbox evidence; it establishes no rule completeness, adequacy, or
 permission. Valid existing measurement and projection formats are unchanged.

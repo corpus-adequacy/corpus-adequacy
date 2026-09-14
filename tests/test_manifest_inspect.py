@@ -20,6 +20,16 @@ def fixture(name):
 
 
 class ManifestInspection(unittest.TestCase):
+    def assert_refused_by_both_before_binding(self, manifest, token):
+        raw = json.dumps(manifest).encode()
+        with mock.patch.object(ca, "bind_manifest_files",
+                               side_effect=AssertionError("binder reached")):
+            with self.assertRaisesRegex(ca.ManifestError, token) as normal:
+                ca.load_manifest_bytes(raw, Path("manifest.json"))
+        with self.assertRaisesRegex(ca.ManifestError, token) as inspected:
+            ca.inspect_manifest_declaration(raw)
+        self.assertEqual(str(normal.exception), str(inspected.exception))
+
     def test_exact_v0_and_v1_bytes_are_closed_and_deterministic(self):
         for version in ("v0", "v1"):
             raw = fixture("manifest.%s.json" % version)
@@ -115,6 +125,60 @@ class ManifestInspection(unittest.TestCase):
             "status": "absent", "value": []}
         with self.assertRaisesRegex(ca.ManifestError, "inspection selector"):
             ca.encode_inspect_v0(doc)
+
+    def test_control_timeout_and_command_shapes_refuse_before_binding(self):
+        base = json.loads(fixture("manifest.v1.json"))
+        cases = []
+
+        malformed = copy.deepcopy(base)
+        malformed["mutants"]["demo"][0]["control"] = "yes"
+        cases.append((malformed, "control must be a boolean"))
+
+        for key in ("build_timeout", "vector_timeout"):
+            for value in ("soon", True, 0, -1, ca._MAX_EXACT_TIMEOUT_SECONDS + 1):
+                malformed = copy.deepcopy(base)
+                malformed[key] = value
+                cases.append((malformed, "%s must be a positive integer" % key))
+
+        for key, values in (("build", ("compile", [""], [7])),
+                            ("entrypoint_command", ("run", [], [""], [7]))):
+            for value in values:
+                malformed = copy.deepcopy(base)
+                malformed[key] = value
+                cases.append((malformed, "%s must be" % key))
+
+        for manifest, token in cases:
+            with self.subTest(token=token, value=manifest):
+                self.assert_refused_by_both_before_binding(manifest, token)
+
+        boundary = copy.deepcopy(base)
+        boundary["build_timeout"] = ca._MAX_EXACT_TIMEOUT_SECONDS
+        boundary["vector_timeout"] = ca._MAX_EXACT_TIMEOUT_SECONDS
+        parsed = ca.parse_manifest_declaration(json.dumps(boundary).encode())
+        self.assertEqual(parsed["build_timeout"], ca._MAX_EXACT_TIMEOUT_SECONDS)
+        self.assertEqual(parsed["vector_timeout"], ca._MAX_EXACT_TIMEOUT_SECONDS)
+        ca.encode_inspect_v0(
+            ca.inspect_manifest_declaration(json.dumps(boundary).encode()))
+
+    def test_inspect_encoder_closes_controls_deadlines_and_commands(self):
+        edits = (
+            (("controls", 0, "group"), 7, "inspection control group"),
+            (("deadlines", "vector_timeout"), "soon", "vector_timeout"),
+            (("deadlines", "build_timeout"), 0, "build_timeout"),
+            (("commands", "build"), "compile", "build"),
+            (("commands", "build"), None, "build"),
+            (("commands", "entrypoint_command"), [], "entrypoint_command"),
+            (("commands", "entrypoint_command"), None, "entrypoint_command"),
+        )
+        for path, value, token in edits:
+            doc = ca.inspect_manifest_declaration(fixture("manifest.v1.json"))
+            target = doc["declared"]
+            for member in path[:-1]:
+                target = target[member]
+            target[path[-1]] = value
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ca.ManifestError, token):
+                    ca.encode_inspect_v0(doc)
 
     def test_declaration_refusal_precedes_binding(self):
         raw = json.dumps({"schema": ca.SCHEMA, "vectors": "missing", "implementation":

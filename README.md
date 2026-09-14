@@ -48,7 +48,13 @@ distinct from an explicitly declared empty or non-empty selector;
 operator profile and contained resource settings are unavailable because the
 manifest does not carry them. Manifest v0 reports rule inventory as absent,
 while v1 summarizes only its validated author-declared inventory. Inspection
-does not resolve or check paths, read vectors or a known-hole digest file;
+and normal loading share the same declaration checks: controls are exact JSON
+booleans, child deadlines are positive JSON integers under the float-deadline
+representational ceiling, build argv may be empty, and execution argv must be a
+non-empty array; every argv member is a non-empty string. These are input-shape
+refusals, not tuned runtime policy.
+Static inspection does not resolve or check paths, read vectors or a known-hole
+digest file;
 when that digest path is declared, inspection shows only its original relative
 string and marks the target runtime-unchecked. It does not open that path,
 select a backend, build, materialize, lock, import, or run anything.
