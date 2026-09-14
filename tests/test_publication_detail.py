@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import signal
@@ -43,6 +44,212 @@ def _site(root: Path, source_commit: str = BUILD) -> dict[str, bytes]:
 
 def _text(files: dict[str, bytes], rel: str) -> str:
     return files[rel].decode("utf-8")
+
+
+def _manifest_tree(tmpdir: Path, manifest: dict, *, report_fixture=SURVIVED_SILENT) -> tuple[Path, Path]:
+    root = _write_tree(tmpdir, [report_fixture / "report.v0.json"], dummy_manifest=False)
+    directory = report_fixture.name
+    measurement = root / "measurements" / directory
+    manifest_path = measurement / "manifest.json"
+    raw = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    manifest_path.write_bytes(raw)
+    report_path = measurement / "report.v0.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["manifest_sha256"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_index(root)
+    return root, manifest_path
+
+
+def _manifest_v0(*, anchor="if True:\n    do_check()") -> dict:
+    return {
+        "schema": ca.SCHEMA,
+        "mutants": {
+            "axis-a": [
+                {"label": "survived-rule", "anchor": anchor},
+                {"label": "killed-rule", "anchor": "killed_anchor"},
+            ],
+            "axis-b": [{"label": "silent-rule", "anchor": "silent_anchor"}],
+        },
+    }
+
+
+def _manifest_v1(*, rule_text="The checker rejects the bad input.", anchor="if True:\n    do_check()") -> dict:
+    doc = _manifest_v0(anchor=anchor)
+    doc["schema"] = ca.MANIFEST_V1_SCHEMA
+    doc["rules"] = {
+        "axis-a": [
+            {
+                "id": "RULE-01",
+                "text": rule_text,
+                "url": "https://example.test/spec#rule-01",
+                "disposition": "mutated",
+                "mutants": ["survived-rule"],
+            },
+            {
+                "id": "RULE-03",
+                "text": "The checker retains the accepted outcome.",
+                "url": "https://example.test/spec#rule-03",
+                "disposition": "mutated",
+                "mutants": ["killed-rule"],
+            },
+        ],
+        "axis-b": [
+            {
+                "id": "RULE-02",
+                "text": "The checker preserves the diagnostic reason.",
+                "url": "https://example.test/spec#rule-02",
+                "disposition": "mutated",
+                "mutants": ["silent-rule"],
+            }
+        ],
+    }
+    return doc
+
+
+class RuleLinkedDossier(unittest.TestCase):
+    @staticmethod
+    def _projection(root: Path) -> tuple[str, dict]:
+        index_bytes, records = rpp.load_listed_records(root)
+        renderer = rpp.read_bounded_regular_file(Path(rpp.__file__))
+        return (
+            rpp.compute_projection_digest(index_bytes, records, renderer, BUILD),
+            records[0],
+        )
+
+    def test_v1_rule_and_exact_bound_anchor_share_one_page(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, _manifest = _manifest_tree(Path(d), _manifest_v1())
+            page = _text(_site(root), SURVIVED)
+            self.assertIn("RULE-01", page)
+            self.assertIn("The checker rejects the bad input.", page)
+            self.assertIn("https://example.test/spec#rule-01", page)
+            self.assertIn("if True:    do_check()", page)
+            self.assertIn("verdict mechanism declared outcome unchanged", page)
+            self.assertIn("diagnostic_channel_declared <span class=\"mono\">true</span>", page)
+            self.assertIn("runner <span class=\"mono\">process</span>", page)
+
+    def test_v0_anchor_is_bound_but_rule_inventory_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, _manifest = _manifest_tree(Path(d), _manifest_v0())
+            page = _text(_site(root), SURVIVED)
+            self.assertIn("if True:    do_check()", page)
+            self.assertIn("unavailable (manifest.v0)", page)
+            self.assertNotIn("RULE-01", page)
+
+    def test_digest_mismatch_neither_crashes_nor_ingests_poison(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, manifest = _manifest_tree(Path(d), _manifest_v1())
+            poison = _manifest_v1(rule_text="POISON_RULE_TEXT", anchor="POISON_ANCHOR")
+            poison["rules"]["axis-a"][0]["id"] = "POISON_RULE_ID"
+            manifest.write_text(json.dumps(poison), encoding="utf-8")
+            page = _text(_site(root), SURVIVED)
+            for token in ("POISON_RULE_TEXT", "POISON_RULE_ID", "POISON_ANCHOR"):
+                self.assertNotIn(token, page)
+            self.assertIn("unavailable (manifest digest mismatch)", page)
+            self.assertIn("omitted (manifest digest mismatch)", page)
+            self.assertIn(">survived<", page)
+
+    def test_missing_manifest_keeps_report_facts_and_names_absence(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, manifest = _manifest_tree(Path(d), _manifest_v1())
+            manifest.unlink()
+            page = _text(_site(root), SURVIVED)
+            self.assertIn("unavailable (manifest absent)", page)
+            self.assertIn("omitted (manifest absent)", page)
+            self.assertIn(">survived<", page)
+
+    def test_matching_malformed_manifest_is_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, manifest = _manifest_tree(Path(d), _manifest_v1())
+            raw = b"{"
+            manifest.write_bytes(raw)
+            report_path = manifest.parent / "report.v0.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["manifest_sha256"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+            report_path.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            _write_index(root)
+            with self.assertRaises(rpp.PublicationError):
+                _site(root)
+
+    def test_rule_and_anchor_derive_from_one_bounded_snapshot(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, manifest = _manifest_tree(Path(d), _manifest_v1())
+            real = rpp.read_bounded_regular_file
+            reads = []
+
+            def once(path, *args, **kwargs):
+                if Path(path) == manifest:
+                    reads.append(Path(path))
+                    if len(reads) > 1:
+                        return json.dumps(_manifest_v1(
+                            rule_text="POISON_SECOND_READ", anchor="POISON_SECOND_ANCHOR"
+                        )).encode("utf-8")
+                return real(path, *args, **kwargs)
+
+            with mock.patch.object(rpp, "read_bounded_regular_file", once):
+                page = _text(_site(root), SURVIVED)
+            self.assertEqual(reads, [manifest])
+            self.assertIn("RULE-01", page)
+            self.assertIn("if True:    do_check()", page)
+            self.assertNotIn("POISON_SECOND", page)
+
+    def test_hostile_rule_and_anchor_text_is_escaped(self):
+        hostile = '\"><img src=x onerror=alert(1)><script>alert(1)</script>'
+        with tempfile.TemporaryDirectory() as d:
+            root, _manifest = _manifest_tree(
+                Path(d), _manifest_v1(rule_text=hostile, anchor=hostile)
+            )
+            page = _text(_site(root), SURVIVED)
+            self.assertNotIn("<script>", page)
+            self.assertNotIn('<img src=x onerror=', page)
+            self.assertIn("&lt;script&gt;", page)
+            self.assertIn("&quot;&gt;&lt;img", page)
+
+    def test_oversized_anchor_is_explicitly_omitted(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, _manifest = _manifest_tree(
+                Path(d), _manifest_v1(anchor="x" * (ca.ANCHOR_EXCERPT_MAX + 1))
+            )
+            page = _text(_site(root), SURVIVED)
+            self.assertIn("omitted (oversized)", page)
+            self.assertNotIn("x" * ca.ANCHOR_EXCERPT_MAX, page)
+
+    def test_invalid_control_and_null_score_are_visibly_unscored(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _write_tree(Path(d), [FIXTURES / "unproved-control" / "report.v0.json"])
+            files = _site(root)
+            page = _text(files, "runs/unproved-control/rules/0000.html")
+            self.assertIn("control_status <span>survived</span>", page)
+            self.assertIn("control invalid: run is unscored", page)
+            self.assertIn("unproved <span class=\"mono\">3</span>", page)
+            self.assertNotIn("runs/unproved-control/rules/0001.html", files)
+
+    def test_projection_digest_binds_accepted_snapshot_and_unavailable_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, manifest = _manifest_tree(Path(d), _manifest_v1())
+            accepted_digest, accepted = self._projection(root)
+            altered = dict(accepted)
+            altered["manifest_projection_bytes"] = accepted["manifest_projection_bytes"] + b" "
+            index_bytes, _records = rpp.load_listed_records(root)
+            renderer = rpp.read_bounded_regular_file(Path(rpp.__file__))
+            self.assertNotEqual(
+                accepted_digest,
+                rpp.compute_projection_digest(index_bytes, [altered], renderer, BUILD),
+            )
+
+            poison = _manifest_v1(rule_text="POISON_ONE", anchor="POISON_A")
+            manifest.write_text(json.dumps(poison), encoding="utf-8")
+            mismatch_one, record_one = self._projection(root)
+            poison["rules"]["axis-a"][0]["text"] = "POISON_TWO"
+            manifest.write_text(json.dumps(poison), encoding="utf-8")
+            mismatch_two, record_two = self._projection(root)
+            self.assertEqual(record_one["manifest_snapshot"]["state"], "digest-mismatch")
+            self.assertEqual(record_two["manifest_snapshot"]["state"], "digest-mismatch")
+            self.assertEqual(mismatch_one, mismatch_two)
+            self.assertNotEqual(accepted_digest, mismatch_one)
 
 
 def _write_publication(root: Path, source_commit: str = BUILD) -> Path:

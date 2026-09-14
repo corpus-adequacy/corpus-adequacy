@@ -45,13 +45,24 @@ pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wra
 <li>not authenticity/endorsement/implementation safety</li>
 <li>silent:0 without diagnostic_channel_declared is not &quot;no silent rules&quot;</li>
 <li>score_percent is percent of author-declared in-scope rules, not of the implementation</li>
+<li>Rule linkage is author-declared traceability at one pin; it does not prove normative completeness, formal compliance, or engine correctness.</li>
+<li>An anchor is an author-declared source excerpt at one pin; it does not prove reachability or execution flow.</li>
+<li>An unavailable manifest is unavailable evidence, not an empty or compliant rule set.</li>
+<li>A manifest digest mismatch leaves rule and anchor evidence unavailable; report observations remain unaltered.</li>
 </ul>
 </section>
 <main id="finding" class="finding">
+<p>rule <span class="unavailable">unavailable (manifest.v0)</span></p>
 <p>verdict <span>survived</span></p>
 <p>group <span class="mono">tersign</span></p>
 <p>obligation After a valid run, the declared mutation did not change the declared outcome on the pinned inputs. A contract-hole reading also needs a faithful owner-pinned declaration and rule ownership.</p>
 <p>moved <span class="mono">0</span></p>
+<p>anchor <span class="mono">if isinstance(value, float):        raise ValueError(&quot;non-integer JSON number in the digest domain&quot;)</span></p>
+<p>runner <span class="mono">process</span></p>
+<p>diagnostic_channel_declared <span class="mono">false</span></p>
+<p>verdict mechanism declared outcome unchanged</p>
+<p>control_status <span>killed</span></p>
+<p>unproved <span class="mono">0</span></p>
 <p class="links">
 <a href="https://github.com/corpus-adequacy/corpus-adequacy/raw/aa2ef19efaa8f6140f7a1766553768984b60e5aa/measurements/tersign-1cc5ea32/report.v0.json">raw report.v0.json</a>
 <a href="https://github.com/tersignhq/evidence-record-conformance/commit/1cc5ea32b3da4f195b55782c8a3573d8564673a7">source commit 1cc5ea32b3da4f195b55782c8a3573d8564673a7</a>
