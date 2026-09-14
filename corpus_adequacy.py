@@ -1537,20 +1537,21 @@ def _visibility_event_sha256(event: dict) -> str:
     return _file_sha256(_encode_class_artifact_v0(event))
 
 
-def _classify_pre_freeze_relationship(authoring: dict) -> tuple[str, str]:
-    relationship = authoring["relationship"]
-    if relationship == "same":
-        return "declared", "disclosed-before-freeze"
-    if relationship == "independent":
-        return "independent", "disclosed-before-freeze"
-    return "unknown", "disclosed-before-freeze"
+_HELD_OUT_CHAIN_NAMES = (
+    "selection-committed", "candidate-frozen", "selection-disclosed",
+)
+_PRE_FREEZE_CHAIN_NAMES = (
+    "selection-committed", "selection-disclosed", "candidate-frozen",
+)
+_VISIBILITY_PATTERNS = ("held_out_chain", "pre_freeze", "commit_only")
+_VISIBILITY_RELATIONSHIPS = ("same", "independent", "unknown")
 
 
-def _classify_visibility_v0(provenance) -> tuple[str, str]:
-    """Derive effective class from the closed visibility chain.
+def _require_visibility_chain_v0(provenance) -> list[str]:
+    """Refuse a broken visibility chain; return the ordered event names.
 
-    Establishes declared artifact order and relationship metadata only. It
-    does not authenticate people or prove absence of undisclosed access.
+    Encode, load, and classification consume this result. Predecessor,
+    bundle, duplicate, and start-of-chain checks live only here.
     """
     events = provenance["visibility_events"]
     bundle = provenance["mutation_bundle_sha256"]
@@ -1570,28 +1571,69 @@ def _classify_visibility_v0(provenance) -> tuple[str, str]:
     if not names or names[0] != "selection-committed":
         raise ManifestError(
             "visibility events are reordered: chain must start with selection-committed")
-    held_out = [
-        "selection-committed", "candidate-frozen", "selection-disclosed",
-    ]
-    pre_freeze = [
-        "selection-committed", "selection-disclosed", "candidate-frozen",
-    ]
-    if names == held_out:
-        return "held_out", "hidden-until-freeze"
-    if names == pre_freeze:
-        return _classify_pre_freeze_relationship(provenance["authoring"])
+    return names
+
+
+def _visibility_pattern(names: list[str]) -> str:
+    if names == list(_HELD_OUT_CHAIN_NAMES):
+        return "held_out_chain"
+    if names == list(_PRE_FREEZE_CHAIN_NAMES):
+        return "pre_freeze"
     if names == ["selection-committed"]:
-        if provenance["requested_class"] == "held_out":
-            raise ManifestError("visibility chain is missing candidate-frozen")
-        relationship = provenance["authoring"]["relationship"]
-        if relationship == "unknown":
-            return "unknown", "unknown"
-        if relationship == "independent":
-            return "independent", "declared"
-        return provenance["requested_class"], "declared"
+        return "commit_only"
     if "candidate-frozen" not in names:
         raise ManifestError("visibility chain is missing candidate-frozen")
     raise ManifestError("visibility events are missing or reordered")
+
+
+def _build_requested_class_transition_v0() -> dict:
+    """Complete monotone table: preserve or weaken, never promote."""
+    table = {}
+    for requested in sorted(CLASS_IDS):
+        for pattern in _VISIBILITY_PATTERNS:
+            for relationship in _VISIBILITY_RELATIONSHIPS:
+                key = (requested, pattern, relationship)
+                if requested == "held_out":
+                    if pattern == "held_out_chain":
+                        table[key] = ("held_out", "hidden-until-freeze")
+                    elif pattern == "pre_freeze":
+                        table[key] = {
+                            "same": ("declared", "disclosed-before-freeze"),
+                            "independent": ("independent", "disclosed-before-freeze"),
+                            "unknown": ("unknown", "disclosed-before-freeze"),
+                        }[relationship]
+                    else:
+                        table[key] = "refuse-missing-freeze"
+                    continue
+                if relationship == "unknown":
+                    table[key] = ("unknown", "unknown")
+                else:
+                    table[key] = (requested, "declared")
+    return table
+
+
+_REQUESTED_CLASS_TRANSITION_V0 = _build_requested_class_transition_v0()
+
+
+def _classify_visibility_v0(provenance, names: list[str]) -> tuple[str, str]:
+    """Derive effective class from an already-validated visibility chain.
+
+    `names` is the ordered event-name list from the semantic chain
+    validator. This function does not restate predecessor, bundle,
+    duplicate, or start-of-chain checks. Establishes declared artifact
+    order and relationship metadata only. It does not authenticate people
+    or prove absence of undisclosed access. Held-out and pre-freeze
+    mappings apply only to a requested held_out selection. Other requested
+    classes preserve or weaken; they cannot promote to held_out or
+    independent.
+    """
+    pattern = _visibility_pattern(names)
+    requested = provenance["requested_class"]
+    relationship = provenance["authoring"]["relationship"]
+    outcome = _REQUESTED_CLASS_TRANSITION_V0[(requested, pattern, relationship)]
+    if outcome == "refuse-missing-freeze":
+        raise ManifestError("visibility chain is missing candidate-frozen")
+    return outcome
 
 
 def _require_origin(origin, requested: str) -> None:
@@ -1709,6 +1751,8 @@ def _require_class_provenance_v0_document(doc) -> dict:
         "candidate_freeze.observation_declaration_sha256")
     _require_authoring(doc["authoring"], doc["requested_class"])
     _require_visibility_events(doc["visibility_events"])
+    names = _require_visibility_chain_v0(doc)
+    _classify_visibility_v0(doc, names)
     _require_origin(doc["origin"], doc["requested_class"])
     _require_expected_distinctions_shape(doc["expected_distinctions"])
     _require_class_non_claims(doc["non_claims"], "non_claims")
@@ -2013,7 +2057,10 @@ def _derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
     _class_report_summary_parity(report)
     if report.get("manifest_sha256") != provenance["manifest_sha256"]:
         raise ManifestError("report/provenance manifest digest mismatch")
-    classified = _classify_visibility_v0(provenance)
+    classified = _classify_visibility_v0(
+        provenance,
+        [event["event"] for event in provenance["visibility_events"]],
+    )
     if classification is not None:
         claimed = _classification_pair(classification)
         if claimed != classified:
@@ -2091,7 +2138,10 @@ def load_class_attempt_v0(attempt_path, *, provenance_path, manifest_path,
         raise ManifestError("attempt rows do not match the validated report")
     if doc["status"] != _class_attempt_status(report):
         raise ManifestError("attempt status does not match the validated report")
-    classified = _classify_visibility_v0(provenance)
+    classified = _classify_visibility_v0(
+        provenance,
+        [event["event"] for event in provenance["visibility_events"]],
+    )
     if classified != (doc["effective_class"], doc["visibility_status"]):
         raise ManifestError(
             "stored effective class or visibility status does not match the classifier")

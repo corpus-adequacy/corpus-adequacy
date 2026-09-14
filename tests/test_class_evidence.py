@@ -77,6 +77,83 @@ def _event_artifact_sha256(event: dict) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
+def _canonical_class_bytes(doc: dict) -> bytes:
+    return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n").encode("utf-8")
+
+
+UNICODE_ACTOR = "作者-α"
+PINNED_UNICODE_EVENT_BUNDLE = "sha256:" + "c" * 64
+PINNED_UNICODE_EVENT_BYTES = (
+    "{\n"
+    "  \"actor\": \"作者-α\",\n"
+    "  \"event\": \"selection-committed\",\n"
+    "  \"mutation_bundle_sha256\": \"%s\",\n"
+    "  \"ordinal\": 0,\n"
+    "  \"predecessor_event_sha256\": null\n"
+    "}\n" % PINNED_UNICODE_EVENT_BUNDLE
+).encode("utf-8")
+PINNED_UNICODE_EVENT_SHA256 = (
+    "sha256:" + hashlib.sha256(PINNED_UNICODE_EVENT_BYTES).hexdigest()
+)
+
+
+def _origin_for(requested: str):
+    if requested == "real_fault":
+        return {
+            "kind": "historical_fault",
+            "repository": "owner/name",
+            "faulty_commit": COMMIT_A,
+            "fixed_commit": COMMIT_B,
+            "reference": "https://example.invalid/issue/1",
+        }
+    if requested == "adaptive":
+        return {
+            "kind": "adaptive",
+            "source": _source(),
+            "predecessor_attempt_sha256": "sha256:" + "9" * 64,
+        }
+    return _authored_origin()
+
+
+def _authoring_for(requested: str, relationship="same"):
+    if requested == "independent":
+        relationship = "independent"
+    builder = "author-a" if relationship == "same" else "builder-b"
+    return {
+        "mutation_author": "author-a",
+        "candidate_builder": builder,
+        "relationship": relationship,
+        "candidate_outcomes_seen": False,
+    }
+
+
+def _provenance_for_class(requested, man, bun, *, events=None,
+                          relationship=None, actor="author-a"):
+    if requested == "independent":
+        relationship = "independent"
+    elif relationship is None:
+        relationship = "same"
+    if events is None:
+        if requested == "held_out":
+            events = _visibility_events(
+                "selection-committed", "candidate-frozen",
+                "selection-disclosed", bundle=bun, actor=actor)
+        else:
+            events = _visibility_events(
+                "selection-committed", bundle=bun, actor=actor)
+    return _provenance_doc(
+        class_id="example-%s-01" % requested.replace("_", "-"),
+        requested=requested,
+        manifest_sha256=man,
+        bundle_sha256=bun,
+        origin=_origin_for(requested),
+        authoring=_authoring_for(requested, relationship),
+        events=events,
+        relationship=relationship,
+    )
+
+
 def _visibility_events(*names, bundle, actor="author-a"):
     events = []
     predecessor = None
@@ -597,10 +674,122 @@ class ClassProvenanceV0(unittest.TestCase):
                 ca.load_class_provenance_v0(
                     path, manifest_path=man_path, mutation_bundle_path=bundle)
 
+    def _held_out_doc(self, man, bun, events):
+        return _provenance_for_class("held_out", man, bun, events=events)
+
+    def _assert_encoder_and_loader_refuse(self, doc, manifest_path, bundle_path,
+                                          pattern):
+        with self.assertRaises(ca.ManifestError) as encoded:
+            ca.encode_class_provenance_v0(doc)
+        self.assertRegex(str(encoded.exception).lower(), pattern)
+        path = manifest_path.parent / "broken-prov.json"
+        path.write_bytes(_canonical_class_bytes(doc))
+        with self.assertRaises(ca.ManifestError) as loaded:
+            ca.load_class_provenance_v0(
+                path, manifest_path=manifest_path,
+                mutation_bundle_path=bundle_path)
+        self.assertRegex(str(loaded.exception).lower(), pattern)
+
+    def test_encode_and_load_share_one_semantic_chain_validator(self):
+        src = Path(ca.__file__).read_text(encoding="utf-8")
+        self.assertEqual(src.count("def _require_visibility_chain_v0"), 1)
+        require = inspect.getsource(ca._require_class_provenance_v0_document)
+        classify = inspect.getsource(ca._classify_visibility_v0)
+        encode = inspect.getsource(ca.encode_class_provenance_v0)
+        load = inspect.getsource(ca.load_class_provenance_v0)
+        self.assertIn("_require_visibility_chain_v0", require)
+        self.assertIn("_classify_visibility_v0", require)
+        self.assertIn("names", inspect.signature(ca._classify_visibility_v0).parameters)
+        self.assertNotIn("_require_visibility_chain_v0", classify)
+        self.assertIn("_require_class_provenance_v0_document", encode)
+        self.assertIn("_require_class_provenance_v0_document", load)
+        self.assertEqual(
+            src.count(
+                "visibility predecessor digest does not match the preceding event"),
+            1)
+
+    def test_encoder_and_loader_refuse_wrong_predecessor(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest_path, bundle_path, manifest_raw, bundle_raw = (
+                _write_module_workspace(root))
+            man = ca._file_sha256(manifest_raw)
+            bun = ca._file_sha256(bundle_raw)
+            events = _visibility_events(
+                "selection-committed", "candidate-frozen",
+                "selection-disclosed", bundle=bun)
+            events[2]["predecessor_event_sha256"] = "sha256:" + "a" * 64
+            self._assert_encoder_and_loader_refuse(
+                self._held_out_doc(man, bun, events),
+                manifest_path, bundle_path, r"predecessor")
+
+    def test_encoder_and_loader_refuse_bundle_drift(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest_path, bundle_path, manifest_raw, bundle_raw = (
+                _write_module_workspace(root))
+            man = ca._file_sha256(manifest_raw)
+            bun = ca._file_sha256(bundle_raw)
+            events = _visibility_events(
+                "selection-committed", "candidate-frozen",
+                "selection-disclosed", bundle=bun)
+            events[2]["mutation_bundle_sha256"] = "sha256:" + "b" * 64
+            events[2]["predecessor_event_sha256"] = _event_artifact_sha256(
+                events[1])
+            self._assert_encoder_and_loader_refuse(
+                self._held_out_doc(man, bun, events),
+                manifest_path, bundle_path, r"bundle|drift")
+
+    def test_encoder_and_loader_refuse_duplicate_event(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest_path, bundle_path, manifest_raw, bundle_raw = (
+                _write_module_workspace(root))
+            man = ca._file_sha256(manifest_raw)
+            bun = ca._file_sha256(bundle_raw)
+            events = _visibility_events(
+                "selection-committed", "candidate-frozen", "candidate-frozen",
+                bundle=bun)
+            self._assert_encoder_and_loader_refuse(
+                self._held_out_doc(man, bun, events),
+                manifest_path, bundle_path, r"duplicate")
+
+    def test_encoder_and_loader_refuse_reordered_events(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest_path, bundle_path, manifest_raw, bundle_raw = (
+                _write_module_workspace(root))
+            man = ca._file_sha256(manifest_raw)
+            bun = ca._file_sha256(bundle_raw)
+            events = _visibility_events(
+                "candidate-frozen", "selection-committed",
+                "selection-disclosed", bundle=bun)
+            self._assert_encoder_and_loader_refuse(
+                self._held_out_doc(man, bun, events),
+                manifest_path, bundle_path, r"reorder|missing|committed")
+
+    def test_encoder_and_loader_refuse_missing_held_out_events(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest_path, bundle_path, manifest_raw, bundle_raw = (
+                _write_module_workspace(root))
+            man = ca._file_sha256(manifest_raw)
+            bun = ca._file_sha256(bundle_raw)
+            missing_disclose = _visibility_events(
+                "selection-committed", "candidate-frozen", bundle=bun)
+            self._assert_encoder_and_loader_refuse(
+                self._held_out_doc(man, bun, missing_disclose),
+                manifest_path, bundle_path, r"missing|reorder")
+            missing_freeze = _visibility_events(
+                "selection-committed", "selection-disclosed", bundle=bun)
+            self._assert_encoder_and_loader_refuse(
+                self._held_out_doc(man, bun, missing_freeze),
+                manifest_path, bundle_path, r"freeze|missing")
+
 
 class ClassAttemptV0(unittest.TestCase):
     def _workspace(self, tmp: Path, report_factory=_healthy_survivor_report,
-                   provenance_factory=None):
+                   provenance_factory=None, encode_provenance=True):
         manifest_path, bundle_path, manifest_raw, bundle_raw = _write_module_workspace(tmp)
         man = ca._file_sha256(manifest_raw)
         bun = ca._file_sha256(bundle_raw)
@@ -608,7 +797,10 @@ class ClassAttemptV0(unittest.TestCase):
             prov = _provenance_doc(manifest_sha256=man, bundle_sha256=bun)
         else:
             prov = provenance_factory(man, bun)
-        prov_raw = ca.encode_class_provenance_v0(prov)
+        if encode_provenance:
+            prov_raw = ca.encode_class_provenance_v0(prov)
+        else:
+            prov_raw = _canonical_class_bytes(prov)
         prov_path = tmp / "prov.json"
         prov_path.write_bytes(prov_raw)
         report = report_factory(manifest_sha256=man)
@@ -995,11 +1187,12 @@ class ClassVisibilityV0(unittest.TestCase):
             predecessor=None,
         )
 
-    def _held_out_workspace(self, tmp, **kwargs):
+    def _held_out_workspace(self, tmp, encode_provenance=True, **kwargs):
         return self._workspace(
             tmp,
             provenance_factory=lambda man, bun: _held_out_provenance(
                 man, bun, **kwargs),
+            encode_provenance=encode_provenance,
         )
 
     def test_valid_commit_freeze_disclose_derives_held_out_and_hidden_until_freeze(
@@ -1100,7 +1293,8 @@ class ClassVisibilityV0(unittest.TestCase):
             ws = self._held_out_workspace(Path(d))
             events = copy.deepcopy(ws["prov"]["visibility_events"])
             events[2]["predecessor_event_sha256"] = "sha256:" + "a" * 64
-            ws = self._held_out_workspace(Path(d), events=events)
+            ws = self._held_out_workspace(
+                Path(d), events=events, encode_provenance=False)
             with self.assertRaises(ca.ManifestError) as cm:
                 self._public_derive(ws)
             self.assertRegex(str(cm.exception).lower(), r"predecessor")
@@ -1112,7 +1306,8 @@ class ClassVisibilityV0(unittest.TestCase):
             events[2]["mutation_bundle_sha256"] = "sha256:" + "b" * 64
             events[2]["predecessor_event_sha256"] = _event_artifact_sha256(
                 events[1])
-            ws = self._held_out_workspace(Path(d), events=events)
+            ws = self._held_out_workspace(
+                Path(d), events=events, encode_provenance=False)
             with self.assertRaises(ca.ManifestError) as cm:
                 self._public_derive(ws)
             self.assertRegex(str(cm.exception).lower(), r"bundle|drift")
@@ -1124,7 +1319,8 @@ class ClassVisibilityV0(unittest.TestCase):
             events = _visibility_events(
                 "selection-committed", "candidate-frozen", "candidate-frozen",
                 bundle=bun)
-            ws = self._held_out_workspace(Path(d), events=events)
+            ws = self._held_out_workspace(
+                Path(d), events=events, encode_provenance=False)
             with self.assertRaises(ca.ManifestError) as cm:
                 self._public_derive(ws)
             self.assertRegex(str(cm.exception).lower(), r"duplicate")
@@ -1136,7 +1332,8 @@ class ClassVisibilityV0(unittest.TestCase):
             events = _visibility_events(
                 "candidate-frozen", "selection-committed",
                 "selection-disclosed", bundle=bun)
-            ws = self._held_out_workspace(Path(d), events=events)
+            ws = self._held_out_workspace(
+                Path(d), events=events, encode_provenance=False)
             with self.assertRaises(ca.ManifestError) as cm:
                 self._public_derive(ws)
             self.assertRegex(
@@ -1148,7 +1345,8 @@ class ClassVisibilityV0(unittest.TestCase):
             bun = ws["prov"]["mutation_bundle_sha256"]
             events = _visibility_events(
                 "selection-committed", "candidate-frozen", bundle=bun)
-            ws = self._held_out_workspace(Path(d), events=events)
+            ws = self._held_out_workspace(
+                Path(d), events=events, encode_provenance=False)
             with self.assertRaises(ca.ManifestError) as cm:
                 self._public_derive(ws)
             self.assertRegex(str(cm.exception).lower(), r"missing")
@@ -1160,7 +1358,8 @@ class ClassVisibilityV0(unittest.TestCase):
             events = _visibility_events(
                 "selection-committed", "selection-disclosed", bundle=bun)
             ws = self._held_out_workspace(
-                Path(d), requested="held_out", events=events)
+                Path(d), requested="held_out", events=events,
+                encode_provenance=False)
             with self.assertRaises(ca.ManifestError) as cm:
                 self._public_derive(ws)
             self.assertRegex(str(cm.exception).lower(), r"freeze|missing")
@@ -1227,6 +1426,182 @@ class ClassVisibilityV0(unittest.TestCase):
                 + inspect.getsource(ca._derive_class_attempt_v0)
                 + inspect.getsource(ca.load_class_attempt_v0),
             )
+
+    def _class_workspace(self, tmp, requested, **kwargs):
+        return self._workspace(
+            tmp,
+            provenance_factory=lambda man, bun: _provenance_for_class(
+                requested, man, bun, **kwargs),
+        )
+
+    def _load_default_attempt(self, tmp, ws, derived):
+        path = tmp / "attempt.json"
+        path.write_bytes(ca.encode_class_attempt_v0(derived))
+        return ca.load_class_attempt_v0(
+            path,
+            provenance_path=ws["prov_path"],
+            manifest_path=ws["manifest_path"],
+            report_path=ws["report_path"],
+            environment_path=ws["env_path"],
+        )
+
+    def test_requested_class_transition_table_is_complete_and_monotone(self):
+        table = ca._REQUESTED_CLASS_TRANSITION_V0
+        patterns = ("held_out_chain", "pre_freeze", "commit_only")
+        relationships = ("same", "independent", "unknown")
+        for requested in sorted(ca.CLASS_IDS):
+            for pattern in patterns:
+                for relationship in relationships:
+                    key = (requested, pattern, relationship)
+                    self.assertIn(key, table, "missing transition %r" % (key,))
+                    outcome = table[key]
+                    if outcome == "refuse-missing-freeze":
+                        self.assertEqual(requested, "held_out")
+                        self.assertEqual(pattern, "commit_only")
+                        continue
+                    effective, status = outcome
+                    if requested != "held_out":
+                        self.assertNotEqual(effective, "held_out", key)
+                    if requested not in ("held_out", "independent"):
+                        self.assertNotEqual(effective, "independent", key)
+
+    def test_requested_declared_does_not_promote_to_held_out(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            bun_probe = self._class_workspace(tmp, "declared")
+            bun = bun_probe["prov"]["mutation_bundle_sha256"]
+            ws = self._class_workspace(
+                tmp, "declared",
+                events=_visibility_events(
+                    "selection-committed", "candidate-frozen",
+                    "selection-disclosed", bundle=bun),
+            )
+            derived = self._public_derive(ws)
+            self.assertEqual(derived["effective_class"], "declared")
+            self.assertNotEqual(derived["effective_class"], "held_out")
+            self.assertEqual(derived["visibility_status"], "declared")
+            loaded = self._load_default_attempt(tmp, ws, derived)
+            self.assertEqual(loaded["effective_class"], "declared")
+
+    def test_requested_declared_does_not_promote_to_independent(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ws = self._class_workspace(
+                tmp, "declared", relationship="independent")
+            derived = self._public_derive(ws)
+            self.assertEqual(derived["effective_class"], "declared")
+            self.assertNotEqual(derived["effective_class"], "independent")
+            loaded = self._load_default_attempt(tmp, ws, derived)
+            self.assertEqual(loaded["effective_class"], "declared")
+
+    def test_all_requested_classes_through_public_derive_and_default_loader(self):
+        expected = {
+            "declared": ("declared", "declared"),
+            "independent": ("independent", "declared"),
+            "held_out": ("held_out", "hidden-until-freeze"),
+            "real_fault": ("real_fault", "declared"),
+            "adaptive": ("adaptive", "declared"),
+        }
+        self.assertEqual(set(expected), set(ca.CLASS_IDS))
+        for requested, (effective, status) in expected.items():
+            with self.subTest(requested=requested):
+                with tempfile.TemporaryDirectory() as d:
+                    tmp = Path(d)
+                    ws = self._class_workspace(tmp, requested)
+                    derived = self._public_derive(ws)
+                    self.assertEqual(derived["effective_class"], effective)
+                    self.assertEqual(derived["visibility_status"], status)
+                    loaded = self._load_default_attempt(tmp, ws, derived)
+                    self.assertEqual(loaded["effective_class"], effective)
+                    self.assertEqual(loaded["visibility_status"], status)
+                    hostile = copy.deepcopy(derived)
+                    if effective != "held_out":
+                        hostile["effective_class"] = "held_out"
+                        hostile["visibility_status"] = "hidden-until-freeze"
+                        path = tmp / "hostile-attempt.json"
+                        path.write_bytes(ca.encode_class_attempt_v0(hostile))
+                        with self.assertRaises(ca.ManifestError):
+                            ca.load_class_attempt_v0(
+                                path,
+                                provenance_path=ws["prov_path"],
+                                manifest_path=ws["manifest_path"],
+                                report_path=ws["report_path"],
+                                environment_path=ws["env_path"],
+                            )
+
+    def test_hostile_stronger_visibility_does_not_promote_weaker_requests(self):
+        weaker = ("declared", "independent", "real_fault", "adaptive")
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            bun = self._class_workspace(
+                tmp, "declared")["prov"]["mutation_bundle_sha256"]
+            held_out_events = _visibility_events(
+                "selection-committed", "candidate-frozen",
+                "selection-disclosed", bundle=bun)
+            pre_freeze_events = _visibility_events(
+                "selection-committed", "selection-disclosed",
+                "candidate-frozen", bundle=bun)
+            for requested in weaker:
+                for events in (held_out_events, pre_freeze_events):
+                    with self.subTest(requested=requested, events=len(events)):
+                        ws = self._class_workspace(
+                            tmp, requested, events=events,
+                            relationship=(
+                                "independent" if requested == "independent"
+                                else "same"),
+                        )
+                        derived = self._public_derive(ws)
+                        self.assertEqual(derived["effective_class"], requested)
+                        self.assertNotEqual(
+                            derived["effective_class"], "held_out")
+                        self.assertEqual(
+                            derived["visibility_status"], "declared")
+                        loaded = self._load_default_attempt(tmp, ws, derived)
+                        self.assertEqual(loaded["effective_class"], requested)
+
+    def test_non_ascii_actor_predecessor_is_independently_digested(self):
+        self.assertTrue(any(ord(ch) > 127 for ch in UNICODE_ACTOR))
+        event = {
+            "ordinal": 0,
+            "event": "selection-committed",
+            "mutation_bundle_sha256": PINNED_UNICODE_EVENT_BUNDLE,
+            "actor": UNICODE_ACTOR,
+            "predecessor_event_sha256": None,
+        }
+        independent_bytes = (
+            json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n").encode("utf-8")
+        escaped_bytes = (
+            json.dumps(event, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        self.assertEqual(independent_bytes, PINNED_UNICODE_EVENT_BYTES)
+        self.assertNotEqual(independent_bytes, escaped_bytes)
+        self.assertIn(UNICODE_ACTOR.encode("utf-8"), independent_bytes)
+        self.assertNotIn(UNICODE_ACTOR.encode("utf-8"), escaped_bytes)
+        independent = "sha256:" + hashlib.sha256(independent_bytes).hexdigest()
+        self.assertEqual(independent, PINNED_UNICODE_EVENT_SHA256)
+        self.assertEqual(ca._visibility_event_sha256(event), independent)
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            bun_probe = self._held_out_workspace(tmp)
+            bun = bun_probe["prov"]["mutation_bundle_sha256"]
+            ws = self._held_out_workspace(
+                tmp,
+                events=_visibility_events(
+                    "selection-committed", "candidate-frozen",
+                    "selection-disclosed", bundle=bun, actor=UNICODE_ACTOR),
+            )
+            events = ws["prov"]["visibility_events"]
+            self.assertEqual(events[0]["actor"], UNICODE_ACTOR)
+            self.assertEqual(
+                events[1]["predecessor_event_sha256"],
+                _event_artifact_sha256(events[0]),
+            )
+            self.assertEqual(
+                ca._visibility_event_sha256(events[0]),
+                _event_artifact_sha256(events[0]),
+            )
+            derived = self._public_derive(ws)
+            self.assertEqual(derived["effective_class"], "held_out")
 
 
 class ClassEvidenceHostileInputs(unittest.TestCase):
