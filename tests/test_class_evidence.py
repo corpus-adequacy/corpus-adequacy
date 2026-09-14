@@ -725,20 +725,17 @@ class ClassAttemptV0(unittest.TestCase):
                 classification={"effective_class": "declared",
                                 "visibility_status": "declared"},
             )
+            self.assertNotEqual(derived["result"]["killed"], 99)
+            self.assertNotEqual(derived["result"]["denominator"], 99)
             derived["result"]["killed"] = 99
             derived["result"]["denominator"] = 99
-            path = Path(d) / "attempt.json"
-            raw = (json.dumps(derived, ensure_ascii=False, indent=2, sort_keys=True)
-                   + "\n").encode("utf-8")
-            path.write_bytes(raw)
-            with self.assertRaises(ca.ManifestError):
-                ca.load_class_attempt_v0(
-                    path,
-                    provenance_path=ws["prov_path"],
-                    manifest_path=ws["manifest_path"],
-                    report_path=ws["report_path"],
-                    environment_path=ws["env_path"],
-                )
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.encode_class_attempt_v0(derived)
+            self.assertRegex(
+                str(cm.exception).lower(),
+                r"result\.(killed|denominator) does not match"
+                r"|denominator does not match scored rows",
+            )
 
     def test_digest_drift_refuses_independently_and_report_before_parse(self):
         with tempfile.TemporaryDirectory() as d:
