@@ -30,6 +30,8 @@ python3 corpus_adequacy.py <manifest.json>
 python3 corpus_adequacy.py <manifest.json> --json
 python3 corpus_adequacy.py --survivors <report.json>
 python3 corpus_adequacy.py --survivors <report.json> --json
+python3 corpus_adequacy.py --rules <report.json> --manifest <manifest.json>
+python3 corpus_adequacy.py --rules <report.json> --manifest <manifest.json> --json
 ```
 
 `--survivors` is a sibling projection over an existing `report.v0` file. It does
@@ -51,6 +53,31 @@ optional on `unexercised`/`known-hole`, and forbidden otherwise. Unknown
 keys and missing required keys fail closed on distinct routes. This is a
 consumer closed-set, not a `report.v1` and not a change to production
 `report.v0` or `survivors.v0` bytes.
+
+`corpus-adequacy.manifest.v1` keeps the v0 measurement fields and semantics and
+requires a closed `rules` inventory. Each author-written row is either
+`mutated`, with one or more eligible mutation labels from the same group, or
+`excluded`, with a reason. Every declared non-control, in-scope mutant and every
+declared equivalent must be linked exactly once. This closes the mapping the
+manifest author supplied; it does not infer rules from implementation source or
+corpus text and does not establish that every normative rule was listed.
+
+`--rules` is a read-only sibling projection. It bounded-reads an exact
+`report.v0` and the required manifest, checks the report's manifest digest
+against the exact manifest bytes before parsing them, and emits
+`corpus-adequacy.rules.v0`. It never invokes a runner or candidate. A matched v0
+manifest projects `inventory: null`, including a v0 document with a member named
+`rules`; that member remains an uninterpreted extension. A valid v1
+`"rules": {}` projects real zero counts. The projected counts are rule rows,
+mutation-linked rule rows, excluded rule rows, and linked mutants. They are not
+a percentage or a score. Flat projected rows add their exact `group` beside the
+disposition-specific manifest fields so `(group, id)` remains a self-describing
+identity when two groups use the same rule id.
+
+This inventory is author-declared traceability. It is not rule coverage,
+adequacy, owner ratification, certification, endorsement, partnership,
+execution, remeasurement, or a change to historical evidence. `report.v0`, its
+score and denominator, and `survivors.v0` do not gain inventory fields.
 
 ```
 python3 adapters/tersign_evidence_record.py <tersign-checkout> <empty-dest>

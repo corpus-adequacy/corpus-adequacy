@@ -11,6 +11,7 @@ rule none does, a rule declared out of scope, and a rule declared equivalent.
 from __future__ import annotations
 
 import ast
+import copy
 import gc
 import hashlib
 import inspect
@@ -5572,6 +5573,529 @@ class SharedMutationStep(unittest.TestCase):
                      report["score_percent"], report["adequate"],
                      report["control_status"]),
                     expected[name])
+
+
+class RuleInventoryV1Contract(unittest.TestCase):
+    """Issue #121: one closed author-declared inventory beside report.v0."""
+
+    def _manifest(self, *, schema="corpus-adequacy.manifest.v1", rules=None,
+                  mutants=None, equivalent=None):
+        doc = {
+            "schema": schema,
+            "mutants": mutants if mutants is not None else {
+                "g": [dict(KILLABLE), dict(CONTROL)],
+            },
+            "equivalent": equivalent or {},
+        }
+        if rules is not None:
+            doc["rules"] = rules
+        return doc
+
+    @staticmethod
+    def _mutated(rule_id="r", labels=None, **extra):
+        row = {
+            "id": rule_id,
+            "text": "The checker rejects bad input.",
+            "url": "https://example.test/spec#bad-input",
+            "disposition": "mutated",
+            "mutants": labels or [KILLABLE["label"]],
+        }
+        row.update(extra)
+        return row
+
+    @staticmethod
+    def _excluded(rule_id="x", **extra):
+        row = {
+            "id": rule_id,
+            "text": "An optional extension may be ignored.",
+            "url": None,
+            "disposition": "excluded",
+            "reason": "No mutation is appropriate for this authored rule.",
+        }
+        row.update(extra)
+        return row
+
+    def test_v0_rules_extension_is_uninterpreted_and_absent(self):
+        malformed = self._manifest(
+            schema=ca.SCHEMA, rules={"g": "not-an-array"})
+        self.assertIsNone(ca.rule_inventory_index(malformed))
+
+    def test_v1_requires_rules_and_closed_container_shapes(self):
+        cases = (
+            (self._manifest(), "rules"),
+            (self._manifest(rules=[]), "object"),
+            (self._manifest(rules={"g": {}}), "array"),
+            (self._manifest(rules={"g": ["row"]}), "object"),
+        )
+        for manifest, token in cases:
+            with self.subTest(token=token), self.assertRaises(ca.ManifestError) as ctx:
+                ca.rule_inventory_index(manifest)
+            self.assertIn(token, str(ctx.exception))
+
+    def test_rows_have_exact_disposition_specific_keys(self):
+        valid_mutated = self._mutated()
+        valid_excluded = self._excluded()
+        cases = []
+        for key in valid_mutated:
+            row = dict(valid_mutated)
+            del row[key]
+            cases.append(row)
+        cases.append(dict(valid_mutated, extra=True))
+        for key in valid_excluded:
+            row = dict(valid_excluded)
+            del row[key]
+            cases.append(row)
+        cases.append(dict(valid_excluded, extra=True))
+        cases.append(dict(valid_mutated, disposition="other"))
+        for row in cases:
+            with self.subTest(row=row), self.assertRaises(ca.ManifestError):
+                ca.rule_inventory_index(self._manifest(rules={"g": [row]}))
+
+    def test_identity_text_reason_and_url_are_hostile_validated(self):
+        cases = (
+            self._mutated(rule_id=""),
+            self._mutated(rule_id=" bad"),
+            self._mutated(rule_id="a" * 129),
+            self._mutated(rule_id="\ud800"),
+            self._mutated(text=" "),
+            self._mutated(text="a" * 8193),
+            self._mutated(text="\ud800"),
+            self._mutated(url=""),
+            self._mutated(url="http://example.test/r"),
+            self._mutated(url="https://user:pass@example.test/r"),
+            self._mutated(url="https:///missing-host"),
+            self._mutated(url="https://example.test/" + "a" * 2040),
+            self._mutated(url="\ud800"),
+            self._excluded(reason=" "),
+            self._excluded(reason="a" * 2049),
+            self._excluded(reason="\ud800"),
+        )
+        for row in cases:
+            with self.subTest(row=row), self.assertRaises(ca.ManifestError):
+                ca.rule_inventory_index(self._manifest(rules={"g": [row]}))
+
+    def test_group_identity_and_rule_id_uniqueness_are_closed(self):
+        for group in ("", " ", "a" * 129, "\ud800"):
+            with self.subTest(group=group), self.assertRaises(ca.ManifestError):
+                ca.rule_inventory_index(self._manifest(rules={group: []}, mutants={}))
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(self._manifest(
+                rules={"g": [self._excluded("same"), self._excluded("same")]},
+                mutants={}))
+        self.assertEqual(ca.rule_inventory_index(self._manifest(
+            rules={"é" * 64: []}, mutants={}))["rules_declared"], 0)
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(self._manifest(
+                rules={"é" * 65: []}, mutants={}))
+
+    def test_reference_refusals_cover_empty_duplicate_unknown_cross_group_and_ineligible(self):
+        ordinary = dict(KILLABLE, label="ordinary")
+        other = dict(KILLABLE, label="other")
+        out = dict(KILLABLE, label="outside", scope="out_of_scope", reason="not claimed")
+        control = dict(CONTROL, label="control")
+        mutants = {"g": [ordinary, out, control], "h": [other]}
+        cases = (
+            [],
+            [""],
+            ["ordinary", "ordinary"],
+            ["unknown"],
+            ["other"],
+            ["control"],
+            ["outside"],
+        )
+        for labels in cases:
+            with self.subTest(labels=labels), self.assertRaises(ca.ManifestError):
+                ca.rule_inventory_index(self._manifest(
+                    rules={"g": [self._mutated(labels=labels)]}, mutants=mutants))
+
+    def test_control_and_out_of_scope_are_each_refused_without_an_eligible_neighbor(self):
+        cases = (
+            dict(CONTROL, label="control"),
+            dict(KILLABLE, label="outside", scope="out_of_scope", reason="not claimed"),
+        )
+        for declaration in cases:
+            with self.subTest(label=declaration["label"]), self.assertRaises(ca.ManifestError):
+                ca.rule_inventory_index(self._manifest(
+                    rules={"g": [self._mutated(labels=[declaration["label"]])]},
+                    mutants={"g": [declaration]}))
+
+    def test_every_ordinary_equivalent_and_known_hole_label_remains_required(self):
+        known = dict(KILLABLE, label="known")
+        manifest = self._manifest(
+            rules={"g": [self._mutated(labels=[KILLABLE["label"]])]},
+            mutants={"g": [dict(KILLABLE), known, dict(CONTROL)]},
+        )
+        manifest["known_holes"] = {
+            "sha256:x": [{"label": "known", "reason": "still required", "recorded": "today"}],
+        }
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(manifest)
+        equivalent = self._manifest(
+            rules={"g": [self._mutated()]},
+            equivalent={"g": [{"label": "equiv", "reason": "same outcome"}]},
+        )
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(equivalent)
+
+    def test_one_label_cannot_be_linked_twice(self):
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(self._manifest(rules={"g": [
+                self._mutated("r1"), self._mutated("r2"),
+            ]}))
+
+    def test_one_rule_can_link_two_mutants_and_index_orders_without_mutating_input(self):
+        a = dict(KILLABLE, label="a")
+        z = dict(KILLABLE, label="z")
+        manifest = self._manifest(
+            mutants={"z-group": [z], "a-group": [a]},
+            rules={
+                "z-group": [self._mutated("z-rule", ["z"])],
+                "a-group": [self._excluded("b"), self._mutated("a", ["a"])],
+            },
+        )
+        before = copy.deepcopy(manifest)
+        index = ca.rule_inventory_index(manifest)
+        self.assertEqual(manifest, before)
+        self.assertEqual(
+            {key: index[key] for key in (
+                "rules_declared", "rules_mutation_linked", "rules_excluded", "linked_mutants")},
+            {"rules_declared": 3, "rules_mutation_linked": 2,
+             "rules_excluded": 1, "linked_mutants": 2},
+        )
+        self.assertEqual([g["group"] for g in index["groups"]], ["a-group", "z-group"])
+        self.assertEqual([(r["group"], r["id"]) for r in index["rules"]], [
+            ("a-group", "a"), ("a-group", "b"), ("z-group", "z-rule")])
+
+    def test_absent_v0_and_empty_v1_do_not_share_a_representation(self):
+        report = producer_shaped_report()
+        for schema, rules, expected in (
+            (ca.SCHEMA, None, None),
+            ("corpus-adequacy.manifest.v1", {}, {
+                "rules_declared": 0, "rules_mutation_linked": 0,
+                "rules_excluded": 0, "linked_mutants": 0,
+            }),
+        ):
+            manifest = self._manifest(schema=schema, rules=rules, mutants={})
+            raw = json.dumps(manifest, separators=(",", ":")).encode()
+            report["manifest_sha256"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+            projected = ca.rule_inventory_projection(report, raw)
+            if expected is None:
+                self.assertIsNone(projected["inventory"])
+            else:
+                self.assertEqual(
+                    {k: projected["inventory"][k] for k in expected}, expected)
+
+    def test_digest_mismatch_precedes_manifest_parse_and_index(self):
+        report = producer_shaped_report(manifest_sha256="sha256:" + "0" * 64)
+        with (mock.patch.object(ca, "_parse_projection_json",
+                               side_effect=AssertionError("manifest parsed before digest")),
+              mock.patch.object(ca, "rule_inventory_index",
+                                side_effect=AssertionError("index reached before digest"))):
+            with self.assertRaises(ca.ManifestError) as ctx:
+                ca.rule_inventory_projection(report, b'{"schema":"x"}')
+        self.assertIn("digest", str(ctx.exception))
+
+    def test_exact_manifest_bytes_not_parsed_object_identity_bind_projection(self):
+        manifest = self._manifest(schema=ca.SCHEMA, rules={"malformed": True})
+        compact = json.dumps(manifest, separators=(",", ":")).encode()
+        spaced = compact + b"\n"
+        report = producer_shaped_report(
+            manifest_sha256="sha256:" + hashlib.sha256(compact).hexdigest())
+        self.assertIsNone(ca.rule_inventory_projection(report, compact)["inventory"])
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_projection(report, spaced)
+
+    def test_loader_stores_private_index_from_the_one_function(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _manifest(tmp, {"a": [KILLABLE]}, raw={
+                "schema": "corpus-adequacy.manifest.v1",
+                "rules": {"a": [self._mutated(labels=[KILLABLE["label"]])]},
+            })
+            sentinel = {"from": "one-index"}
+            with mock.patch.object(ca, "rule_inventory_index", return_value=sentinel) as indexer:
+                loaded = ca.load_manifest(path)
+        self.assertIs(loaded["_rule_inventory"], sentinel)
+        indexer.assert_called_once_with(loaded)
+
+    def test_v0_malformed_rules_keeps_measurement_and_survivors_bytes_identical(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            plain = _manifest(tmp, {"a": [KILLABLE]})
+            plain_bytes = plain.read_bytes()
+            plain_report = ca.run(plain, execution_profile="trusted-local")
+            plain_report_bytes = ca.encode_report_v0(plain_report)
+            plain_survivors = ca.encode_survivors_v0(ca.survivor_findings(plain_report))
+            doc = json.loads(plain_bytes)
+            doc["rules"] = {"malformed": "v0 ignores this extension"}
+            extended = tmp / "extended.json"
+            extended.write_text(json.dumps(doc), encoding="utf-8")
+            extended_report = ca.run(extended, execution_profile="trusted-local")
+        for key in ("score_percent", "adequate", "declared_total", "killed", "survived"):
+            self.assertEqual(plain_report[key], extended_report[key])
+        normalized = dict(extended_report,
+                          manifest=plain_report["manifest"],
+                          manifest_sha256=plain_report["manifest_sha256"])
+        self.assertEqual(ca.encode_report_v0(normalized), plain_report_bytes)
+        self.assertEqual(
+            ca.encode_survivors_v0(ca.survivor_findings(normalized)), plain_survivors)
+
+    def test_every_bound_accepts_max_and_refuses_max_plus_one(self):
+        max_groups = {"g%03d" % i: [] for i in range(ca.RULE_GROUPS_MAX)}
+        self.assertEqual(ca.rule_inventory_index(
+            self._manifest(rules=max_groups, mutants={}))["rules_declared"], 0)
+        max_groups["overflow"] = []
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(self._manifest(rules=max_groups, mutants={}))
+
+        rows = [self._excluded("r%04d" % i) for i in range(ca.RULE_ROWS_PER_GROUP_MAX)]
+        self.assertEqual(ca.rule_inventory_index(
+            self._manifest(rules={"g": rows}, mutants={}))["rules_declared"], 1024)
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(self._manifest(
+                rules={"g": rows + [self._excluded("overflow")]}, mutants={}))
+
+        four_groups = {
+            "g%d" % group: [self._excluded("r%04d" % i)
+                             for i in range(ca.RULE_ROWS_PER_GROUP_MAX)]
+            for group in range(4)
+        }
+        self.assertEqual(ca.rule_inventory_index(
+            self._manifest(rules=four_groups, mutants={}))["rules_declared"], 4096)
+        four_groups["overflow"] = [self._excluded("x")]
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(self._manifest(rules=four_groups, mutants={}))
+
+        labels = ["m%04d" % i for i in range(ca.RULE_MUTANT_REFERENCES_MAX + 1)]
+        mutants = {"g": [dict(KILLABLE, label=label) for label in labels]}
+        chunks = [labels[i:i + ca.RULE_MUTANTS_PER_ROW_MAX]
+                  for i in range(0, ca.RULE_MUTANT_REFERENCES_MAX,
+                                 ca.RULE_MUTANTS_PER_ROW_MAX)]
+        linked_rows = [self._mutated("r%03d" % i, chunk)
+                       for i, chunk in enumerate(chunks)]
+        self.assertEqual(ca.rule_inventory_index(self._manifest(
+            rules={"g": linked_rows}, mutants={"g": mutants["g"][:-1]}))[
+                "linked_mutants"], ca.RULE_MUTANT_REFERENCES_MAX)
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(self._manifest(
+                rules={"g": linked_rows + [self._mutated("overflow", [labels[-1]])]},
+                mutants=mutants))
+
+    def test_field_byte_caps_accept_max_and_refuse_max_plus_one(self):
+        exact_url = "https://example.test/" + "u" * (2048 - len("https://example.test/"))
+        exact = self._excluded(
+            rule_id="i" * 128, text="t" * 8192, url=exact_url, reason="r" * 2048)
+        self.assertEqual(ca.rule_inventory_index(
+            self._manifest(rules={"g": [exact]}, mutants={}))["rules_declared"], 1)
+        for key, value in (
+            ("id", "i" * 129), ("text", "t" * 8193),
+            ("url", exact_url + "u"), ("reason", "r" * 2049),
+        ):
+            with self.subTest(key=key), self.assertRaises(ca.ManifestError):
+                ca.rule_inventory_index(self._manifest(
+                    rules={"g": [dict(exact, **{key: value})]}, mutants={}))
+
+        labels = ["m%03d" % i for i in range(ca.RULE_MUTANTS_PER_ROW_MAX + 1)]
+        mutants = {"g": [dict(KILLABLE, label=label) for label in labels]}
+        self.assertEqual(ca.rule_inventory_index(self._manifest(
+            rules={"g": [self._mutated(labels=labels[:-1])]},
+            mutants={"g": mutants["g"][:-1]}))["linked_mutants"], 256)
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(self._manifest(
+                rules={"g": [self._mutated(labels=labels)]}, mutants=mutants))
+        with self.assertRaises(ca.ManifestError):
+            ca.rule_inventory_index(self._manifest(
+                rules={"g": [self._mutated(labels=["\ud800"])]}, mutants={"g": []}))
+
+    def test_rules_encoder_closes_every_object_layer_and_invariants(self):
+        manifest = self._manifest(rules={"g": [self._mutated()]})
+        raw = json.dumps(manifest).encode()
+        report = producer_shaped_report(
+            manifest_sha256="sha256:" + hashlib.sha256(raw).hexdigest())
+        projected = ca.rule_inventory_projection(report, raw)
+        encoded = ca.encode_rules_v0(projected)
+        self.assertTrue(encoded.endswith(b"\n"))
+        self.assertEqual(json.loads(encoded)["schema"], ca.RULES_SCHEMA)
+        mutations = (
+            dict(projected, extra=True),
+            dict(projected, inventory=dict(projected["inventory"], extra=True)),
+            dict(projected, inventory=dict(
+                projected["inventory"],
+                groups=[dict(projected["inventory"]["groups"][0], extra=True)])),
+            dict(projected, inventory=dict(
+                projected["inventory"],
+                rules=[dict(projected["inventory"]["rules"][0], extra=True)])),
+            dict(projected, inventory=dict(
+                projected["inventory"], rules_declared=99)),
+        )
+        for malformed in mutations:
+            with self.subTest(malformed=malformed), self.assertRaises(ca.ManifestError):
+                ca.encode_rules_v0(malformed)
+
+    def test_projection_order_is_stable_across_group_and_reference_order(self):
+        one = dict(KILLABLE, label="one")
+        two = dict(KILLABLE, label="two")
+        first = self._manifest(
+            mutants={"b": [two], "a": [one]},
+            rules={"b": [self._mutated("z", ["two"])],
+                   "a": [self._mutated("a", ["one"])]})
+        second = self._manifest(
+            mutants={"a": [one], "b": [two]},
+            rules={"a": [self._mutated("a", ["one"])],
+                   "b": [self._mutated("z", ["two"])]})
+        self.assertEqual(ca.rule_inventory_index(first), ca.rule_inventory_index(second))
+
+        many_a = dict(KILLABLE, label="a")
+        many_z = dict(KILLABLE, label="z")
+        left = self._manifest(
+            mutants={"g": [many_a, many_z]},
+            rules={"g": [self._mutated(labels=["z", "a"])]})
+        right = self._manifest(
+            mutants={"g": [many_z, many_a]},
+            rules={"g": [self._mutated(labels=["a", "z"])]})
+        self.assertEqual(ca.rule_inventory_index(left), ca.rule_inventory_index(right))
+
+    def test_projection_calls_the_same_index_and_carries_its_result(self):
+        manifest = self._manifest(schema=ca.SCHEMA, rules={"ignored": True})
+        raw = json.dumps(manifest).encode()
+        report = producer_shaped_report(
+            manifest_sha256="sha256:" + hashlib.sha256(raw).hexdigest())
+        sentinel = {"one": "index"}
+        with mock.patch.object(ca, "rule_inventory_index", return_value=sentinel) as indexer:
+            projected = ca.rule_inventory_projection(report, raw)
+        self.assertIs(projected["inventory"], sentinel)
+        indexer.assert_called_once()
+
+    def test_rules_cli_uses_shared_reader_shared_projection_and_never_run(self):
+        manifest = self._manifest(schema=ca.SCHEMA, rules={"ignored": True})
+        manifest_raw = json.dumps(manifest).encode()
+        report = producer_shaped_report(
+            manifest_sha256="sha256:" + hashlib.sha256(manifest_raw).hexdigest())
+        report_raw = ca.encode_report_v0(report)
+        stdout = io.BytesIO()
+
+        class BinaryStdout:
+            buffer = stdout
+
+            def write(self, _text):
+                raise AssertionError("rules JSON was routed through text encoding")
+
+        with (mock.patch.object(sys, "argv", [
+                "corpus_adequacy.py", "--rules", "report.json",
+                "--manifest", "manifest.json", "--json"]),
+              mock.patch.object(sys, "stdout", BinaryStdout()),
+              mock.patch.object(ca, "read_bounded_regular_file",
+                                side_effect=[report_raw, manifest_raw]) as reader,
+              mock.patch.object(ca, "rule_inventory_projection",
+                                wraps=ca.rule_inventory_projection) as projection,
+              mock.patch.object(ca, "run", side_effect=AssertionError("--rules called run()")),
+              mock.patch.object(Path, "read_bytes",
+                                side_effect=AssertionError("rules used Path.read_bytes()")),
+              mock.patch("builtins.open", side_effect=AssertionError("rules used open()"))):
+            rc = ca.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(reader.call_count, 2)
+        projection.assert_called_once()
+        self.assertIsNone(json.loads(stdout.getvalue())["inventory"])
+
+    def test_rules_cli_errors_are_project_envelopes_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            report = tmp / "report.json"
+            report.write_text('{"schema":"wrong"}', encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(ca.__file__), "--rules", str(report), "--json"],
+                capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 2)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertIn("could not project", json.loads(proc.stdout)["error"])
+
+    def test_human_renderer_consumes_index_counts_and_marks_v0_absent(self):
+        stdout = io.StringIO()
+        with mock.patch.object(sys, "stdout", stdout):
+            ca._render_rules_v0({"inventory": None})
+        self.assertEqual(
+            stdout.getvalue(),
+            "Rule inventory: absent (manifest.v0); no zero was measured.\n")
+        projected = {"inventory": {
+            "rules_declared": 7, "rules_mutation_linked": 5,
+            "rules_excluded": 2, "linked_mutants": 9,
+            "groups": [], "rules": [],
+        }}
+        stdout = io.StringIO()
+        with mock.patch.object(sys, "stdout", stdout):
+            ca._render_rules_v0(projected)
+        self.assertIn("7 declared, 5 mutation-linked, 2 excluded, 9 linked mutants",
+                      stdout.getvalue())
+
+    def test_v1_inventory_does_not_change_measurement_semantics(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            v0 = _manifest(tmp, {"a": [KILLABLE]})
+            report_v0 = ca.run(v0, execution_profile="trusted-local")
+            v1 = _manifest(tmp, {"a": [KILLABLE]}, raw={
+                "schema": ca.MANIFEST_V1_SCHEMA,
+                "rules": {"a": [self._mutated(labels=[KILLABLE["label"]])]},
+            })
+            report_v1 = ca.run(v1, execution_profile="trusted-local")
+        for key in (
+                "score_percent", "adequate", "declared_total", "killed", "survived",
+                "silent", "equivalent", "unexercised_out_of_scope", "unproved",
+                "control_status", "mutants", "failures"):
+            self.assertEqual(report_v1[key], report_v0[key], key)
+        self.assertNotEqual(report_v1["manifest_sha256"], report_v0["manifest_sha256"])
+        self.assertNotIn("inventory", report_v1)
+        self.assertNotIn("rules", report_v1)
+
+    def test_v1_shape_refusals_are_exit_2_error_envelopes(self):
+        cases = (
+            {},
+            {"rules": []},
+            {"rules": {"a": {}}},
+            {"rules": {"a": ["row"]}},
+            {"rules": {"a": [dict(self._mutated(), disposition="wrong")]}},
+        )
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            for i, extra in enumerate(cases):
+                path = _manifest(tmp, {"a": [KILLABLE]}, raw={
+                    "schema": ca.MANIFEST_V1_SCHEMA, **extra})
+                renamed = tmp / ("case-%d.json" % i)
+                path.replace(renamed)
+                proc = subprocess.run(
+                    [sys.executable, str(ca.__file__), str(renamed), "--json"],
+                    capture_output=True, text=True, timeout=30)
+                with self.subTest(extra=extra):
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertNotIn("Traceback", proc.stderr)
+                    self.assertEqual(json.loads(proc.stdout)["schema"], ca.ERROR_SCHEMA)
+
+    def test_flat_rules_rows_are_self_describing_by_exact_group_and_id(self):
+        first = dict(KILLABLE, label="first")
+        second = dict(KILLABLE, label="second")
+        index = ca.rule_inventory_index(self._manifest(
+            mutants={"a": [first], "b": [second]},
+            rules={
+                "b": [self._mutated("same", ["second"])],
+                "a": [self._mutated("same", ["first"])],
+            }))
+        self.assertEqual(
+            [(row["group"], row["id"]) for row in index["rules"]],
+            [("a", "same"), ("b", "same")],
+        )
+        self.assertEqual(len({(row["group"], row["id"]) for row in index["rules"]}), 2)
+
+    def test_text_url_and_reason_are_projected_without_normalization(self):
+        excluded = self._excluded(
+            text="  Keep authored spacing.  ",
+            url="HTTPS://Example.Test/spec?q=One#Part",
+            reason="  Authored reason.  ",
+        )
+        index = ca.rule_inventory_index(self._manifest(
+            rules={"g": [excluded]}, mutants={}))
+        row = index["rules"][0]
+        for key in ("text", "url", "reason"):
+            self.assertEqual(row[key], excluded[key])
 
 
 if __name__ == "__main__":
