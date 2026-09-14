@@ -1533,6 +1533,109 @@ def _require_visibility_events(events) -> None:
             _require_canonical_sha256(pred, where + ".predecessor_event_sha256")
 
 
+def _visibility_event_sha256(event: dict) -> str:
+    return _file_sha256(_encode_class_artifact_v0(event))
+
+
+_HELD_OUT_CHAIN_NAMES = (
+    "selection-committed", "candidate-frozen", "selection-disclosed",
+)
+_PRE_FREEZE_CHAIN_NAMES = (
+    "selection-committed", "selection-disclosed", "candidate-frozen",
+)
+_VISIBILITY_PATTERNS = ("held_out_chain", "pre_freeze", "commit_only")
+_VISIBILITY_RELATIONSHIPS = ("same", "independent", "unknown")
+
+
+def _require_visibility_chain_v0(provenance) -> list[str]:
+    """Refuse a broken visibility chain; return the ordered event names.
+
+    Encode, load, and classification consume this result. Predecessor,
+    bundle, duplicate, and start-of-chain checks live only here.
+    """
+    events = provenance["visibility_events"]
+    bundle = provenance["mutation_bundle_sha256"]
+    names = []
+    for i, event in enumerate(events):
+        if event["mutation_bundle_sha256"] != bundle:
+            raise ManifestError("visibility event mutation bundle drifted")
+        if i > 0:
+            expected = _visibility_event_sha256(events[i - 1])
+            if event["predecessor_event_sha256"] != expected:
+                raise ManifestError(
+                    "visibility predecessor digest does not match the preceding event")
+        name = event["event"]
+        if name in names:
+            raise ManifestError("duplicate visibility event")
+        names.append(name)
+    if not names or names[0] != "selection-committed":
+        raise ManifestError(
+            "visibility events are reordered: chain must start with selection-committed")
+    return names
+
+
+def _visibility_pattern(names: list[str]) -> str:
+    if names == list(_HELD_OUT_CHAIN_NAMES):
+        return "held_out_chain"
+    if names == list(_PRE_FREEZE_CHAIN_NAMES):
+        return "pre_freeze"
+    if names == ["selection-committed"]:
+        return "commit_only"
+    if "candidate-frozen" not in names:
+        raise ManifestError("visibility chain is missing candidate-frozen")
+    raise ManifestError("visibility events are missing or reordered")
+
+
+def _build_requested_class_transition_v0() -> dict:
+    """Complete monotone table: preserve or weaken, never promote."""
+    table = {}
+    for requested in sorted(CLASS_IDS):
+        for pattern in _VISIBILITY_PATTERNS:
+            for relationship in _VISIBILITY_RELATIONSHIPS:
+                key = (requested, pattern, relationship)
+                if requested == "held_out":
+                    if pattern == "held_out_chain":
+                        table[key] = ("held_out", "hidden-until-freeze")
+                    elif pattern == "pre_freeze":
+                        table[key] = {
+                            "same": ("declared", "disclosed-before-freeze"),
+                            "independent": ("independent", "disclosed-before-freeze"),
+                            "unknown": ("unknown", "disclosed-before-freeze"),
+                        }[relationship]
+                    else:
+                        table[key] = "refuse-missing-freeze"
+                    continue
+                if relationship == "unknown":
+                    table[key] = ("unknown", "unknown")
+                else:
+                    table[key] = (requested, "declared")
+    return table
+
+
+_REQUESTED_CLASS_TRANSITION_V0 = _build_requested_class_transition_v0()
+
+
+def _classify_visibility_v0(provenance, names: list[str]) -> tuple[str, str]:
+    """Derive effective class from an already-validated visibility chain.
+
+    `names` is the ordered event-name list from the semantic chain
+    validator. This function does not restate predecessor, bundle,
+    duplicate, or start-of-chain checks. Establishes declared artifact
+    order and relationship metadata only. It does not authenticate people
+    or prove absence of undisclosed access. Held-out and pre-freeze
+    mappings apply only to a requested held_out selection. Other requested
+    classes preserve or weaken; they cannot promote to held_out or
+    independent.
+    """
+    pattern = _visibility_pattern(names)
+    requested = provenance["requested_class"]
+    relationship = provenance["authoring"]["relationship"]
+    outcome = _REQUESTED_CLASS_TRANSITION_V0[(requested, pattern, relationship)]
+    if outcome == "refuse-missing-freeze":
+        raise ManifestError("visibility chain is missing candidate-frozen")
+    return outcome
+
+
 def _require_origin(origin, requested: str) -> None:
     require_shape(origin, dict, "origin")
     kind = origin.get("kind")
@@ -1622,7 +1725,7 @@ def _require_authoring(authoring, requested: str) -> None:
             "requested_class independent requires relationship independent")
 
 
-def _require_class_provenance_v0_document(doc) -> dict:
+def _require_class_provenance_v0_document(doc) -> tuple[str, str]:
     require_shape(doc, dict, "class provenance")
     _require_closed_keys(
         doc, _CLASS_PROVENANCE_KEYS, _CLASS_PROVENANCE_KEYS,
@@ -1648,10 +1751,12 @@ def _require_class_provenance_v0_document(doc) -> dict:
         "candidate_freeze.observation_declaration_sha256")
     _require_authoring(doc["authoring"], doc["requested_class"])
     _require_visibility_events(doc["visibility_events"])
+    names = _require_visibility_chain_v0(doc)
+    classified = _classify_visibility_v0(doc, names)
     _require_origin(doc["origin"], doc["requested_class"])
     _require_expected_distinctions_shape(doc["expected_distinctions"])
     _require_class_non_claims(doc["non_claims"], "non_claims")
-    return doc
+    return classified
 
 
 def _ordinary_declared_mutant(manifest: dict, group: str, label: str) -> dict:
@@ -1736,7 +1841,7 @@ def load_class_provenance_v0(provenance_path, *, manifest_path, mutation_bundle_
     raw = _read_class_input(provenance_path)
     doc = _parse_class_object(raw)
     _require_class_provenance_v0_document(doc)
-    _require_canonical_class_bytes(raw, encode_class_provenance_v0(doc))
+    _require_canonical_class_bytes(raw, _encode_class_artifact_v0(doc))
     manifest_raw = _read_class_input(manifest_path)
     _require_digest_match(manifest_raw, doc["manifest_sha256"], "manifest")
     _parse_class_object(manifest_raw)
@@ -1935,14 +2040,14 @@ def _classification_pair(classification) -> tuple[str, str]:
 
 def _derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
                              report_raw, environment_raw, predecessor,
-                             classification) -> dict:
+                             classification=None) -> dict:
     if type(provenance_raw) is not bytes or type(manifest_raw) is not bytes:
         raise ManifestError("class attempt inputs must be bytes")
     if type(report_raw) is not bytes or type(environment_raw) is not bytes:
         raise ManifestError("class attempt inputs must be bytes")
     provenance = _parse_class_object(provenance_raw)
-    _require_class_provenance_v0_document(provenance)
-    _require_canonical_class_bytes(provenance_raw, encode_class_provenance_v0(provenance))
+    classified = _require_class_provenance_v0_document(provenance)
+    _require_canonical_class_bytes(provenance_raw, _encode_class_artifact_v0(provenance))
     _require_digest_match(manifest_raw, provenance["manifest_sha256"], "manifest")
     _parse_class_object(manifest_raw)
     manifest = load_manifest_bytes(manifest_raw, Path("manifest.json"))
@@ -1952,7 +2057,12 @@ def _derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
     _class_report_summary_parity(report)
     if report.get("manifest_sha256") != provenance["manifest_sha256"]:
         raise ManifestError("report/provenance manifest digest mismatch")
-    effective, visibility = _classification_pair(classification)
+    if classification is not None:
+        claimed = _classification_pair(classification)
+        if claimed != classified:
+            raise ManifestError(
+                "classification does not match the visibility classifier")
+    effective, visibility = classified
     _require_sha256_or_null(predecessor, "predecessor_attempt_sha256")
     result = _class_result_from_report(report)
     status = _class_attempt_status(report)
@@ -1977,10 +2087,15 @@ def _derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
 
 
 def derive_class_attempt_v0(*, attempt_id, provenance_raw, manifest_raw,
-                            report_raw, environment_raw, predecessor,
-                            classification) -> dict:
-    raise ManifestError(
-        "publishable class-attempt construction is unreachable until F2")
+                            report_raw, environment_raw, predecessor) -> dict:
+    return _derive_class_attempt_v0(
+        attempt_id=attempt_id,
+        provenance_raw=provenance_raw,
+        manifest_raw=manifest_raw,
+        report_raw=report_raw,
+        environment_raw=environment_raw,
+        predecessor=predecessor,
+    )
 
 
 def load_class_attempt_v0(attempt_path, *, provenance_path, manifest_path,
@@ -1992,8 +2107,8 @@ def load_class_attempt_v0(attempt_path, *, provenance_path, manifest_path,
     provenance_raw = _read_class_input(provenance_path)
     _require_digest_match(provenance_raw, doc["provenance_sha256"], "provenance")
     provenance = _parse_class_object(provenance_raw)
-    _require_class_provenance_v0_document(provenance)
-    _require_canonical_class_bytes(provenance_raw, encode_class_provenance_v0(provenance))
+    classified = _require_class_provenance_v0_document(provenance)
+    _require_canonical_class_bytes(provenance_raw, _encode_class_artifact_v0(provenance))
     if provenance["class_id"] != doc["class_id"]:
         raise ManifestError("provenance class_id does not match the attempt")
     manifest_raw = _read_class_input(manifest_path)
@@ -2019,10 +2134,13 @@ def load_class_attempt_v0(attempt_path, *, provenance_path, manifest_path,
         raise ManifestError("attempt rows do not match the validated report")
     if doc["status"] != _class_attempt_status(report):
         raise ManifestError("attempt status does not match the validated report")
+    if classified != (doc["effective_class"], doc["visibility_status"]):
+        raise ManifestError(
+            "stored effective class or visibility status does not match the classifier")
     if classifier is not None:
-        classified = classifier(provenance, report)
-        if (classified != (doc["effective_class"], doc["visibility_status"])
-                and classified != {
+        extra = classifier(provenance, report)
+        if (extra != classified
+                and extra != {
                     "effective_class": doc["effective_class"],
                     "visibility_status": doc["visibility_status"],
                 }):

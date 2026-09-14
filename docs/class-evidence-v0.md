@@ -40,9 +40,9 @@ Exact top-level keys: `schema`, `class_id`, `requested_class`,
 | `expected_distinctions[]` | 1–8192; unique canonical Unicode order by `(group, label, channel, member-or-empty)` |
 
 `relationship=independent` requires distinct identity strings and
-`candidate_outcomes_seen=false`. F1 does not authenticate those strings. F2
-owns visibility-chain hashing and effective-class downgrade. Until F2, no
-`held_out` provenance may be used to construct a publishable attempt.
+`candidate_outcomes_seen=false`. Those strings are not authenticated. The F2
+classifier hashes the visibility chain and derives effective class. It does
+not authenticate people or prove absence of undisclosed access.
 
 ### Distinction binding (after exact manifest digest match)
 
@@ -74,9 +74,10 @@ Exact top-level keys: `schema`, `attempt_id`, `class_id`, `provenance_sha256`,
 positive-control `control_status=killed`, and no baseline/control abnormality.
 A healthy survivor is `completed` with `adequate=false`. It is not `unproved`.
 
-Publishable attempt construction (`derive_class_attempt_v0`) is unreachable
-until F2. F1 may encode and load codec bytes. Callers cannot supply result
-counts; the decoder refuses parity mismatches against the validated report.
+Publishable attempt construction (`derive_class_attempt_v0`) uses the same
+visibility classifier as loading. Callers cannot supply class, status, or
+result counts; the decoder refuses parity mismatches against the validated
+report and against the derived class.
 
 ## Loaders
 
@@ -88,8 +89,47 @@ either artifact. Encoders share one class-artifact byte contract: UTF-8,
 `ensure_ascii=False`, two-space indent, sorted keys, one trailing LF.
 `encode_report_v0` is unchanged.
 
+`_require_visibility_chain_v0` is the one semantic chain validator.
+`encode_class_provenance_v0`, `load_class_provenance_v0`, and
+`_classify_visibility_v0` consume that result. They do not restate the
+predecessor, bundle-continuity, duplicate, or start-of-chain checks.
+
+`_classify_visibility_v0` then applies `_REQUESTED_CLASS_TRANSITION_V0`.
+A requested class may preserve or weaken; it cannot promote. Held-out
+and pre-freeze mappings apply only when `requested_class` is `held_out`.
+
+Recognized patterns: `held_out_chain` (`selection-committed` →
+`candidate-frozen` → `selection-disclosed`), `pre_freeze`
+(`selection-committed` → `selection-disclosed` → `candidate-frozen`),
+and `commit_only` (a single `selection-committed` event). Any other
+sequence refuses as missing freeze or missing/reordered events.
+
+| requested | pattern | relationship | effective_class | visibility_status |
+|---|---|---|---|---|
+| `held_out` | `held_out_chain` | any | `held_out` | `hidden-until-freeze` |
+| `held_out` | `pre_freeze` | `same` | `declared` | `disclosed-before-freeze` |
+| `held_out` | `pre_freeze` | `independent` | `independent` | `disclosed-before-freeze` |
+| `held_out` | `pre_freeze` | `unknown` | `unknown` | `disclosed-before-freeze` |
+| `held_out` | `commit_only` | any | refuse (missing freeze) | — |
+| `declared` / `real_fault` / `adaptive` | any recognized | `same` or `independent` | the requested class | `declared` |
+| `declared` / `real_fault` / `adaptive` | any recognized | `unknown` | `unknown` | `unknown` |
+| `independent` | any recognized | `independent` | `independent` | `declared` |
+| `independent` | any recognized | `unknown` | `unknown` | `unknown` |
+
+A declared (or real-fault, adaptive, independent) selection that supplies
+a held-out chain or independent relationship metadata does not become
+`held_out` or, unless it requested `independent`, `independent`.
+A single `selection-committed` event is not held-out.
+
+`load_class_attempt_v0` always recomputes that pair and refuses a stored
+class or status mismatch. An optional caller `classifier` is an extra check,
+not a bypass of the default.
+
+Predecessor identity uses the shared UTF-8 class-artifact encoder, including
+when `actor` contains non-ASCII text. Escaping those code points as
+`\uXXXX` is a different digest.
+
 ## Out of scope
 
-F2 visibility state machine, F3 experiment, F4 recorder/publication, CLI
-registration, candidate/Docker execution, hosted dispatch, and any
-cross-class score.
+F3 experiment, F4 recorder/publication, CLI registration, candidate/Docker
+execution, hosted dispatch, and any cross-class score.
