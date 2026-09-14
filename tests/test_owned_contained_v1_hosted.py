@@ -271,14 +271,50 @@ class OwnedHostedRailContract(unittest.TestCase):
             validate.assert_called_once()
             self.assertEqual(loaded["package"]["schema"],
                              publication.DIAGNOSTIC_SCHEMA_V1)
-            self.assertEqual(loaded["package"]["candidate_diagnostics"]["members"][0], {
+            self.assertEqual(loaded["package"]["candidate_diagnostics"], {
+                "state": "present", "members": [{
                 "ordinal": 0, "candidate_outcome": "unproved",
-                "unproved_reason": "inner-exit"})
+                "unproved_reason": "inner-exit"}]})
             self.assertEqual(
                 publication._readback_summary(loaded["package"])["candidate_diagnostics"],
                 [{"ordinal": 0, "candidate_outcome": "unproved",
                   "unproved_reason": "inner-exit"}])
             sidecar = (out / publication.DIAGNOSTIC_DIRNAME / diagnostics.FILENAME)
+            manifest_path = (out / publication.DIAGNOSTIC_DIRNAME
+                             / publication.DIAGNOSTIC_MANIFEST_FILENAME)
+            rerun_path = out / publication.RERUN_EVIDENCE_FILENAME
+            original_sidecar = sidecar.read_bytes()
+            original_manifest = manifest_path.read_bytes()
+            original_rerun = rerun_path.read_bytes()
+            contradictory = json.loads(original_sidecar)
+            contradictory["members"][0].update(
+                candidate_outcome="completed", unproved_reason=None)
+            contradictory_raw = diagnostics.encode_document(contradictory)
+            sidecar.write_bytes(contradictory_raw)
+            manifest = json.loads(original_manifest)
+            descriptor = manifest["candidate_diagnostics"]["artifact"]
+            descriptor["bytes"] = len(contradictory_raw)
+            descriptor["sha256"] = hashlib.sha256(contradictory_raw).hexdigest()
+            forged_manifest = publication._encode_json(manifest)
+            manifest_path.write_bytes(forged_manifest)
+            rerun = [json.loads(line) for line in original_rerun.splitlines()]
+            rerun[-1]["diagnostic_package_sha256"] = hashlib.sha256(
+                forged_manifest).hexdigest()
+            rerun_path.write_bytes(b"".join(
+                (json.dumps(row, sort_keys=True) + "\n").encode() for row in rerun))
+            with self.assertRaisesRegex(publication.HostedPublicationError,
+                                        "candidate_diagnostics_outcome"):
+                publication.load_hosted_attempt_artifacts(
+                    setup_path=out / publication.SETUP_STATUS_FILENAME,
+                    candidate_path=out / publication.CANDIDATE_RESULT_FILENAME,
+                    rerun_path=rerun_path,
+                    diagnostic_dir=out / publication.DIAGNOSTIC_DIRNAME,
+                    expected_bindings=bindings, expected_run_id="1001",
+                    expected_run_attempt="2")
+
+            sidecar.write_bytes(original_sidecar)
+            manifest_path.write_bytes(original_manifest)
+            rerun_path.write_bytes(original_rerun)
             tampered = sidecar.read_bytes().replace(b"inner-exit", b"output-cap", 1)
             self.assertEqual(len(tampered), sidecar.stat().st_size)
             sidecar.write_bytes(tampered)

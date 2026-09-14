@@ -64,24 +64,42 @@ class CandidateDiagnosticsContract(unittest.TestCase):
                 diagnostics.observation(0, outcome, reason)
 
     def test_count_and_encoded_byte_ceilings_refuse_before_write(self):
-        rows = [diagnostics.observation(i, "unproved", "timeout")
-                for i in range(diagnostics.MAX_MEMBERS)]
-        diagnostics.build_document(bindings=BINDINGS, members=rows)
+        rows_255 = [diagnostics.observation(i, "unproved", "timeout")
+                    for i in range(255)]
+        diagnostics.build_document(bindings=BINDINGS, members=rows_255)
+        rows_256 = rows_255 + [diagnostics.observation(255, "unproved", "timeout")]
+        largest = diagnostics.build_document(bindings=BINDINGS, members=rows_256)
+        self.assertEqual(len(largest["members"]), 256)
         with self.assertRaisesRegex(diagnostics.DiagnosticError, "member count"):
             diagnostics.build_document(
                 bindings=BINDINGS,
-                members=rows + [{"ordinal": 256, "candidate_outcome": "unproved",
-                                 "unproved_reason": "timeout"}])
+                members=rows_256 + [{"ordinal": 256, "candidate_outcome": "unproved",
+                                     "unproved_reason": "timeout"}])
 
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / diagnostics.FILENAME
+            self.assertLess(len(diagnostics.encode_document(largest)), 65536)
             with self.assertRaisesRegex(diagnostics.DiagnosticError, "byte ceiling"):
                 diagnostics.write_document(
                     path,
-                    diagnostics.build_document(bindings=BINDINGS, members=rows),
+                    largest,
                     max_bytes=100,
                 )
             self.assertFalse(path.exists())
+
+    def test_default_byte_ceiling_refuses_literal_65537_byte_valid_document(self):
+        bindings = dict(BINDINGS)
+        one = diagnostics.build_document(bindings=bindings, members=[])
+        base_size = len(diagnostics.encode_document(one, max_bytes=65537))
+        bindings["workflow_run_id"] += "1" * (65537 - base_size)
+        doc = diagnostics.build_document(bindings=bindings, members=[])
+        encoded = diagnostics.encode_document(doc, max_bytes=65537)
+        self.assertEqual(len(encoded), 65537)
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / diagnostics.FILENAME
+            path.write_bytes(encoded)
+            with self.assertRaisesRegex(diagnostics.DiagnosticError, "input"):
+                diagnostics.load_document(path)
 
     def test_unknown_keys_and_binding_drift_are_refused(self):
         doc = diagnostics.build_document(

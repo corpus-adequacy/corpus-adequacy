@@ -148,7 +148,9 @@ DIAGNOSTIC_MANIFEST_KEYS = (
     "artifacts", "collection", "non_claims",
 )
 DIAGNOSTIC_MANIFEST_KEYS_V1 = DIAGNOSTIC_MANIFEST_KEYS + ("candidate_diagnostics",)
+CANDIDATE_DIAGNOSTIC_STATE_KEYS = ("state", "artifact")
 CANDIDATE_DIAGNOSTIC_BINDING_KEYS = ("relpath", "bytes", "sha256")
+CANDIDATE_DIAGNOSTIC_STATES = ("present", "unavailable")
 RUN_IDENTITY_KEYS = ("run_id", "run_attempt")
 FILE_DIGEST_KEYS = ("bytes", "sha256")
 COLLECTION_BINDING_KEYS = ("relpath", "index", "members")
@@ -939,7 +941,7 @@ def finalize_nonpublish_attempt(
             }
         candidate_diagnostic_raw = None
         candidate_diagnostic_binding = None
-        if candidate_diagnostic_rows is not None:
+        if candidate_diagnostic_rows:
             if loaded is None or collection_binding is None or report_sha256 is None:
                 raise HostedPublicationError("candidate_diagnostics_binding")
             diagnostic_bindings = {
@@ -960,10 +962,15 @@ def finalize_nonpublish_attempt(
             except candidate_diagnostics.DiagnosticError as exc:
                 raise HostedPublicationError("candidate_diagnostics") from exc
             candidate_diagnostic_binding = {
-                "relpath": candidate_diagnostics.FILENAME,
-                "bytes": len(candidate_diagnostic_raw),
-                "sha256": hashlib.sha256(candidate_diagnostic_raw).hexdigest(),
+                "state": "present",
+                "artifact": {
+                    "relpath": candidate_diagnostics.FILENAME,
+                    "bytes": len(candidate_diagnostic_raw),
+                    "sha256": hashlib.sha256(candidate_diagnostic_raw).hexdigest(),
+                },
             }
+        elif execute_began:
+            candidate_diagnostic_binding = {"state": "unavailable", "artifact": None}
         manifest = _closed_manifest(
             decision=decision, reason=reason, execute_began=execute_began,
             collection_state=collection_state, identity=closed_identity,
@@ -1213,44 +1220,66 @@ def load_diagnostic_package(directory, *, max_bytes: int = MAX_DIAGNOSTIC_PACKAG
         raise HostedPublicationError("collection_state")
     loaded_candidate_diagnostics = None
     if schema == DIAGNOSTIC_SCHEMA_V1:
-        descriptor = manifest.get("candidate_diagnostics")
-        _require_exact(descriptor, CANDIDATE_DIAGNOSTIC_BINDING_KEYS,
+        state_doc = manifest.get("candidate_diagnostics")
+        _require_exact(state_doc, CANDIDATE_DIAGNOSTIC_STATE_KEYS,
                        "candidate_diagnostics")
-        if descriptor.get("relpath") != candidate_diagnostics.FILENAME:
+        state = state_doc.get("state")
+        if state not in CANDIDATE_DIAGNOSTIC_STATES:
             raise HostedPublicationError("candidate_diagnostics")
-        _require_sha256(descriptor.get("sha256"), "candidate_diagnostics")
-        sidecar_path = directory / candidate_diagnostics.FILENAME
-        try:
-            sidecar_raw = ca.read_bounded_regular_file(
-                sidecar_path, cap=candidate_diagnostics.MAX_BYTES)
-        except ca.ManifestError as exc:
-            raise HostedPublicationError("candidate_diagnostics") from exc
-        if (len(sidecar_raw) != descriptor.get("bytes")
-                or hashlib.sha256(sidecar_raw).hexdigest() != descriptor.get("sha256")):
-            raise HostedPublicationError("candidate_diagnostics_digest")
-        if loaded_collection is None or manifest.get("report_sha256") is None:
-            raise HostedPublicationError("candidate_diagnostics_binding")
-        dispatch = manifest.get("bindings")
-        if type(dispatch) is not dict or set(dispatch) != set(DISPATCH_BINDING_KEYS):
-            raise HostedPublicationError("candidate_diagnostics_binding")
-        dispatch = require_bindings(
-            dispatch.get("candidate_revision"), dispatch.get("runner_revision"),
-            dispatch.get("image_digest"))
-        expected_diagnostic_bindings = {
-            "candidate_revision": dispatch["candidate_revision"],
-            "runner_revision": dispatch["runner_revision"],
-            "image_digest": dispatch["image_digest"],
-            "prepare_sha256": loaded_collection["index"]["prepare_sha256"],
-            "report_sha256": manifest["report_sha256"],
-            "collection_index_sha256": manifest["collection"]["index"]["sha256"],
-            "workflow_run_id": identity["run_id"],
-            "run_attempt": identity["run_attempt"],
-        }
-        try:
-            loaded_candidate_diagnostics = candidate_diagnostics.load_document(
-                sidecar_path, expected_bindings=expected_diagnostic_bindings)
-        except candidate_diagnostics.DiagnosticError as exc:
-            raise HostedPublicationError("candidate_diagnostics") from exc
+        descriptor = state_doc.get("artifact")
+        if state == "unavailable":
+            if descriptor is not None or candidate_diagnostics.FILENAME in names:
+                raise HostedPublicationError("candidate_diagnostics")
+            loaded_candidate_diagnostics = {"state": "unavailable", "members": None}
+        else:
+            _require_exact(descriptor, CANDIDATE_DIAGNOSTIC_BINDING_KEYS,
+                           "candidate_diagnostics")
+            if descriptor.get("relpath") != candidate_diagnostics.FILENAME:
+                raise HostedPublicationError("candidate_diagnostics")
+            _require_sha256(descriptor.get("sha256"), "candidate_diagnostics")
+            sidecar_path = directory / candidate_diagnostics.FILENAME
+            try:
+                sidecar_raw = ca.read_bounded_regular_file(
+                    sidecar_path, cap=candidate_diagnostics.MAX_BYTES)
+            except ca.ManifestError as exc:
+                raise HostedPublicationError("candidate_diagnostics") from exc
+            if (len(sidecar_raw) != descriptor.get("bytes")
+                    or hashlib.sha256(sidecar_raw).hexdigest() != descriptor.get("sha256")):
+                raise HostedPublicationError("candidate_diagnostics_digest")
+            if loaded_collection is None or manifest.get("report_sha256") is None:
+                raise HostedPublicationError("candidate_diagnostics_binding")
+            dispatch = manifest.get("bindings")
+            if type(dispatch) is not dict or set(dispatch) != set(DISPATCH_BINDING_KEYS):
+                raise HostedPublicationError("candidate_diagnostics_binding")
+            dispatch = require_bindings(
+                dispatch.get("candidate_revision"), dispatch.get("runner_revision"),
+                dispatch.get("image_digest"))
+            expected_diagnostic_bindings = {
+                "candidate_revision": dispatch["candidate_revision"],
+                "runner_revision": dispatch["runner_revision"],
+                "image_digest": dispatch["image_digest"],
+                "prepare_sha256": loaded_collection["index"]["prepare_sha256"],
+                "report_sha256": manifest["report_sha256"],
+                "collection_index_sha256": manifest["collection"]["index"]["sha256"],
+                "workflow_run_id": identity["run_id"],
+                "run_attempt": identity["run_attempt"],
+            }
+            try:
+                loaded_doc = candidate_diagnostics.load_document(
+                    sidecar_path, expected_bindings=expected_diagnostic_bindings)
+            except candidate_diagnostics.DiagnosticError as exc:
+                raise HostedPublicationError("candidate_diagnostics") from exc
+            diagnostic_members = loaded_doc["members"]
+            collection_entries = loaded_collection["index"]["members"]
+            collection_members = loaded_collection["members"]
+            if (len(diagnostic_members) != len(collection_members)
+                    or [row["ordinal"] for row in diagnostic_members]
+                    != [row["ordinal"] for row in collection_entries]
+                    or [row["candidate_outcome"] for row in diagnostic_members]
+                    != [row["candidate_outcome"] for row in collection_members]):
+                raise HostedPublicationError("candidate_diagnostics_outcome")
+            loaded_candidate_diagnostics = {
+                "state": "present", "members": loaded_doc["members"]}
     digest = hashlib.sha256(_manifest_raw).hexdigest()
     result = dict(manifest)
     result["collection"] = loaded_collection
