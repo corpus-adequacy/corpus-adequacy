@@ -1016,10 +1016,10 @@ def _prepare_raw(profile) -> bytes:
 
 def _observed_inspect(profile, *, image=TOOLCHAIN_IMAGE) -> dict:
     """What a daemon that honoured `profile` stores. Tests then take pieces away."""
-    work = "rw,size=%d,nr_inodes=%d,mode=1777" % (
-        profile["work_bytes"], profile["work_inodes"])
-    if profile["work_exec"]:
-        work += ",exec"
+    owner_bound = profile["schema"] == contained.RESOURCE_PROFILE_V2_SCHEMA
+    work = contained.encode_tmpfs_options(
+        contained.tmpfs_request(profile, destination="/work", owner_bound=owner_bound),
+        owner_bound=owner_bound)
     host = {
         "CapAdd": None, "CapDrop": ["ALL"], "Devices": None,
         "Memory": profile["memory_bytes"], "MemorySwap": profile["memory_swap_bytes"],
@@ -1027,8 +1027,10 @@ def _observed_inspect(profile, *, image=TOOLCHAIN_IMAGE) -> dict:
         "Privileged": False, "ReadonlyRootfs": True,
         "SecurityOpt": ["no-new-privileges:true"],
         "Tmpfs": {
-            "/tmp": "rw,size=%d,nr_inodes=%d,mode=1777" % (
-                profile["tmp_bytes"], profile["tmp_inodes"]),
+            "/tmp": contained.encode_tmpfs_options(
+                contained.tmpfs_request(
+                    profile, destination="/tmp", owner_bound=owner_bound),
+                owner_bound=owner_bound),
             "/work": work,
         },
         "UsernsMode": "",
@@ -1138,7 +1140,7 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
             self.assertEqual(argv.count(flag), 1, flag)
         self.assertNotIn("--cpus", argv)
         record = completed.envelope_record
-        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v1")
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v2")
         self.assertEqual(record["envelope_status"], "verified", record["unverified_field"])
         self.assertEqual(record["requested"]["execution_profile"], V1_PROFILE)
         self.assertEqual(record["requested"]["resource_profile"],
@@ -1349,9 +1351,9 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
         record = completed.envelope_record
         self.assertEqual(record["envelope_status"], "unverified")
         self.assertEqual(record["unverified_field"], "daemon_info")
-        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v1")
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v2")
 
-    def test_refused_setup_under_v1_still_records_the_v1_schema(self):
+    def test_refused_setup_under_v1_still_records_the_v2_schema(self):
         transport = ObservingTransport(
             inspect=_observed_inspect(contained.CANDIDATE_RESOURCE_PROFILE_V2),
             create_error=contained.DockerUnavailable("docker missing"))
@@ -1360,7 +1362,7 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
         record = completed.envelope_record
         self.assertEqual(record["setup_status"], "unavailable")
         self.assertEqual(record["candidate_outcome"], "not-run")
-        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v1")
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v2")
         self.assertEqual(record["requested"]["execution_profile"], V1_PROFILE)
 
     def test_alternate_values_below_admission_match_argv_and_verify(self):

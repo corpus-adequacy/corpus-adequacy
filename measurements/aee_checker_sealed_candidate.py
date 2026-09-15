@@ -309,7 +309,7 @@ def _refused_envelope(binding: dict, requested, status: str,
 
 
 def _requested_envelope(*, execution_profile, image_id: str, resource_profile,
-                        sealed: bool) -> dict:
+                        sealed: bool, schema: str) -> dict:
     """Pure declaration, so a record always exists to hold what happened.
 
     The profile is the one admission resolved, never a constant: a request that named a
@@ -321,6 +321,7 @@ def _requested_envelope(*, execution_profile, image_id: str, resource_profile,
         mount_spec=CANDIDATE_MOUNT_SPEC,
         resource_profile=resource_profile,
         sealed=sealed,
+        schema=schema,
     )
 
 
@@ -340,6 +341,10 @@ def _project_effective(transport, inspect, *, image_id: str, schema: str) -> dic
     """
     image_env_names = _observed(transport, "image_env_names", image_id)
     runtime_version = _observed(transport, "version")
+    if schema == envelope.ENVELOPE_SCHEMA_V2:
+        return envelope.project_effective_envelope_v2(
+            inspect, image_env_names=image_env_names, runtime_version=runtime_version,
+            daemon_info=_observed(transport, "daemon_info"))
     if schema == envelope.ENVELOPE_SCHEMA_V1:
         return envelope.project_effective_envelope_v1(
             inspect, image_env_names=image_env_names, runtime_version=runtime_version,
@@ -392,12 +397,12 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
     The envelope is projected from this run's own inspect output and this
     run's own runtime version. PREPARE's inert-probe evidence describes a
     different image and profile and cannot stand in for either. The record's
-    schema follows the execution profile: contained-oci-v1 records v1.
+    schema follows the execution profile: new contained-oci-v1 records v2.
     """
+    schema = envelope.envelope_schema_for_profile(execution_profile)
     requested = _requested_envelope(
         execution_profile=execution_profile, image_id=image_id,
-        resource_profile=resource_profile, sealed=sealed)
-    schema = envelope.envelope_schema_for_profile(execution_profile)
+        resource_profile=resource_profile, sealed=sealed, schema=schema)
     try:
         transport = contained.resolve_transport(image_id, transport)
         raw = _contained_candidate_run(

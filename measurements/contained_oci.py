@@ -363,24 +363,124 @@ def parse_inspect_payload(raw: bytes) -> dict:
     return doc[0]
 
 
-def _tmpfs_spec(value, *, expected_exec=False) -> dict:
-    if not isinstance(value, str):
+def contained_user_ids(value=None) -> tuple[int, int]:
+    """Parse the one canonical Docker uid:gid declaration without normalization."""
+    if value is None:
+        value = CONTAINED_USER
+    if not isinstance(value, str) or value.count(":") != 1:
+        raise PrepareError("user")
+    values = value.split(":")
+    parsed = []
+    for item in values:
+        if (not item or not item.isascii() or not item.isdecimal() or
+                (len(item) > 1 and item.startswith("0"))):
+            raise PrepareError("user")
+        number = int(item)
+        if not 0 <= number <= 0xffffffff:
+            raise PrepareError("user")
+        parsed.append(number)
+    return parsed[0], parsed[1]
+
+
+def _canonical_uint(value: str) -> int:
+    if (not value or not value.isascii() or not value.isdecimal() or
+            (len(value) > 1 and value.startswith("0"))):
         raise PrepareError("tmpfs")
-    size = inodes = None
-    try:
-        for part in value.split(","):
-            if part.startswith("size="):
-                size = int(part[5:])
-            elif part.startswith("nr_inodes="):
-                inodes = int(part[10:])
-    except ValueError as exc:
-        raise PrepareError("tmpfs") from exc
-    if type(size) is not int or type(inodes) is not int:
+    number = int(value)
+    if number <= 0:
         raise PrepareError("tmpfs")
-    has_exec = "exec" in value.split(",")
-    if has_exec is not expected_exec:
+    return number
+
+
+def parse_tmpfs_options(value, *, owner_bound: bool) -> dict:
+    """Parse a closed Docker tmpfs declaration; v2 additionally binds its owner."""
+    if not isinstance(value, str) or type(owner_bound) is not bool:
         raise PrepareError("tmpfs")
-    return {"nr_inodes": inodes, "size": size}
+    flags, values = set(), {}
+    for part in value.split(","):
+        if not part:
+            raise PrepareError("tmpfs")
+        if "=" not in part:
+            if part not in {"rw", "exec", "noexec", "nosuid", "nodev"} or part in flags:
+                raise PrepareError("tmpfs")
+            flags.add(part)
+            continue
+        key, raw = part.split("=", 1)
+        if key not in {"mode", "uid", "gid", "size", "nr_inodes"} or key in values:
+            raise PrepareError("tmpfs")
+        values[key] = raw
+    if owner_bound and "rw" not in flags:
+        raise PrepareError("tmpfs")
+    if "exec" in flags and "noexec" in flags:
+        raise PrepareError("tmpfs")
+    required = {"size", "nr_inodes"}
+    if owner_bound:
+        required |= {"mode", "uid", "gid"}
+        if flags & {"nosuid", "nodev"} or ("exec" in flags) == ("noexec" in flags):
+            raise PrepareError("tmpfs")
+    elif "uid" in values or "gid" in values:
+        raise PrepareError("tmpfs")
+    if ((owner_bound and set(values) != required) or
+            (not owner_bound and (
+                not {"size", "nr_inodes"} <= set(values) or
+                set(values) - {"size", "nr_inodes", "mode"})) or
+            owner_bound and values["mode"] != "1777"):
+        raise PrepareError("tmpfs")
+    parsed = {
+        "exec": "exec" in flags,
+        "mode": values.get("mode", "1777"),
+        "nr_inodes": _canonical_uint(values["nr_inodes"]),
+        "rw": True,
+        "size": _canonical_uint(values["size"]),
+    }
+    if owner_bound:
+        uid, gid = contained_user_ids()
+        if values["uid"] != str(uid) or values["gid"] != str(gid):
+            raise PrepareError("tmpfs")
+        parsed.update(uid=uid, gid=gid)
+    return parsed
+
+
+def tmpfs_request(profile: dict, *, destination: str, owner_bound: bool) -> dict:
+    profile = require_versioned_resource_profile(profile)
+    if destination not in ("/tmp", "/work"):
+        raise PrepareError("tmpfs")
+    prefix = "tmp" if destination == "/tmp" else "work"
+    result = {
+        "exec": False if destination == "/tmp" else profile["work_exec"],
+        "mode": "1777", "nr_inodes": profile[prefix + "_inodes"],
+        "rw": True, "size": profile[prefix + "_bytes"],
+    }
+    if owner_bound:
+        uid, gid = contained_user_ids()
+        result.update(uid=uid, gid=gid)
+    return result
+
+
+def encode_tmpfs_options(spec: dict, *, owner_bound: bool) -> str:
+    expected = {"exec", "mode", "nr_inodes", "rw", "size"}
+    if owner_bound:
+        expected |= {"uid", "gid"}
+    if type(spec) is not dict or set(spec) != expected or spec["rw"] is not True:
+        raise PrepareError("tmpfs")
+    if owner_bound:
+        text = "rw,%s,mode=%s,uid=%d,gid=%d,size=%d,nr_inodes=%d" % (
+            "exec" if spec["exec"] else "noexec", spec["mode"], spec["uid"],
+            spec["gid"], spec["size"], spec["nr_inodes"])
+    else:
+        text = "rw,size=%d,nr_inodes=%d,mode=%s%s" % (
+            spec["size"], spec["nr_inodes"], spec["mode"],
+            ",exec" if spec["exec"] else "")
+    if parse_tmpfs_options(text, owner_bound=owner_bound) != spec:
+        raise PrepareError("tmpfs")
+    return text
+
+
+def _tmpfs_spec(value, *, expected_exec=False, owner_bound=False) -> dict:
+    parsed = parse_tmpfs_options(value, owner_bound=owner_bound)
+    if parsed["exec"] is not expected_exec:
+        raise PrepareError("tmpfs")
+    return parsed
 
 
 def _require_tmpfs_match(parsed: dict, *, dest: str, size: int, inodes: int) -> None:
@@ -431,10 +531,12 @@ def validate_inspect_contract(
     tmpfs = host.get("Tmpfs")
     if type(tmpfs) is not dict:
         raise PrepareError("tmpfs")
+    owner_bound = profile["schema"] == RESOURCE_PROFILE_V2_SCHEMA
     parsed = {
-        "/tmp": _tmpfs_spec(tmpfs.get("/tmp")),
+        "/tmp": _tmpfs_spec(tmpfs.get("/tmp"), owner_bound=owner_bound),
         "/work": _tmpfs_spec(
-            tmpfs.get("/work"), expected_exec=profile["work_exec"]),
+            tmpfs.get("/work"), expected_exec=profile["work_exec"],
+            owner_bound=owner_bound),
     }
     _require_tmpfs_match(
         parsed["/tmp"], dest="/tmp",
@@ -442,6 +544,11 @@ def validate_inspect_contract(
     _require_tmpfs_match(
         parsed["/work"], dest="/work",
         size=profile["work_bytes"], inodes=profile["work_inodes"])
+    if not owner_bound:
+        parsed = {
+            destination: {"nr_inodes": value["nr_inodes"], "size": value["size"]}
+            for destination, value in parsed.items()
+        }
     mounts = inspect.get("Mounts")
     if type(mounts) is not list:
         raise PrepareError("readonly mount")
@@ -571,12 +678,13 @@ def docker_create_argv(
     expected_mounts = {key for key, _destination in normalized_mount_spec}
     if set(mounts) - expected_mounts:
         raise PrepareError("unexpected mount")
-    tmp_tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (
-        profile["tmp_bytes"], profile["tmp_inodes"])
-    work_tmpfs = "rw,size=%d,nr_inodes=%d,mode=1777" % (
-        profile["work_bytes"], profile["work_inodes"])
-    if profile["work_exec"]:
-        work_tmpfs += ",exec"
+    owner_bound = profile["schema"] == RESOURCE_PROFILE_V2_SCHEMA
+    tmp_tmpfs = encode_tmpfs_options(
+        tmpfs_request(profile, destination="/tmp", owner_bound=owner_bound),
+        owner_bound=owner_bound)
+    work_tmpfs = encode_tmpfs_options(
+        tmpfs_request(profile, destination="/work", owner_bound=owner_bound),
+        owner_bound=owner_bound)
     argv = [
         "docker", "create",
         "--name", name,

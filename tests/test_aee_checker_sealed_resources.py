@@ -46,12 +46,13 @@ def _mounts(root: Path, *, subject=True):
 
 
 def _inspect(dests, *, profile):
-    work = "rw,size=%d,nr_inodes=%d,mode=1777" % (
-        profile["work_bytes"], profile["work_inodes"])
-    if profile["work_exec"]:
-        work += ",exec"
-    tmp = "rw,size=%d,nr_inodes=%d,mode=1777" % (
-        profile["tmp_bytes"], profile["tmp_inodes"])
+    owner_bound = profile["schema"] == contained.RESOURCE_PROFILE_V2_SCHEMA
+    work = contained.encode_tmpfs_options(
+        contained.tmpfs_request(profile, destination="/work", owner_bound=owner_bound),
+        owner_bound=owner_bound)
+    tmp = contained.encode_tmpfs_options(
+        contained.tmpfs_request(profile, destination="/tmp", owner_bound=owner_bound),
+        owner_bound=owner_bound)
     return {
         "HostConfig": {
             "ReadonlyRootfs": True,
@@ -798,8 +799,14 @@ class V2FlagsAtCreate(unittest.TestCase):
             v2 = _create_argv(contained.CANDIDATE_RESOURCE_PROFILE_V2, Path(raw))
         self.assertTrue(_contains_run(v2, V2_FLAGS), v2)
         start = next(i for i in range(len(v2)) if v2[i:i + len(V2_FLAGS)] == V2_FLAGS)
-        # Removing the six v2 tokens leaves the v1 argv of the same ceilings, byte for byte.
-        self.assertEqual(v2[:start] + v2[start + len(V2_FLAGS):], v1)
+        # Outside the two owner-bound tmpfs values and the six v2 resource tokens, the argv
+        # remains the v1 argv of the same ceilings.
+        stripped = v2[:start] + v2[start + len(V2_FLAGS):]
+        for argv in (stripped, v1):
+            for i, item in enumerate(argv):
+                if item == "--tmpfs":
+                    argv[i + 1] = argv[i + 1].split(":", 1)[0] + ":<tmpfs>"
+        self.assertEqual(stripped, v1)
         self.assertNotIn("--cpus", v2)
 
     def test_representational_cpu_maximum_passes_create_and_one_more_refuses(self):
@@ -861,13 +868,25 @@ class V2FlagsAtCreate(unittest.TestCase):
             "--cpu-period", "100000", "--cpu-quota", "250000",
             "--ulimit", "nofile=512:2048"]), transport.argv)
 
-    def test_inspect_contract_reads_the_same_fields_for_v1_and_v2(self):
+    def test_inspect_contract_reads_owner_fields_only_for_v2(self):
         doc = _inspect(("/input", "/vendor", "/tool"), profile=contained.CANDIDATE_RESOURCE_PROFILE)
         v1 = oci.validate_inspect_contract(
             doc, sealed=True, resource_profile=contained.CANDIDATE_RESOURCE_PROFILE)
+        profile = contained.CANDIDATE_RESOURCE_PROFILE_V2
+        owner_bound = True
+        doc["HostConfig"]["Memory"] = profile["memory_bytes"]
+        doc["HostConfig"]["MemorySwap"] = profile["memory_swap_bytes"]
+        doc["HostConfig"]["PidsLimit"] = profile["pids"]
+        doc["HostConfig"]["Tmpfs"] = {
+            dest: contained.encode_tmpfs_options(
+                contained.tmpfs_request(profile, destination=dest, owner_bound=owner_bound),
+                owner_bound=owner_bound)
+            for dest in ("/tmp", "/work")
+        }
         v2 = oci.validate_inspect_contract(
             doc, sealed=True, resource_profile=contained.CANDIDATE_RESOURCE_PROFILE_V2)
-        self.assertEqual(v1, v2)
+        self.assertEqual(v1["tmpfs"]["/tmp"], {"nr_inodes": 2048, "size": 16777216})
+        self.assertEqual(v2["tmpfs"]["/tmp"]["uid"], 65532)
 
     def test_unknown_resource_profile_schema_refuses_at_create(self):
         for schema in ("corpus-adequacy.aee-checker-sealed.resource-profile.v3", None, ["x"]):
@@ -952,3 +971,67 @@ class PrepareDispatcher(unittest.TestCase):
     def test_execution_profile_is_required(self):
         with self.assertRaises(TypeError):
             run.load_prepare_for_profile(self._raw(contained.CANDIDATE_RESOURCE_PROFILE))
+
+
+class V2TmpfsOwnerContract(unittest.TestCase):
+    def test_owner_is_derived_from_the_single_contained_user_declaration(self):
+        with mock.patch.object(contained, "CONTAINED_USER", "42:43"):
+            self.assertEqual(contained.contained_user_ids(), (42, 43))
+            requested = contained.tmpfs_request(
+                contained.CANDIDATE_RESOURCE_PROFILE_V2,
+                destination="/tmp", owner_bound=True)
+            self.assertEqual((requested["uid"], requested["gid"]), (42, 43))
+
+    def test_v2_create_binds_owner_and_explicit_exec_state_while_v1_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as d:
+            mounts = _mounts(Path(d))
+            legacy = contained.docker_create_argv(
+                image_id=IMAGE, name="legacy", mounts=mounts, command=["ok"],
+                mount_spec=cand.CANDIDATE_MOUNT_SPEC,
+                resource_profile=contained.CANDIDATE_RESOURCE_PROFILE)
+            owned = contained.docker_create_argv(
+                image_id=IMAGE, name="owned", mounts=mounts, command=["ok"],
+                mount_spec=cand.CANDIDATE_MOUNT_SPEC,
+                resource_profile=contained.CANDIDATE_RESOURCE_PROFILE_V2)
+        legacy_tmpfs = [legacy[i + 1] for i, item in enumerate(legacy) if item == "--tmpfs"]
+        owned_tmpfs = [owned[i + 1] for i, item in enumerate(owned) if item == "--tmpfs"]
+        self.assertEqual(legacy_tmpfs, [
+            "/tmp:rw,size=16777216,nr_inodes=2048,mode=1777",
+            "/work:rw,size=268435456,nr_inodes=16384,mode=1777,exec",
+        ])
+        self.assertEqual(owned_tmpfs, [
+            "/tmp:rw,noexec,mode=1777,uid=65532,gid=65532,size=16777216,nr_inodes=2048",
+            "/work:rw,exec,mode=1777,uid=65532,gid=65532,size=268435456,nr_inodes=16384",
+        ])
+
+    def test_owned_tmpfs_parser_refuses_noncanonical_or_incomplete_options(self):
+        valid = "rw,noexec,mode=1777,uid=65532,gid=65532,size=1,nr_inodes=2"
+        expected = {
+            "exec": False, "gid": 65532, "mode": "1777", "nr_inodes": 2,
+            "rw": True, "size": 1, "uid": 65532,
+        }
+        self.assertEqual(contained.parse_tmpfs_options(valid, owner_bound=True), expected)
+        bad = (
+            valid + ",uid=65532",
+            valid + ",rw",
+            valid.replace("uid=65532", "uid=1"),
+            valid.replace("gid=65532", "gid=1"),
+            valid.replace("noexec", "exec,noexec"),
+            valid.replace("noexec,", ""),
+            valid.replace("rw,", ""),
+            valid.replace("mode=1777,", ""),
+            valid.replace("uid=65532,", ""),
+            valid.replace("gid=65532,", ""),
+            valid.replace("size=1,", ""),
+            valid.replace(",nr_inodes=2", ""),
+            valid + ",nosuid",
+            valid + ",unknown=1",
+            valid.replace("mode=1777", "mode=0777"),
+            valid.replace("gid=65532", "gid=+65532"),
+            valid.replace("size=1", "size=01"),
+            valid.replace("size=1", "size=0"),
+            valid.replace("nr_inodes=2", "nr_inodes=-2"),
+        )
+        for value in bad:
+            with self.subTest(value=value), self.assertRaisesRegex(PrepareError, "^tmpfs$"):
+                contained.parse_tmpfs_options(value, owner_bound=True)

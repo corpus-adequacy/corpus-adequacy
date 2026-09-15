@@ -587,19 +587,33 @@ class DualEnvelopeVersions(unittest.TestCase):
         from tests.test_effective_envelope import _wire_v1_record
         return _wire_v1_record()
 
+    def _v2(self):
+        from tests.test_effective_envelope import _wire_v2_record
+        return _wire_v2_record()
+
     def test_mixed_v0_v1_round_trip_preserves_each_member_version(self):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "collection"
             _write_pair(dest, _valid_record(), self._v1())
             collection.load_collection(dest)
             docs = [json.loads(p.read_bytes()) for p in sorted(dest.glob("member-*.json"))]
-            self.assertEqual([r["schema"] for r in docs], list(envelope.ENVELOPE_SCHEMAS))
+            self.assertEqual([r["schema"] for r in docs], [
+                envelope.ENVELOPE_SCHEMA, envelope.ENVELOPE_SCHEMA_V1])
 
     def test_report_binding_changes_only_the_binding_not_the_member_version(self):
         record = self._v1(); before = dict(record)
         bound = envelope.bind_report(record, "1" * 64)
         before["report_sha256"] = "1" * 64
         self.assertEqual(bound, before)
+
+    def test_v2_member_round_trips_through_the_shared_collection_reader(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "collection"
+            _write_pair(dest, self._v1(), self._v2())
+            loaded = collection.load_collection(dest)
+            self.assertEqual(
+                [row["schema"] for row in loaded["members"]],
+                [envelope.ENVELOPE_SCHEMA_V1, envelope.ENVELOPE_SCHEMA_V2])
 
     def test_v0_member_bytes_are_not_backfilled_or_normalized(self):
         with tempfile.TemporaryDirectory() as d:
