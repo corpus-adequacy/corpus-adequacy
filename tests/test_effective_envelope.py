@@ -1091,7 +1091,7 @@ class RequestedProfilePairing(unittest.TestCase):
     def test_pairing_vocabulary_is_exactly_the_contained_profiles(self):
         self.assertEqual(set(env.ENVELOPE_SCHEMA_BY_PROFILE), set(ca._CONTAINED_PROFILES))
         self.assertEqual(env.envelope_schema_for_profile("contained-oci-v0"), env.ENVELOPE_SCHEMA)
-        self.assertEqual(env.envelope_schema_for_profile(V1_PROFILE), env.ENVELOPE_SCHEMA_V1)
+        self.assertEqual(env.envelope_schema_for_profile(V1_PROFILE), env.ENVELOPE_SCHEMA_V2)
         for profile in ("trusted-local", None, ["x"]):
             with self.subTest(profile=profile), self.assertRaises(env.EnvelopeError):
                 env.envelope_schema_for_profile(profile)
@@ -1225,6 +1225,125 @@ class V1ProfileRecordSchema(unittest.TestCase):
         record = _wire_v1_record()
         self.assertEqual(record["requested"]["execution_profile"], "contained-oci-v0")
         self.assertEqual(env.validate_envelope_record(record), record)
+
+
+def _owned_v2_inspect():
+    profile = _v2_profile()
+    doc = _inspect(profile=profile)
+    doc["HostConfig"].update(CpuPeriod=100000, CpuQuota=100000, NanoCpus=0,
+                             Ulimits=copy.deepcopy(_FROZEN_NOFILE))
+    doc["HostConfig"]["Tmpfs"] = {
+        dest: contained.encode_tmpfs_options(
+            contained.tmpfs_request(profile, destination=dest, owner_bound=True),
+            owner_bound=True)
+        for dest in ("/tmp", "/work")
+    }
+    return doc
+
+
+def _wire_v2_record():
+    schema = env.ENVELOPE_SCHEMA_V2
+    requested = env.requested_envelope(
+        execution_profile=V1_PROFILE, image_id=IMAGE,
+        mount_spec=candidate.CANDIDATE_MOUNT_SPEC,
+        resource_profile=_v2_profile(), sealed=True, schema=schema)
+    effective = env.project_effective_envelope_v2(
+        _owned_v2_inspect(), image_env_names=IMAGE_ENV_NAMES,
+        runtime_version=RUNTIME_VERSION,
+        daemon_info={"KernelVersion": "synthetic-kernel", "CgroupVersion": "2",
+                     "CgroupDriver": "systemd", "SecurityOptions": None})
+    return env.build_envelope_record(
+        schema=schema, requested=requested, setup_status="ready",
+        envelope_status="verified", unverified_field=None, effective=effective,
+        candidate_outcome="completed", cleanup="removed-and-absent",
+        prepare_sha256="d" * 64, execution_commit="c" * 40,
+        report_sha256=None)
+
+
+class V2TmpfsRequestedObservedEnvelope(unittest.TestCase):
+    def test_rehashed_two_sided_scalar_substitutions_refuse_at_reader(self):
+        cases = {
+            "rw": 1, "exec": 0, "uid": 65532.0, "gid": 65532.0,
+            "size": 16777216.0, "nr_inodes": 2048.0,
+            "uid-bool": True, "mode": 1777, "mode-noncanonical": "01777",
+        }
+        for label, value in cases.items():
+            field = label.split("-", 1)[0]
+            record = _wire_v2_record()
+            record["requested"]["tmpfs"]["/tmp"][field] = value
+            record["effective"]["tmpfs"]["/tmp"][field] = value
+            rehashed = json.loads(env.encode_envelope(record))
+            with self.subTest(label=label), self.assertRaisesRegex(
+                    env.EnvelopeError, "^tmpfs$"):
+                env.validate_envelope_record(rehashed)
+
+
+    def test_contained_v1_selects_v2_with_requested_and_observed_owner(self):
+        schema = env.envelope_schema_for_profile(V1_PROFILE)
+        self.assertEqual(schema, "corpus-adequacy.execution-envelope.v2")
+        requested = env.requested_envelope(
+            execution_profile=V1_PROFILE, image_id=IMAGE,
+            mount_spec=candidate.CANDIDATE_MOUNT_SPEC,
+            resource_profile=_v2_profile(), sealed=True, schema=schema)
+        effective = env.project_effective_envelope_v2(
+            _owned_v2_inspect(), image_env_names=IMAGE_ENV_NAMES,
+            runtime_version=RUNTIME_VERSION,
+            daemon_info={"KernelVersion": "synthetic-kernel", "CgroupVersion": "2",
+                         "CgroupDriver": "systemd", "SecurityOptions": None})
+        self.assertEqual(requested["tmpfs"], effective["tmpfs"])
+        self.assertEqual(requested["tmpfs"]["/tmp"], {
+            "exec": False, "gid": 65532, "mode": "1777", "nr_inodes": 2048,
+            "rw": True, "size": 16777216, "uid": 65532,
+        })
+        record = _wire_v2_record()
+        self.assertEqual(
+            env.validate_envelope_record(json.loads(env.encode_envelope(record))), record)
+
+    def test_v2_cannot_be_selected_for_the_legacy_execution_profile(self):
+        with self.assertRaisesRegex(env.EnvelopeError, "^envelope_schema_profile$"):
+            env.requested_envelope(
+                execution_profile="contained-oci-v0", image_id=IMAGE,
+                mount_spec=candidate.CANDIDATE_MOUNT_SPEC,
+                resource_profile=contained.CANDIDATE_RESOURCE_PROFILE, sealed=True,
+                schema=env.ENVELOPE_SCHEMA_V2)
+        stored = _requested_v2()
+        stored["tmpfs"] = {
+            dest: contained.tmpfs_request(
+                stored["resource_profile"], destination=dest, owner_bound=True)
+            for dest in ("/tmp", "/work")
+        }
+        stored["execution_profile"] = "contained-oci-v0"
+        with self.assertRaisesRegex(env.EnvelopeError, "^envelope_schema_profile$"):
+            env.require_requested_record(stored, schema=env.ENVELOPE_SCHEMA_V2)
+
+    def test_v2_refuses_a_rehashed_requested_tmpfs_owner_mismatch(self):
+        schema = "corpus-adequacy.execution-envelope.v2"
+        requested = env.requested_envelope(
+            execution_profile=V1_PROFILE, image_id=IMAGE,
+            mount_spec=candidate.CANDIDATE_MOUNT_SPEC,
+            resource_profile=_v2_profile(), sealed=True, schema=schema)
+        effective = env.project_effective_envelope_v2(
+            _owned_v2_inspect(), image_env_names=IMAGE_ENV_NAMES,
+            runtime_version=RUNTIME_VERSION,
+            daemon_info={"KernelVersion": "synthetic-kernel", "CgroupVersion": "2",
+                         "CgroupDriver": "systemd", "SecurityOptions": None})
+        requested["tmpfs"]["/tmp"]["uid"] = 1
+        with self.assertRaisesRegex(env.EnvelopeError, "^tmpfs$"):
+            env.require_envelope_matches_request(effective, requested, schema=schema)
+    def test_v2_refuses_a_daemon_stored_tmpfs_request_mismatch(self):
+        schema = env.ENVELOPE_SCHEMA_V2
+        requested = env.requested_envelope(
+            execution_profile=V1_PROFILE, image_id=IMAGE,
+            mount_spec=candidate.CANDIDATE_MOUNT_SPEC,
+            resource_profile=_v2_profile(), sealed=True, schema=schema)
+        effective = env.project_effective_envelope_v2(
+            _owned_v2_inspect(), image_env_names=IMAGE_ENV_NAMES,
+            runtime_version=RUNTIME_VERSION,
+            daemon_info={"KernelVersion": "synthetic-kernel", "CgroupVersion": "2",
+                         "CgroupDriver": "systemd", "SecurityOptions": None})
+        effective["tmpfs"]["/work"]["exec"] = False
+        with self.assertRaisesRegex(env.EnvelopeError, "^tmpfs$"):
+            env.require_envelope_matches_request(effective, requested, schema=schema)
 
 
 if __name__ == "__main__":

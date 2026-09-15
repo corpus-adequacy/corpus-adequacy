@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Owned `contained-oci-v1` candidate runs now bind tmpfs ownership and mount options in
+both the Docker create request and a sibling `execution-envelope.v2`. One canonical
+parser/encoder closes `rw`, explicit `exec`/`noexec`, mode, uid, gid, size and inode
+count; the requested and daemon-stored objects must match exactly. uid/gid derive from
+the existing `CONTAINED_USER`. Historical v0/v1 envelope readers and v0 resource argv
+remain unchanged, and no resource-profile or PREPARE schema changes. Docker inspect is
+stored daemon configuration, not filesystem-stat or kernel-applied containment proof.
+
 Add `--inspect <manifest.json> [--json]`, a nonexecuting static declaration
 path. One pure parser now validates manifest-resident rules for both inspection
 and normal measurement; only normal measurement continues into a separate

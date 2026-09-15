@@ -20,7 +20,8 @@ import contained_oci as contained
 
 ENVELOPE_SCHEMA = "corpus-adequacy.execution-envelope.v0"
 ENVELOPE_SCHEMA_V1 = "corpus-adequacy.execution-envelope.v1"
-ENVELOPE_SCHEMAS = (ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_V1)
+ENVELOPE_SCHEMA_V2 = "corpus-adequacy.execution-envelope.v2"
+ENVELOPE_SCHEMAS = (ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_V1, ENVELOPE_SCHEMA_V2)
 CONTAINED_PROFILE = "contained-oci-v0"
 CONTAINED_PROFILE_V1 = "contained-oci-v1"
 # The one pairing rule for a request: the resource-profile loader each contained execution
@@ -29,11 +30,11 @@ _REQUESTED_RESOURCE_PROFILE = {
     CONTAINED_PROFILE: contained.require_resource_profile,
     CONTAINED_PROFILE_V1: contained.require_resource_profile_v2,
 }
-# The envelope schema a candidate run under each profile emits. The builder holds only the
-# v1 direction (a contained-oci-v1 record is v1); a v1 envelope may still carry a v0 request.
+# The envelope schema a new candidate run under each profile emits. Historical v1 bytes remain
+# readable; new contained-oci-v1 records use v2 to carry the owner-bound tmpfs declaration.
 ENVELOPE_SCHEMA_BY_PROFILE = {
     CONTAINED_PROFILE: ENVELOPE_SCHEMA,
-    CONTAINED_PROFILE_V1: ENVELOPE_SCHEMA_V1,
+    CONTAINED_PROFILE_V1: ENVELOPE_SCHEMA_V2,
 }
 CONTAINED_USER = contained.CONTAINED_USER
 OFFLINE_ENV_NAME = "CARGO_NET_OFFLINE"
@@ -58,6 +59,7 @@ EFFECTIVE_KEYS_V1 = EFFECTIVE_KEYS + (
 REQUESTED_KEYS = (
     "execution_profile", "image_id", "mount_spec", "resource_profile", "sealed",
 )
+REQUESTED_KEYS_V2 = REQUESTED_KEYS + ("tmpfs",)
 ENVELOPE_KEYS = (
     "candidate_outcome", "cleanup", "effective", "envelope_status",
     "execution_commit", "non_claims", "prepare_sha256",
@@ -126,26 +128,19 @@ def _observed_bool(doc, *path) -> bool:
     return value
 
 
-def _observed_tmpfs(spec: str, where: str) -> dict:
-    """Parse one tmpfs option string into observed numbers only."""
-    if not isinstance(spec, str):
-        raise EnvelopeError(where)
-    parts = spec.split(",")
-    size = inodes = None
+def _observed_tmpfs(spec: str, where: str, *, owner_bound=False) -> dict:
+    """Use the executor's one tmpfs parser, then select the schema's stored shape."""
     try:
-        for part in parts:
-            if part.startswith("size="):
-                size = int(part[5:])
-            elif part.startswith("nr_inodes="):
-                inodes = int(part[10:])
-    except ValueError as exc:
+        parsed = contained.parse_tmpfs_options(spec, owner_bound=owner_bound)
+    except contained.PrepareError as exc:
         raise EnvelopeError(where) from exc
-    if type(size) is not int or type(inodes) is not int:
-        raise EnvelopeError(where)
-    return {"exec": "exec" in parts, "nr_inodes": inodes, "size": size}
+    if owner_bound:
+        return parsed
+    return {key: parsed[key] for key in ("exec", "nr_inodes", "size")}
 
 
-def project_effective_envelope(inspect, *, image_env_names, runtime_version) -> dict:
+def _project_effective_envelope(inspect, *, image_env_names, runtime_version,
+                                owner_bound=False) -> dict:
     """Read the effective envelope from Docker output and nothing else.
 
     Every value is read from `inspect` or from the runtime version observed
@@ -192,7 +187,7 @@ def project_effective_envelope(inspect, *, image_env_names, runtime_version) -> 
         raise EnvelopeError("HostConfig.Tmpfs")
     for destination in sorted(observed_tmpfs):
         tmpfs[destination] = _observed_tmpfs(
-            observed_tmpfs[destination], "HostConfig.Tmpfs")
+            observed_tmpfs[destination], "HostConfig.Tmpfs", owner_bound=owner_bound)
 
     return {
         "cap_add": sorted(_observed_list(inspect, "HostConfig", "CapAdd")),
@@ -219,10 +214,15 @@ def project_effective_envelope(inspect, *, image_env_names, runtime_version) -> 
     }
 
 
+def project_effective_envelope(inspect, *, image_env_names, runtime_version) -> dict:
+    return _project_effective_envelope(
+        inspect, image_env_names=image_env_names, runtime_version=runtime_version)
+
+
 def _effective_keys(schema):
     if schema == ENVELOPE_SCHEMA:
         return EFFECTIVE_KEYS
-    if schema == ENVELOPE_SCHEMA_V1:
+    if schema in (ENVELOPE_SCHEMA_V1, ENVELOPE_SCHEMA_V2):
         return EFFECTIVE_KEYS_V1
     raise EnvelopeError("envelope_schema_shape")
 
@@ -265,11 +265,7 @@ def _require_v1_values(effective):
             raise EnvelopeError("ulimit_nofile")
 
 
-def project_effective_envelope_v1(inspect, *, image_env_names, runtime_version,
-                                  daemon_info):
-    """Explicit synthetic/observed-input route; existing emitters still use v0."""
-    effective = project_effective_envelope(
-        inspect, image_env_names=image_env_names, runtime_version=runtime_version)
+def _add_v1_observations(effective, inspect, daemon_info):
     for stored, wire in (("cpu_period", "CpuPeriod"), ("cpu_quota", "CpuQuota"),
                          ("nano_cpus", "NanoCpus")):
         effective[stored] = _v1_integer(
@@ -308,6 +304,23 @@ def project_effective_envelope_v1(inspect, *, image_env_names, runtime_version,
     return effective
 
 
+def project_effective_envelope_v1(inspect, *, image_env_names, runtime_version,
+                                  daemon_info):
+    """Historical v1 shape; its tmpfs projection remains byte-compatible."""
+    effective = project_effective_envelope(
+        inspect, image_env_names=image_env_names, runtime_version=runtime_version)
+    return _add_v1_observations(effective, inspect, daemon_info)
+
+
+def project_effective_envelope_v2(inspect, *, image_env_names, runtime_version,
+                                  daemon_info):
+    """Owner-bound tmpfs observations plus the existing v1 resource observations."""
+    effective = _project_effective_envelope(
+        inspect, image_env_names=image_env_names, runtime_version=runtime_version,
+        owner_bound=True)
+    return _add_v1_observations(effective, inspect, daemon_info)
+
+
 def _resource_profile_loader(execution_profile):
     """The resource-profile loader a requested execution profile admits; any other refuses."""
     if (type(execution_profile) is not str or
@@ -325,8 +338,13 @@ def envelope_schema_for_profile(execution_profile) -> str:
     return ENVELOPE_SCHEMA_BY_PROFILE[execution_profile]
 
 
+def _require_schema_profile(schema, execution_profile) -> None:
+    if schema == ENVELOPE_SCHEMA_V2 and execution_profile != CONTAINED_PROFILE_V1:
+        raise EnvelopeError("envelope_schema_profile")
+
+
 def requested_envelope(*, execution_profile, image_id, mount_spec,
-                       resource_profile, sealed) -> dict:
+                       resource_profile, sealed, schema=None) -> dict:
     """The declaration side. These values are compared, never projected.
 
     The pinned image's own environment is NOT here: it is an observation of
@@ -336,7 +354,12 @@ def requested_envelope(*, execution_profile, image_id, mount_spec,
     loader = _resource_profile_loader(execution_profile)
     if type(sealed) is not bool:
         raise EnvelopeError("sealed")
-    return {
+    if schema is None:
+        schema = ENVELOPE_SCHEMA
+    if schema not in ENVELOPE_SCHEMAS:
+        raise EnvelopeError("envelope_schema_shape")
+    _require_schema_profile(schema, execution_profile)
+    requested = {
         "execution_profile": execution_profile,
         "image_id": contained.require_image_id(image_id),
         "mount_spec": sorted(
@@ -345,6 +368,13 @@ def requested_envelope(*, execution_profile, image_id, mount_spec,
         "resource_profile": loader(resource_profile),
         "sealed": sealed,
     }
+    if schema == ENVELOPE_SCHEMA_V2:
+        requested["tmpfs"] = {
+            destination: contained.tmpfs_request(
+                requested["resource_profile"], destination=destination, owner_bound=True)
+            for destination in ("/tmp", "/work")
+        }
+    return requested
 
 
 def _require_exact(doc, keys, where: str) -> None:
@@ -352,7 +382,7 @@ def _require_exact(doc, keys, where: str) -> None:
         raise EnvelopeError(where)
 
 
-def require_requested_record(requested) -> dict:
+def require_requested_record(requested, *, schema=None) -> dict:
     """Validate that a stored requested declaration conforms to the closed schema.
 
     Enforces that execution_profile is a contained profile paired with its own
@@ -362,7 +392,9 @@ def require_requested_record(requested) -> dict:
     integer limits and bool work_exec, and mount_spec is a strictly sorted
     list of unique destination strings starting with '/'.
     """
-    _require_exact(requested, REQUESTED_KEYS, "requested")
+    keys = REQUESTED_KEYS_V2 if schema == ENVELOPE_SCHEMA_V2 else REQUESTED_KEYS
+    _require_exact(requested, keys, "requested")
+    _require_schema_profile(schema, requested["execution_profile"])
     loader = _resource_profile_loader(requested["execution_profile"])
     try:
         contained.require_image_id(requested["image_id"])
@@ -379,6 +411,19 @@ def require_requested_record(requested) -> dict:
         contained.validate_mount_destinations(mount_spec, strictly_sorted=True)
     except contained.PrepareError as exc:
         raise EnvelopeError("mount_spec") from exc
+    if schema == ENVELOPE_SCHEMA_V2:
+        expected_tmpfs = {
+            destination: contained.tmpfs_request(
+                requested["resource_profile"], destination=destination, owner_bound=True)
+            for destination in ("/tmp", "/work")
+        }
+        try:
+            for spec in requested["tmpfs"].values():
+                contained.require_tmpfs_spec(spec, owner_bound=True)
+        except (AttributeError, contained.PrepareError) as exc:
+            raise EnvelopeError("tmpfs") from exc
+        if requested["tmpfs"] != expected_tmpfs:
+            raise EnvelopeError("tmpfs")
     return requested
 
 
@@ -415,17 +460,18 @@ def require_envelope_matches_request(effective, requested, *, schema=ENVELOPE_SC
 
     The v0 fields retain their declaration comparisons. For a v2 request the
     observed CPU period, quota and nofile soft/hard are compared exactly and
-    NanoCpus must be stored unset (0), so a v2 request needs a v1 envelope.
-    For a v1 request those fields, and the daemon fields always, are
+    NanoCpus must be stored unset (0), so a v2 request needs a v1 or v2 envelope.
+    For a v1 resource request those fields, and the daemon fields always, are
     observations with shape checks, not requested limits.
     """
-    require_requested_record(requested)
+    require_requested_record(requested, schema=schema)
     _require_exact(effective, _effective_keys(schema),
                        "effective" if schema == ENVELOPE_SCHEMA else "envelope_schema_shape")
-    if schema == ENVELOPE_SCHEMA_V1:
+    if schema in (ENVELOPE_SCHEMA_V1, ENVELOPE_SCHEMA_V2):
         _require_v1_values(effective)
     profile = requested["resource_profile"]
-    if _requests_cpu_and_nofile(requested) and schema != ENVELOPE_SCHEMA_V1:
+    if _requests_cpu_and_nofile(requested) and schema not in (
+            ENVELOPE_SCHEMA_V1, ENVELOPE_SCHEMA_V2):
         raise EnvelopeError("envelope_schema_profile")
 
     if effective["image"] != requested["image_id"]:
@@ -467,22 +513,28 @@ def require_envelope_matches_request(effective, requested, *, schema=ENVELOPE_SC
 
     if type(effective["tmpfs"]) is not dict:
         raise EnvelopeError("tmpfs")
-    expected_tmpfs = {
+    expected_tmpfs = requested["tmpfs"] if schema == ENVELOPE_SCHEMA_V2 else {
         "/tmp": {"exec": False, "nr_inodes": profile["tmp_inodes"],
                  "size": profile["tmp_bytes"]},
         "/work": {"exec": profile["work_exec"],
-                  "nr_inodes": profile["work_inodes"],
-                  "size": profile["work_bytes"]},
+                  "nr_inodes": profile["work_inodes"], "size": profile["work_bytes"]},
     }
+    if schema == ENVELOPE_SCHEMA_V2:
+        try:
+            for spec in effective["tmpfs"].values():
+                contained.require_tmpfs_spec(spec, owner_bound=True)
+        except (AttributeError, contained.PrepareError) as exc:
+            raise EnvelopeError("tmpfs") from exc
     if effective["tmpfs"] != expected_tmpfs:
         raise EnvelopeError("tmpfs")
-    for _dest, spec in effective["tmpfs"].items():
-        if type(spec) is not dict:
-            raise EnvelopeError("tmpfs")
-        if type(spec.get("exec")) is not bool:
-            raise EnvelopeError("tmpfs")
-        if type(spec.get("nr_inodes")) is not int or type(spec.get("size")) is not int:
-            raise EnvelopeError("tmpfs")
+    if schema != ENVELOPE_SCHEMA_V2:
+        for _dest, spec in effective["tmpfs"].items():
+            if type(spec) is not dict:
+                raise EnvelopeError("tmpfs")
+            if type(spec.get("exec")) is not bool:
+                raise EnvelopeError("tmpfs")
+            if type(spec.get("nr_inodes")) is not int or type(spec.get("size")) is not int:
+                raise EnvelopeError("tmpfs")
 
     # The allowed environment is the pinned image's own observed environment
     # plus exactly what the create argv adds. A name injected at create time
@@ -563,11 +615,11 @@ def build_envelope_record(*, requested, setup_status, envelope_status,
     no `publication_permission` parameter: it cannot be caller-supplied.
     """
     _effective_keys(schema)
-    require_requested_record(requested)
-    # A contained-oci-v1 record is v1 whatever its states: a v0 record has nowhere to hold the
-    # CPU and nofile its request names. The reverse is not held, so a v1 envelope may still
-    # carry a v0 request.
-    if _requests_cpu_and_nofile(requested) and schema != ENVELOPE_SCHEMA_V1:
+    require_requested_record(requested, schema=schema)
+    # A v2 resource request needs v1's CPU/nofile fields. Historical v1 records remain valid;
+    # new contained-oci-v1 emissions select v2 so their requested tmpfs owner is also bound.
+    if _requests_cpu_and_nofile(requested) and schema not in (
+            ENVELOPE_SCHEMA_V1, ENVELOPE_SCHEMA_V2):
         raise EnvelopeError("envelope_schema_profile")
     setup_status = _require_member(setup_status, SETUP_STATUSES, "setup_status")
     envelope_status = _require_member(
