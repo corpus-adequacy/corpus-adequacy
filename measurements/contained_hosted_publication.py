@@ -1356,6 +1356,10 @@ def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
                 or candidate.get("decision") != "publish"):
             raise HostedPublicationError("success_artifacts")
         loaded_collection = load_envelope_collection(collection_dir)
+        collection_decision = collection_publication_decision(
+            loaded_collection, setup_status=setup["setup_status"])
+        if collection_decision.get("decision") != "publish":
+            raise HostedPublicationError("success_collection_permission")
         rail = _rail_for_operator_profile(setup.get("operator_profile"))
         prepare_sha256 = loaded_collection["index"].get("prepare_sha256")
         for member in loaded_collection["members"]:

@@ -2910,7 +2910,7 @@ class WithheldDiagnosticPackage(unittest.TestCase):
                 hosted.load_hosted_attempt_artifacts(**bad)
             self.assertEqual(str(ctx.exception), "attempt_binding")
 
-    def test_owned_success_readback_binds_every_member_to_dispatch_and_prepare(self):
+    def test_owned_success_readback_binds_members_and_requires_publishable_collection(self):
         from hosted_rail_contract import OWNED_V1_RAIL
         from tests.test_effective_envelope import _requested_v2, _v2_effective
 
@@ -3030,6 +3030,56 @@ class WithheldDiagnosticPackage(unittest.TestCase):
                         )
             member_path.write_bytes(original_member)
             _recompute_collection_index(coll)
+            shutil.rmtree(coll)
+            hosted.collection.write_collection(
+                hosted.collection.Ledger(), coll, report_sha256=report_sha)
+            loaded_empty = hosted.load_envelope_collection(coll)
+            self.assertEqual(loaded_empty["withheld_reason"], "no_attempt_recorded")
+            with self.assertRaisesRegex(
+                    hosted.HostedPublicationError, "success_collection_permission"):
+                hosted.load_hosted_attempt_artifacts(
+                    setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                    candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                    rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                    collection_dir=coll,
+                    expected_bindings=bindings,
+                    expected_run_id=HOSTED_RUN_ID,
+                    expected_run_attempt=HOSTED_RUN_ATTEMPT,
+                )
+            shutil.rmtree(coll)
+            unverified_member = hosted.effective_envelope.build_envelope_record(
+                requested=requested,
+                setup_status="ready",
+                envelope_status="unverified",
+                unverified_field="runtime_version",
+                effective=None,
+                candidate_outcome="completed",
+                cleanup="removed-and-absent",
+                prepare_sha256=prepare_sha,
+                execution_commit=RUNNER,
+                report_sha256=None,
+                schema=hosted.effective_envelope.ENVELOPE_SCHEMA_V1,
+            )
+            nonpublish = hosted.collection.Ledger()
+            nonpublish.recorded(nonpublish.register(), unverified_member)
+            hosted.collection.write_collection(
+                nonpublish, coll, report_sha256=report_sha)
+            self.assertEqual(
+                hosted.collection.collection_permission(
+                    hosted.collection.load_collection(coll)),
+                "withheld",
+            )
+            with self.assertRaisesRegex(
+                    hosted.HostedPublicationError, "success_collection_permission"):
+                hosted.load_hosted_attempt_artifacts(
+                    setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                    candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                    rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                    collection_dir=coll,
+                    expected_bindings=bindings,
+                    expected_run_id=HOSTED_RUN_ID,
+                    expected_run_attempt=HOSTED_RUN_ATTEMPT,
+                )
 
     def test_success_terminal_is_unique_last_and_carries_no_diagnostic_digest(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -9,7 +9,9 @@ to carry `publication-permitted`, `collection_present`, and no diagnostic-packag
 digest. Offline readback accepts exactly one of the successful collection or withheld
 diagnostic package and binds the attempt identity, dispatch inputs, candidate result,
 collection report digest, and every member's canonical runner, image, PREPARE, and
-execution-profile bindings. An artifact-write failure remains pre-terminal. This
+execution-profile bindings. The existing collection publication decision must also
+permit the loaded collection, so empty or otherwise withheld observations cannot be
+promoted by readback. An artifact-write failure remains pre-terminal. This
 adds no score or authentication claim and does not alter historical run ledgers.
 
 The sealed AEE runtime now normalizes the actual isolated subject bind to 0755
