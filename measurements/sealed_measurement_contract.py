@@ -13,6 +13,14 @@ from pathlib import PurePosixPath
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _PIN_NAMES = frozenset({"control.json", "manifest.json", "pins.json", "sites.json"})
+CANDIDATE_WRAPPER_STAGE_RETURNCODES = (
+    ("preflight", 76),
+    ("copy", 77),
+    ("build", 78),
+    ("report-missing", 79),
+    ("report-empty", 80),
+    ("report-read", 81),
+)
 
 
 def _require_relpath(value: str, where: str) -> None:
@@ -57,6 +65,7 @@ class SealedMeasurementContract:
     container_context_relpath: str
     candidate_build: tuple[str, ...]
     candidate_entrypoint: tuple[str, ...]
+    candidate_complete_returncodes: tuple[int, ...]
     vendor_tree_requirement: str
 
     def __post_init__(self) -> None:
@@ -134,6 +143,16 @@ class SealedMeasurementContract:
             _require_tuple(command, where)
             if any(not isinstance(value, str) or not value for value in command):
                 raise ValueError(where)
+        _require_tuple(
+            self.candidate_complete_returncodes, "candidate_complete_returncodes")
+        if (len(self.candidate_complete_returncodes) !=
+                len(set(self.candidate_complete_returncodes)) or any(
+                    type(value) is not int or value < 0 or value > 255
+                    for value in self.candidate_complete_returncodes)):
+            raise ValueError("candidate_complete_returncodes")
+        if set(self.candidate_complete_returncodes).intersection(
+                value for _stage, value in CANDIDATE_WRAPPER_STAGE_RETURNCODES):
+            raise ValueError("candidate_complete_returncodes overlap wrapper stages")
         if type(self.vendor_tree_requirement) is not str or self.vendor_tree_requirement not in (
                 "nonempty", "canonical-empty"):
             raise ValueError("vendor_tree_requirement")
@@ -197,6 +216,7 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
     candidate_entrypoint=(
         "/work/target/release/aee-checker", "/input/vectors", "--json", "/work/report.json",
     ),
+    candidate_complete_returncodes=(0, 1),
     vendor_tree_requirement="nonempty",
 )
 
@@ -237,5 +257,6 @@ OWNED_CONTAINED_V1_CONTRACT = SealedMeasurementContract(
         "/work/target/release/corpus-adequacy-owned-fixture",
         "/input/vectors", "--json", "/work/report.json",
     ),
+    candidate_complete_returncodes=(0,),
     vendor_tree_requirement="canonical-empty",
 )

@@ -371,7 +371,9 @@ class InnerNormalize(unittest.TestCase):
 
     def test_copy_mutation_drops_rc1_acceptance(self):
         src = Path(cand.__file__).read_text()
-        mutated = src.replace("COMPLETE_RETURNCODES = (0, 1)", "COMPLETE_RETURNCODES = (0,)")
+        mutated = src.replace(
+            "returncode not in contract.candidate_complete_returncodes",
+            "returncode not in (0,)")
         self.assertNotEqual(src, mutated)
         with tempfile.TemporaryDirectory() as d:
             module = _load_mutated(mutated, Path(d))
@@ -1643,7 +1645,7 @@ class OomKilledReported(unittest.TestCase):
                 self.assertUnprovedAs(completed, OOM_TOKEN, label)
 
     def test_a_normal_complete_exit_1_with_oom_killed_true_is_oom_killed_reported(self):
-        self.assertIn(1, cand.COMPLETE_RETURNCODES)
+        self.assertIn(1, cand.AEE_CHECKER_SEALED_CONTRACT.candidate_complete_returncodes)
         for label, completed in self._every_path(returncode=1, oom=True):
             with self.subTest(path=label):
                 self.assertUnprovedAs(completed, OOM_TOKEN, label)
