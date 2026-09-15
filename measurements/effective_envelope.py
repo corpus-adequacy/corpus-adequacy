@@ -417,6 +417,11 @@ def require_requested_record(requested, *, schema=None) -> dict:
                 requested["resource_profile"], destination=destination, owner_bound=True)
             for destination in ("/tmp", "/work")
         }
+        try:
+            for spec in requested["tmpfs"].values():
+                contained.require_tmpfs_spec(spec, owner_bound=True)
+        except (AttributeError, contained.PrepareError) as exc:
+            raise EnvelopeError("tmpfs") from exc
         if requested["tmpfs"] != expected_tmpfs:
             raise EnvelopeError("tmpfs")
     return requested
@@ -514,15 +519,22 @@ def require_envelope_matches_request(effective, requested, *, schema=ENVELOPE_SC
         "/work": {"exec": profile["work_exec"],
                   "nr_inodes": profile["work_inodes"], "size": profile["work_bytes"]},
     }
+    if schema == ENVELOPE_SCHEMA_V2:
+        try:
+            for spec in effective["tmpfs"].values():
+                contained.require_tmpfs_spec(spec, owner_bound=True)
+        except (AttributeError, contained.PrepareError) as exc:
+            raise EnvelopeError("tmpfs") from exc
     if effective["tmpfs"] != expected_tmpfs:
         raise EnvelopeError("tmpfs")
-    for _dest, spec in effective["tmpfs"].items():
-        if type(spec) is not dict:
-            raise EnvelopeError("tmpfs")
-        if type(spec.get("exec")) is not bool:
-            raise EnvelopeError("tmpfs")
-        if type(spec.get("nr_inodes")) is not int or type(spec.get("size")) is not int:
-            raise EnvelopeError("tmpfs")
+    if schema != ENVELOPE_SCHEMA_V2:
+        for _dest, spec in effective["tmpfs"].items():
+            if type(spec) is not dict:
+                raise EnvelopeError("tmpfs")
+            if type(spec.get("exec")) is not bool:
+                raise EnvelopeError("tmpfs")
+            if type(spec.get("nr_inodes")) is not int or type(spec.get("size")) is not int:
+                raise EnvelopeError("tmpfs")
 
     # The allowed environment is the pinned image's own observed environment
     # plus exactly what the create argv adds. A name injected at create time

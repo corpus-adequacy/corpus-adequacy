@@ -1261,6 +1261,22 @@ def _wire_v2_record():
 
 
 class V2TmpfsRequestedObservedEnvelope(unittest.TestCase):
+    def test_rehashed_two_sided_scalar_substitutions_refuse_at_reader(self):
+        cases = {
+            "rw": 1, "exec": 0, "uid": 65532.0, "gid": 65532.0,
+            "size": 16777216.0, "nr_inodes": 2048.0,
+            "uid-bool": True, "mode": 1777, "mode-noncanonical": "01777",
+        }
+        for label, value in cases.items():
+            field = label.split("-", 1)[0]
+            record = _wire_v2_record()
+            record["requested"]["tmpfs"]["/tmp"][field] = value
+            record["effective"]["tmpfs"]["/tmp"][field] = value
+            rehashed = json.loads(env.encode_envelope(record))
+            with self.subTest(label=label), self.assertRaisesRegex(
+                    env.EnvelopeError, "^tmpfs$"):
+                env.validate_envelope_record(rehashed)
+
 
     def test_contained_v1_selects_v2_with_requested_and_observed_owner(self):
         schema = env.envelope_schema_for_profile(V1_PROFILE)
@@ -1314,7 +1330,7 @@ class V2TmpfsRequestedObservedEnvelope(unittest.TestCase):
         requested["tmpfs"]["/tmp"]["uid"] = 1
         with self.assertRaisesRegex(env.EnvelopeError, "^tmpfs$"):
             env.require_envelope_matches_request(effective, requested, schema=schema)
-    def test_v2_refuses_a_daemon_stored_tmpfs_owner_mismatch(self):
+    def test_v2_refuses_a_daemon_stored_tmpfs_request_mismatch(self):
         schema = env.ENVELOPE_SCHEMA_V2
         requested = env.requested_envelope(
             execution_profile=V1_PROFILE, image_id=IMAGE,
@@ -1325,7 +1341,7 @@ class V2TmpfsRequestedObservedEnvelope(unittest.TestCase):
             runtime_version=RUNTIME_VERSION,
             daemon_info={"KernelVersion": "synthetic-kernel", "CgroupVersion": "2",
                          "CgroupDriver": "systemd", "SecurityOptions": None})
-        effective["tmpfs"]["/work"]["gid"] = 1
+        effective["tmpfs"]["/work"]["exec"] = False
         with self.assertRaisesRegex(env.EnvelopeError, "^tmpfs$"):
             env.require_envelope_matches_request(effective, requested, schema=schema)
 

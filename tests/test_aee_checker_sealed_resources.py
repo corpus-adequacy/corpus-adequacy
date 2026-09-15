@@ -974,6 +974,21 @@ class PrepareDispatcher(unittest.TestCase):
 
 
 class V2TmpfsOwnerContract(unittest.TestCase):
+    def test_structured_encoder_refuses_noncanonical_scalar_types(self):
+        valid = contained.tmpfs_request(
+            contained.CANDIDATE_RESOURCE_PROFILE_V2,
+            destination="/tmp", owner_bound=True)
+        cases = {
+            "rw": 1, "exec": 0, "uid": 65532.0, "gid": 65532.0,
+            "size": 16777216.0, "nr_inodes": 2048.0, "size-bool": True,
+            "mode": 1777, "mode-noncanonical": "01777",
+        }
+        for label, value in cases.items():
+            field = label.split("-", 1)[0]
+            mutated = dict(valid); mutated[field] = value
+            with self.subTest(label=label), self.assertRaisesRegex(PrepareError, "^tmpfs$"):
+                contained.encode_tmpfs_options(mutated, owner_bound=True)
+
     def test_owner_is_derived_from_the_single_contained_user_declaration(self):
         with mock.patch.object(contained, "CONTAINED_USER", "42:43"):
             self.assertEqual(contained.contained_user_ids(), (42, 43))

@@ -457,12 +457,29 @@ def tmpfs_request(profile: dict, *, destination: str, owner_bound: bool) -> dict
     return result
 
 
-def encode_tmpfs_options(spec: dict, *, owner_bound: bool) -> str:
-    expected = {"exec", "mode", "nr_inodes", "rw", "size"}
+def require_tmpfs_spec(spec, *, owner_bound: bool) -> dict:
+    """Validate the exact structured tmpfs value shared by writers and readers."""
+    keys = {"exec", "mode", "nr_inodes", "rw", "size"}
     if owner_bound:
-        expected |= {"uid", "gid"}
-    if type(spec) is not dict or set(spec) != expected or spec["rw"] is not True:
+        keys |= {"uid", "gid"}
+    if (type(spec) is not dict or set(spec) != keys or
+            type(spec["rw"]) is not bool or spec["rw"] is not True or
+            type(spec["exec"]) is not bool or
+            type(spec["mode"]) is not str or spec["mode"] != "1777"):
         raise PrepareError("tmpfs")
+    for key in ("size", "nr_inodes"):
+        if type(spec[key]) is not int or spec[key] <= 0:
+            raise PrepareError("tmpfs")
+    if owner_bound:
+        uid, gid = contained_user_ids()
+        if (type(spec["uid"]) is not int or type(spec["gid"]) is not int or
+                spec["uid"] != uid or spec["gid"] != gid):
+            raise PrepareError("tmpfs")
+    return spec
+
+
+def encode_tmpfs_options(spec: dict, *, owner_bound: bool) -> str:
+    require_tmpfs_spec(spec, owner_bound=owner_bound)
     if owner_bound:
         text = "rw,%s,mode=%s,uid=%d,gid=%d,size=%d,nr_inodes=%d" % (
             "exec" if spec["exec"] else "noexec", spec["mode"], spec["uid"],
