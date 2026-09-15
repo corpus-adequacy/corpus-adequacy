@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+Successful hosted publication attempts now append one closed `run-attempt-terminal`
+event after the collection, setup status, and candidate result have been written. The
+same terminal validator accepts publish and diagnostic forms while requiring publish
+to carry `publication-permitted`, `collection_present`, and no diagnostic-package
+digest. Offline readback accepts exactly one of the successful collection or withheld
+diagnostic package and binds the attempt identity, dispatch inputs, candidate result,
+and collection report digest. An artifact-write failure remains pre-terminal. This
+adds no score or authentication claim and does not alter historical run ledgers.
+
 The sealed AEE runtime now normalizes the actual isolated subject bind to 0755
 directories and 0644 regular files immediately before candidate invocation. The
 generic isolated mutation tree stays private while it is host-only. This does not

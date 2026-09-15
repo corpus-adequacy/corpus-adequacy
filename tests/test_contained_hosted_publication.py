@@ -2853,9 +2853,108 @@ class WithheldDiagnosticPackage(unittest.TestCase):
             self.assertTrue((out / hosted.COLLECTION_DIRNAME).is_dir())
             setup = json.loads((out / hosted.SETUP_STATUS_FILENAME).read_text())
             self.assertEqual(setup["reason"], "publication-permitted")
-            lines = (out / hosted.RERUN_EVIDENCE_FILENAME).read_text().splitlines()
-            kinds = [json.loads(line)["kind"] for line in lines if line]
-            self.assertNotIn("run-attempt-terminal", kinds)
+            entries = hosted.load_rerun_evidence(
+                out / hosted.RERUN_EVIDENCE_FILENAME, mode="complete")
+            self.assertEqual(
+                [entry["kind"] for entry in entries],
+                ["run-attempt-start", "run-attempt-terminal"],
+            )
+            terminal = entries[-1]
+            self.assertEqual(terminal["decision"], "publish")
+            self.assertEqual(terminal["reason"], "publication-permitted")
+            self.assertEqual(terminal["collection_state"], "collection_present")
+            self.assertIsNone(terminal["diagnostic_package_sha256"])
+
+    def test_success_readback_binds_collection_attempt_and_public_cli(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+            _run_ok(base, "packet", rels)
+            out = base / "artifacts"
+            kwargs = dict(
+                setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                collection_dir=out / hosted.COLLECTION_DIRNAME,
+                expected_bindings=BINDINGS,
+                expected_run_id=HOSTED_RUN_ID,
+                expected_run_attempt=HOSTED_RUN_ATTEMPT,
+            )
+            loaded = hosted.load_hosted_attempt_artifacts(**kwargs)
+            self.assertEqual(loaded["projection"]["decision"], "publish")
+            self.assertEqual(loaded["projection"]["publication_permission"], "permitted")
+            self.assertIsNone(loaded["package"])
+            cmd = [
+                sys.executable, str(Path(hosted.__file__)), "readback",
+                "--setup", str(kwargs["setup_path"]),
+                "--candidate", str(kwargs["candidate_path"]),
+                "--rerun", str(kwargs["rerun_path"]),
+                "--collection", str(kwargs["collection_dir"]),
+                "--candidate-revision", CANDIDATE,
+                "--runner-revision", RUNNER,
+                "--image-digest", IMAGE,
+                "--run-id", HOSTED_RUN_ID,
+                "--run-attempt", HOSTED_RUN_ATTEMPT,
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            summary = json.loads(proc.stdout)
+            self.assertEqual(summary["decision"], "publish")
+            self.assertEqual(summary["publication_permission"], "permitted")
+            self.assertGreaterEqual(summary["members"], 1)
+            bad = dict(kwargs)
+            bad["expected_run_attempt"] = "999"
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_hosted_attempt_artifacts(**bad)
+            self.assertEqual(str(ctx.exception), "attempt_binding")
+
+    def test_success_terminal_is_unique_last_and_carries_no_diagnostic_digest(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+            _run_ok(base, "packet", rels)
+            log = base / "artifacts" / hosted.RERUN_EVIDENCE_FILENAME
+            original = log.read_bytes()
+            lines = [line for line in original.splitlines() if line]
+            terminal = json.loads(lines[-1])
+            terminal["diagnostic_package_sha256"] = "0" * 64
+            log.write_bytes(lines[0] + b"\n" + hosted._encode_json(terminal))
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_rerun_evidence(log)
+            log.write_bytes(original + lines[-1] + b"\n")
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_rerun_evidence(log)
+            log.write_bytes(lines[-1] + b"\n" + lines[0] + b"\n")
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_rerun_evidence(log)
+
+    def test_success_artifact_write_failure_leaves_no_terminal(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def refuse_artifact_write(*_args, **_kwargs):
+                raise OSError("controlled artifact write failure")
+
+            with mock.patch.object(
+                    hosted, "write_separate_artifacts", refuse_artifact_write):
+                with self.assertRaisesRegex(OSError, "controlled artifact write failure"):
+                    _run_ok(base, "packet", rels)
+            entries = hosted.load_rerun_evidence(
+                base / "artifacts" / hosted.RERUN_EVIDENCE_FILENAME,
+                mode="legacy",
+            )
+            self.assertEqual([entry["kind"] for entry in entries], ["run-attempt-start"])
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_rerun_evidence(
+                    base / "artifacts" / hosted.RERUN_EVIDENCE_FILENAME)
+            self.assertEqual(str(ctx.exception), "rerun_terminal")
 
     def test_downloaded_bytes_cli_readback(self):
         with tempfile.TemporaryDirectory() as raw:
