@@ -2910,6 +2910,127 @@ class WithheldDiagnosticPackage(unittest.TestCase):
                 hosted.load_hosted_attempt_artifacts(**bad)
             self.assertEqual(str(ctx.exception), "attempt_binding")
 
+    def test_owned_success_readback_binds_every_member_to_dispatch_and_prepare(self):
+        from hosted_rail_contract import OWNED_V1_RAIL
+        from tests.test_effective_envelope import _requested_v2, _v2_effective
+
+        requested = _requested_v2()
+        bindings = {
+            "candidate_revision": CANDIDATE,
+            "runner_revision": RUNNER,
+            "image_digest": requested["image_id"],
+        }
+        report = {
+            "schema": hosted.ca.REPORT_SCHEMA,
+            "control_status": "killed",
+            "killed": 1,
+            "survived": 0,
+            "silent": 0,
+            "equivalent": 0,
+            "unexercised_out_of_scope": 0,
+            "unproved": 0,
+            "known_holes": 0,
+            "declared_total": 1,
+            "failures": [],
+            "adequate": True,
+        }
+        report_sha = hashlib.sha256(hosted.ca.encode_report_v0(report)).hexdigest()
+        prepare_raw = json.dumps({"schema": hosted.sealed_run.PREPARE_V2_SCHEMA}).encode()
+        prepare_sha = hashlib.sha256(prepare_raw).hexdigest()
+        member = hosted.effective_envelope.build_envelope_record(
+            requested=requested,
+            setup_status="ready",
+            envelope_status="verified",
+            unverified_field=None,
+            effective=_v2_effective(),
+            candidate_outcome="completed",
+            cleanup="removed-and-absent",
+            prepare_sha256=prepare_sha,
+            execution_commit=RUNNER,
+            report_sha256=None,
+            schema=hosted.effective_envelope.ENVELOPE_SCHEMA_V1,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw)
+            packet = workspace / OWNED_V1_RAIL.packet_dirname
+            packet.mkdir()
+            (packet / OWNED_V1_RAIL.prepare_filename).write_bytes(prepare_raw)
+            (packet / OWNED_V1_RAIL.authorize_filename).write_bytes(b"authorize")
+            (packet / "pins").mkdir()
+            out = workspace / "out"
+
+            def execute(**kwargs):
+                ledger = hosted.collection.Ledger()
+                ledger.recorded(ledger.register(), member)
+                hosted.collection.write_collection(
+                    ledger, kwargs["envelope_dest"], report_sha256=report_sha)
+                return report
+
+            packet_files = {
+                OWNED_V1_RAIL.prepare_filename: prepare_sha,
+                OWNED_V1_RAIL.authorize_filename: hashlib.sha256(b"authorize").hexdigest(),
+            }
+            with mock.patch.object(hosted, "check_packet_manifest",
+                                   return_value=packet_files), \
+                    mock.patch.object(hosted, "load_dispatch_bindings"), \
+                    mock.patch.object(hosted, "check_prepare_bindings"), \
+                    mock.patch.object(hosted.sealed_run, "load_prepare_for_profile",
+                                      return_value={}):
+                decision = hosted.run_gate(
+                    **bindings,
+                    operator_profile=OWNED_V1_RAIL.execution_profile,
+                    out_dir=out,
+                    workspace_root=workspace,
+                    packet_root=OWNED_V1_RAIL.packet_dirname,
+                    authorize_path=OWNED_V1_RAIL.authorize_filename,
+                    prepare_path=OWNED_V1_RAIL.prepare_filename,
+                    pins_dir="pins",
+                    packet_manifest_sha256="d" * 64,
+                    docker_ready=lambda: "ready",
+                    sealed_execute=execute,
+                    environ={
+                        "GITHUB_SHA": RUNNER,
+                        "GITHUB_WORKFLOW_SHA": RUNNER,
+                        "GITHUB_RUN_ID": HOSTED_RUN_ID,
+                        "GITHUB_RUN_ATTEMPT": HOSTED_RUN_ATTEMPT,
+                    },
+                    rail=OWNED_V1_RAIL,
+                )
+            self.assertEqual(decision["decision"], "publish")
+            coll = out / hosted.COLLECTION_DIRNAME
+            member_path = next(
+                path for path in coll.iterdir()
+                if path.name != hosted.collection.INDEX_FILENAME)
+            original_member = member_path.read_bytes()
+            mutations = (
+                ("execution_commit", "runner_revision_binding",
+                 lambda doc: doc.__setitem__("execution_commit", OTHER_RUNNER)),
+                ("image_id", "image_digest_binding",
+                 lambda doc: (
+                     doc["requested"].__setitem__("image_id", OTHER_IMAGE),
+                     doc["effective"].__setitem__("image", OTHER_IMAGE))),
+                ("prepare_sha256", "prepare_sha256_binding",
+                 lambda doc: doc.__setitem__("prepare_sha256", "e" * 64)),
+            )
+            for name, reason, mutate in mutations:
+                with self.subTest(name=name):
+                    member_doc = json.loads(original_member)
+                    mutate(member_doc)
+                    member_path.write_bytes(hosted._encode_json(member_doc))
+                    _recompute_collection_index(coll)
+                    with self.assertRaisesRegex(hosted.HostedPublicationError, reason):
+                        hosted.load_hosted_attempt_artifacts(
+                            setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                            candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                            rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                            collection_dir=coll,
+                            expected_bindings=bindings,
+                            expected_run_id=HOSTED_RUN_ID,
+                            expected_run_attempt=HOSTED_RUN_ATTEMPT,
+                        )
+            member_path.write_bytes(original_member)
+            _recompute_collection_index(coll)
+
     def test_success_terminal_is_unique_last_and_carries_no_diagnostic_digest(self):
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)

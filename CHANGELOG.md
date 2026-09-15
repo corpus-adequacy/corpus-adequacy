@@ -8,7 +8,8 @@ same terminal validator accepts publish and diagnostic forms while requiring pub
 to carry `publication-permitted`, `collection_present`, and no diagnostic-package
 digest. Offline readback accepts exactly one of the successful collection or withheld
 diagnostic package and binds the attempt identity, dispatch inputs, candidate result,
-and collection report digest. An artifact-write failure remains pre-terminal. This
+collection report digest, and every member's canonical runner, image, PREPARE, and
+execution-profile bindings. An artifact-write failure remains pre-terminal. This
 adds no score or authentication claim and does not alter historical run ledgers.
 
 The sealed AEE runtime now normalizes the actual isolated subject bind to 0755

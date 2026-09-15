@@ -56,7 +56,7 @@ import envelope_collection as collection  # noqa: E402
 import effective_envelope  # noqa: E402
 import hosted_packet as packet_delivery  # noqa: E402
 import aee_checker_sealed_run as sealed_run  # noqa: E402
-from hosted_rail_contract import LEGACY_RAIL, require_rail  # noqa: E402
+from hosted_rail_contract import LEGACY_RAIL, OWNED_V1_RAIL, require_rail  # noqa: E402
 from aee_checker_sealed_candidate import (  # noqa: E402
     CANDIDATE_MOUNT_SPEC,
     require_candidate_image,
@@ -237,6 +237,13 @@ def require_operator_profile(profile) -> str:
     if profile != REQUIRED_PROFILE:
         raise HostedPublicationError("operator_profile")
     return profile
+
+
+def _rail_for_operator_profile(profile):
+    for rail in (LEGACY_RAIL, OWNED_V1_RAIL):
+        if rail.execution_profile == profile:
+            return rail
+    raise HostedPublicationError("operator_profile")
 
 
 def observe_workflow_identity(environ=None) -> dict:
@@ -1349,6 +1356,12 @@ def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
                 or candidate.get("decision") != "publish"):
             raise HostedPublicationError("success_artifacts")
         loaded_collection = load_envelope_collection(collection_dir)
+        rail = _rail_for_operator_profile(setup.get("operator_profile"))
+        prepare_sha256 = loaded_collection["index"].get("prepare_sha256")
+        for member in loaded_collection["members"]:
+            check_envelope_bindings(
+                member, bindings=expected, prepare_sha256=prepare_sha256,
+                rail=rail)
         carried = candidate.get("report_sha256")
         claimed = loaded_collection["index"].get("report_sha256")
         if carried is not None and carried != claimed:
