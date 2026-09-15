@@ -33,6 +33,10 @@ REPORT = {"vectors": [{
     "id": "v1", "verdict": "valid", "result": "ok", "reason": "bounded",
     "code": "PRIVATE", "tiersWithPinnedKey": ["t"], "tiersWithoutKey": [],
 }]}
+POSIX_SHELL_ONLY = unittest.skipIf(
+    os.name == "nt", "generated candidate wrapper requires POSIX /bin/sh")
+POSIX_MODES_ONLY = unittest.skipIf(
+    os.name == "nt", "POSIX read and traverse mode bits are not represented by NTFS")
 
 
 def _load(path: Path, name: str):
@@ -95,6 +99,7 @@ class GeneratedWrapperStages(unittest.TestCase):
         self.assertEqual(normalized.stdout, "")
         self.assertEqual(normalized.stderr, "")
 
+    @POSIX_SHELL_ONLY
     def test_each_wrapper_owned_failure_has_one_closed_stage(self):
         cases = (
             ("preflight", dict(missing=("tool/config.toml",))),
@@ -110,6 +115,7 @@ class GeneratedWrapperStages(unittest.TestCase):
             with self.subTest(stage=stage):
                 self.assertStage(self._run(**kwargs), stage)
 
+    @POSIX_SHELL_ONLY
     def test_report_read_never_replaces_noncomplete_entrypoint_status(self):
         proc = self._run(
             entrypoint=("/bin/sh", "-c", "printf x > report.json; exit 2"),
@@ -121,17 +127,13 @@ class GeneratedWrapperStages(unittest.TestCase):
             contract=OWNED_CONTAINED_V1_CONTRACT)
         self.assertEqual(normalized.unproved_reason, "inner-exit")
 
+    @POSIX_SHELL_ONLY
     def test_candidate_forging_the_old_exact_frame_remains_generic(self):
         old_frame = "candidate-wrapper-stage.v0:build"
-        if sys.platform.startswith("linux"):
-            attack = f"printf '%s\\n' '{old_frame}' > /proc/$PPID/fd/1; exit 75"
-            portable_fd = False
-        else:
-            attack = f"printf '%s\\n' '{old_frame}' >&3; exit 75"
-            portable_fd = True
+        attack = f"printf '%s\\n' '{old_frame}' >&3; exit 75"
         proc = self._run(
             entrypoint=("/bin/sh", "-c", attack),
-            expose_wrapper_stdout=portable_fd)
+            expose_wrapper_stdout=True)
         self.assertEqual(proc.stdout, old_frame + "\n")
         self.assertEqual(proc.returncode, candidate.UNPROVED_EXIT)
         normalized = candidate.normalize_inner_event(
@@ -139,6 +141,7 @@ class GeneratedWrapperStages(unittest.TestCase):
             contract=OWNED_CONTAINED_V1_CONTRACT)
         self.assertEqual(normalized.unproved_reason, "inner-exit")
 
+    @POSIX_SHELL_ONLY
     def test_every_noncomplete_candidate_exit_is_remapped_before_classification(self):
         statuses = (2, candidate.UNPROVED_EXIT,
                     *candidate.WRAPPER_STAGE_RETURNCODES.values())
@@ -189,6 +192,7 @@ class GeneratedWrapperStages(unittest.TestCase):
         self.assertEqual(aee.returncode, 0)
         self.assertEqual(owned.unproved_reason, "inner-exit")
 
+    @POSIX_SHELL_ONLY
     def test_generated_wrapper_preserves_aee_exit_one_but_owned_v1_refuses_it(self):
         command = ("/bin/sh", "-c", "printf '%s\\n' '{\"vectors\":[]}' > report.json; exit 1")
         aee = self._run(entrypoint=command, contract=AEE_CHECKER_SEALED_CONTRACT)
@@ -335,6 +339,7 @@ class CrossUidMaterializationModes(unittest.TestCase):
         self.assertEqual(stat.S_IMODE((root / "top.txt").stat().st_mode), 0o644)
         self.assertEqual(stat.S_IMODE((root / "nested/inner.txt").stat().st_mode), 0o644)
 
+    @POSIX_MODES_ONLY
     def test_owned_tree_is_cross_uid_readable_despite_umask_077(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / "tree"
@@ -384,6 +389,16 @@ class CrossUidMaterializationModes(unittest.TestCase):
         finally:
             os.umask(old)
 
+    def test_materializer_wires_all_four_readonly_bind_roots_on_every_platform(self):
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+                materialize, "normalize_readonly_bind_modes") as normalizer:
+            result = self._materialize_with_stubs(materialize, Path(raw))
+        self.assertEqual(
+            [call.args[0] for call in normalizer.call_args_list],
+            [result[name] for name in ("subject", "corpus", "vendor", "tool")],
+        )
+
+    @POSIX_MODES_ONLY
     def test_materializer_applies_modes_to_every_mounted_tree(self):
         with tempfile.TemporaryDirectory() as raw:
             result = self._materialize_with_stubs(materialize, Path(raw))
@@ -396,6 +411,7 @@ class CrossUidMaterializationModes(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(result["tool"].stat().st_mode), 0o755)
             self.assertEqual(stat.S_IMODE((result["tool"] / "config.toml").stat().st_mode), 0o644)
 
+    @POSIX_MODES_ONLY
     def test_mode_normalization_mutation_bites_and_noop_is_green(self):
         source = Path(materialize.__file__).read_text(encoding="utf-8")
         needle = "        normalize_readonly_bind_modes(readonly_bind)"
