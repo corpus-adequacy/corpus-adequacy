@@ -7,6 +7,7 @@ Does not run a real corpus/checker experiment.
 
 from __future__ import annotations
 
+import importlib
 import json
 import corpus_adequacy as ca
 import shlex
@@ -45,8 +46,6 @@ _ROOT = Path(__file__).resolve().parents[1]
 _ADAPTERS = str(_ROOT / "adapters")
 if _ADAPTERS not in sys.path:
     sys.path.insert(0, _ADAPTERS)
-import aee_checker_sealed as sealed_adapter  # noqa: E402
-import owned_contained_v1 as owned_adapter  # noqa: E402
 from sealed_measurement_contract import OWNED_CONTAINED_V1_CONTRACT  # noqa: E402
 
 CANDIDATE_MOUNT_SPEC = DEFAULT_MOUNT_SPEC + (("subject", "/subject"),)
@@ -172,9 +171,9 @@ def host_vectors_path(mounts: dict) -> str:
 def sealed_adapter_for(contract):
     """Resolve only the two code-owned adapters; paths are never operator input."""
     if contract is AEE_CHECKER_SEALED_CONTRACT:
-        return sealed_adapter
+        return importlib.import_module("aee_checker_sealed")
     if contract is OWNED_CONTAINED_V1_CONTRACT:
-        return owned_adapter
+        return importlib.import_module("owned_contained_v1")
     raise PrepareError("sealed measurement adapter")
 
 
@@ -459,6 +458,9 @@ def _run_sealed_candidate(*, image_id: str, mounts: dict,
     profile; one without a contained profile refuses before any effect.
     Below admission: the profile/PREPARE pairing is `run_sealed_candidate`'s.
     """
+    # Resolve the code-owned adapter before container creation. A selected adapter whose
+    # module cannot load is an admission failure, not a post-execution projection failure.
+    sealed_adapter_for(contract)
     if binding is not None:
         return _recorded_sealed_candidate(
             image_id=image_id, mounts=mounts,

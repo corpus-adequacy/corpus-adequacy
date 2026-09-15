@@ -38,6 +38,33 @@ FIXTURE = ROOT / "fixtures" / "contained-v1-owned"
 
 
 class OwnedContainedV1ContractTests(unittest.TestCase):
+    def test_candidate_import_loads_only_the_selected_adapter(self):
+        script = r'''
+import json
+import sys
+from pathlib import Path
+root = Path.cwd()
+sys.path.insert(0, str(root))
+sys.path.insert(0, str(root / "measurements"))
+import aee_checker_sealed_candidate as candidate
+from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT, OWNED_CONTAINED_V1_CONTRACT
+before = [name for name in ("aee_checker_sealed", "owned_contained_v1") if name in sys.modules]
+contract = OWNED_CONTAINED_V1_CONTRACT if sys.argv[1] == "owned" else AEE_CHECKER_SEALED_CONTRACT
+candidate.sealed_adapter_for(contract)
+after = [name for name in ("aee_checker_sealed", "owned_contained_v1") if name in sys.modules]
+print(json.dumps({"before": before, "after": after}, sort_keys=True))
+'''
+        for selected, expected in (
+            ("generic", ["aee_checker_sealed"]),
+            ("owned", ["owned_contained_v1"]),
+        ):
+            proc = subprocess.run(
+                [sys.executable, "-c", script, selected], cwd=ROOT,
+                check=True, capture_output=True, text=True)
+            result = json.loads(proc.stdout)
+            self.assertEqual(result["before"], [], selected)
+            self.assertEqual(result["after"], expected, selected)
+
     def test_owned_contract_freezes_selected_fixture_subtrees(self):
         contract = OWNED_CONTAINED_V1_CONTRACT
         self.assertEqual(
