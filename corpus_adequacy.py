@@ -3340,8 +3340,8 @@ CLOSED_UNPROVED_REASONS = (
     # Contained setup never became ready (unavailable or refused), so no candidate ran to
     # an outcome. Without this token the sanitizer reported such a run as "malformed".
     "setup",
-    # Exact frames emitted by the sealed wrapper itself. These distinguish where its
-    # bounded protocol stopped without retaining child or host text.
+    # Closed tokens selected from wrapper-owned reserved exit statuses. These distinguish
+    # where its bounded protocol stopped without retaining child or host text.
     "candidate-preflight",
     "candidate-copy",
     "candidate-build",
