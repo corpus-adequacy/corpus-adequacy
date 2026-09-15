@@ -21,6 +21,7 @@ import aee_checker_sealed_runtime as runtime  # noqa: E402
 import aee_checker_sealed_run as run  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
 import envelope_collection as collection  # noqa: E402
+import isolated_tree as iso  # noqa: E402
 
 PREPARE_V0 = REPO_ROOT / "measurements" / "aee-go-run" / "prepare.v0.json"
 
@@ -82,6 +83,63 @@ class SealedRuntimeBackend(unittest.TestCase):
             result.selector_keys_seen,
             {"outcome_from": {"rows"}, "diagnostic_from": {"diagnostics"}},
         )
+
+    def test_normalizes_the_actual_isolated_subject_at_the_candidate_boundary(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "source"
+            source.mkdir()
+            (source / "nested").mkdir(mode=0o700)
+            (source / "nested" / "input.txt").write_text("input\n", encoding="utf-8")
+            (source / "nested" / "input.txt").chmod(0o600)
+            tree = iso.IsolatedMutationTree(source)
+            isolated = tree.materialize()
+            isolated.chmod(0o700)
+            self.assertEqual(isolated.stat().st_mode & 0o777, 0o700)
+            materialized = {key: root / key for key in ("corpus", "vendor", "tool")}
+            for path in materialized.values():
+                path.mkdir()
+            manifest = {
+                "_repo_root": isolated,
+                "accepted_exit_codes": [0],
+                "unproved_exit_codes": [75],
+                "runner": "batch",
+                "outcome_from": ["rows"],
+                "build": list(runtime.candidate.CONTAINER_BUILD),
+                "entrypoint_command": list(runtime.candidate.CONTAINER_ENTRYPOINT),
+            }
+            completed = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout='{"rows":["r"]}', stderr="")
+
+            def observe_subject(**kwargs):
+                subject = kwargs["mounts"]["subject"]
+                self.assertEqual(subject, isolated)
+                directories = [subject] + [p for p in subject.rglob("*") if p.is_dir()]
+                files = [p for p in subject.rglob("*") if p.is_file()]
+                self.assertTrue(files)
+                self.assertEqual(
+                    {p.relative_to(subject).as_posix() if p != subject else ".":
+                     p.stat().st_mode & 0o777 for p in directories},
+                    {".": 0o755, "nested": 0o755},
+                )
+                self.assertEqual(
+                    {p.relative_to(subject).as_posix(): p.stat().st_mode & 0o777
+                     for p in files},
+                    {"nested/input.txt": 0o644},
+                )
+                return completed
+
+            try:
+                with mock.patch.object(
+                        runtime.candidate, "run_sealed_candidate",
+                        side_effect=observe_subject):
+                    result = runtime.make_sealed_backend(
+                        prepare_raw=_prepare_v1(), materialized=materialized,
+                        execution_profile="contained-oci-v0",
+                    )(manifest, [{"vector_id": "<batch>"}], rebuild=True)
+            finally:
+                tree.cleanup()
+        self.assertEqual(result.outcomes, {"<batch>": (("r",),)})
 
     def test_returncode_75_is_unproved_and_never_an_empty_success(self):
         with tempfile.TemporaryDirectory() as d:

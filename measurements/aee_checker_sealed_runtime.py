@@ -9,6 +9,7 @@ import corpus_adequacy as ca
 import aee_checker_sealed_candidate as candidate
 import candidate_diagnostics as diagnostics
 from aee_checker_sealed_common import PrepareError
+from aee_checker_sealed_materialize import normalize_readonly_bind_modes
 from aee_checker_sealed_run import load_prepare_for_profile
 from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT
 
@@ -51,6 +52,7 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
             raise ca.ManifestError(
                 "sealed runtime requires one combined build-and-run execution")
         subject = Path(execution_manifest["_repo_root"])
+        normalize_readonly_bind_modes(subject)
         mounts = {
             "input": materialized["corpus"],
             "vendor": materialized["vendor"],

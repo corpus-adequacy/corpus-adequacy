@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+The sealed AEE runtime now normalizes the actual isolated subject bind to 0755
+directories and 0644 regular files immediately before candidate invocation. The
+generic isolated mutation tree stays private while it is host-only. This does not
+retroactively establish the r8 errno, prove live tmpfs state, make an unproved run
+scoreable, or establish that a later hosted attempt will succeed.
+
 Owned `contained-oci-v1` candidate runs now bind tmpfs ownership and mount options in
 both the Docker create request and a sibling `execution-envelope.v2`. One canonical
 parser/encoder closes `rw`, explicit `exec`/`noexec`, mode, uid, gid, size and inode
