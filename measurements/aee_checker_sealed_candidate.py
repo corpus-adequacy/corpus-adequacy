@@ -36,7 +36,10 @@ from aee_checker_sealed_run import load_prepare_for_profile
 import bounded_run as br
 import contained_oci as contained
 import effective_envelope as envelope
-from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT
+from sealed_measurement_contract import (
+    AEE_CHECKER_SEALED_CONTRACT,
+    CANDIDATE_WRAPPER_STAGE_RETURNCODES,
+)
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ADAPTERS = str(_ROOT / "adapters")
@@ -51,23 +54,21 @@ CANDIDATE_ENTRYPOINT = "/bin/sh"
 CONTAINER_BUILD = AEE_CHECKER_SEALED_CONTRACT.candidate_build
 CONTAINER_ENTRYPOINT = AEE_CHECKER_SEALED_CONTRACT.candidate_entrypoint
 UNPROVED_EXIT = 75
-WRAPPER_STAGES = (
-    "preflight", "copy", "build", "report-missing", "report-empty", "report-read",
-)
-_WRAPPER_STAGE_PREFIX = "candidate-wrapper-stage.v0:"
+WRAPPER_STAGE_RETURNCODES = dict(CANDIDATE_WRAPPER_STAGE_RETURNCODES)
+WRAPPER_STAGES = tuple(WRAPPER_STAGE_RETURNCODES)
 
 
-def wrapper_stage_frame(stage: str) -> str:
-    if stage not in WRAPPER_STAGES:
+def wrapper_stage_returncode(stage: str) -> int:
+    if stage not in WRAPPER_STAGE_RETURNCODES:
         raise PrepareError("candidate wrapper stage")
-    return _WRAPPER_STAGE_PREFIX + stage + "\n"
+    return WRAPPER_STAGE_RETURNCODES[stage]
 
 
-def _wrapper_stage(stdout) -> str | None:
-    if type(stdout) is not str:
+def _wrapper_stage(returncode) -> str | None:
+    if type(returncode) is not int:
         return None
-    for stage in WRAPPER_STAGES:
-        if stdout == wrapper_stage_frame(stage):
+    for stage, stage_returncode in WRAPPER_STAGE_RETURNCODES.items():
+        if returncode == stage_returncode:
             return stage
     return None
 
@@ -82,23 +83,24 @@ def candidate_script(execution_contract: dict,
             entrypoint != list(contract.candidate_entrypoint)):
         raise PrepareError("candidate execution contract")
     complete = "|".join(str(value) for value in contract.candidate_complete_returncodes)
-    return (
-    "set -u; "
-    "candidate_stage() { printf 'candidate-wrapper-stage.v0:%s\\n' \"$1\"; exit 75; }; "
-    "test -d /input/vectors && test -d /vendor && test -f /tool/config.toml "
-    "&& test -d /subject || candidate_stage preflight; "
-    "cp -R /subject/. /work/ || candidate_stage copy; "
-    "cd /work || candidate_stage copy; "
-    "PATH=/usr/local/cargo/bin:$PATH CARGO_HOME=/tool "
-    + shlex.join(build) + " 1>&2 || candidate_stage build; "
-    + shlex.join(entrypoint) + " 1>&2; "
-    "status=$?; "
-    "case \"$status\" in " + complete + ") ;; *) exit \"$status\" ;; esac; "
-    "test -e /work/report.json || candidate_stage report-missing; "
-    "test -s /work/report.json || candidate_stage report-empty; "
-    "cat /work/report.json || candidate_stage report-read; "
-    "exit $status"
-    )
+    stage = WRAPPER_STAGE_RETURNCODES
+    return "".join((
+        "set -u; ",
+        "candidate_stage() { exit \"$1\"; }; ",
+        "test -d /input/vectors && test -d /vendor && test -f /tool/config.toml ",
+        "&& test -d /subject || candidate_stage %d; " % stage["preflight"],
+        "cp -R /subject/. /work/ || candidate_stage %d; " % stage["copy"],
+        "cd /work || candidate_stage %d; " % stage["copy"],
+        "PATH=/usr/local/cargo/bin:$PATH CARGO_HOME=/tool ",
+        shlex.join(build), " 1>&2 || candidate_stage %d; " % stage["build"],
+        shlex.join(entrypoint), " 1>&2; status=$?; ",
+        "case \"$status\" in ", complete,
+        ") ;; *) exit %d ;; esac; " % UNPROVED_EXIT,
+        "test -e /work/report.json || candidate_stage %d; " % stage["report-missing"],
+        "test -s /work/report.json || candidate_stage %d; " % stage["report-empty"],
+        "cat /work/report.json || candidate_stage %d; " % stage["report-read"],
+        "exit $status",
+    ))
 
 
 DEFAULT_EXECUTION_CONTRACT = {
@@ -179,8 +181,8 @@ def sealed_adapter_for(contract):
 def normalize_inner_event(*, returncode, stdout, vectors,
                           contract=AEE_CHECKER_SEALED_CONTRACT) -> subprocess.CompletedProcess:
     """Parse the inner report once, then reuse adapter expected_ids/project."""
-    stage = _wrapper_stage(stdout)
-    if returncode == UNPROVED_EXIT and stage is not None:
+    stage = _wrapper_stage(returncode)
+    if stage is not None:
         return _unproved("candidate-" + stage)
     if returncode not in contract.candidate_complete_returncodes:
         return _unproved("inner-exit")

@@ -13,6 +13,14 @@ from pathlib import PurePosixPath
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _PIN_NAMES = frozenset({"control.json", "manifest.json", "pins.json", "sites.json"})
+CANDIDATE_WRAPPER_STAGE_RETURNCODES = (
+    ("preflight", 76),
+    ("copy", 77),
+    ("build", 78),
+    ("report-missing", 79),
+    ("report-empty", 80),
+    ("report-read", 81),
+)
 
 
 def _require_relpath(value: str, where: str) -> None:
@@ -142,6 +150,9 @@ class SealedMeasurementContract:
                     type(value) is not int or value < 0 or value > 255
                     for value in self.candidate_complete_returncodes)):
             raise ValueError("candidate_complete_returncodes")
+        if set(self.candidate_complete_returncodes).intersection(
+                value for _stage, value in CANDIDATE_WRAPPER_STAGE_RETURNCODES):
+            raise ValueError("candidate_complete_returncodes overlap wrapper stages")
         if type(self.vendor_tree_requirement) is not str or self.vendor_tree_requirement not in (
                 "nonempty", "canonical-empty"):
             raise ValueError("vendor_tree_requirement")

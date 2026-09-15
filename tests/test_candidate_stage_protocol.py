@@ -44,7 +44,7 @@ def _load(path: Path, name: str):
 
 class GeneratedWrapperStages(unittest.TestCase):
     def _run(self, *, build=("true",), entrypoint=("true",), missing=(), fake=(),
-             contract=OWNED_CONTAINED_V1_CONTRACT):
+             contract=OWNED_CONTAINED_V1_CONTRACT, expose_wrapper_stdout=False):
         contract = replace(
             contract,
             candidate_build=build,
@@ -67,6 +67,10 @@ class GeneratedWrapperStages(unittest.TestCase):
                 elif path.exists():
                     path.unlink()
             script = candidate.candidate_script(execution, contract=contract)
+            if expose_wrapper_stdout:
+                # Portable equivalent of the Linux /proc/$PPID/fd/1 attack: the
+                # candidate inherits another descriptor for its parent's stdout.
+                script = "exec 3>&1; " + script
             for old, new in (
                 ("/input", str(root / "input")),
                 ("/vendor", str(root / "vendor")),
@@ -82,8 +86,8 @@ class GeneratedWrapperStages(unittest.TestCase):
                 env=env, timeout=5, check=False)
 
     def assertStage(self, proc, stage):
-        self.assertEqual(proc.returncode, candidate.UNPROVED_EXIT)
-        self.assertEqual(proc.stdout, candidate.wrapper_stage_frame(stage))
+        self.assertEqual(proc.returncode, candidate.wrapper_stage_returncode(stage))
+        self.assertEqual(proc.stdout, "")
         normalized = candidate.normalize_inner_event(
             returncode=proc.returncode, stdout=proc.stdout, vectors="unused",
             contract=OWNED_CONTAINED_V1_CONTRACT)
@@ -110,16 +114,56 @@ class GeneratedWrapperStages(unittest.TestCase):
         proc = self._run(
             entrypoint=("/bin/sh", "-c", "printf x > report.json; exit 2"),
             fake=("cat",))
-        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.returncode, candidate.UNPROVED_EXIT)
         self.assertEqual(proc.stdout, "")
         normalized = candidate.normalize_inner_event(
             returncode=proc.returncode, stdout=proc.stdout, vectors="unused",
             contract=OWNED_CONTAINED_V1_CONTRACT)
         self.assertEqual(normalized.unproved_reason, "inner-exit")
 
+    def test_candidate_forging_the_old_exact_frame_remains_generic(self):
+        old_frame = "candidate-wrapper-stage.v0:build"
+        if sys.platform.startswith("linux"):
+            attack = f"printf '%s\\n' '{old_frame}' > /proc/$PPID/fd/1; exit 75"
+            portable_fd = False
+        else:
+            attack = f"printf '%s\\n' '{old_frame}' >&3; exit 75"
+            portable_fd = True
+        proc = self._run(
+            entrypoint=("/bin/sh", "-c", attack),
+            expose_wrapper_stdout=portable_fd)
+        self.assertEqual(proc.stdout, old_frame + "\n")
+        self.assertEqual(proc.returncode, candidate.UNPROVED_EXIT)
+        normalized = candidate.normalize_inner_event(
+            returncode=proc.returncode, stdout=proc.stdout, vectors="unused",
+            contract=OWNED_CONTAINED_V1_CONTRACT)
+        self.assertEqual(normalized.unproved_reason, "inner-exit")
+
+    def test_every_noncomplete_candidate_exit_is_remapped_before_classification(self):
+        statuses = (2, candidate.UNPROVED_EXIT,
+                    *candidate.WRAPPER_STAGE_RETURNCODES.values())
+        for status in statuses:
+            with self.subTest(candidate_status=status):
+                proc = self._run(entrypoint=("/bin/sh", "-c", "exit %d" % status))
+                self.assertEqual(proc.returncode, candidate.UNPROVED_EXIT)
+                normalized = candidate.normalize_inner_event(
+                    returncode=proc.returncode, stdout=proc.stdout, vectors="unused",
+                    contract=OWNED_CONTAINED_V1_CONTRACT)
+                self.assertEqual(normalized.unproved_reason, "inner-exit")
+
     def test_complete_returncodes_are_contract_specific(self):
         self.assertEqual(AEE_CHECKER_SEALED_CONTRACT.candidate_complete_returncodes, (0, 1))
         self.assertEqual(OWNED_CONTAINED_V1_CONTRACT.candidate_complete_returncodes, (0,))
+        self.assertEqual(len(candidate.WRAPPER_STAGE_RETURNCODES), 6)
+        self.assertEqual(len(set(candidate.WRAPPER_STAGE_RETURNCODES.values())), 6)
+        for contract in (AEE_CHECKER_SEALED_CONTRACT, OWNED_CONTAINED_V1_CONTRACT):
+            self.assertTrue(set(contract.candidate_complete_returncodes).isdisjoint(
+                candidate.WRAPPER_STAGE_RETURNCODES.values()))
+        with self.assertRaisesRegex(ValueError, "overlap wrapper stages"):
+            replace(
+                OWNED_CONTAINED_V1_CONTRACT,
+                candidate_complete_returncodes=(
+                    candidate.wrapper_stage_returncode("preflight"),))
 
         class Adapter:
             @staticmethod
@@ -151,13 +195,20 @@ class GeneratedWrapperStages(unittest.TestCase):
         owned = self._run(entrypoint=command, contract=OWNED_CONTAINED_V1_CONTRACT)
         self.assertEqual(aee.returncode, 1)
         self.assertEqual(aee.stdout, '{"vectors":[]}\n')
-        self.assertEqual(owned.returncode, 1)
+        self.assertEqual(owned.returncode, candidate.UNPROVED_EXIT)
         self.assertEqual(owned.stdout, "")
 
-    def test_only_exact_closed_frames_are_retained(self):
+    def test_only_closed_stage_tokens_are_retained_and_stdout_never_is(self):
         for stage in candidate.WRAPPER_STAGES:
             token = "candidate-" + stage
             self.assertEqual(ca.sanitize_unproved_reason(token), token)
+            completed = candidate.normalize_inner_event(
+                returncode=candidate.wrapper_stage_returncode(stage),
+                stdout="untrusted child or host text", vectors="unused",
+                contract=OWNED_CONTAINED_V1_CONTRACT)
+            self.assertEqual(completed.unproved_reason, token)
+            self.assertEqual(completed.stdout, "")
+            self.assertEqual(completed.stderr, "")
         for raw in (
             "candidate-wrapper-stage.v0:build:/private/tmp/secret\n",
             "candidate-wrapper-stage.v0:build command=cargo\n",
@@ -185,8 +236,8 @@ class GeneratedWrapperStages(unittest.TestCase):
                 path.write_text(changed, encoding="utf-8")
                 module = _load(path, "candidate_" + label)
                 completed = module.normalize_inner_event(
-                    returncode=module.UNPROVED_EXIT,
-                    stdout=module.wrapper_stage_frame("build"), vectors="unused",
+                    returncode=module.wrapper_stage_returncode("build"),
+                    stdout="untrusted", vectors="unused",
                     contract=OWNED_CONTAINED_V1_CONTRACT)
                 if label == "mutation":
                     self.assertNotEqual(completed.unproved_reason, expected)
@@ -214,9 +265,10 @@ class GeneratedWrapperStages(unittest.TestCase):
                 "entrypoint_command": list(AEE_CHECKER_SEALED_CONTRACT.candidate_entrypoint),
             }
             inspect = _observed_inspect(common.CANDIDATE_RESOURCE_PROFILE)
-            inspect["State"]["ExitCode"] = 75
+            stage_returncode = candidate.wrapper_stage_returncode("build")
+            inspect["State"]["ExitCode"] = stage_returncode
             transport = FakeTransport(
-                returncode=75, stdout=candidate.wrapper_stage_frame("build"),
+                returncode=stage_returncode, stdout="untrusted host or child text",
                 inspect=inspect)
             result = runtime.make_sealed_backend(
                 prepare_raw=_prepare_v1(), materialized=materialized,
@@ -230,6 +282,40 @@ class GeneratedWrapperStages(unittest.TestCase):
             "unproved_reason": "candidate-build",
         }])
         self.assertNotIn("stderr", repr(rows))
+
+    def test_fake_transport_cannot_promote_old_frame_to_a_stage(self):
+        from tests.test_aee_checker_sealed_candidate import FakeTransport, _observed_inspect
+        from tests.test_aee_checker_sealed_runtime import _prepare_v1
+        import aee_checker_sealed_common as common
+
+        rows = []
+        old_frame = "candidate-wrapper-stage.v0:build\n"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            materialized = {key: root / key for key in ("corpus", "vendor", "tool")}
+            for path in materialized.values():
+                path.mkdir()
+            subject = root / "subject"
+            subject.mkdir()
+            manifest = {
+                "_repo_root": subject,
+                "accepted_exit_codes": [0], "unproved_exit_codes": [75],
+                "runner": "batch", "outcome_from": ["rows"],
+                "build": list(AEE_CHECKER_SEALED_CONTRACT.candidate_build),
+                "entrypoint_command": list(AEE_CHECKER_SEALED_CONTRACT.candidate_entrypoint),
+            }
+            inspect = _observed_inspect(common.CANDIDATE_RESOURCE_PROFILE)
+            inspect["State"]["ExitCode"] = candidate.UNPROVED_EXIT
+            transport = FakeTransport(
+                returncode=candidate.UNPROVED_EXIT, stdout=old_frame, inspect=inspect)
+            result = runtime.make_sealed_backend(
+                prepare_raw=_prepare_v1(), materialized=materialized,
+                execution_profile="contained-oci-v0", transport=transport,
+                ledger=collection.Ledger(), diagnostic_sink=rows.append,
+            )(manifest, [{"vector_id": "<batch>"}], rebuild=True)
+        self.assertEqual(result.raised, {"<batch>": "unproved"})
+        self.assertEqual(rows[0]["unproved_reason"], "inner-exit")
+        self.assertNotIn("wrapper-stage", repr(rows))
 
 
 class CrossUidMaterializationModes(unittest.TestCase):
