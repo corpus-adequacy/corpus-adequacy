@@ -27,6 +27,10 @@ import aee_checker_sealed_oci as oci  # noqa: E402
 import corpus_adequacy as ca  # noqa: E402
 
 from aee_checker_sealed_common import INERT_RESOURCE_PROFILE, PrepareError  # noqa: E402
+from sealed_measurement_contract import (  # noqa: E402
+    AEE_CHECKER_SEALED_CONTRACT,
+    OWNED_CONTAINED_V1_CONTRACT,
+)
 
 IMAGE = "sha256:" + ("ab" * 32)
 POLICY = {"accepted_exit_codes": [0], "unproved_exit_codes": [75]}
@@ -384,6 +388,16 @@ class InnerNormalize(unittest.TestCase):
 
 
 class SealedLifecycle(unittest.TestCase):
+    def test_selected_adapter_must_load_before_candidate_effect(self):
+        with mock.patch.object(
+                cand.importlib, "import_module", side_effect=ImportError("adapter")), \
+                mock.patch.object(cand, "_contained_candidate_run") as contained:
+            with self.assertRaisesRegex(ImportError, "adapter"):
+                cand._run_sealed_candidate(
+                    image_id=IMAGE, mounts={}, resource_profile=INERT_RESOURCE_PROFILE,
+                    contract=OWNED_CONTAINED_V1_CONTRACT)
+        contained.assert_not_called()
+
     def test_public_entrypoint_forces_sealed_mode(self):
         prepare = {
             "toolchain": {"image_id": IMAGE},
@@ -656,7 +670,7 @@ class ClosedInnerProtocol(unittest.TestCase):
     def test_project_manifest_error_is_closed_projection(self):
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.object(
-                    cand.sealed_adapter, "project",
+                    cand.sealed_adapter_for(AEE_CHECKER_SEALED_CONTRACT), "project",
                     side_effect=ca.ManifestError("/host/secret")):
                 completed = cand.normalize_inner_event(
                     returncode=0, stdout=json.dumps(RICH_REPORT) + "\n",

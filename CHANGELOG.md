@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+The sealed execution identity now binds the candidate-diagnostics module and loads
+only the adapter selected by the code-owned measurement contract. Adapter loading
+happens before candidate effects, so an unavailable selected adapter refuses instead
+of failing after execution. The inner content digest remains distinct from the full
+runner and workflow revisions that bind hosted orchestration. This changes execution
+identity and requires a fresh PREPARE before another hosted measurement.
+
 Successful hosted publication attempts now append one closed `run-attempt-terminal`
 event after the collection, setup status, and candidate result have been written. The
 same terminal validator accepts publish and diagnostic forms while requiring publish

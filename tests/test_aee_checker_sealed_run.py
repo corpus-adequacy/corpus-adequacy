@@ -85,6 +85,7 @@ AEE_LF_ATTRS = (
     "measurements/aee_checker_sealed_candidate.py text eol=lf",
     "measurements/aee_checker_sealed_driver.py text eol=lf",
     "measurements/aee_checker_sealed_runtime.py text eol=lf",
+    "measurements/candidate_diagnostics.py text eol=lf",
     "tests/test_aee_checker_sealed_driver.py text eol=lf",
     "tests/test_aee_checker_sealed_runtime.py text eol=lf",
     "measurements/aee_checker_sealed_run.py text eol=lf",
@@ -113,6 +114,7 @@ AEE_LF_PATHS = (
     "measurements/aee_checker_sealed_candidate.py",
     "measurements/aee_checker_sealed_driver.py",
     "measurements/aee_checker_sealed_runtime.py",
+    "measurements/candidate_diagnostics.py",
     "tests/test_aee_checker_sealed_driver.py",
     "tests/test_aee_checker_sealed_runtime.py",
     "measurements/aee_checker_sealed_run.py",
@@ -142,6 +144,7 @@ REQUIRED_EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_execute.py",
     "measurements/aee_checker_sealed_driver.py",
     "measurements/aee_checker_sealed_runtime.py",
+    "measurements/candidate_diagnostics.py",
     "measurements/sealed_measurement_contract.py",
     "execution/aee-checker-sealed/Containerfile",
     "execution/aee-checker-sealed/probe.sh",
@@ -1067,6 +1070,33 @@ class ExecutionIdentityDirty(unittest.TestCase):
                 run.execution_identity(root)
             self.assertRegex(str(ctx.exception).lower(), r"dirty|untracked|head")
 
+    def test_dirty_candidate_diagnostics_is_refused(self):
+        rel = "measurements/candidate_diagnostics.py"
+        self.assertIn(rel, run.EXECUTION_PATHS)
+        with tempfile.TemporaryDirectory() as d:
+            root = _committed_execution_root(Path(d))
+            target = root / rel
+            target.write_bytes(target.read_bytes() + b"# dirty\n")
+            with self.assertRaises(run.PrepareError) as ctx:
+                run.execution_identity(root)
+            self.assertRegex(str(ctx.exception).lower(), r"dirty|untracked|head")
+
+    def test_committed_candidate_diagnostics_change_moves_content_digest(self):
+        rel = "measurements/candidate_diagnostics.py"
+        with tempfile.TemporaryDirectory() as d:
+            root = _committed_execution_root(Path(d))
+            before = run.execution_identity(root)["content_sha256"]
+            target = root / rel
+            target.write_bytes(target.read_bytes() + b"# committed change\n")
+            subprocess.run(
+                ["git", "add", "--", rel], cwd=root, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "c2"],
+                cwd=root, check=True, capture_output=True)
+            after = run.execution_identity(root)
+        self.assertNotEqual(before, after["content_sha256"])
+        self.assertIn(rel, after["paths"])
+
     def test_committed_envelope_collection_change_moves_the_content_digest(self):
         """Committed, not dirty: the gate passes and the digest must still move."""
         rel = "measurements/envelope_collection.py"
@@ -1097,6 +1127,7 @@ class ExecutionIdentityDirty(unittest.TestCase):
         self.assertIn("measurements/envelope_collection.py", run.EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_oci.py", run.EXECUTION_PATHS)
         self.assertIn("measurements/aee_checker_sealed_materialize.py", run.EXECUTION_PATHS)
+        self.assertIn("measurements/candidate_diagnostics.py", run.EXECUTION_PATHS)
         self.assertIn("execution/aee-checker-sealed/cargo-config.toml", run.EXECUTION_PATHS)
         with tempfile.TemporaryDirectory() as d:
             root = _committed_execution_root(Path(d))

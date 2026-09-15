@@ -206,6 +206,7 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
         "measurements/aee_checker_sealed_execute.py",
         "measurements/aee_checker_sealed_driver.py",
         "measurements/aee_checker_sealed_runtime.py",
+        "measurements/candidate_diagnostics.py",
         "measurements/sealed_measurement_contract.py",
         "execution/aee-checker-sealed/Containerfile",
         "execution/aee-checker-sealed/probe.sh",
