@@ -56,7 +56,7 @@ import envelope_collection as collection  # noqa: E402
 import effective_envelope  # noqa: E402
 import hosted_packet as packet_delivery  # noqa: E402
 import aee_checker_sealed_run as sealed_run  # noqa: E402
-from hosted_rail_contract import LEGACY_RAIL, require_rail  # noqa: E402
+from hosted_rail_contract import LEGACY_RAIL, OWNED_V1_RAIL, require_rail  # noqa: E402
 from aee_checker_sealed_candidate import (  # noqa: E402
     CANDIDATE_MOUNT_SPEC,
     require_candidate_image,
@@ -237,6 +237,13 @@ def require_operator_profile(profile) -> str:
     if profile != REQUIRED_PROFILE:
         raise HostedPublicationError("operator_profile")
     return profile
+
+
+def _rail_for_operator_profile(profile):
+    for rail in (LEGACY_RAIL, OWNED_V1_RAIL):
+        if rail.execution_profile == profile:
+            return rail
+    raise HostedPublicationError("operator_profile")
 
 
 def observe_workflow_identity(environ=None) -> dict:
@@ -696,6 +703,34 @@ def _require_reason(reason) -> str:
     return reason
 
 
+def _terminal_event(entry) -> dict:
+    """Validate the one closed terminal shape shared by publish and diagnostic attempts."""
+    if type(entry) is not dict:
+        raise HostedPublicationError("rerun_terminal")
+    _require_exact(entry, RERUN_TERMINAL_KEYS, "rerun_keys")
+    decision = entry.get("decision")
+    reason = _require_reason(entry.get("reason"))
+    collection_state = entry.get("collection_state")
+    diagnostic_digest = entry.get("diagnostic_package_sha256")
+    if decision == "publish":
+        if (reason != "publication-permitted"
+                or collection_state != COLLECTION_PRESENT
+                or diagnostic_digest is not None):
+            raise HostedPublicationError("rerun_terminal")
+    elif decision in DIAGNOSTIC_DECISIONS:
+        if collection_state not in (COLLECTION_PRESENT, COLLECTION_ABSENT):
+            raise HostedPublicationError("rerun_terminal")
+        _require_sha256(diagnostic_digest, "diagnostic_package_sha256")
+    else:
+        raise HostedPublicationError("rerun_terminal")
+    _require_bindings_pair(entry.get("bindings"), entry.get("dispatch_bindings"))
+    _require_run_identity({
+        "run_id": entry.get("run_id"),
+        "run_attempt": entry.get("run_attempt"),
+    })
+    return dict(entry)
+
+
 def _is_member_filename(name: str) -> bool:
     if not isinstance(name, str) or not name.startswith("member-") or not name.endswith(".json"):
         return False
@@ -1005,7 +1040,7 @@ def finalize_nonpublish_attempt(
         staging.rename(dest)
         _write_setup_and_candidate()
         digest = hashlib.sha256(manifest_raw).hexdigest()
-        append_rerun_evidence(rerun_log, {
+        append_rerun_evidence(rerun_log, _terminal_event({
             "kind": RERUN_KIND_TERMINAL,
             "decision": decision,
             "reason": reason,
@@ -1015,7 +1050,7 @@ def finalize_nonpublish_attempt(
             "dispatch_bindings": dict(bindings),
             "run_id": closed_identity["run_id"],
             "run_attempt": closed_identity["run_attempt"],
-        })
+        }))
         return {
             "decision": decision,
             "collection_state": collection_state,
@@ -1120,6 +1155,8 @@ def load_rerun_evidence(path, *, max_bytes: int = MAX_RERUN_EVIDENCE_BYTES,
         if keys is None:
             raise HostedPublicationError("rerun_kind")
         _require_exact(entry, keys, "rerun_keys")
+        if kind == RERUN_KIND_TERMINAL:
+            entry = _terminal_event(entry)
         entries.append(entry)
     if not entries:
         raise HostedPublicationError("rerun_evidence")
@@ -1290,30 +1327,71 @@ def load_diagnostic_package(directory, *, max_bytes: int = MAX_DIAGNOSTIC_PACKAG
 
 
 def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
-                                 diagnostic_dir, expected_bindings,
+                                 diagnostic_dir=None, collection_dir=None,
+                                 expected_bindings,
                                  expected_run_id, expected_run_attempt) -> dict:
     setup, setup_raw = _load_setup_status(setup_path)
     candidate, candidate_raw = _load_candidate_result(candidate_path)
-    package = load_diagnostic_package(diagnostic_dir)
     entries = load_rerun_evidence(rerun_path)
     expected = _require_bindings_pair(
         expected_bindings, expected_bindings, expected=expected_bindings)
     _require_bindings_pair(setup.get("bindings"), setup.get("dispatch_bindings"), expected)
     _require_bindings_pair(candidate.get("bindings"), candidate.get("dispatch_bindings"),
                            expected)
-    _require_bindings_pair(package.get("bindings"), package.get("dispatch_bindings"),
-                           expected)
     identity = _require_run_identity({
         "run_id": expected_run_id,
         "run_attempt": expected_run_attempt,
     })
-    if package["run_identity"] != identity:
-        raise HostedPublicationError("attempt_binding")
     _require_attempt_ledger(entries, expected=expected, expected_identity=identity)
     start = entries[0]
     terminal = entries[-1]
     if setup.get("workflow_identity") != start.get("workflow_identity"):
         raise HostedPublicationError("workflow_identity")
+    if terminal.get("decision") == "publish":
+        if diagnostic_dir is not None or collection_dir is None:
+            raise HostedPublicationError("success_artifacts")
+        if (setup.get("setup_status") != "ready"
+                or setup.get("reason") != "publication-permitted"
+                or candidate.get("kind") != "hosted-candidate-result"
+                or candidate.get("decision") != "publish"):
+            raise HostedPublicationError("success_artifacts")
+        loaded_collection = load_envelope_collection(collection_dir)
+        collection_decision = collection_publication_decision(
+            loaded_collection, setup_status=setup["setup_status"])
+        if collection_decision.get("decision") != "publish":
+            raise HostedPublicationError("success_collection_permission")
+        rail = _rail_for_operator_profile(setup.get("operator_profile"))
+        prepare_sha256 = loaded_collection["index"].get("prepare_sha256")
+        for member in loaded_collection["members"]:
+            check_envelope_bindings(
+                member, bindings=expected, prepare_sha256=prepare_sha256,
+                rail=rail)
+        carried = candidate.get("report_sha256")
+        claimed = loaded_collection["index"].get("report_sha256")
+        if carried is not None and carried != claimed:
+            raise HostedPublicationError("report_sha256")
+        projection = {
+            "decision": "publish",
+            "collection_state": COLLECTION_PRESENT,
+            "collection": loaded_collection,
+            "report_sha256": claimed,
+            "publication_permission": "permitted",
+            "candidate_diagnostics": None,
+        }
+        return {
+            "setup": setup,
+            "candidate": candidate,
+            "rerun": entries,
+            "package": None,
+            "projection": projection,
+        }
+    if diagnostic_dir is None or collection_dir is not None:
+        raise HostedPublicationError("diagnostic_artifacts")
+    package = load_diagnostic_package(diagnostic_dir)
+    _require_bindings_pair(package.get("bindings"), package.get("dispatch_bindings"),
+                           expected)
+    if package["run_identity"] != identity:
+        raise HostedPublicationError("attempt_binding")
     if package.get("workflow_identity") != start.get("workflow_identity"):
         raise HostedPublicationError("workflow_identity")
     declared = package["artifacts"]
@@ -1347,6 +1425,7 @@ def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
         "candidate": candidate,
         "rerun": entries,
         "package": package,
+        "projection": package,
     }
 
 
@@ -1373,7 +1452,8 @@ def _readback_summary(package) -> dict:
         "attempts": attempts,
         "members": members,
         "report_sha256": package.get("report_sha256"),
-        "publication_permission": DIAGNOSTIC_PERMISSION,
+        "publication_permission": package.get(
+            "publication_permission", DIAGNOSTIC_PERMISSION),
         "member_observations": observations,
     }
     diagnostic = package.get("candidate_diagnostics")
@@ -1986,6 +2066,17 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         out, setup_doc, envelope_doc, candidate_doc,
         max_bytes=max_artifact_bytes,
     )
+    append_rerun_evidence(rerun_log, _terminal_event({
+        "kind": RERUN_KIND_TERMINAL,
+        "decision": "publish",
+        "reason": "publication-permitted",
+        "collection_state": COLLECTION_PRESENT,
+        "diagnostic_package_sha256": None,
+        "bindings": dict(bindings),
+        "dispatch_bindings": dict(bindings),
+        "run_id": identity["run_id"],
+        "run_attempt": identity["run_attempt"],
+    }))
     return decision
 
 
@@ -2022,7 +2113,9 @@ def build_parser() -> argparse.ArgumentParser:
     readback.add_argument("--setup", required=True)
     readback.add_argument("--candidate", required=True)
     readback.add_argument("--rerun", required=True)
-    readback.add_argument("--diagnostic", required=True)
+    source = readback.add_mutually_exclusive_group(required=True)
+    source.add_argument("--diagnostic")
+    source.add_argument("--collection")
     readback.add_argument("--candidate-revision", required=True)
     readback.add_argument("--runner-revision", required=True)
     readback.add_argument("--image-digest", required=True)
@@ -2041,12 +2134,13 @@ def main(argv=None) -> int:
                 candidate_path=args.candidate,
                 rerun_path=args.rerun,
                 diagnostic_dir=args.diagnostic,
+                collection_dir=args.collection,
                 expected_bindings=require_bindings(
                     args.candidate_revision, args.runner_revision, args.image_digest),
                 expected_run_id=args.run_id,
                 expected_run_attempt=args.run_attempt,
             )
-            summary = _readback_summary(loaded["package"])
+            summary = _readback_summary(loaded["projection"])
             sys.stdout.write(_encode_json(summary).decode("utf-8"))
             return 0
         if args.command != "gate":

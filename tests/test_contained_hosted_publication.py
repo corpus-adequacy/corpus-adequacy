@@ -2853,9 +2853,279 @@ class WithheldDiagnosticPackage(unittest.TestCase):
             self.assertTrue((out / hosted.COLLECTION_DIRNAME).is_dir())
             setup = json.loads((out / hosted.SETUP_STATUS_FILENAME).read_text())
             self.assertEqual(setup["reason"], "publication-permitted")
-            lines = (out / hosted.RERUN_EVIDENCE_FILENAME).read_text().splitlines()
-            kinds = [json.loads(line)["kind"] for line in lines if line]
-            self.assertNotIn("run-attempt-terminal", kinds)
+            entries = hosted.load_rerun_evidence(
+                out / hosted.RERUN_EVIDENCE_FILENAME, mode="complete")
+            self.assertEqual(
+                [entry["kind"] for entry in entries],
+                ["run-attempt-start", "run-attempt-terminal"],
+            )
+            terminal = entries[-1]
+            self.assertEqual(terminal["decision"], "publish")
+            self.assertEqual(terminal["reason"], "publication-permitted")
+            self.assertEqual(terminal["collection_state"], "collection_present")
+            self.assertIsNone(terminal["diagnostic_package_sha256"])
+
+    def test_success_readback_binds_collection_attempt_and_public_cli(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+            _run_ok(base, "packet", rels)
+            out = base / "artifacts"
+            kwargs = dict(
+                setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                collection_dir=out / hosted.COLLECTION_DIRNAME,
+                expected_bindings=BINDINGS,
+                expected_run_id=HOSTED_RUN_ID,
+                expected_run_attempt=HOSTED_RUN_ATTEMPT,
+            )
+            loaded = hosted.load_hosted_attempt_artifacts(**kwargs)
+            self.assertEqual(loaded["projection"]["decision"], "publish")
+            self.assertEqual(loaded["projection"]["publication_permission"], "permitted")
+            self.assertIsNone(loaded["package"])
+            cmd = [
+                sys.executable, str(Path(hosted.__file__)), "readback",
+                "--setup", str(kwargs["setup_path"]),
+                "--candidate", str(kwargs["candidate_path"]),
+                "--rerun", str(kwargs["rerun_path"]),
+                "--collection", str(kwargs["collection_dir"]),
+                "--candidate-revision", CANDIDATE,
+                "--runner-revision", RUNNER,
+                "--image-digest", IMAGE,
+                "--run-id", HOSTED_RUN_ID,
+                "--run-attempt", HOSTED_RUN_ATTEMPT,
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            summary = json.loads(proc.stdout)
+            self.assertEqual(summary["decision"], "publish")
+            self.assertEqual(summary["publication_permission"], "permitted")
+            self.assertGreaterEqual(summary["members"], 1)
+            bad = dict(kwargs)
+            bad["expected_run_attempt"] = "999"
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_hosted_attempt_artifacts(**bad)
+            self.assertEqual(str(ctx.exception), "attempt_binding")
+
+    def test_owned_success_readback_binds_members_and_requires_publishable_collection(self):
+        from hosted_rail_contract import OWNED_V1_RAIL
+        from tests.test_effective_envelope import _requested_v2, _v2_effective
+
+        requested = _requested_v2()
+        bindings = {
+            "candidate_revision": CANDIDATE,
+            "runner_revision": RUNNER,
+            "image_digest": requested["image_id"],
+        }
+        report = {
+            "schema": hosted.ca.REPORT_SCHEMA,
+            "control_status": "killed",
+            "killed": 1,
+            "survived": 0,
+            "silent": 0,
+            "equivalent": 0,
+            "unexercised_out_of_scope": 0,
+            "unproved": 0,
+            "known_holes": 0,
+            "declared_total": 1,
+            "failures": [],
+            "adequate": True,
+        }
+        report_sha = hashlib.sha256(hosted.ca.encode_report_v0(report)).hexdigest()
+        prepare_raw = json.dumps({"schema": hosted.sealed_run.PREPARE_V2_SCHEMA}).encode()
+        prepare_sha = hashlib.sha256(prepare_raw).hexdigest()
+        member = hosted.effective_envelope.build_envelope_record(
+            requested=requested,
+            setup_status="ready",
+            envelope_status="verified",
+            unverified_field=None,
+            effective=_v2_effective(),
+            candidate_outcome="completed",
+            cleanup="removed-and-absent",
+            prepare_sha256=prepare_sha,
+            execution_commit=RUNNER,
+            report_sha256=None,
+            schema=hosted.effective_envelope.ENVELOPE_SCHEMA_V1,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw)
+            packet = workspace / OWNED_V1_RAIL.packet_dirname
+            packet.mkdir()
+            (packet / OWNED_V1_RAIL.prepare_filename).write_bytes(prepare_raw)
+            (packet / OWNED_V1_RAIL.authorize_filename).write_bytes(b"authorize")
+            (packet / "pins").mkdir()
+            out = workspace / "out"
+
+            def execute(**kwargs):
+                ledger = hosted.collection.Ledger()
+                ledger.recorded(ledger.register(), member)
+                hosted.collection.write_collection(
+                    ledger, kwargs["envelope_dest"], report_sha256=report_sha)
+                return report
+
+            packet_files = {
+                OWNED_V1_RAIL.prepare_filename: prepare_sha,
+                OWNED_V1_RAIL.authorize_filename: hashlib.sha256(b"authorize").hexdigest(),
+            }
+            with mock.patch.object(hosted, "check_packet_manifest",
+                                   return_value=packet_files), \
+                    mock.patch.object(hosted, "load_dispatch_bindings"), \
+                    mock.patch.object(hosted, "check_prepare_bindings"), \
+                    mock.patch.object(hosted.sealed_run, "load_prepare_for_profile",
+                                      return_value={}):
+                decision = hosted.run_gate(
+                    **bindings,
+                    operator_profile=OWNED_V1_RAIL.execution_profile,
+                    out_dir=out,
+                    workspace_root=workspace,
+                    packet_root=OWNED_V1_RAIL.packet_dirname,
+                    authorize_path=OWNED_V1_RAIL.authorize_filename,
+                    prepare_path=OWNED_V1_RAIL.prepare_filename,
+                    pins_dir="pins",
+                    packet_manifest_sha256="d" * 64,
+                    docker_ready=lambda: "ready",
+                    sealed_execute=execute,
+                    environ={
+                        "GITHUB_SHA": RUNNER,
+                        "GITHUB_WORKFLOW_SHA": RUNNER,
+                        "GITHUB_RUN_ID": HOSTED_RUN_ID,
+                        "GITHUB_RUN_ATTEMPT": HOSTED_RUN_ATTEMPT,
+                    },
+                    rail=OWNED_V1_RAIL,
+                )
+            self.assertEqual(decision["decision"], "publish")
+            coll = out / hosted.COLLECTION_DIRNAME
+            member_path = next(
+                path for path in coll.iterdir()
+                if path.name != hosted.collection.INDEX_FILENAME)
+            original_member = member_path.read_bytes()
+            mutations = (
+                ("execution_commit", "runner_revision_binding",
+                 lambda doc: doc.__setitem__("execution_commit", OTHER_RUNNER)),
+                ("image_id", "image_digest_binding",
+                 lambda doc: (
+                     doc["requested"].__setitem__("image_id", OTHER_IMAGE),
+                     doc["effective"].__setitem__("image", OTHER_IMAGE))),
+                ("prepare_sha256", "prepare_sha256_binding",
+                 lambda doc: doc.__setitem__("prepare_sha256", "e" * 64)),
+            )
+            for name, reason, mutate in mutations:
+                with self.subTest(name=name):
+                    member_doc = json.loads(original_member)
+                    mutate(member_doc)
+                    member_path.write_bytes(hosted._encode_json(member_doc))
+                    _recompute_collection_index(coll)
+                    with self.assertRaisesRegex(hosted.HostedPublicationError, reason):
+                        hosted.load_hosted_attempt_artifacts(
+                            setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                            candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                            rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                            collection_dir=coll,
+                            expected_bindings=bindings,
+                            expected_run_id=HOSTED_RUN_ID,
+                            expected_run_attempt=HOSTED_RUN_ATTEMPT,
+                        )
+            member_path.write_bytes(original_member)
+            _recompute_collection_index(coll)
+            shutil.rmtree(coll)
+            hosted.collection.write_collection(
+                hosted.collection.Ledger(), coll, report_sha256=report_sha)
+            loaded_empty = hosted.load_envelope_collection(coll)
+            self.assertEqual(loaded_empty["withheld_reason"], "no_attempt_recorded")
+            with self.assertRaisesRegex(
+                    hosted.HostedPublicationError, "success_collection_permission"):
+                hosted.load_hosted_attempt_artifacts(
+                    setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                    candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                    rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                    collection_dir=coll,
+                    expected_bindings=bindings,
+                    expected_run_id=HOSTED_RUN_ID,
+                    expected_run_attempt=HOSTED_RUN_ATTEMPT,
+                )
+            shutil.rmtree(coll)
+            unverified_member = hosted.effective_envelope.build_envelope_record(
+                requested=requested,
+                setup_status="ready",
+                envelope_status="unverified",
+                unverified_field="runtime_version",
+                effective=None,
+                candidate_outcome="completed",
+                cleanup="removed-and-absent",
+                prepare_sha256=prepare_sha,
+                execution_commit=RUNNER,
+                report_sha256=None,
+                schema=hosted.effective_envelope.ENVELOPE_SCHEMA_V1,
+            )
+            nonpublish = hosted.collection.Ledger()
+            nonpublish.recorded(nonpublish.register(), unverified_member)
+            hosted.collection.write_collection(
+                nonpublish, coll, report_sha256=report_sha)
+            self.assertEqual(
+                hosted.collection.collection_permission(
+                    hosted.collection.load_collection(coll)),
+                "withheld",
+            )
+            with self.assertRaisesRegex(
+                    hosted.HostedPublicationError, "success_collection_permission"):
+                hosted.load_hosted_attempt_artifacts(
+                    setup_path=out / hosted.SETUP_STATUS_FILENAME,
+                    candidate_path=out / hosted.CANDIDATE_RESULT_FILENAME,
+                    rerun_path=out / hosted.RERUN_EVIDENCE_FILENAME,
+                    collection_dir=coll,
+                    expected_bindings=bindings,
+                    expected_run_id=HOSTED_RUN_ID,
+                    expected_run_attempt=HOSTED_RUN_ATTEMPT,
+                )
+
+    def test_success_terminal_is_unique_last_and_carries_no_diagnostic_digest(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+            _run_ok(base, "packet", rels)
+            log = base / "artifacts" / hosted.RERUN_EVIDENCE_FILENAME
+            original = log.read_bytes()
+            lines = [line for line in original.splitlines() if line]
+            terminal = json.loads(lines[-1])
+            terminal["diagnostic_package_sha256"] = "0" * 64
+            log.write_bytes(lines[0] + b"\n" + hosted._encode_json(terminal))
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_rerun_evidence(log)
+            log.write_bytes(original + lines[-1] + b"\n")
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_rerun_evidence(log)
+            log.write_bytes(lines[-1] + b"\n" + lines[0] + b"\n")
+            with self.assertRaises(hosted.HostedPublicationError):
+                hosted.load_rerun_evidence(log)
+
+    def test_success_artifact_write_failure_leaves_no_terminal(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            packet = base / "packet"
+            packet.mkdir()
+            rels = _write_packet(packet)
+
+            def refuse_artifact_write(*_args, **_kwargs):
+                raise OSError("controlled artifact write failure")
+
+            with mock.patch.object(
+                    hosted, "write_separate_artifacts", refuse_artifact_write):
+                with self.assertRaisesRegex(OSError, "controlled artifact write failure"):
+                    _run_ok(base, "packet", rels)
+            entries = hosted.load_rerun_evidence(
+                base / "artifacts" / hosted.RERUN_EVIDENCE_FILENAME,
+                mode="legacy",
+            )
+            self.assertEqual([entry["kind"] for entry in entries], ["run-attempt-start"])
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.load_rerun_evidence(
+                    base / "artifacts" / hosted.RERUN_EVIDENCE_FILENAME)
+            self.assertEqual(str(ctx.exception), "rerun_terminal")
 
     def test_downloaded_bytes_cli_readback(self):
         with tempfile.TemporaryDirectory() as raw:
