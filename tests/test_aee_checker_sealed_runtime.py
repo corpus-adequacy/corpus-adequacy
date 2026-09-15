@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -84,6 +85,7 @@ class SealedRuntimeBackend(unittest.TestCase):
             {"outcome_from": {"rows"}, "diagnostic_from": {"diagnostics"}},
         )
 
+    @unittest.skipIf(not hasattr(os, "O_NOFOLLOW"), "O_NOFOLLOW is required")
     def test_normalizes_the_actual_isolated_subject_at_the_candidate_boundary(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
