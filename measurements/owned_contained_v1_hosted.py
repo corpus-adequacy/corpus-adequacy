@@ -224,7 +224,11 @@ def main(argv=None) -> int:
         print("owned hosted rail refused: %s" % exc, file=sys.stderr)
         return 2
     print(json.dumps(result, sort_keys=True))
-    return 0 if result.get("decision", "publish") == "publish" else 3
+    if args.command == "gate":
+        # The workflow uploads the verified collection only on exit 0, so only an explicit
+        # publish decision may exit 0; withhold and unavailable exit 3.
+        return 0 if result.get("decision") == "publish" else 3
+    return 0
 
 
 if __name__ == "__main__":

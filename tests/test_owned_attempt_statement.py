@@ -123,6 +123,38 @@ class OwnedSeal(unittest.TestCase):
             self.assertIn("statement:statement_occupied", again.stderr)
 
 
+class OwnedFacadeExitCodes(unittest.TestCase):
+    """Exit 0 authorizes the verified-collection upload; only publish may reach it."""
+
+    def _main(self, argv, **patch):
+        with mock.patch.object(owned, next(iter(patch)), return_value=next(iter(patch.values()))), \
+                mock.patch("builtins.print"):
+            return owned.main(argv)
+
+    GATE_ARGV = ["gate", "--candidate-revision", "a" * 40, "--runner-revision", "b" * 40,
+                 "--image-digest", "sha256:" + "c" * 64, "--packet-manifest-sha256", "d" * 64,
+                 "--out", "x"]
+    SEAL_ARGV = ["seal", "--candidate-revision", "a" * 40, "--runner-revision", "b" * 40,
+                 "--image-digest", "sha256:" + "c" * 64, "--packet-release-tag", "t",
+                 "--packet-manifest-sha256", "d" * 64, "--gate-outcome", "failure",
+                 "--out", "x"]
+
+    def test_gate_exits_zero_only_on_publish(self):
+        for result, code in (({"decision": "publish"}, 0), ({"decision": "withhold"}, 3),
+                             ({"decision": "unavailable"}, 3), ({}, 3)):
+            with self.subTest(result=result):
+                self.assertEqual(self._main(self.GATE_ARGV, gate_owned=result), code)
+
+    def test_seal_exits_zero_on_success_whatever_the_gate_did(self):
+        self.assertEqual(self._main(self.SEAL_ARGV, seal_owned={"subjects": 5}), 0)
+
+    def test_a_refusal_exits_two(self):
+        with mock.patch.object(owned, "seal_owned",
+                               side_effect=publication.HostedPublicationError("statement:x")), \
+                mock.patch("sys.stderr"):
+            self.assertEqual(owned.main(self.SEAL_ARGV), 2)
+
+
 class OwnedStatementReadback(unittest.TestCase):
     def _run(self, cmd):
         return subprocess.run(cmd, capture_output=True, text=True, check=False)
