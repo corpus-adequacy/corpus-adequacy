@@ -267,6 +267,8 @@ def require_review(review, proposal: dict, *, packet_author=None) -> dict:
         raise AdmissionError("review-shape")
     if type(review["minutes"]) is not int or not 0 <= review["minutes"] <= 24 * 60:
         raise AdmissionError("review-shape")
+    # Exact string comparison over names the record itself calls unauthenticated: it catches an
+    # honest self-review, not someone who chooses a different spelling.
     authorship = proposal["authorship"]
     excluded = {authorship["author"], authorship["model_id"], packet_author} - {None}
     if reviewer in excluded:
@@ -305,7 +307,8 @@ def admission_record(proposal_raw: bytes, proposal: dict, gate_results: dict) ->
 def encode_admission(record: dict) -> bytes:
     if record.get("schema") != ADMISSION_SCHEMA or record.get("decision") not in DECISIONS:
         raise AdmissionError("admission-shape")
-    if any(gate["status"] == "passed" for gate in record["gates"]
+    # Every execution gate must read not-run here, whatever a hand-built record claims.
+    if any(gate["status"] != "not-run" for gate in record["gates"]
            if gate["gate"] in EXECUTION_GATES):
         raise AdmissionError("admission-shape")
     return ca._encode_class_artifact_v0(record)

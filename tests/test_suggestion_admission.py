@@ -255,6 +255,23 @@ class RecordAndJudge(unittest.TestCase):
         with self.assertRaises(sa.AdmissionError):
             sa.encode_admission(forged)
 
+    def test_the_encoder_refuses_any_execution_gate_that_is_not_not_run(self):
+        with tempfile.TemporaryDirectory() as raw:
+            record = sa.judge(FIXTURES / "good.json", corpus_dest=Path(raw) / "c",
+                              review=_review())
+        for status in ("passed", "refused"):
+            forged = copy.deepcopy(record)
+            forged["gates"][4]["status"] = status
+            with self.subTest(status=status), self.assertRaises(sa.AdmissionError):
+                sa.encode_admission(forged)
+
+    def test_the_review_minutes_bound_is_a_day(self):
+        proposal = _good()
+        sa.require_review(_review(minutes=24 * 60), proposal)
+        with self.assertRaises(sa.AdmissionError) as ctx:
+            sa.require_review(_review(minutes=24 * 60 + 1), proposal)
+        self.assertEqual(str(ctx.exception), "review-shape")
+
     def test_the_record_refuses_an_unaccounted_gate(self):
         proposal = _good()
         with self.assertRaises(sa.AdmissionError) as ctx:

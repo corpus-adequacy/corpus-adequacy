@@ -39,15 +39,17 @@ a new `MANIFEST.json` whose `corpusDigest` uses the fixture's own formula (SHA-2
 `file`, NUL, bytes, in manifest order). It refuses a vector id or file already present and
 verifies that the frozen corpus tree is unchanged afterwards. Gate 7 takes a
 `corpus-adequacy.suggestion-review.v0` record `{schema, proposal_id, reviewer, decision, minutes}`
-whose reviewer is none of the proposal author, the model id or the packet author.
+whose reviewer is none of the proposal author, the model id or the packet author. That
+comparison is exact-string over names the record itself calls unauthenticated: it catches an honest
+self-review, not a different spelling of the same person.
 
 ## Record: `corpus-adequacy.suggestion-admission.v0`
 
 Keys `schema`, `proposal_id`, `proposal_sha256`, `selection`, `gates` (nine rows of
 `{gate, name, status, refusal}`), `decision`, `refusal`, `non_claims`. The bytes use the
 class-artifact encoding. `decision` is `refused` (the first refusal is named) or
-`pending-execution`. Execution gates are always `not-run`, and the encoder refuses a record that
-claims otherwise, so no record from this module is admitted.
+`pending-execution`. Execution gates are always `not-run`, and the encoder refuses a record whose
+execution gates say anything else, so no record from this module is admitted.
 
 `account()` checks a set of proposals: each reaches exactly one of `admitted`,
 `refused:<token>` or `no-improvement`, and the counts add up. "No improvement over the
