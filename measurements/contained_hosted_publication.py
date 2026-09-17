@@ -57,6 +57,7 @@ import effective_envelope  # noqa: E402
 import hosted_packet as packet_delivery  # noqa: E402
 import aee_checker_sealed_run as sealed_run  # noqa: E402
 from hosted_rail_contract import LEGACY_RAIL, OWNED_V1_RAIL, require_rail  # noqa: E402
+import hosted_attempt_statement as attempt_statement  # noqa: E402
 from aee_checker_sealed_candidate import (  # noqa: E402
     CANDIDATE_MOUNT_SPEC,
     require_candidate_image,
@@ -2121,7 +2122,85 @@ def build_parser() -> argparse.ArgumentParser:
     readback.add_argument("--image-digest", required=True)
     readback.add_argument("--run-id", required=True)
     readback.add_argument("--run-attempt", required=True)
+    # The sealed `attempt-statement.v0/` directory, when the reader downloaded it. Checked
+    # offline against the same files; the signature is `gh attestation verify`'s to check.
+    readback.add_argument("--statement", default=None)
+    seal = sub.add_parser(
+        "seal",
+        help="Seal the attempt's upload surface into an unsigned in-toto statement (#187)")
+    seal.add_argument("--out", required=True)
+    seal.add_argument("--rail", default=LEGACY_RAIL.name)
+    seal.add_argument("--candidate-revision", required=True)
+    seal.add_argument("--runner-revision", required=True)
+    seal.add_argument("--image-digest", required=True)
+    seal.add_argument("--packet-release-tag", required=True)
+    seal.add_argument("--packet-manifest-sha256", required=True)
+    seal.add_argument("--gate-outcome", required=True)
     return parser
+
+
+def seal_attempt_statement(*, out_dir, rail, bindings, packet_release_tag,
+                           packet_manifest_sha256, gate_outcome, environ=None) -> dict:
+    """Seal whatever the gate left on the upload surface; run after the gate, on any outcome.
+
+    Identity comes from the runner's own environment, as the gate reads it, never from a
+    workflow-supplied value. A rail name outside the closed set refuses.
+    """
+    rails = {LEGACY_RAIL.name: LEGACY_RAIL, OWNED_V1_RAIL.name: OWNED_V1_RAIL}
+    if rail not in rails:
+        raise HostedPublicationError("statement:rail")
+    rail_contract = require_rail(rails[rail])
+    identity = _run_attempt_identity(environ)
+    workflow_identity = observe_workflow_identity(environ)
+    check_workflow_identity(workflow_identity, runner_revision=bindings["runner_revision"])
+    dispatch_inputs = dict(bindings)
+    dispatch_inputs["packet_release_tag"] = packet_release_tag
+    dispatch_inputs["packet_manifest_sha256"] = packet_manifest_sha256
+    try:
+        return attempt_statement.seal_attempt(
+            out_dir=out_dir, rail=rail_contract.name, bindings=bindings,
+            dispatch_inputs=dispatch_inputs, run_identity=identity,
+            workflow_identity=workflow_identity, gate_outcome=gate_outcome)
+    except attempt_statement.StatementError as exc:
+        raise HostedPublicationError("statement:%s" % exc) from exc
+
+
+def _statement_subject_files(*, setup_path, candidate_path, rerun_path,
+                             diagnostic_dir=None, collection_dir=None) -> dict:
+    """The reader's files under the names the seal used: upload-surface-relative paths."""
+    files = {
+        SETUP_STATUS_FILENAME: Path(setup_path),
+        CANDIDATE_RESULT_FILENAME: Path(candidate_path),
+        RERUN_EVIDENCE_FILENAME: Path(rerun_path),
+    }
+    for dirname, root in ((COLLECTION_DIRNAME, collection_dir),
+                          (DIAGNOSTIC_DIRNAME, diagnostic_dir)):
+        if root is None:
+            continue
+        root = Path(root)
+        for path in sorted(root.rglob("*")):
+            if path.is_dir() and not path.is_symlink():
+                continue
+            files["%s/%s" % (dirname, path.relative_to(root).as_posix())] = path
+    return files
+
+
+def readback_statement(statement_dir, *, setup_path, candidate_path, rerun_path,
+                       diagnostic_dir=None, collection_dir=None, expected_bindings,
+                       expected_run_id, expected_run_attempt) -> dict:
+    """Offline check of the unsigned statement against the reader's own downloaded files."""
+    try:
+        loaded = attempt_statement.load_statement_dir(statement_dir)
+        return attempt_statement.check_statement_against_files(
+            loaded,
+            _statement_subject_files(
+                setup_path=setup_path, candidate_path=candidate_path,
+                rerun_path=rerun_path, diagnostic_dir=diagnostic_dir,
+                collection_dir=collection_dir),
+            bindings=expected_bindings,
+            run_identity={"run_id": expected_run_id, "run_attempt": expected_run_attempt})
+    except attempt_statement.StatementError as exc:
+        raise HostedPublicationError("statement:%s" % exc) from exc
 
 
 def main(argv=None) -> int:
@@ -2141,7 +2220,28 @@ def main(argv=None) -> int:
                 expected_run_attempt=args.run_attempt,
             )
             summary = _readback_summary(loaded["projection"])
+            summary["statement"] = "not-provided"
+            if args.statement is not None:
+                summary.update(readback_statement(
+                    args.statement,
+                    setup_path=args.setup, candidate_path=args.candidate,
+                    rerun_path=args.rerun, diagnostic_dir=args.diagnostic,
+                    collection_dir=args.collection,
+                    expected_bindings=require_bindings(
+                        args.candidate_revision, args.runner_revision, args.image_digest),
+                    expected_run_id=args.run_id,
+                    expected_run_attempt=args.run_attempt))
             sys.stdout.write(_encode_json(summary).decode("utf-8"))
+            return 0
+        if args.command == "seal":
+            sealed = seal_attempt_statement(
+                out_dir=args.out, rail=args.rail,
+                bindings=require_bindings(
+                    args.candidate_revision, args.runner_revision, args.image_digest),
+                packet_release_tag=args.packet_release_tag,
+                packet_manifest_sha256=args.packet_manifest_sha256,
+                gate_outcome=args.gate_outcome)
+            sys.stdout.write(_encode_json(sealed).decode("utf-8"))
             return 0
         if args.command != "gate":
             parser.error("unsupported command")
