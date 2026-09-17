@@ -260,14 +260,19 @@ def write_provenance(out: Path) -> dict:
 
 def derive_class(out: Path) -> dict:
     contract = OWNED_INDEPENDENT_V0_CONTRACT
-    base = Path(out) / "independent"
-    doc = ca.derive_class_attempt_v0(
-        attempt_id=ATTEMPT_ID,
-        provenance_raw=_read(base / PROVENANCE_FILENAME),
-        manifest_raw=_read(pins_dir(contract) / "manifest.json"),
-        report_raw=_read(base / REPORT_FILENAME),
-        environment_raw=_read(base / PREPARE_FILENAME),
-        predecessor=None)
+    base = (Path(out) / "independent").resolve()
+    inputs = {
+        "provenance_raw": _read(base / PROVENANCE_FILENAME),
+        "manifest_raw": _read(pins_dir(contract) / "manifest.json"),
+        "report_raw": _read(base / REPORT_FILENAME),
+        "environment_raw": _read(base / PREPARE_FILENAME),
+    }
+    # The derivation binds the manifest relative to the working directory, so it runs where the
+    # frozen manifest's `repo_root` resolves: beside a verified copy of the pinned candidate.
+    with manifest_beside_subject() as manifest_path:
+        with contextlib.chdir(manifest_path.parent):
+            doc = ca.derive_class_attempt_v0(
+                attempt_id=ATTEMPT_ID, predecessor=None, **inputs)
     raw = ca.encode_class_attempt_v0(doc)
     target = base / ATTEMPT_FILENAME
     with tempfile.TemporaryDirectory() as check_dir:
