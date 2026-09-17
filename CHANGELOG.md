@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+The external hosted rail now publishes a reduced candidate result (#184),
+`corpus-adequacy.aee-contained-v0.candidate-result.v1`: the historical keys plus
+`report_sha256`, `control_status`, `unproved` and per-ordinal `outcomes`. It carries no
+`adequate`, no verdict counts and no per-site verdict, because the external corpus owner's
+consent covers no score and no per-mutant result; its `decision` stays the envelope decision.
+The gate no longer writes the unbound `hosted-publication.v0` candidate result: a publish
+decision without a report is refused as `candidate_report_absent`, and a report the collection
+does not bind is refused as `candidate_report_binding`, both through the existing post-execute
+refusal path. A withheld run without a report keeps its void result. The loader still reads the
+historical shape (the retained r4 bytes are pinned as a fixture), refuses any other schema, and
+on the publish readback compares the carried digest with the collection index and the carried
+outcomes with the members. `readback` names the candidate-result schema it read. The owned rail
+is unchanged. No execution identity path changes; any later hosted run still needs a new tag and
+PREPARE because the runner revision moves.
+
 The external hosted publication workflow now seals each attempt's upload surface into an
 unsigned in-toto Statement v1 and signs it (#187). A `seal` step after the gate, on every gate
 outcome, writes `attempt-statement.v0/` beside the artifacts: `SHA256SUMS` over the setup

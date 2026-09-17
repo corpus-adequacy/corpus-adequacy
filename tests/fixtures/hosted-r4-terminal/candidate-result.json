@@ -1,0 +1,23 @@
+{
+  "bindings": {
+    "candidate_revision": "25b9dfa797986624f2d680530a7228232aa3ddda",
+    "image_digest": "sha256:d5373500f56281009855ee607358ab237ea1564ded3e58491e1045380dbfa245",
+    "runner_revision": "1345bac5d5853824a6de00dda9a7b03efd906236"
+  },
+  "decision": "publish",
+  "dispatch_bindings": {
+    "candidate_revision": "25b9dfa797986624f2d680530a7228232aa3ddda",
+    "image_digest": "sha256:d5373500f56281009855ee607358ab237ea1564ded3e58491e1045380dbfa245",
+    "runner_revision": "1345bac5d5853824a6de00dda9a7b03efd906236"
+  },
+  "kind": "hosted-candidate-result",
+  "non_claims": [
+    "Not authentication of the candidate author or operator.",
+    "Not endorsement, audit, or certification.",
+    "Not proof that OCI is an escape-proof sandbox.",
+    "Not a third-party quality score.",
+    "Hosted intake is not hosted execution authorization beyond this gate."
+  ],
+  "schema": "corpus-adequacy.hosted-publication.v0",
+  "score_status": "none"
+}

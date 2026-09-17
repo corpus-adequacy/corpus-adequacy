@@ -50,15 +50,41 @@ def _read_only_member(artifacts_dir):
     return json.loads(files[0].read_text(encoding="utf-8"))
 
 
-def _write_collection(dest, doc, *, report_sha256=None):
-    """Write a one-member collection where a single envelope file used to be written.
+def _report(**overrides):
+    """A canonical report.v0 for a one-member run whose baseline and control held."""
+    report = {
+        "schema": hosted.ca.REPORT_SCHEMA,
+        "control_status": "killed",
+        "killed": 1, "survived": 0, "silent": 0, "equivalent": 0,
+        "unexercised_out_of_scope": 0, "unproved": 0, "known_holes": 0,
+        "declared_total": 1, "failures": [], "adequate": True,
+    }
+    report.update(overrides)
+    return report
+
+
+def _report_sha256(report):
+    return hashlib.sha256(hosted.ca.encode_report_v0(report)).hexdigest()
+
+
+_UNSET = object()
+
+
+def _write_collection(dest, doc, *, report_sha256=_UNSET, report=None):
+    """Write a one-member collection where a single envelope file used to be written, and
+    return the report it is bound to, as the real driver does.
 
     The hosted consumer requires a collection now: a lone record is refused rather than read,
-    so these fixtures produce the shape a real driver produces.
+    so these fixtures produce the shape a real driver produces. The external rail publishes
+    only with a bound report (#184), so a fake execute returns this value.
     """
+    report = _report() if report is None else report
+    if report_sha256 is _UNSET:
+        report_sha256 = _report_sha256(report)
     ledger = collection.Ledger()
     ledger.recorded(ledger.register(), doc)
     collection.write_collection(ledger, Path(dest), report_sha256=report_sha256)
+    return report
 
 
 def _write_collection_raw(dest, doc, raw_text):
@@ -394,7 +420,7 @@ def _run_ok(base, packet_name, rels, *, candidate=CANDIDATE, bindings=None,
         sha = rels["prepare_sha256"]
 
         def execute(**kwargs):
-            _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=sha))
+            return _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=sha))
 
     over.setdefault("packet_manifest_sha256", rels["manifest_sha256"])
     over.setdefault("docker_ready", lambda: "27.0.0")
@@ -765,7 +791,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             self.assertEqual(envelope["prepare_sha256"], rels["prepare_sha256"])
 
             def execute_unverified(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             envelope_status="unverified",
                         ))
@@ -793,7 +819,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
                     "auth": hashlib.sha256(Path(kwargs["authorize_path"]).read_bytes()).hexdigest(),
                     "prep": hashlib.sha256(Path(kwargs["prepare_path"]).read_bytes()).hexdigest(),
                 })
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=prepare_hash))
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=prepare_hash))
 
             d1 = _run_ok(base, "packet", rels, execute=execute, out_name="o1")
             self.assertEqual(d1["decision"], "publish")
@@ -826,7 +852,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_wrong_prep(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256="ab" * 32))
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256="ab" * 32))
 
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(base, "packet", rels, execute=execute_wrong_prep, out_name="o")
@@ -867,7 +893,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_wrong_commit(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             execution_commit=OTHER_RUNNER,
                         ))
@@ -876,7 +902,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
                 _run_ok(base, "packet", rels, execute=execute_wrong_commit, out_name="out")
 
             def execute_wrong_image(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             requested={
                                 "image_id": OTHER_IMAGE,
@@ -981,7 +1007,7 @@ class PublicationDecisionAndArtifacts(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             effective={
                                 "env_names": ["PATH", "GITHUB_TOKEN"],
@@ -1247,7 +1273,7 @@ class SourceMutations(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             effective={
                                 "env_names": ["GITHUB_TOKEN"],
@@ -1298,7 +1324,7 @@ class SourceMutations(unittest.TestCase):
             rels["manifest_sha256"] = _seal_packet(packet)
 
             def execute(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 hosted.run_gate(
@@ -1348,7 +1374,7 @@ class SourceMutations(unittest.TestCase):
 
             def spy(**kwargs):
                 executed.append(True)
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(base, "packet", rels, execute=spy, out_name="good")
@@ -1386,7 +1412,7 @@ class SourceMutations(unittest.TestCase):
             abs_root = str(packet.resolve())
 
             def execute(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256=rels["prepare_sha256"]))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 hosted.run_gate(
@@ -1478,7 +1504,7 @@ class SourceMutations(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                             prepare_sha256=rels["prepare_sha256"],
                             effective={
                                 "env_names": ["GITHUB_TOKEN"],
@@ -1546,7 +1572,7 @@ class SourceMutations(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_wrong_prep(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256="ab" * 32))
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(prepare_sha256="ab" * 32))
 
             with self.assertRaises(hosted.HostedPublicationError):
                 _run_ok(
@@ -1721,7 +1747,7 @@ class SourceMutations(unittest.TestCase):
                     {"destination": "/tool", "rw": False, "type": "bind"},
                     {"destination": "/vendor", "rw": False, "type": "bind"},
                 ]
-                _write_collection(kwargs["envelope_dest"], env)
+                return _write_collection(kwargs["envelope_dest"], env)
 
             with self.assertRaises(hosted.HostedPublicationError) as ctx:
                 _run_ok(
@@ -1829,7 +1855,7 @@ class QuarantineFailureKeepsThePrimaryRefusal(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                     prepare_sha256=rels["prepare_sha256"],
                     effective={"env_names": ["GITHUB_TOKEN"],
                                "image_env_names": ["GITHUB_TOKEN"]}))
@@ -1959,7 +1985,7 @@ class HostedPacketDelivery(unittest.TestCase):
                 prepared = json.loads(Path(kwargs["prepare_path"]).read_bytes())
                 observed.append(
                     sealed_run.execution_identity(Path(kwargs["root"])) == prepared["execution"])
-                _write_collection(kwargs["envelope_dest"], _permitted_envelope(
+                return _write_collection(kwargs["envelope_dest"], _permitted_envelope(
                     prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
                     execution_commit=head))
 
@@ -1989,7 +2015,7 @@ class HostedPacketDelivery(unittest.TestCase):
             ws, sha, prepare_sha = _fetched_workspace(Path(raw))
 
             def execute(**kwargs):
-                _write_collection(kwargs["envelope_dest"],
+                return _write_collection(kwargs["envelope_dest"],
                                   _permitted_envelope(prepare_sha256=prepare_sha))
 
             self.assertEqual(_gate_fetched(ws, sha, execute=execute)["decision"], "publish")
@@ -2220,7 +2246,7 @@ class WorkflowIdentityBinding(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_wrong_prep(**kwargs):
-                _write_collection(kwargs["envelope_dest"],
+                return _write_collection(kwargs["envelope_dest"],
                                   _permitted_envelope(prepare_sha256="ab" * 32))
 
             with self.assertRaises(hosted.HostedPublicationError):
@@ -2290,7 +2316,7 @@ class WithheldDiagnosticPackage(unittest.TestCase):
         over = dict(envelope_over or {})
         if execute is None:
             def execute(**kwargs):
-                _write_collection(
+                return _write_collection(
                     kwargs["envelope_dest"],
                     _permitted_envelope(prepare_sha256=rels["prepare_sha256"], **over),
                 )
@@ -2357,7 +2383,7 @@ class WithheldDiagnosticPackage(unittest.TestCase):
         rels = _write_packet(packet)
 
         def execute_wrong_prep(**kwargs):
-            _write_collection(
+            return _write_collection(
                 kwargs["envelope_dest"],
                 _permitted_envelope(prepare_sha256="ab" * 32),
             )
@@ -2472,7 +2498,7 @@ class WithheldDiagnosticPackage(unittest.TestCase):
             rels = _write_packet(packet)
 
             def execute_cred(**kwargs):
-                _write_collection(
+                return _write_collection(
                     kwargs["envelope_dest"],
                     _permitted_envelope(
                         prepare_sha256=rels["prepare_sha256"],
