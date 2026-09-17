@@ -26,6 +26,9 @@ published verification.
 
 ## Scope
 
+The assets, trusted computing base and residual risks are described in
+[docs/threat-model.md](docs/threat-model.md).
+
 Useful reports include input-bound failures, path or archive escapes, resource
 ceiling bypasses, unsafe candidate execution, evidence/provenance confusion,
 and cases where a refusal or incomplete run is presented as a clean result.
