@@ -8,7 +8,9 @@ release assets (`sums`, optionally `--write`), requires the assets to be exactly
 with those digests (`check`), and unpacks each artifact ZIP flat and bounded into
 `DEST/<zip stem>/` for `readback` (`extract`). It refuses rather than repairs: extra, missing or
 changed assets, a non-canonical checksum file, nested or non-regular entries, and ZIP members that
-traverse, nest, repeat, are links or exceed the 5 MiB artifact ceiling. It never downloads,
+traverse, nest, repeat, are links or exceed the 5 MiB artifact ceiling, counted on the bytes
+actually read in bounded chunks; a linked extraction target is refused and member files are
+created new without following links. It never downloads,
 uploads, tags or dispatches, and no workflow runs it. The retained r4 artifacts are now fixtures
 in full, so their `readback` at the current revision is a regression test. README describes the
 owner's archive steps.

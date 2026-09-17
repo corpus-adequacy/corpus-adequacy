@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import stat
 import sys
@@ -202,16 +203,22 @@ def extract_archive(directory, dest) -> dict:
                 if archive.testzip() is not None:
                     raise ArchiveError("zip_corrupt:%s" % name)
                 members = []
-                actual = 0
+                budget = MAX_EXTRACTED_BYTES
                 for info in infos:
-                    data = archive.read(info)
                     # The declared sizes were bounded above; the bytes actually read are
-                    # bounded here too, so the ceiling does not rest on the header telling the
-                    # truth or on zipfile noticing that it did not.
-                    actual += len(data)
-                    if actual > MAX_EXTRACTED_BYTES:
-                        raise ArchiveError("zip_extracted_bytes:%s" % name)
-                    members.append((info.filename, data))
+                    # bounded here too, in chunks, so the ceiling caps memory as well and does
+                    # not rest on the header telling the truth or on zipfile noticing.
+                    chunks = []
+                    with archive.open(info) as handle:
+                        while True:
+                            chunk = handle.read(min(65536, budget + 1))
+                            if not chunk:
+                                break
+                            budget -= len(chunk)
+                            if budget < 0:
+                                raise ArchiveError("zip_extracted_bytes:%s" % name)
+                            chunks.append(chunk)
+                    members.append((info.filename, b"".join(chunks)))
                 plans.append((target, members))
         except zipfile.BadZipFile as exc:
             raise ArchiveError("zip_corrupt:%s" % name) from exc
@@ -224,7 +231,14 @@ def extract_archive(directory, dest) -> dict:
         if target.is_symlink() or not target.is_dir():
             raise ArchiveError("extract_target:%s" % target.name)
         for member_name, data in members:
-            (target / member_name).write_bytes(data)
+            # Created new, never through a link at the final component. A directory swapped
+            # for a link by a concurrent writer inside DEST is outside this helper's threat
+            # model: DEST is the reader's own, freshly created directory.
+            flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+            fd = os.open(target / member_name, flags, 0o644)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
         written[target.name] = sorted(member_name for member_name, _ in members)
     return written
 
