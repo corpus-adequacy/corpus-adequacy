@@ -75,6 +75,14 @@ jobs:
           path: owned-contained-v1-artifacts/effective-envelope-collection.v0/
           retention-days: 14
           if-no-files-found: error
+      - name: Upload report
+        if: steps.gate.outcome == 'success' && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: owned-contained-v1-report
+          path: owned-contained-v1-artifacts/report.v0.json
+          retention-days: 14
+          if-no-files-found: error
       - name: Upload candidate result
         if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
