@@ -62,3 +62,4 @@ measurements/envelope_collection.py text eol=lf
 tests/test_envelope_collection.py text eol=lf
 tests/fixtures/inspect-v0/** text eol=lf
 tests/fixtures/hosted-r4-terminal/** text eol=lf
+tests/fixtures/suggestion-v0/** text eol=lf

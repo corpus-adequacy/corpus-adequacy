@@ -1,0 +1,29 @@
+{
+  "authorship": {
+    "author": "fixture-human",
+    "author_kind": "human",
+    "input_sha256": null,
+    "model_id": null,
+    "prompt_sha256": null,
+    "source_pin": "6848b678db372db7350c4dd382380a53dd6352d2"
+  },
+  "expected": {
+    "accepted": false,
+    "reason": "above-maximum"
+  },
+  "proposal_id": "duplicate-id",
+  "schema": "corpus-adequacy.suggestion-proposal.v0",
+  "selection": "owned-independent-v0",
+  "target": {
+    "group": "independent",
+    "mutation_id": "upper-guard-first-overflow-only"
+  },
+  "vector": {
+    "document": {
+      "value": 11
+    },
+    "file": "over-limit.json",
+    "id": "over-limit",
+    "value_class": "upper-refusal"
+  }
+}
