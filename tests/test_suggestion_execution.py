@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -142,6 +143,25 @@ class GateFiveRefusesFalseWitnesses(unittest.TestCase):
                 _record(script), PROPOSAL, baseline_rows=BASELINE_ROWS,
                 baseline_diagnostics=DIAGNOSTICS, mutation_id=MUTATION_ID)
         self.assertEqual(str(caught.exception), "mutant-unproved:parse-error")
+
+    def test_mixed_kinds_are_unproved_because_that_is_what_the_engine_calls_them(self):
+        """One id terminates, another does not. The engine computes the non-termination kinds
+        first and returns unproved, so the gate has to refuse in that order too. Reversing the
+        precedence changes the refusal without changing any count, which is why it needs its
+        own case."""
+        script = _script(mutant=_result(outcomes={}, raised={VECTOR_ID: "timeout",
+                                                             "allow": "parse-error"}))
+        with self.assertRaises(admission.AdmissionError) as caught:
+            execution.check_intended_distinction(
+                _record(script), PROPOSAL, baseline_rows=BASELINE_ROWS,
+                baseline_diagnostics=DIAGNOSTICS, mutation_id=MUTATION_ID)
+        self.assertEqual(str(caught.exception), "mutant-unproved:parse-error")
+
+    def test_the_gate_asks_the_engine_which_kinds_are_terminations(self):
+        for kind in sorted(ca.TERMINATED_KINDS):
+            self.assertIs(ca._child_failure_is_termination(kind), True, kind)
+        for kind in ("parse-error", "incomplete", "unproved"):
+            self.assertIs(ca._child_failure_is_termination(kind), False, kind)
 
     def test_a_frozen_row_that_moves_is_not_attributed_to_the_proposal(self):
         moved = dict(BASELINE_ROWS, **{VECTOR_ID: {"accepted": True, "reason": "within-range"},
@@ -373,6 +393,56 @@ class TheRecord(unittest.TestCase):
         text = " ".join(admission.NON_CLAIMS_V1).lower()
         for phrase in ("one recording", "human-authored corpus change", "unauthenticated"):
             self.assertIn(phrase, text)
+
+
+class TheEngineDrivesTheWrapper(unittest.TestCase):
+    """The gates read a recording; this pins that the engine produces one.
+
+    Everything above proves the gates judge a recording correctly. It does not prove the
+    engine's own session calls the wrapper the way the gates assume, which the review named as
+    the one thing a fake backend cannot show. This drives the real session, with a real source
+    guard over a real file, and no candidate, build or container.
+    """
+
+    def test_the_session_passes_a_step_and_the_wrapper_records_it(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "check.rs"
+            source.write_text("fn main() {}\n", encoding="utf-8")
+            manifest = {"_repo_root": root, "_source_paths": [source],
+                        "runner": "batch", "entrypoint_command": ["true"],
+                        "outcome_from": ["accepted"], "diagnostic_from": ["detail"]}
+            inner = FakeBackend(_script())
+            backend = execution.RecordingBackend(inner, profile="contained-oci-v1", route="fake")
+            session = ca._ProcessMutationSession(
+                manifest, backend, ca._ProcessReportAccumulator(), {}, 2)
+            self.assertIs(session.accepts_step, True)
+            result = session.execute(None, rebuild=True, step=ca._step("baseline", GROUP))
+            self.assertEqual(result.outcomes, BASELINE_ROWS)
+            self.assertEqual([entry["step"] for entry in backend.entries],
+                             [{"kind": "baseline", "group": GROUP, "id": None}])
+            self.assertEqual(inner.calls, [{"kind": "baseline", "group": GROUP, "id": None}])
+            self.assertEqual(source.read_text(encoding="utf-8"), "fn main() {}\n")
+
+    def test_the_session_refuses_a_backend_that_returns_something_else(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "check.rs"
+            source.write_text("fn main() {}\n", encoding="utf-8")
+            manifest = {"_repo_root": root, "_source_paths": [source]}
+
+            class Broken:
+                accepts_step = True
+
+                def __call__(self, manifest, vectors, *, rebuild=True, step=None):
+                    return "not an execution"
+
+            backend = execution.RecordingBackend(Broken(), profile="contained-oci-v1",
+                                                 route="fake")
+            session = ca._ProcessMutationSession(
+                manifest, backend, ca._ProcessReportAccumulator(), {}, 2)
+            with self.assertRaises(ca.ManifestError):
+                session.execute(None, rebuild=True, step=ca._step("baseline", GROUP))
 
 
 class TheModuleStaysOffline(unittest.TestCase):

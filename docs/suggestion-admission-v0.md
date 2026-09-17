@@ -68,8 +68,9 @@ Under the process and batch runners the engine scores a mutant that terminates a
 engine's own backend calls. `RecordingBackend` wraps whatever backend the caller already trusts,
 declares that it accepts a step, keeps what each call observed, and forwards the call unchanged.
 A call that arrives without a step cannot be attributed and is refused rather than recorded. The
-module imports no process, socket or HTTP machinery, and a test reads its import list to keep it
-that way.
+module imports no process, socket or HTTP machinery of its own, and a test reads its import list
+to keep it that way. That is a tripwire on this module, not a sandbox: it imports
+`corpus_adequacy`, which runs children by design.
 
 | Gate | Passes when | Refusal |
 |---|---|---|
@@ -92,9 +93,13 @@ judged the execution gates writes v1 instead: the same keys plus `execution`, wh
 v1 record every gate must read `passed` or `refused`, because `not-run` belongs to v0, and
 `decision` is `admitted` or `refused`.
 
-The encoder refuses `admitted` on any route that did not run the candidate. The `fake` route
-exists for tests, so a fake-route record can be built and can say `admitted`, and it cannot be
-encoded.
+The encoder refuses `admitted` unless the record's `route` is one that runs the candidate. The
+`fake` route exists for tests, so a fake-route record can be built, can say `admitted`, and
+cannot be encoded.
+
+That is a check on the label the record carries, not proof that a run happened. A hand-built
+record naming a real route encodes. What binds a record to a run is `recording_sha256`, which a
+reader recomputes from the recording; the encoder never sees the recording.
 
 ## Non-claims
 

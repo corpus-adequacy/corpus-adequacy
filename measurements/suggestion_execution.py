@@ -67,7 +67,9 @@ class RecordingBackend:
             raise AdmissionError("accounting-gap")
         extra = {"step": dict(step)} if self._inner_takes_step else {}
         result = self.inner(manifest, vectors, rebuild=rebuild, **extra)
-        self.entries.append(_entry(step, result))
+        # Validate with the engine's own checker, so an invalid backend result raises what it
+        # would have raised without the wrapper, and the recording holds what the engine sees.
+        self.entries.append(_entry(step, ca._snapshot_process_execution(result)))
         return result
 
     def recording(self):
@@ -75,15 +77,9 @@ class RecordingBackend:
 
 
 def _entry(step: dict, result) -> dict:
-    """One backend call, detached from the backend's own objects."""
-    try:
-        built, outcomes = result.built, result.outcomes
-        diagnostics, raised = result.diagnostics, result.raised
-    except AttributeError as exc:
-        raise AdmissionError("accounting-gap") from exc
-    if type(built) is not bool or any(type(item) is not dict
-                                      for item in (outcomes, diagnostics, raised)):
-        raise AdmissionError("accounting-gap")
+    """One validated backend call, detached from the backend's own objects."""
+    built, outcomes = result.built, result.outcomes
+    diagnostics, raised = result.diagnostics, result.raised
     return {
         "step": {"kind": step["kind"], "group": step.get("group"), "id": step.get("id")},
         "built": built,
@@ -138,8 +134,10 @@ class Recording:
 def _abnormal_kinds(raised: dict) -> tuple[list[str], list[str]]:
     """Raised kinds split the way the engine splits them: terminations are kills, rest unproved."""
     kinds = sorted(set(raised.values()))
-    terminated = [kind for kind in kinds if kind in ca.TERMINATED_KINDS]
-    other = [kind for kind in kinds if kind not in ca.TERMINATED_KINDS]
+    # Ask the engine which kinds it treats as terminations rather than copying its set, so the
+    # two cannot drift apart silently.
+    terminated = [kind for kind in kinds if ca._child_failure_is_termination(kind)]
+    other = [kind for kind in kinds if not ca._child_failure_is_termination(kind)]
     return terminated, other
 
 
