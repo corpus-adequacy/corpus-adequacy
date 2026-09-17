@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""The threat model names only mechanisms the code has (#102)."""
+"""Selected bindings between the threat model and the code (#102).
+
+These pin the names the document states (closed reasons, profiles, the offline environment name,
+token permissions, the redirect host, the sealed-candidate rule). They do not prove every table
+row or residual-risk bullet; review of the document does that.
+"""
 
 from __future__ import annotations
 
@@ -60,6 +65,18 @@ class ThreatModelMatchesTheCode(unittest.TestCase):
         self.assertIn("public #197", self.text)
         for claim in ("escape-proof sandbox", "CPU or file-descriptor bound"):
             self.assertIn(claim, self.text)
+
+    def test_the_named_redirect_host_is_the_fetch_allowlist(self):
+        import hosted_packet
+        self.assertIn("`release-assets.githubusercontent.com`", self.text)
+        self.assertIn("release-assets.githubusercontent.com", Path(hosted_packet.__file__)
+                      .read_text(encoding="utf-8"))
+
+    def test_candidate_containers_are_sealed(self):
+        import inspect
+        import aee_checker_sealed_candidate as candidate
+        self.assertIn("for every candidate container", self.text)
+        self.assertIn("sealed=True", inspect.getsource(candidate.run_sealed_candidate))
 
     def test_readme_and_security_policy_point_here(self):
         self.assertIn("docs/threat-model.md", (ROOT / "README.md").read_text(encoding="utf-8"))

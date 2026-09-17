@@ -53,6 +53,10 @@ batch runners. The README's "Trust boundary" section is the authority; nothing h
   introspection.
 - The pinned runner revision: the gate (`measurements/contained_hosted_publication.py`), the
   sealed driver, runtime and candidate modules, and the pins they verify.
+- What the workflows pull in by pin: the checkout, setup-python, upload-artifact and attest
+  actions (by commit SHA), the Python toolchain `setup-python` installs, which runs the gate
+  itself, and the packet fetch's single permitted redirect host,
+  `release-assets.githubusercontent.com`.
 - The owner, who reviews PREPARE bytes, publishes packets, obtains an external corpus owner's
   consent where one applies, and dispatches each attempt.
 - For signed statements: Sigstore (Fulcio, Rekor) and GitHub's attestation store.
@@ -70,7 +74,7 @@ text and exception messages do not.
 |---|---|---|
 | Untrusted manifest without a contained profile | Refused before any command runs; no fallback from contained to local | `ManifestError`, exit 2 |
 | Credentials in the child | Only the image's own environment plus `CARGO_NET_OFFLINE` | Environment *names* compared against the image's |
-| Network | `--network none` | Daemon-stored network mode |
+| Network | `--network none` for every candidate container; the only unsealed containers are PREPARE's inert network-control probe and online materialization, which run no candidate code | Daemon-stored network mode; the gate refuses a record whose request is not sealed |
 | Source and host checkout | Read-only root and read-only binds; mutation happens on an isolated copy | Complete mount inventory, `rw: false` |
 | Time and output | Host-enforced deadline and output ceiling | Closed reasons `timeout`, `output-cap` |
 | Memory | `--memory`/`--memory-swap` requested | Daemon-stored values compared; a daemon-reported `OOMKilled` becomes `oom-killed-reported` |
