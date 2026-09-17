@@ -87,7 +87,7 @@ def _doc(rel: str) -> dict:
 
 class RetainedBytes(unittest.TestCase):
     def test_every_retained_file_is_pinned_and_nothing_else_is_there(self):
-        found = {str(p.relative_to(EVIDENCE)): hashlib.sha256(p.read_bytes()).hexdigest()
+        found = {p.relative_to(EVIDENCE).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                  for p in EVIDENCE.rglob("*") if p.is_file()}
         self.assertEqual(found, DIGESTS)
 
