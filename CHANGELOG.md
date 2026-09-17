@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+Deterministic admission for proposed test vectors (#200), without any model or provider call.
+`measurements/suggestion_admission.py` judges one proposal for the closed, code-owned selection
+`owned-independent-v0` through named gates: closed proposal shape (a proposal may expect only the
+declared outcome members, never a diagnostic, and no key may claim an equivalence), the selection's
+freeze, a separate proposal corpus with its own manifest and corpus digest that leaves the frozen
+corpus untouched, a semantic review by someone who is not the author, the model or the packet
+author, and accounting. The execution gates stay `not-run`, so a record can say at most
+`pending-execution`; the encoder refuses one that claims otherwise. `docs/suggestion-admission-v0.md`
+documents the schemas and refusals, including why a termination is not a witness.
+
 Slice B contract for the frozen independent selection (#199, #103). Sealed measurement contracts
 gain `site_replacement`; the authorized-sequence funnel compares each site against it instead of a
 hard-coded `"false"` (both existing contracts keep `"false"`). `OWNED_INDEPENDENT_V0_CONTRACT`
