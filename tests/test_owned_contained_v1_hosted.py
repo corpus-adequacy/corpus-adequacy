@@ -23,7 +23,9 @@ import hosted_packet  # noqa: E402
 import owned_contained_v1_hosted as owned  # noqa: E402
 from hosted_rail_contract import LEGACY_RAIL, OWNED_V1_RAIL  # noqa: E402
 from sealed_measurement_contract import OWNED_CONTAINED_V1_CONTRACT  # noqa: E402
+import hosted_attempt_statement as attempt_statement  # noqa: E402
 from tests.test_contained_hosted_workflow_contract import (  # noqa: E402
+    ATTEST_ACTION,
     CHECKOUT_ACTION,
     DIAGNOSTIC_PACKAGE_DIRNAME,
     DIAGNOSTIC_UPLOAD_IF,
@@ -68,6 +70,16 @@ OWNED_PREPARE_WORKFLOW = {
 }
 
 
+OWNED_SEAL_RUN = (
+    "python measurements/owned_contained_v1_hosted.py seal "
+    "--candidate-revision \"$CANDIDATE_REVISION\" --runner-revision \"$RUNNER_REVISION\" "
+    "--image-digest \"$IMAGE_DIGEST\" --packet-release-tag \"$PACKET_RELEASE_TAG\" "
+    "--packet-manifest-sha256 \"$PACKET_MANIFEST_SHA256\" --gate-outcome \"$GATE_OUTCOME\" "
+    "--out owned-contained-v1-artifacts"
+)
+OWNED_STATEMENT_IF = "always() && !cancelled() && steps.seal.outcome == 'success'"
+
+
 OWNED_PUBLICATION_WORKFLOW = {
     "name": "owned-contained-v1-publication",
     "on": {"workflow_dispatch": {"inputs": {
@@ -77,7 +89,7 @@ OWNED_PUBLICATION_WORKFLOW = {
             "packet_release_tag", "packet_manifest_sha256",
         )
     }}},
-    "permissions": {"contents": "read"},
+    "permissions": {"contents": "read", "id-token": "write", "attestations": "write"},
     "concurrency": {
         "group": "owned-contained-v1-publication",
         "cancel-in-progress": False,
@@ -106,6 +118,19 @@ OWNED_PUBLICATION_WORKFLOW = {
                  "PACKET_MANIFEST_SHA256": "${{ inputs.packet_manifest_sha256 }}",
              },
              "run": "python measurements/owned_contained_v1_hosted.py gate --candidate-revision \"$CANDIDATE_REVISION\" --runner-revision \"$RUNNER_REVISION\" --image-digest \"$IMAGE_DIGEST\" --packet-manifest-sha256 \"$PACKET_MANIFEST_SHA256\" --out owned-contained-v1-artifacts"},
+            {"name": "Seal owned attempt statement", "id": "seal",
+             "if": "always() && !cancelled()", "shell": "bash",
+             "env": {
+                 "CANDIDATE_REVISION": "${{ inputs.candidate_revision }}",
+                 "RUNNER_REVISION": "${{ inputs.runner_revision }}",
+                 "IMAGE_DIGEST": "${{ inputs.image_digest }}",
+                 "PACKET_RELEASE_TAG": "${{ inputs.packet_release_tag }}",
+                 "PACKET_MANIFEST_SHA256": "${{ inputs.packet_manifest_sha256 }}",
+                 "GATE_OUTCOME": "${{ steps.gate.outcome }}",
+                 "GITHUB_RUN_ID": "${{ github.run_id }}",
+                 "GITHUB_RUN_ATTEMPT": "${{ github.run_attempt }}",
+             },
+             "run": OWNED_SEAL_RUN},
             {"name": "Upload setup", "if": "always() && !cancelled()",
              "uses": UPLOAD_ACTION,
              "with": {"name": "owned-contained-v1-setup",
@@ -141,6 +166,21 @@ OWNED_PUBLICATION_WORKFLOW = {
                  "name": "owned-contained-v1-withheld-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}",
                  "path": "owned-contained-v1-artifacts/withheld-diagnostic-package.v0/",
                  "retention-days": 14, "if-no-files-found": "error"}},
+            {"name": "Upload owned attempt statement", "if": OWNED_STATEMENT_IF,
+             "uses": UPLOAD_ACTION,
+             "with": {
+                 "name": "owned-contained-v1-attempt-statement-${{ github.run_id }}-${{ github.run_attempt }}",
+                 "path": "owned-contained-v1-artifacts/attempt-statement.v0/",
+                 "retention-days": 14, "if-no-files-found": "error"}},
+            {"name": "Attest owned attempt statement", "if": OWNED_STATEMENT_IF,
+             "uses": ATTEST_ACTION,
+             "with": {
+                 "subject-checksums":
+                     "owned-contained-v1-artifacts/attempt-statement.v0/SHA256SUMS",
+                 "predicate-type": attempt_statement.PREDICATE_TYPE,
+                 "predicate-path": "owned-contained-v1-artifacts/attempt-statement.v0/"
+                                   "hosted-attempt-predicate.v0.json",
+                 "show-summary": True}},
         ],
     }},
 }

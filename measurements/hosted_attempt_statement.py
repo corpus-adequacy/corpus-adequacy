@@ -41,6 +41,10 @@ STATEMENT_FILENAMES = (SUMS_FILENAME, PREDICATE_FILENAME, STATEMENT_FILENAME)
 # contract test: a file outside this list (the materialize tree, a quarantined collection, the
 # refusal stub that is never uploaded) is not a subject even when it sits under the out root.
 SUBJECT_FILES = ("setup-status.json", "candidate-result.json", "rerun-evidence.jsonl")
+# The owned rail also uploads its published report (#186); the external rail never does.
+REPORT_SUBJECT = "report.v0.json"
+OWNED_SUBJECT_FILES = SUBJECT_FILES + (REPORT_SUBJECT,)
+SUBJECT_FILE_SETS = (SUBJECT_FILES, OWNED_SUBJECT_FILES)
 SUBJECT_DIRS = ("effective-envelope-collection.v0", "withheld-diagnostic-package.v0")
 # `actions/attest` refuses more than 1024 subjects; a larger surface is a defect, not a bigger
 # statement.
@@ -145,18 +149,20 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def enumerate_subjects(out_dir) -> list[tuple[str, str]]:
+def enumerate_subjects(out_dir, *, subject_files=SUBJECT_FILES) -> list[tuple[str, str]]:
     """`(name, sha256)` per upload-surface file under `out_dir`, in sorted name order.
 
     Names are POSIX paths relative to `out_dir`. Exactly one of the two subject directories
     may be present: a publish attempt leaves the collection, a non-publish attempt the
     diagnostic package, and both at once is not a shape the gate writes.
     """
+    if subject_files not in SUBJECT_FILE_SETS:
+        raise StatementError("subject_files")
     out = Path(out_dir)
     if out.is_symlink() or not out.is_dir():
         raise StatementError("out_dir")
     subjects = []
-    for name in SUBJECT_FILES:
+    for name in subject_files:
         path = out / name
         if path.exists() or path.is_symlink():
             _regular_file(path, "subject:%s" % name)
@@ -263,10 +269,10 @@ def encode_json(doc) -> bytes:
 
 
 def seal_attempt(*, out_dir, rail, bindings, dispatch_inputs, run_identity,
-                 workflow_identity, gate_outcome) -> dict:
+                 workflow_identity, gate_outcome, subject_files=SUBJECT_FILES) -> dict:
     """Write `attempt-statement.v0/` under `out_dir`; refuse rather than overwrite."""
     out = Path(out_dir)
-    subjects = enumerate_subjects(out)
+    subjects = enumerate_subjects(out, subject_files=subject_files)
     sums_raw = encode_sums(subjects)
     predicate = build_predicate(
         rail=rail, bindings=bindings, dispatch_inputs=dispatch_inputs,
@@ -340,7 +346,8 @@ def load_statement_dir(statement_dir) -> dict:
             "sums_sha256": hashlib.sha256(sums_raw).hexdigest()}
 
 
-def check_statement_against_files(loaded: dict, files: dict, *, bindings, run_identity) -> dict:
+def check_statement_against_files(loaded: dict, files: dict, *, bindings, run_identity,
+                                  rail=None) -> dict:
     """Every subject is one of `files` (name -> path) with the same bytes, and vice versa.
 
     `files` is the reader's own download: what it holds must be exactly what was sealed. A
@@ -348,6 +355,8 @@ def check_statement_against_files(loaded: dict, files: dict, *, bindings, run_id
     not name is not covered by the signature and refuses as well.
     """
     predicate = loaded["predicate"]
+    if rail is not None and predicate["rail"] != rail:
+        raise StatementError("statement_rail")
     if predicate["bindings"] != require_bindings(bindings):
         raise StatementError("statement_bindings")
     if predicate["run_identity"] != require_run_identity(run_identity):

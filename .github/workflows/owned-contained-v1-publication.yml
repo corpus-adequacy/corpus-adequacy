@@ -21,6 +21,9 @@ on:
 
 permissions:
   contents: read
+  # Only for the attest step: mint the OIDC token and persist the attestation (#187).
+  id-token: write
+  attestations: write
 
 concurrency:
   group: owned-contained-v1-publication
@@ -59,6 +62,22 @@ jobs:
           IMAGE_DIGEST: ${{ inputs.image_digest }}
           PACKET_MANIFEST_SHA256: ${{ inputs.packet_manifest_sha256 }}
         run: python measurements/owned_contained_v1_hosted.py gate --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --packet-manifest-sha256 "$PACKET_MANIFEST_SHA256" --out owned-contained-v1-artifacts
+      # Seals whatever the gate left on the upload surface, report included, on every gate
+      # outcome. Identity is read from the runner's own environment, as in the gate.
+      - name: Seal owned attempt statement
+        id: seal
+        if: always() && !cancelled()
+        shell: bash
+        env:
+          CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
+          RUNNER_REVISION: ${{ inputs.runner_revision }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          PACKET_RELEASE_TAG: ${{ inputs.packet_release_tag }}
+          PACKET_MANIFEST_SHA256: ${{ inputs.packet_manifest_sha256 }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python measurements/owned_contained_v1_hosted.py seal --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --packet-release-tag "$PACKET_RELEASE_TAG" --packet-manifest-sha256 "$PACKET_MANIFEST_SHA256" --gate-outcome "$GATE_OUTCOME" --out owned-contained-v1-artifacts
       - name: Upload setup
         if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -107,3 +126,19 @@ jobs:
           path: owned-contained-v1-artifacts/withheld-diagnostic-package.v0/
           retention-days: 14
           if-no-files-found: error
+      - name: Upload owned attempt statement
+        if: always() && !cancelled() && steps.seal.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: owned-contained-v1-attempt-statement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: owned-contained-v1-artifacts/attempt-statement.v0/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Attest owned attempt statement
+        if: always() && !cancelled() && steps.seal.outcome == 'success'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-checksums: owned-contained-v1-artifacts/attempt-statement.v0/SHA256SUMS
+          predicate-type: https://github.com/corpus-adequacy/corpus-adequacy/attestations/hosted-attempt/v0
+          predicate-path: owned-contained-v1-artifacts/attempt-statement.v0/hosted-attempt-predicate.v0.json
+          show-summary: true

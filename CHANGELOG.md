@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+The repository-owned `contained-oci-v1` rail now seals and attests its attempts as the external
+rail does (#187). Its publication workflow runs `owned_contained_v1_hosted.py seal` after the gate
+on every gate outcome, uploads `attempt-statement.v0/` under an owned name, and signs it with the
+same SHA-pinned `actions/attest` step; the job gains `id-token: write` and `attestations: write`,
+and `contents` stays read. The owned subject set is the external one plus `report.v0.json` when a
+published report exists; the external rail never seals that name. `readback --statement` passes
+`--report` through to the subject check and refuses a statement whose predicate names a rail
+other than the setup artifact's. The external workflow bytes do not change.
+
 Terminal hosted attempts can now be archived and checked offline (#188).
 `scripts/terminal_archive.py` computes the canonical `SHA256SUMS` over a local directory of
 release assets (`sums`, optionally `--write`), requires the assets to be exactly the listed files
