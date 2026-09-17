@@ -35,7 +35,7 @@ CONTRACTS = {"declared": OWNED_CONTAINED_V1_CONTRACT,
              "independent": OWNED_INDEPENDENT_V0_CONTRACT}
 DIGESTS = {
     "README.md":
-        "0a32c3f759df3f6f71a301be61730d47f2de6ad9a0599f537079841c69e749d4",
+        "cd9ab3062b2b617b531ab1a5f85a072f2f052bbf2796614e369f67fb1ad91e63",
     "declared/authorize.v0.json":
         "91aac51bd97dae1848fa3ae5bbd05a4dbe9edc90d35b43b241538f8b51bd9cdf",
     "declared/effective-envelope-collection.v0/collection-index.v0.json":
@@ -283,7 +283,12 @@ class ClassEvidence(unittest.TestCase):
         retained attempt byte for byte. The derivation resolves the frozen manifest's
         `repo_root` against the working directory, so it only succeeds beside a verified
         copy of the pinned candidate; running it anywhere else fails instead of binding a
-        tree nobody checked."""
+        tree nobody checked.
+
+        Known gap: the facade also reloads its own emitted bytes before writing them, and
+        that self-check is not observable from here. It can only raise on inputs the facade
+        itself reads from one place, so no caller can construct the inconsistency it guards
+        against. The sibling tests load the retained bytes through the real loader."""
         with tempfile.TemporaryDirectory() as out:
             staged = Path(out) / "independent"
             staged.mkdir()

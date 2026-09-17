@@ -29,9 +29,12 @@ The independent directory adds the class evidence: `class-provenance.v0.json` (r
 Each report's `manifest` field records the manifest path exactly as it was handed to the tool,
 which here is absolute and names the operator's worktree. Earlier retained measurements were run
 from the repository root and record a repository-relative path instead. Nothing binds on that
-string: the manifest is bound by `manifest_sha256`, and the publication renderer refuses host
-markers before anything is public. Public corpus-adequacy#204 makes the facade record the
-repository-relative path so the next retained measurement matches the earlier ones.
+string: the manifest is bound by `manifest_sha256`, and every check here compares bytes. Nothing
+strips it either. The publication renderer refuses host-local paths only in a void attempt's free
+text; a completed measurement's report bytes are bundled verbatim, so a report published that way
+would carry the path as written. This measurement is retained, not published. Public
+corpus-adequacy#204 makes the facade record the repository-relative path so the next retained
+measurement matches the earlier ones.
 
 ## Reading it back
 
