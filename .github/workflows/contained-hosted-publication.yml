@@ -26,6 +26,9 @@ on:
 
 permissions:
   contents: read
+  # Only for the attest step: mint the OIDC token and persist the attestation (#187).
+  id-token: write
+  attestations: write
 
 concurrency:
   group: contained-hosted-publication
@@ -78,6 +81,23 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python measurements/contained_hosted_publication.py gate --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --packet-manifest-sha256 "$PACKET_MANIFEST_SHA256" --operator-profile "$OPERATOR_EXECUTION_PROFILE" --max-artifact-bytes "$MAX_ARTIFACT_BYTES" --out artifacts --workspace-root "$GITHUB_WORKSPACE" --packet-root hosted-packet --authorize authorize.v0.json --prepare prepare.v1.json --pins-dir pins --rerun-log artifacts/rerun-evidence.jsonl
+      # Seals whatever the gate left on the upload surface, after the gate and on every gate
+      # outcome: a refusal is sealed as a refusal. Identity is read from the runner's own
+      # environment, as in the gate; the workflow supplies only its dispatch inputs.
+      - name: Seal attempt statement
+        id: seal
+        if: always() && !cancelled()
+        shell: bash
+        env:
+          CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
+          RUNNER_REVISION: ${{ inputs.runner_revision }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          PACKET_RELEASE_TAG: ${{ inputs.packet_release_tag }}
+          PACKET_MANIFEST_SHA256: ${{ inputs.packet_manifest_sha256 }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python measurements/contained_hosted_publication.py seal --out artifacts --rail aee-contained-v0 --candidate-revision "$CANDIDATE_REVISION" --runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" --packet-release-tag "$PACKET_RELEASE_TAG" --packet-manifest-sha256 "$PACKET_MANIFEST_SHA256" --gate-outcome "$GATE_OUTCOME"
       - name: Upload setup
         if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -130,3 +150,24 @@ jobs:
           path: artifacts/withheld-diagnostic-package.v0/
           retention-days: 14
           if-no-files-found: error
+      # The unsigned copy of what the attest step signs, so a reader can check the shape
+      # offline; bound to the seal step, never to the gate's decision.
+      - name: Upload attempt statement
+        if: always() && !cancelled() && steps.seal.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: attempt-statement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/attempt-statement.v0/
+          retention-days: 14
+          if-no-files-found: error
+      # Signs the sealed subjects and predicate with the workflow's own Sigstore identity
+      # (Fulcio binds the run invocation URI and trigger). It reads the two sealed files and
+      # touches no artifact byte. Verification is `gh attestation verify`, documented in README.
+      - name: Attest attempt statement
+        if: always() && !cancelled() && steps.seal.outcome == 'success'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-checksums: artifacts/attempt-statement.v0/SHA256SUMS
+          predicate-type: https://github.com/corpus-adequacy/corpus-adequacy/attestations/hosted-attempt/v0
+          predicate-path: artifacts/attempt-statement.v0/hosted-attempt-predicate.v0.json
+          show-summary: true

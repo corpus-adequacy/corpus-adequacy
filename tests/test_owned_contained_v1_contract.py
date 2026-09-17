@@ -351,7 +351,7 @@ print(json.dumps({"before": before, "after": after}, sort_keys=True))
             "measurements/aee-go-run/authorize.v0.json": "72326c68c57bdc591e445d9b1afbfcda6bd671d831a0faefc561dffde2fa7195",
             "measurements/aee-go-run/prepare.v0.json": "90674e74097d93d84e6794b4c6b3294ce702949f41af2e582807c3910ccf4c79",
             ".github/workflows/contained-hosted-prepare.yml": "b069c7f94ad52c5e38b4706f51ab817bca791b0012e91c20493784e49fcd4c45",
-            ".github/workflows/contained-hosted-publication.yml": "99b1d57351b851120847abd7742061e5c62b031600d2c78792da9636c87bc929",
+            ".github/workflows/contained-hosted-publication.yml": "0a9b79ccb551bb3cf8e64122f28f7a667da351ebf1568458f8b815db351c15a9",
         }
         for rel, digest in expected.items():
             self.assertEqual(hashlib.sha256((ROOT / rel).read_bytes()).hexdigest(), digest, rel)

@@ -25,6 +25,7 @@ import envelope_collection as collection  # noqa: E402
 import contained_hosted_publication as hosted  # noqa: E402
 import contained_oci as contained  # noqa: E402
 import hosted_packet  # noqa: E402
+import hosted_attempt_statement as attempt_statement  # noqa: E402
 import aee_checker_sealed_execute as sealed_execute  # noqa: E402
 from aee_checker_sealed_common import MATERIALIZE_CEILINGS, load_strict  # noqa: E402
 
@@ -69,11 +70,31 @@ UPLOAD_ACTION = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa0
 CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 SETUP_PYTHON_ACTION = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 PINNED_RUNS_ON = "ubuntu-24.04"
+# actions/attest v4.2.2 (2026-08-04), pinned by commit; a tag here would let the signer move.
+ATTEST_ACTION = "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
+STATEMENT_UPLOAD_IF = "always() && !cancelled() && steps.seal.outcome == 'success'"
+STATEMENT_PATH = "artifacts/%s/" % attempt_statement.STATEMENT_DIRNAME
+ATTEST_WITH = {
+    "subject-checksums": "artifacts/%s/%s" % (
+        attempt_statement.STATEMENT_DIRNAME, attempt_statement.SUMS_FILENAME),
+    "predicate-type": attempt_statement.PREDICATE_TYPE,
+    "predicate-path": "artifacts/%s/%s" % (
+        attempt_statement.STATEMENT_DIRNAME, attempt_statement.PREDICATE_FILENAME),
+    "show-summary": True,
+}
+ALLOWED_PERMISSIONS = {"contents": "read", "id-token": "write", "attestations": "write"}
 
 FETCH_RUN = (
     'python measurements/hosted_packet.py fetch --repository "$GITHUB_REPOSITORY" '
     '--tag "$PACKET_RELEASE_TAG" --manifest-sha256 "$PACKET_MANIFEST_SHA256" '
     '--workspace-root "$GITHUB_WORKSPACE" --dest hosted-packet'
+)
+SEAL_RUN = (
+    'python measurements/contained_hosted_publication.py seal --out artifacts '
+    '--rail aee-contained-v0 --candidate-revision "$CANDIDATE_REVISION" '
+    '--runner-revision "$RUNNER_REVISION" --image-digest "$IMAGE_DIGEST" '
+    '--packet-release-tag "$PACKET_RELEASE_TAG" '
+    '--packet-manifest-sha256 "$PACKET_MANIFEST_SHA256" --gate-outcome "$GATE_OUTCOME"'
 )
 GATE_RUN = (
     'python measurements/contained_hosted_publication.py gate '
@@ -102,7 +123,7 @@ ALLOWED_HOSTED_WORKFLOW = {
         'packet_manifest_sha256': _input(
             'SHA-256 of the packet manifest release asset (64-hex)'),
     }}},
-    'permissions': {'contents': 'read'},
+    'permissions': ALLOWED_PERMISSIONS,
     'concurrency': {'group': 'contained-hosted-publication', 'cancel-in-progress': False},
     'env': {'PYTHON_VERSION': '3.13',
             'OPERATOR_EXECUTION_PROFILE': 'contained-oci-v0',
@@ -135,6 +156,19 @@ ALLOWED_HOSTED_WORKFLOW = {
                      'GITHUB_RUN_ID': '${{ github.run_id }}',
                      'GITHUB_RUN_ATTEMPT': '${{ github.run_attempt }}'},
              'run': GATE_RUN},
+            {'name': 'Seal attempt statement',
+             'id': 'seal',
+             'if': 'always() && !cancelled()',
+             'shell': 'bash',
+             'env': {'CANDIDATE_REVISION': '${{ inputs.candidate_revision }}',
+                     'RUNNER_REVISION': '${{ inputs.runner_revision }}',
+                     'IMAGE_DIGEST': '${{ inputs.image_digest }}',
+                     'PACKET_RELEASE_TAG': '${{ inputs.packet_release_tag }}',
+                     'PACKET_MANIFEST_SHA256': '${{ inputs.packet_manifest_sha256 }}',
+                     'GATE_OUTCOME': '${{ steps.gate.outcome }}',
+                     'GITHUB_RUN_ID': '${{ github.run_id }}',
+                     'GITHUB_RUN_ATTEMPT': '${{ github.run_attempt }}'},
+             'run': SEAL_RUN},
             {'name': 'Upload setup',
              'if': 'always() && !cancelled()',
              'uses': UPLOAD_ACTION,
@@ -170,6 +204,17 @@ ALLOWED_HOSTED_WORKFLOW = {
                       'path': 'artifacts/withheld-diagnostic-package.v0/',
                       'retention-days': 14,
                       'if-no-files-found': 'error'}},
+            {'name': 'Upload attempt statement',
+             'if': STATEMENT_UPLOAD_IF,
+             'uses': UPLOAD_ACTION,
+             'with': {'name': 'attempt-statement-${{ github.run_id }}-${{ github.run_attempt }}',
+                      'path': STATEMENT_PATH,
+                      'retention-days': 14,
+                      'if-no-files-found': 'error'}},
+            {'name': 'Attest attempt statement',
+             'if': STATEMENT_UPLOAD_IF,
+             'uses': ATTEST_ACTION,
+             'with': ATTEST_WITH},
         ]}}}
 
 def _strip_comment(line: str) -> str:
@@ -264,8 +309,9 @@ def parse_workflow_yaml(text: str):
 
 def hosted_shape_violations(tree) -> list[str]:
     bad = []
-    if tree.get("permissions") != {"contents": "read"}:
-        bad.append("permissions must be exactly {contents: read}")
+    if tree.get("permissions") != ALLOWED_PERMISSIONS:
+        # id-token and attestations exist only for the attest step; contents stays read.
+        bad.append("permissions must be exactly %s" % ALLOWED_PERMISSIONS)
     conc = tree.get("concurrency")
     if not isinstance(conc, dict) or conc.get("group") != "contained-hosted-publication":
         bad.append("concurrency.group must be contained-hosted-publication")
@@ -307,6 +353,11 @@ def hosted_shape_violations(tree) -> list[str]:
     if ("Fetch hosted packet" not in names or "Gate hosted publication" not in names
             or names.index("Fetch hosted packet") > names.index("Gate hosted publication")):
         bad.append("the packet fetch step must run before the gate")
+    for required in ("Seal attempt statement", "Attest attempt statement"):
+        if required not in names or "Gate hosted publication" not in names or (
+                names.index(required) < names.index("Gate hosted publication")):
+            bad.append("%s must exist and run after the gate" % required)
+    saw_attest = False
     upload_names = []
     saw_write_facts = False
     for step in steps:
@@ -338,6 +389,15 @@ def hosted_shape_violations(tree) -> list[str]:
                     bad.append(
                         "the published collection upload must be bound to gate success "
                         "(if: %s)" % GATE_BOUND_UPLOAD_IF)
+            elif isinstance(name, str) and "attempt-statement" in name:
+                # Bound to the seal, not to the decision: a refusal's statement is uploaded too.
+                if step_if != STATEMENT_UPLOAD_IF:
+                    bad.append("the statement upload must be bound to seal success (if: %s)"
+                               % STATEMENT_UPLOAD_IF)
+                if "github.run_id" not in name or "github.run_attempt" not in name:
+                    bad.append("statement artifact name must include run_id and run_attempt")
+                if with_block.get("path") != STATEMENT_PATH:
+                    bad.append("statement upload path must be %s" % STATEMENT_PATH)
             elif isinstance(name, str) and "withheld-diagnostic" in name:
                 if step_if != DIAGNOSTIC_UPLOAD_IF:
                     bad.append(
@@ -354,8 +414,37 @@ def hosted_shape_violations(tree) -> list[str]:
                     "diagnostic upload steps must run on failure/cancellation "
                     "(if: always() && !cancelled())"
                 )
+        if uses.startswith("actions/attest"):
+            saw_attest = True
+            if uses != ATTEST_ACTION:
+                bad.append("attest step must be pinned to %s" % ATTEST_ACTION)
+            if step.get("if") != STATEMENT_UPLOAD_IF:
+                bad.append("attest step must be bound to seal success (if: %s)"
+                           % STATEMENT_UPLOAD_IF)
+            if with_block != ATTEST_WITH:
+                bad.append("attest step inputs must be exactly the sealed subjects/predicate")
+            if step.get("continue-on-error") is True:
+                bad.append("attest continue-on-error would hide a failed signature")
         run = step.get("run")
         if isinstance(run, str):
+            if step.get("name") == "Seal attempt statement":
+                if run != SEAL_RUN:
+                    bad.append("seal run must seal artifacts for rail aee-contained-v0")
+                if step.get("if") != "always() && !cancelled()":
+                    bad.append("seal must run on every gate outcome (if: always() && !cancelled())")
+                if step.get("id") != "seal":
+                    bad.append("seal step id must be seal")
+                env_step = step.get("env") or {}
+                for key in ("CANDIDATE_REVISION", "RUNNER_REVISION", "IMAGE_DIGEST",
+                            "PACKET_RELEASE_TAG", "PACKET_MANIFEST_SHA256", "GATE_OUTCOME",
+                            "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
+                    if key not in env_step:
+                        bad.append("seal env missing %s" % key)
+                if env_step.get("GATE_OUTCOME") != "${{ steps.gate.outcome }}":
+                    bad.append("seal GATE_OUTCOME must be the gate step's outcome")
+                for key in ("GITHUB_SHA", "GITHUB_WORKFLOW_SHA"):
+                    if key in env_step:
+                        bad.append("seal env must not set %s" % key)
             if "${{ inputs." in run:
                 bad.append("workflow inputs must not appear in run: (shell breakout)")
             if step.get("name") == "Fetch hosted packet":
@@ -400,17 +489,22 @@ def hosted_shape_violations(tree) -> list[str]:
                     bad.append("gate run must pass --workspace-root $GITHUB_WORKSPACE")
     if saw_write_facts:
         bad.append("write-workflow-facts step must not exist as runtime evidence")
+    if not saw_attest:
+        bad.append("attest step missing")
     expected_uploads = [
         "setup", "effective-envelope", "candidate-result",
     ]
-    if len(upload_names) != 5 or upload_names[:3] != expected_uploads:
+    if len(upload_names) != 6 or upload_names[:3] != expected_uploads:
         bad.append(
             "must upload setup, effective-envelope, candidate-result, "
-            "rerun-evidence and withheld-diagnostic separately"
+            "rerun-evidence, withheld-diagnostic and attempt-statement separately"
         )
     else:
         rerun_name = upload_names[3]
         diagnostic_name = upload_names[4]
+        statement_name = upload_names[5]
+        if not isinstance(statement_name, str) or "attempt-statement" not in statement_name:
+            bad.append("sixth upload must be the attempt statement")
         if not isinstance(rerun_name, str):
             bad.append("rerun-evidence artifact name missing run identity")
         else:
@@ -449,6 +543,38 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         self.assertEqual(job["runs-on"], "ubuntu-24.04")
         checkout = job["steps"][0]
         self.assertIs(checkout["with"]["persist-credentials"], False)
+
+    def test_mutation_unpin_or_unbind_attest_step_is_red(self):
+        for old, new, expect in (
+            (ATTEST_ACTION, "actions/attest@v4", "pinned"),
+            ("if: always() && !cancelled() && steps.seal.outcome == 'success'\n"
+             "        uses: actions/attest",
+             "if: steps.gate.outcome == 'success' && !cancelled()\n"
+             "        uses: actions/attest",
+             "bound to seal success"),
+            ("  attestations: write\n", "", "permissions must be exactly"),
+            ("  id-token: write\n", "", "permissions must be exactly"),
+            ("  contents: read\n", "  contents: write\n", "permissions must be exactly"),
+            ('--gate-outcome "$GATE_OUTCOME"', "--gate-outcome success",
+             "seal run must seal"),
+            ("GATE_OUTCOME: ${{ steps.gate.outcome }}", "GATE_OUTCOME: success",
+             "GATE_OUTCOME must be the gate step's outcome"),
+        ):
+            self.assertIn(old, self.text, old)
+            hits = hosted_shape_violations(self._mutated(old, new))
+            self.assertTrue(any(expect in hit for hit in hits), (old, hits))
+
+    def test_mutation_drop_seal_or_statement_upload_is_red(self):
+        seal_start = self.text.index("      # Seals whatever the gate left")
+        seal_end = self.text.index("      - name: Upload setup")
+        hits = hosted_shape_violations(
+            parse_workflow_yaml(self.text[:seal_start] + self.text[seal_end:]))
+        self.assertTrue(any("Seal attempt statement" in hit for hit in hits), hits)
+        up_start = self.text.index("      # The unsigned copy of what the attest step signs")
+        up_end = self.text.index("      # Signs the sealed subjects and predicate")
+        hits = hosted_shape_violations(
+            parse_workflow_yaml(self.text[:up_start] + self.text[up_end:]))
+        self.assertTrue(any("attempt-statement" in hit for hit in hits), hits)
 
     def test_mutation_shell_breakout_inputs_in_run_is_red(self):
         poisoned = self.text.replace(
@@ -549,6 +675,7 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         always_on = 0
         diagnostic = 0
         verified = 0
+        statement = 0
         for step in self.tree["jobs"]["hosted-contained"]["steps"]:
             uses = str(step.get("uses") or "")
             if not uses.startswith("actions/upload-artifact@"):
@@ -562,6 +689,10 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
             elif isinstance(name, str) and "withheld-diagnostic" in name:
                 self.assertEqual(step.get("if"), DIAGNOSTIC_UPLOAD_IF)
                 diagnostic += 1
+            elif isinstance(name, str) and "attempt-statement" in name:
+                # The unsigned statement follows the seal, not the decision.
+                self.assertEqual(step.get("if"), STATEMENT_UPLOAD_IF)
+                statement += 1
             else:
                 # Setup, candidate and rerun stay observable when the gate fails.
                 self.assertEqual(step.get("if"), "always() && !cancelled()")
@@ -569,6 +700,7 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         self.assertEqual(always_on, 3, "setup, candidate and rerun must stay always-on")
         self.assertEqual(verified, 1)
         self.assertEqual(diagnostic, 1, "gate failure must upload the diagnostic package")
+        self.assertEqual(statement, 1, "the sealed statement must be uploaded once")
         gate = self.tree["jobs"]["hosted-contained"]["steps"][3]
         self.assertEqual(gate.get("name"), "Gate hosted publication")
         self.assertNotEqual(gate.get("continue-on-error"), True)
@@ -581,7 +713,7 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
             for step in self.tree["jobs"]["hosted-contained"]["steps"]
             if str(step.get("uses") or "").startswith("actions/upload-artifact@")
         ]
-        self.assertEqual(len(names), 5)
+        self.assertEqual(len(names), 6)
         self.assertEqual(names[0], "setup")
         self.assertEqual(names[1], "effective-envelope")
         self.assertEqual(names[2], "candidate-result")
@@ -590,6 +722,9 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         self.assertIn("withheld-diagnostic", names[4])
         self.assertIn("github.run_id", names[4])
         self.assertIn("github.run_attempt", names[4])
+        self.assertIn("attempt-statement", names[5])
+        self.assertIn("github.run_id", names[5])
+        self.assertIn("github.run_attempt", names[5])
 
     def test_mutation_omit_generic_diagnostic_upload_is_red(self):
         block = (

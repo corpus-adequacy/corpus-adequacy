@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+The external hosted publication workflow now seals each attempt's upload surface into an
+unsigned in-toto Statement v1 and signs it (#187). A `seal` step after the gate, on every gate
+outcome, writes `attempt-statement.v0/` beside the artifacts: `SHA256SUMS` over the setup
+status, candidate result, rerun ledger and exactly the verified collection or the withheld
+diagnostic package; a closed `hosted-attempt-predicate.v0` carrying the five dispatch inputs,
+the run and workflow identity as the runner reports them, and the gate outcome; and the
+statement those two make. A SHA-pinned `actions/attest` step signs them with the workflow's
+Sigstore identity under `id-token: write` and `attestations: write`; `contents` stays read.
+`readback --statement` checks the unsigned copy offline against the downloaded files;
+signature verification is `gh attestation verify`, documented in README, not reimplemented.
+The seal changes no decision, no artifact byte and no execution identity path; the owned rail
+does not seal yet. Not authentication of the candidate author, corpus owner or operator.
+
 The sealed execution identity now binds the candidate-diagnostics module and loads
 only the adapter selected by the code-owned measurement contract. Adapter loading
 happens before candidate effects, so an unavailable selected adapter stops the route
