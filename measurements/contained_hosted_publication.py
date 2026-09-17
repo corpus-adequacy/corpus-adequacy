@@ -56,6 +56,7 @@ import envelope_collection as collection  # noqa: E402
 import effective_envelope  # noqa: E402
 import hosted_packet as packet_delivery  # noqa: E402
 import aee_checker_sealed_run as sealed_run  # noqa: E402
+import aee_checker_sealed_authorize as sealed_authorize  # noqa: E402
 from hosted_rail_contract import LEGACY_RAIL, OWNED_V1_RAIL, require_rail  # noqa: E402
 import hosted_attempt_statement as attempt_statement  # noqa: E402
 from aee_checker_sealed_candidate import (  # noqa: E402
@@ -1417,6 +1418,7 @@ def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
         if collection_decision.get("decision") != "publish":
             raise HostedPublicationError("success_collection_permission")
         rail = _rail_for_operator_profile(setup.get("operator_profile"))
+        check_collection_steps(loaded_collection, rail=rail)
         prepare_sha256 = loaded_collection["index"].get("prepare_sha256")
         for member in loaded_collection["members"]:
             check_envelope_bindings(
@@ -1505,6 +1507,8 @@ def _readback_summary(package) -> dict:
                 "cleanup": member.get("cleanup"),
             })
     result = {
+        "step_attribution": (collection.step_attribution(loaded) if loaded is not None
+                             else "not-carried"),
         "decision": package.get("decision"),
         "collection_state": package.get("collection_state"),
         "attempts": attempts,
@@ -1550,7 +1554,7 @@ def _refuse_collection_at_legacy_path(doc) -> None:
     """The legacy path names a single envelope. A collection document there would be read as one
     by every consumer that predates the collection, so it is refused rather than written."""
     if isinstance(doc, dict) and (
-            doc.get("schema") == collection.COLLECTION_SCHEMA or "members" in doc):
+            doc.get("schema") in collection.COLLECTION_SCHEMAS or "members" in doc):
         raise HostedPublicationError("collection_at_legacy_envelope_path")
 
 
@@ -1666,6 +1670,60 @@ def _collection_refusal_reason(exc) -> str:
     if check in _JSON_INPUT_CHECKS:
         return "json_input"
     return "envelope_collection_corrupt"
+
+
+def expected_step_ids(rail) -> tuple:
+    """The authorized step ids, in order, from the rail's pinned sites (digest-checked)."""
+    rail = require_rail(rail)
+    # The pins live beside the sealed modules that verify them, whatever file this module was
+    # loaded from.
+    pins = Path(sealed_authorize.__file__).resolve().parents[1].joinpath(*rail.pins_source)
+    try:
+        sites = sealed_authorize.load_frozen_sites(pins, contract=rail.measurement)
+        steps = sealed_authorize.required_sequence(sites, contract=rail.measurement)
+    except (sealed_authorize.AuthorizeError, sealed_run.PrepareError, ca.ManifestError,
+            OSError, ValueError) as exc:
+        raise HostedPublicationError("collection_step_contract") from exc
+    return tuple(step["id"] for step in steps)
+
+
+def check_collection_steps(loaded, *, rail) -> None:
+    """A v1 collection's rows must name the authorized steps, in authorized order (#185).
+
+    Skips are allowed (an attempt the engine never made leaves no row); repeats, reorderings,
+    foreign groups, a build step and an unnamed row are not. A v0 index carries no steps and is
+    historical; it is not judged here.
+    """
+    index = loaded.get("index") if type(loaded) is dict else None
+    if type(index) is not dict or index.get("schema") != collection.COLLECTION_SCHEMA_V1:
+        return
+    contract = require_rail(rail).measurement
+    expected = expected_step_ids(rail)
+    controls = {contract.control_id, *contract.inert_control_ids}
+    position = 0
+    for row in loaded.get("ledger") or []:
+        step = row.get("step")
+        if step is None:
+            raise HostedPublicationError("collection_step_absent")
+        if step["group"] != contract.mutation_group:
+            raise HostedPublicationError("collection_step_group")
+        if step["kind"] == "baseline":
+            step_id = "baseline"
+        elif step["kind"] == "control" and step["id"] in controls:
+            step_id = step["id"]
+        elif (step["kind"] == "mutant" and step["id"] not in controls
+              and step["id"] != "baseline"):
+            step_id = step["id"]
+        else:
+            raise HostedPublicationError("collection_step_kind")
+        # The engine runs no control or mutant before its group's baseline, so a non-empty
+        # collection starts with the baseline row.
+        if position == 0 and step_id != expected[0]:
+            raise HostedPublicationError("collection_step_order")
+        try:
+            position = expected.index(step_id, position) + 1
+        except ValueError as exc:
+            raise HostedPublicationError("collection_step_order") from exc
 
 
 def load_envelope_collection(directory, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
@@ -2025,6 +2083,7 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
             **({"rail": rail} if sealed_execute is None else {}),
         )
         loaded = load_envelope_collection(envelope_dest, max_bytes=max_input_bytes)
+        check_collection_steps(loaded, rail=rail)
         envelope = loaded
         # Every member is bound and observed. Checking one would let a hostile sibling ride along
         # behind a benign first record.

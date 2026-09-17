@@ -21,13 +21,13 @@ from sealed_measurement_contract import OWNED_CONTAINED_V1_CONTRACT  # noqa: E40
 
 
 class _Ledger:
-    def register(self):
+    def register(self, *, step=None):
         return 1
 
     def no_envelope(self, _ordinal):
         pass
 
-    def recorded(self, _ordinal, _record):
+    def recorded(self, _ordinal, _record, *, returncode=None):
         pass
 
     def raised(self, _ordinal, _name):

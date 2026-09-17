@@ -10,3 +10,8 @@ SHA-256 `0ac4b193e23cfff205f68bcb51c065d5a4223c05089c5aa222c3cee6a77acb38`.
 It is the historical `corpus-adequacy.hosted-publication.v0` shape, which carries no
 `report_sha256`. The gate no longer writes that shape (#184); the loader keeps reading it so the
 retained r1 and r4 bytes stay checkable.
+
+`effective-envelope/` is the extracted `effective-envelope.zip` asset of the same release: the
+v0 collection index (SHA-256 `b899299ac8f8c85f3acda6f739bfe30dbe11aa62fa1f3f5f12f46d3c9764cb61`)
+and its nine byte-identical members. It is the historical v0 index shape, which carries no step
+attribution; the loader keeps reading it (#185).

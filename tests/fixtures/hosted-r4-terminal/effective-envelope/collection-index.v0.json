@@ -1,0 +1,98 @@
+{
+  "attempts": 9,
+  "execution_commit": "1345bac5d5853824a6de00dda9a7b03efd906236",
+  "ledger": [
+    {
+      "ordinal": 0,
+      "state": "recorded"
+    },
+    {
+      "ordinal": 1,
+      "state": "recorded"
+    },
+    {
+      "ordinal": 2,
+      "state": "recorded"
+    },
+    {
+      "ordinal": 3,
+      "state": "recorded"
+    },
+    {
+      "ordinal": 4,
+      "state": "recorded"
+    },
+    {
+      "ordinal": 5,
+      "state": "recorded"
+    },
+    {
+      "ordinal": 6,
+      "state": "recorded"
+    },
+    {
+      "ordinal": 7,
+      "state": "recorded"
+    },
+    {
+      "ordinal": 8,
+      "state": "recorded"
+    }
+  ],
+  "members": [
+    {
+      "ordinal": 0,
+      "relpath": "member-0000.json",
+      "sha256": "5e8552910637481011258594b72dc9d3b4853d42f9713c8072a702b27ba72415"
+    },
+    {
+      "ordinal": 1,
+      "relpath": "member-0001.json",
+      "sha256": "5e8552910637481011258594b72dc9d3b4853d42f9713c8072a702b27ba72415"
+    },
+    {
+      "ordinal": 2,
+      "relpath": "member-0002.json",
+      "sha256": "5e8552910637481011258594b72dc9d3b4853d42f9713c8072a702b27ba72415"
+    },
+    {
+      "ordinal": 3,
+      "relpath": "member-0003.json",
+      "sha256": "5e8552910637481011258594b72dc9d3b4853d42f9713c8072a702b27ba72415"
+    },
+    {
+      "ordinal": 4,
+      "relpath": "member-0004.json",
+      "sha256": "5e8552910637481011258594b72dc9d3b4853d42f9713c8072a702b27ba72415"
+    },
+    {
+      "ordinal": 5,
+      "relpath": "member-0005.json",
+      "sha256": "5e8552910637481011258594b72dc9d3b4853d42f9713c8072a702b27ba72415"
+    },
+    {
+      "ordinal": 6,
+      "relpath": "member-0006.json",
+      "sha256": "5e8552910637481011258594b72dc9d3b4853d42f9713c8072a702b27ba72415"
+    },
+    {
+      "ordinal": 7,
+      "relpath": "member-0007.json",
+      "sha256": "5e8552910637481011258594b72dc9d3b4853d42f9713c8072a702b27ba72415"
+    },
+    {
+      "ordinal": 8,
+      "relpath": "member-0008.json",
+      "sha256": "5e8552910637481011258594b72dc9d3b4853d42f9713c8072a702b27ba72415"
+    }
+  ],
+  "non_claims": [
+    "States that these attempted invocations left these records in one collection run.",
+    "Does not authenticate origin: a digest binds bytes, not who produced them.",
+    "Cannot detect substitution of a byte-identical record from a different run.",
+    "Not a score, not an audit, not a certification, and not publication authorization."
+  ],
+  "prepare_sha256": "09a1ed6636e7e6c7a53614c0e2785f48c72ec5c48e164556cde030b710434d02",
+  "report_sha256": "8b9ec543f891b0a88aaffac9a49230d98b4c6e1d6a09e2cf28c62749e7408c98",
+  "schema": "corpus-adequacy.execution-envelope-collection.v0"
+}

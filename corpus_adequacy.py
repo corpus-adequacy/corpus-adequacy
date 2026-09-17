@@ -272,6 +272,9 @@ _EXECUTABLE_PROFILES = frozenset(
 _DECLARATION_REQUIRED_PROFILES = frozenset({"contained-oci-v1"})
 # The attribute a contained backend declares its profile on.
 BACKEND_PROFILE_ATTRIBUTE = "execution_profile"
+# A backend that sets this attribute to True receives one more keyword per call, `step`, naming
+# what the engine is running (#185). A backend without it is called exactly as before.
+BACKEND_STEP_ATTRIBUTE = "accepts_step"
 _UNDECLARED = object()
 
 
@@ -3849,14 +3852,18 @@ class _ProcessMutationSession:
                  acknowledged: dict, declared_controls: int):
         self.manifest = copy.deepcopy(manifest)
         self.backend = backend
+        # The default local backend never takes a step; only a supplied backend can declare one.
+        self.accepts_step = (backend is not _default_execution_backend
+                             and _backend_accepts_step(backend))
         self.accumulator = accumulator
         self.acknowledged = acknowledged
         self.declared_controls = declared_controls
         self.baselines = {}
 
-    def execute(self, vectors=None, *, rebuild=True, record_selectors=False):
+    def execute(self, vectors=None, *, rebuild=True, record_selectors=False, step):
         execution_manifest = _execution_manifest(self.manifest)
         execution_vectors = copy.deepcopy(vectors)
+        step_kwargs = {"step": dict(step)} if self.accepts_step else {}
         sources = [
             _resolved_contained_source(path, self.manifest["_repo_root"])
             for path in self.manifest["_source_paths"]
@@ -3864,7 +3871,7 @@ class _ProcessMutationSession:
         source_guard = _SourceGuard(sources, repo_root=None)
         try:
             result = _snapshot_process_execution(self.backend(
-                execution_manifest, execution_vectors, rebuild=rebuild))
+                execution_manifest, execution_vectors, rebuild=rebuild, **step_kwargs))
             changed = source_guard.verify_clean()
             if changed:
                 raise ManifestError(
@@ -3880,6 +3887,24 @@ class _ProcessMutationSession:
                 trusted_seen.setdefault(selector, set()).update(
                     result.selector_keys_seen.get(selector, set()))
         return result
+
+
+def _backend_accepts_step(backend) -> bool:
+    """True only for an explicit boolean True; any other declared value is refused uncalled."""
+    declared = getattr(backend, BACKEND_STEP_ATTRIBUTE, _UNDECLARED)
+    if declared is _UNDECLARED:
+        return False
+    if declared is not True:
+        raise ManifestError(
+            "execution backend declares %s=%r; only True is accepted, so it is not called"
+            % (BACKEND_STEP_ATTRIBUTE, declared if isinstance(declared, (bool, str, int))
+               else type(declared).__name__))
+    return True
+
+
+def _step(kind: str, group=None, mutation_id=None) -> dict:
+    """The engine's own name for one backend call: no label text, path or host value."""
+    return {"kind": kind, "group": group, "id": mutation_id}
 
 
 def _finalize_process_tally(tally: dict, m: dict, acknowledged: dict,
@@ -3996,7 +4021,8 @@ def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) 
     mutated = original.replace(mut["anchor"], mut["replacement"], 1)
     target.write_text(mutated, encoding="utf-8")
     try:
-        execution = session.execute(vectors, rebuild=True)
+        execution = session.execute(vectors, rebuild=True, step=_step(
+            "control" if mut.get("control") else "mutant", group, mut.get("id")))
         out = execution.outcomes
         out_diag = execution.diagnostics
         raised = execution.raised
@@ -4231,6 +4257,9 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
     if m["runner"] == "batch" and m["group_key"] is None:
         m["group_key"] = "_g"
     backend = execution_backend or _default_execution_backend
+    # Judged before the lock and before any call, like the profile declaration.
+    if backend is not _default_execution_backend:
+        _backend_accepts_step(backend)
     accumulator = _ProcessReportAccumulator()
     tally = accumulator.state
 
@@ -4284,7 +4313,7 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
     ordered_mutants = ordered_declared_mutants(m["mutants"], mutation_order)
     try:
         if separate_build_phase:
-            prepared = session.execute(None, rebuild=True)
+            prepared = session.execute(None, rebuild=True, step=_step("build"))
             if not prepared.built:
                 raise ManifestError(
                     "the UNMUTATED tree does not build: %s" % prepared.detail)
@@ -4295,7 +4324,8 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
                 tally["failures"].append("%s: no vectors, so its mutants cannot be scored" % group)
                 continue
             baseline = session.execute(
-                vectors, rebuild=not separate_build_phase, record_selectors=True)
+                vectors, rebuild=not separate_build_phase, record_selectors=True,
+                step=_step("baseline", group))
             if not baseline.built:
                 tally["failures"].append("%s: the UNMUTATED binary failed (%s) on %s"
                                          % (group, baseline.detail, ["<build>"]))

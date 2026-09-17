@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+The envelope collection now attributes every attempt to the step that ran (#185). Its index is
+`corpus-adequacy.execution-envelope-collection.v1`: each ledger row carries `step` (the engine's
+`{kind, group, id}` for that backend call), `returncode` (the candidate return code the runtime
+observed, null unless recorded), the collection's `run_nonce`, and `previous_member_sha256`, the
+digest of the preceding recorded member, which the loader recomputes. Member bytes do not change,
+and v0 indexes (including the retained r4 collection, now a fixture) stay readable without
+attribution. The engine passes `step` only to a backend that declares `accepts_step = True`; any
+other declared value is refused before the first call, and undeclared backends are called as
+before. The sealed runtime declares it. On the publish path the hosted gate and readback require
+a v1 collection to name the authorized steps of its rail in authorized order, starting with the
+baseline (skips allowed; repeats, reordering, foreign groups, build steps and unnamed rows
+refused); a failure is a named post-execute refusal. `readback` prints `step_attribution`, or
+`not-carried` for a v0 index. `corpus_adequacy.py`, `envelope_collection.py` and the sealed
+runtime are inside the sealed execution identity, so any later hosted measurement on either rail
+needs a fresh PREPARE. `report.v0` bytes and frozen fixture digests do not move. The run nonce
+names the index, not its members; a byte-identical member remains substitutable.
+
 The repository-owned `contained-oci-v1` rail now publishes its report (#186). On a publish
 decision the gate writes `report.v0.json`, exactly `encode_report_v0(report)`, after checking
 that the bytes round-trip canonically and hash to the digest the collection index and the

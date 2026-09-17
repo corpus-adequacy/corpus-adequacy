@@ -13,18 +13,28 @@ Contract:
 - no summary record exists: a folded artifact would validate on its own and become an alternative
   to the members, so a deletion would stop being visible;
 - an index digest binds bytes. It does not authenticate origin and cannot detect a byte-identical
-  record from another run.
+  record from another run;
+- index v1 (#185) attributes each ledger row to the step the engine ran (`step`), the candidate
+  return code it observed (`returncode`), one per-collection `run_nonce`, and the digest of the
+  preceding recorded member (`previous_member_sha256`), which the loader recomputes. Member bytes
+  are unchanged; the attribution lives in the index only. v0 indexes stay readable as they are.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import re
+import secrets
 from pathlib import Path
 
 import corpus_adequacy as ca
 import effective_envelope as envelope
 
-COLLECTION_SCHEMA = "corpus-adequacy.execution-envelope-collection.v0"
+COLLECTION_SCHEMA_V0 = "corpus-adequacy.execution-envelope-collection.v0"
+COLLECTION_SCHEMA_V1 = "corpus-adequacy.execution-envelope-collection.v1"
+# What the writer emits. Readers accept both; v0 is historical bytes (r1, r4, r11).
+COLLECTION_SCHEMA = COLLECTION_SCHEMA_V1
+COLLECTION_SCHEMAS = (COLLECTION_SCHEMA_V0, COLLECTION_SCHEMA_V1)
 INDEX_FILENAME = "collection-index.v0.json"
 MEMBER_TEMPLATE = "member-%04d.json"
 
@@ -42,12 +52,29 @@ LEDGER_STATES = (RECORDED, RAISED, NO_ENVELOPE)
 
 INDEX_KEYS = ("attempts", "execution_commit", "ledger", "members", "non_claims",
               "prepare_sha256", "report_sha256", "schema")
+INDEX_KEYS_V1 = INDEX_KEYS + ("run_nonce",)
+ROW_KEYS_V1 = ("ordinal", "state", "step", "returncode", "run_nonce",
+               "previous_member_sha256")
+ROW_KEYS_V1_RAISED = ROW_KEYS_V1 + ("exception_type",)
+# The engine's own step vocabulary. `id` is the manifest mutation id when the manifest declares
+# one; `group` is the manifest group. No label text, path or host value is carried.
+STEP_KEYS = ("kind", "group", "id")
+STEP_KINDS = ("build", "baseline", "control", "mutant")
+MAX_STEP_TEXT = 128
+# A candidate return code is a process exit status as the runtime normalized it.
+RETURNCODE_BOUND = 2 ** 31
+_HEX32 = re.compile(r"^[0-9a-f]{32}$")
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 NON_CLAIMS = (
     "States that these attempted invocations left these records in one collection run.",
     "Does not authenticate origin: a digest binds bytes, not who produced them.",
     "Cannot detect substitution of a byte-identical record from a different run.",
     "Not a score, not an audit, not a certification, and not publication authorization.",
+)
+NON_CLAIMS_V1 = NON_CLAIMS + (
+    "Step attribution is the engine's own record of what it ran; the run nonce names this "
+    "index, not its members, so a byte-identical member remains substitutable.",
 )
 
 
@@ -85,6 +112,35 @@ def _encode_index(doc: dict) -> bytes:
     return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
+def require_step(step):
+    """None, or the engine's closed step object. Refused before the invocation it names."""
+    if step is None:
+        return None
+    if type(step) is not dict or tuple(sorted(step)) != tuple(sorted(STEP_KEYS)):
+        raise CollectionError("collection step shape")
+    if step["kind"] not in STEP_KINDS:
+        raise CollectionError("collection step kind")
+    for key in ("group", "id"):
+        value = step[key]
+        if value is not None and (
+                type(value) is not str or not value or len(value) > MAX_STEP_TEXT
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
+            raise CollectionError("collection step %s" % key)
+    if step["kind"] in ("control", "mutant") and step["group"] is None:
+        raise CollectionError("collection step group")
+    if step["kind"] in ("build", "baseline") and step["id"] is not None:
+        raise CollectionError("collection step id")
+    return {key: step[key] for key in STEP_KEYS}
+
+
+def require_returncode(value):
+    if value is None:
+        return None
+    if type(value) is not int or not -RETURNCODE_BOUND <= value < RETURNCODE_BOUND:
+        raise CollectionError("collection returncode")
+    return value
+
+
 class Ledger:
     """Attempts registered BEFORE the candidate call, so a raised one still counts.
 
@@ -94,23 +150,34 @@ class Ledger:
 
     def __init__(self, *, max_members: int = MAX_COLLECTION_MEMBERS,
                  max_member_bytes: int = MAX_MEMBER_BYTES,
-                 max_member_total_bytes: int = MAX_MEMBER_TOTAL_BYTES) -> None:
+                 max_member_total_bytes: int = MAX_MEMBER_TOTAL_BYTES,
+                 run_nonce: str | None = None) -> None:
         self.max_members = int(max_members)
         self.max_member_bytes = int(max_member_bytes)
         self.max_member_total_bytes = int(max_member_total_bytes)
+        # One value per collection, drawn here so a caller cannot reuse another run's by
+        # accident; a fixed value is accepted only when a caller passes one explicitly.
+        self.run_nonce = secrets.token_hex(16) if run_nonce is None else run_nonce
+        if type(self.run_nonce) is not str or not _HEX32.match(self.run_nonce):
+            raise CollectionError("collection run nonce")
         self._states: list[str | None] = []
         self._records: dict[int, dict] = {}
+        self._steps: list[dict | None] = []
+        self._returncodes: dict[int, int | None] = {}
 
 
-    def register(self) -> int:
+    def register(self, *, step=None) -> int:
         """Admission gate, before the invocation: the count cap, the only bound knowable here.
 
         Bytes cannot be judged yet -- the record does not exist, and its written size is not
-        fixed until the report digest is bound. That gate lives in `write_collection`.
+        fixed until the report digest is bound. That gate lives in `write_collection`. The step
+        the engine says it is about to run is judged here, before the call it names.
         """
+        step = require_step(step)
         if len(self._states) >= self.max_members:
             raise CollectionError("collection member count ceiling")
         self._states.append(None)
+        self._steps.append(step)
         return len(self._states) - 1
 
     def _settle(self, ordinal: int, state: str) -> None:
@@ -120,11 +187,13 @@ class Ledger:
             raise CollectionError("ordinal already settled")
         self._states[ordinal] = state
 
-    def recorded(self, ordinal: int, record: dict) -> None:
+    def recorded(self, ordinal: int, record: dict, *, returncode=None) -> None:
         """Settle the attempt. Size is NOT judged here: the bytes that get written are the
         report-bound encoding, which does not exist until the report digest is known."""
+        returncode = require_returncode(returncode)
         self._settle(ordinal, RECORDED)
         self._records[ordinal] = record
+        self._returncodes[ordinal] = returncode
 
     def raised(self, ordinal: int, exception_type: str) -> None:
         """Type name only. An exception message can carry host content."""
@@ -145,6 +214,12 @@ class Ledger:
         for ordinal, state in enumerate(self._states):
             yield ordinal, (state or NO_ENVELOPE), self._records.get(ordinal)
 
+    def step(self, ordinal: int):
+        return self._steps[ordinal]
+
+    def returncode(self, ordinal: int):
+        return self._returncodes.get(ordinal)
+
 
 def write_collection(ledger: Ledger, dest, *, report_sha256) -> Path:
     """Encode, bound, then write. A refusal happens before its write, so earlier members survive."""
@@ -156,8 +231,16 @@ def write_collection(ledger: Ledger, dest, *, report_sha256) -> Path:
     total = 0
     prepare_sha256 = None
     execution_commit = None
+    previous = None
     for ordinal, state, payload in ledger.entries():
-        row = {"ordinal": ordinal, "state": state}
+        row = {
+            "ordinal": ordinal,
+            "state": state,
+            "step": ledger.step(ordinal),
+            "returncode": ledger.returncode(ordinal) if state == RECORDED else None,
+            "run_nonce": ledger.run_nonce,
+            "previous_member_sha256": previous,
+        }
         if state == RAISED:
             row["exception_type"] = payload["exception_type"]
         ledger_rows.append(row)
@@ -185,6 +268,7 @@ def write_collection(ledger: Ledger, dest, *, report_sha256) -> Path:
         total += len(raw)
         members.append({"ordinal": ordinal, "relpath": relpath,
                         "sha256": member_digest(raw)})
+        previous = member_digest(raw)
         prepare_sha256 = prepare_sha256 or payload["prepare_sha256"]
         execution_commit = execution_commit or payload["execution_commit"]
     index = {
@@ -192,10 +276,11 @@ def write_collection(ledger: Ledger, dest, *, report_sha256) -> Path:
         "execution_commit": execution_commit,
         "ledger": ledger_rows,
         "members": members,
-        "non_claims": list(NON_CLAIMS),
+        "non_claims": list(NON_CLAIMS_V1),
         "prepare_sha256": prepare_sha256,
         "report_sha256": report_sha256,
-        "schema": COLLECTION_SCHEMA,
+        "run_nonce": ledger.run_nonce,
+        "schema": COLLECTION_SCHEMA_V1,
     }
     raw_index = _encode_index(index)
     # Staged: the index is bounded before any member is written, so an index-size refusal
@@ -232,9 +317,15 @@ def load_collection(dest, *, max_index_bytes: int = MAX_INDEX_BYTES,
     # bare ValueError, and a narrower clause lets it escape unmapped -- the #116 F1 defect.
     except (UnicodeError, ValueError) as exc:
         raise CollectionError("collection index json") from exc
-    _require_exact(index, INDEX_KEYS, "collection index")
-    if index["schema"] != COLLECTION_SCHEMA:
+    if type(index) is not dict or index.get("schema") not in COLLECTION_SCHEMAS:
         raise CollectionError("collection index schema")
+    is_v1 = index["schema"] == COLLECTION_SCHEMA_V1
+    _require_exact(index, INDEX_KEYS_V1 if is_v1 else INDEX_KEYS, "collection index")
+    if is_v1:
+        if index["non_claims"] != list(NON_CLAIMS_V1):
+            raise CollectionError("collection index non-claims")
+        if type(index["run_nonce"]) is not str or not _HEX32.match(index["run_nonce"]):
+            raise CollectionError("collection run nonce")
 
     rows = index["ledger"]
     if type(rows) is not list or len(rows) != index["attempts"]:
@@ -247,6 +338,16 @@ def load_collection(dest, *, max_index_bytes: int = MAX_INDEX_BYTES,
             raise CollectionError("collection ledger ordinals are not contiguous")
         if row.get("state") not in LEDGER_STATES:
             raise CollectionError("collection ledger state")
+        if is_v1:
+            _require_exact(row, ROW_KEYS_V1_RAISED if row["state"] == RAISED else ROW_KEYS_V1,
+                           "collection ledger row")
+            require_step(row["step"])
+            if row["run_nonce"] != index["run_nonce"]:
+                raise CollectionError("collection run nonce mismatch")
+            if row["state"] == RECORDED:
+                require_returncode(row["returncode"])
+            elif row["returncode"] is not None:
+                raise CollectionError("collection returncode")
 
     recorded = [row["ordinal"] for row in rows if row["state"] == RECORDED]
     entries = index["members"]
@@ -264,6 +365,7 @@ def load_collection(dest, *, max_index_bytes: int = MAX_INDEX_BYTES,
 
     referenced = set()
     members = []
+    digests = {}
     for entry in entries:
         relpath = entry.get("relpath")
         if relpath != MEMBER_TEMPLATE % entry["ordinal"]:
@@ -301,11 +403,29 @@ def load_collection(dest, *, max_index_bytes: int = MAX_INDEX_BYTES,
             raise CollectionError("collection member report digest")
         referenced.add(relpath)
         members.append(doc)
+        digests[entry["ordinal"]] = entry["sha256"]
 
     on_disk = {p.name for p in dest.iterdir() if p.name != INDEX_FILENAME}
     if on_disk - referenced:
         raise CollectionError("collection carries an unreferenced member")
+    if is_v1:
+        # Recomputed, not trusted: each row names the digest of the last recorded member before it.
+        previous = None
+        for row in rows:
+            if row["previous_member_sha256"] != previous:
+                raise CollectionError("collection chain")
+            if row["state"] == RECORDED:
+                previous = digests[row["ordinal"]]
     return {"index": index, "ledger": rows, "members": members}
+
+
+def step_attribution(loaded: dict) -> list:
+    """Per-row `{ordinal, state, step, returncode}` for readers; `not-carried` on a v0 index."""
+    index = loaded.get("index") or {}
+    if index.get("schema") != COLLECTION_SCHEMA_V1:
+        return "not-carried"
+    return [{"ordinal": row["ordinal"], "state": row["state"], "step": row["step"],
+             "returncode": row["returncode"]} for row in loaded.get("ledger", [])]
 
 
 def withheld_reason(loaded: dict):

@@ -47,7 +47,7 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
     # must be recorded is refused before it exists, not at its first call.
     candidate.require_recording(execution_profile=execution_profile, binding=binding)
 
-    def backend(execution_manifest: dict, vectors, *, rebuild=True):
+    def backend(execution_manifest: dict, vectors, *, rebuild=True, step=None):
         if vectors is None or rebuild is not True:
             raise ca.ManifestError(
                 "sealed runtime requires one combined build-and-run execution")
@@ -61,7 +61,9 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
         }
         # Registered before the call, never in the sink: the sink runs after return and cannot
         # observe an invocation that raised.
-        ordinal = None if ledger is None else ledger.register()
+        # The step is the engine's own record of what this call is (#185); judged here, before
+        # the call it names.
+        ordinal = None if ledger is None else ledger.register(step=step)
         try:
             # The profile this backend declares, read at call time: the value the engine
             # compared with the one it resolved is the value admission runs under, even if
@@ -90,7 +92,8 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
             if record is None:
                 ledger.no_envelope(ordinal)
             else:
-                ledger.recorded(ordinal, record)
+                ledger.recorded(ordinal, record,
+                                returncode=getattr(completed, "returncode", None))
         if envelope_sink is not None and record is not None:
             envelope_sink(record)
         outcome, diagnostic, kind = ca.child_outcome(execution_manifest, completed)
@@ -113,4 +116,5 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
             {"<batch>": outcome}, {"<batch>": diagnostic}, {}, seen)
 
     setattr(backend, ca.BACKEND_PROFILE_ATTRIBUTE, execution_profile)
+    setattr(backend, ca.BACKEND_STEP_ATTRIBUTE, True)
     return backend
