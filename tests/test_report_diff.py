@@ -915,10 +915,11 @@ class ReportDiffDocs(unittest.TestCase):
 
     def test_changelog_records_the_projection(self):
         text = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = text.split("## 0.2.0", 1)[0]
-        self.assertIn("#122", unreleased)
-        self.assertIn("corpus-adequacy.diff.v0", unreleased)
-        self.assertIn("--diff", unreleased)
+        # Pinned to the 0.3.0 entry the projection was released in.
+        release = text.split("## 0.3.0 — ", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("#122", release)
+        self.assertIn("corpus-adequacy.diff.v0", release)
+        self.assertIn("--diff", release)
 
 
 if __name__ == "__main__":

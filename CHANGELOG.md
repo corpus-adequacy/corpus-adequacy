@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-09-17
+
+Source-only release: the first released revision that names the hosted route. It
+identifies source, not a run. The owned `contained-oci-v1` rail (#102, r11) and the
+external `aee-contained-v0` rail (#107, r4: publish, no score) each have one retained
+terminal run, both measured at the earlier revision `1345bac5d5853824a6de00dda9a7b03efd906236`,
+which this release includes as history; neither run is an adequacy score. From this
+release on, the external rail's published candidate result is the v1 shape (#184), and any
+later hosted run needs a fresh PREPARE because the runner revision moves.
+
 The external hosted rail now publishes a reduced candidate result (#184),
 `corpus-adequacy.aee-contained-v0.candidate-result.v1`: the historical keys plus
 `report_sha256`, `control_status`, `unproved` and per-ordinal `outcomes`. It carries no
