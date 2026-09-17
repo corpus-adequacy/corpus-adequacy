@@ -335,11 +335,13 @@ class GateIntegration(unittest.TestCase):
             self.assertEqual(proc.returncode, 2, proc.stdout)
             self.assertIn("hosted publication refused: diagnostic_artifacts", proc.stderr)
             target.write_bytes(original)
+            # Bytes, not text: on Windows a text-mode write would turn the newlines into
+            # CRLF and the refusal would be subject_name instead of the re-stamped digest.
             sums = out / statement.STATEMENT_DIRNAME / statement.SUMS_FILENAME
-            text = sums.read_text()
-            line = next(l for l in text.splitlines() if l.endswith(hosted.CANDIDATE_RESULT_FILENAME))
+            text = sums.read_bytes().decode("utf-8")
+            line = next(l for l in text.split("\n") if l.endswith(hosted.CANDIDATE_RESULT_FILENAME))
             flipped = ("0" if line[0] != "0" else "1") + line[1:]
-            sums.write_text(text.replace(line, flipped, 1))
+            sums.write_bytes(text.replace(line, flipped, 1).encode("utf-8"))
             proc = subprocess.run(cmd, cwd=download, capture_output=True, text=True, check=False)
             self.assertEqual(proc.returncode, 2, proc.stdout)
             self.assertIn("statement:predicate_canonical", proc.stderr)
