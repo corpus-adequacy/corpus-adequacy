@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+Add `docs/threat-model.md` (#102): assets, trusted computing base per route (local,
+external hosted, repository-owned hosted), untrusted inputs, mechanisms, residual risks and change
+control. It defines "limit applied" as what the code verifies (daemon-stored configuration equal
+to the request, no create warning, otherwise `unverified` and withheld) and points kernel-interface
+read-back to #197. README and SECURITY.md link to it, and a test binds its named reasons,
+profiles and token permissions to the code. No behaviour changes.
+
 The repository-owned `contained-oci-v1` rail now seals and attests its attempts as the external
 rail does (#187). Its publication workflow runs `owned_contained_v1_hosted.py seal` after the gate
 on every gate outcome, uploads `attempt-statement.v0/` under an owned name, and signs it with the
