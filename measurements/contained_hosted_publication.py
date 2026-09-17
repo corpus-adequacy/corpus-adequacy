@@ -174,6 +174,12 @@ OWNED_CANDIDATE_KEYS = (
     "report_sha256", "control_status", "unproved", "adequate", "outcomes",
     "non_claims",
 )
+# The external rail's reduced projection (#184). The external corpus owner's consent covers no
+# score and no per-mutant result, so `adequate`, the verdict counts and per-site verdicts are
+# absent by construction; `control_status`, `unproved` and per-ordinal completion are the facts
+# a reader needs to see that baseline and control held without being shown a score.
+EXTERNAL_CANDIDATE_KEYS = tuple(key for key in OWNED_CANDIDATE_KEYS if key != "adequate")
+CONTROL_STATUSES = ("killed", "survived", "moved", "error", "absent-or-invalid")
 RERUN_START_KEYS = (
     "kind", "bindings", "dispatch_bindings", "workflow_identity", "run_id",
     "run_attempt",
@@ -1092,12 +1098,58 @@ def _load_candidate_result(path, *, max_bytes: int = MAX_INPUT_BYTES):
         return doc, raw
     if kind != "hosted-candidate-result":
         raise HostedPublicationError("candidate_result")
-    if doc.get("schema") == HOSTED_SCHEMA:
+    schema = doc.get("schema")
+    if schema == HOSTED_SCHEMA:
+        # Historical external bytes (r1, r4) and nothing newer: the gate no longer writes it.
         _require_exact(doc, LEGACY_CANDIDATE_KEYS, "candidate_result")
         return doc, raw
+    if schema == candidate_result_schema(LEGACY_RAIL):
+        _require_exact(doc, EXTERNAL_CANDIDATE_KEYS, "candidate_result")
+        _require_projection_facts(doc)
+        return doc, raw
+    if schema != candidate_result_schema(OWNED_V1_RAIL):
+        raise HostedPublicationError("candidate_result")
     _require_exact(doc, OWNED_CANDIDATE_KEYS, "candidate_result")
     _require_sha256(doc.get("report_sha256"), "report_sha256")
     return doc, raw
+
+
+def _require_projection_facts(doc) -> None:
+    """The closed values a reduced projection may carry; nothing score-shaped survives this."""
+    _require_sha256(doc.get("report_sha256"), "report_sha256")
+    if doc.get("decision") not in ("publish", "withhold"):
+        raise HostedPublicationError("candidate_result")
+    if doc.get("score_status") != "none":
+        raise HostedPublicationError("candidate_result")
+    if doc.get("control_status") not in CONTROL_STATUSES:
+        raise HostedPublicationError("candidate_result")
+    unproved = doc.get("unproved")
+    if type(unproved) is not int or unproved < 0:
+        raise HostedPublicationError("candidate_result")
+    outcomes = doc.get("outcomes")
+    if type(outcomes) is not list:
+        raise HostedPublicationError("candidate_outcome")
+    for position, row in enumerate(outcomes):
+        if (type(row) is not dict
+                or tuple(sorted(row)) != ("candidate_outcome", "ordinal")
+                or type(row["ordinal"]) is not int or row["ordinal"] < 0
+                or row["candidate_outcome"] not in effective_envelope.CANDIDATE_OUTCOMES):
+            raise HostedPublicationError("candidate_outcome")
+        if position and row["ordinal"] <= outcomes[position - 1]["ordinal"]:
+            raise HostedPublicationError("candidate_outcome")
+
+
+def _require_outcomes_match_collection(candidate, loaded_collection) -> None:
+    """A carried per-ordinal outcome list must be exactly the collection's members."""
+    if "outcomes" not in candidate:
+        return
+    entries = loaded_collection["index"].get("members") or []
+    members = loaded_collection.get("members") or []
+    observed = [{"ordinal": entry.get("ordinal"),
+                 "candidate_outcome": member.get("candidate_outcome")}
+                for entry, member in zip(entries, members)]
+    if len(entries) != len(members) or candidate["outcomes"] != observed:
+        raise HostedPublicationError("candidate_outcome")
 
 
 def load_candidate_result(path, *, max_bytes: int = MAX_INPUT_BYTES) -> dict:
@@ -1371,6 +1423,8 @@ def load_hosted_attempt_artifacts(*, setup_path, candidate_path, rerun_path,
         claimed = loaded_collection["index"].get("report_sha256")
         if carried is not None and carried != claimed:
             raise HostedPublicationError("report_sha256")
+        if candidate.get("schema") == candidate_result_schema(LEGACY_RAIL):
+            _require_outcomes_match_collection(candidate, loaded_collection)
         projection = {
             "decision": "publish",
             "collection_state": COLLECTION_PRESENT,
@@ -1688,8 +1742,17 @@ def default_sealed_execute(*, authorize_path, prepare_path, pins_dir, root,
     )
 
 
+def candidate_result_schema(rail) -> str:
+    """The one spelling of a rail's v1 candidate-result schema."""
+    return "corpus-adequacy.%s.candidate-result.v1" % require_rail(rail).name
+
+
 def safe_candidate_projection(report, loaded, *, bindings, rail=LEGACY_RAIL) -> dict:
-    """Publish only run validity and declared candidate outcomes; never raw host observations."""
+    """Publish only run validity and declared candidate outcomes; never raw host observations.
+
+    On the external rail the projection is reduced (`EXTERNAL_CANDIDATE_KEYS`): no `adequate`,
+    and its `decision` is only a placeholder that the gate replaces with the envelope decision.
+    """
     rail = require_rail(rail)
     if type(report) is not dict:
         raise HostedPublicationError("candidate_report")
@@ -1729,8 +1792,8 @@ def safe_candidate_projection(report, loaded, *, bindings, rail=LEGACY_RAIL) -> 
                          "candidate_outcome": member["candidate_outcome"]})
     publishable = (report["control_status"] == "killed"
                    and report["unproved"] == 0 and report["adequate"] is True)
-    return {
-        "schema": "corpus-adequacy.%s.candidate-result.v1" % rail.name,
+    result = {
+        "schema": candidate_result_schema(rail),
         "kind": "hosted-candidate-result",
         "decision": "publish" if publishable else "withhold",
         "score_status": "none",
@@ -1743,6 +1806,10 @@ def safe_candidate_projection(report, loaded, *, bindings, rail=LEGACY_RAIL) -> 
         "outcomes": outcomes,
         "non_claims": list(NON_CLAIMS),
     }
+    if rail is LEGACY_RAIL:
+        del result["adequate"]
+        result["decision"] = "withhold"
+    return result
 
 
 def _record_cleanup_failure(rerun_log, primary_reason, cleanup_exc, identity, bindings) -> None:
@@ -2003,6 +2070,29 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     # applies it universally, so a later member cannot rescue an earlier one.
     decision = collection_publication_decision(envelope, setup_status=setup_status)
     safe_projection = None
+    if rail is LEGACY_RAIL and envelope is not None and decision["decision"] != "unavailable":
+        # The external rail publishes only with a bound report (#184). No report on a publish
+        # decision, or a report that does not bind to the collection, is a named post-execute
+        # refusal, never the historical unbound document. A withheld run without a report keeps
+        # its void result: it publishes nothing either way.
+        try:
+            if report is None and decision["decision"] == "publish":
+                raise HostedPublicationError("candidate_report_absent")
+            if report is not None:
+                safe_projection = safe_candidate_projection(
+                    report, envelope, bindings=bindings, rail=rail)
+                safe_projection["decision"] = (
+                    "publish" if decision["decision"] == "publish" else "withhold")
+        except HostedPublicationError as exc:
+            try:
+                materialize_post_execute_refusal(
+                    out=out, reason=str(exc), bindings=bindings, rerun_log=rerun_log,
+                    identity=identity, max_artifact_bytes=max_artifact_bytes,
+                    workflow_identity=workflow_identity, rail=rail)
+            except BaseException as cleanup_exc:
+                _record_cleanup_failure(rerun_log, str(exc), cleanup_exc, identity, bindings)
+                raise exc from cleanup_exc
+            raise
     if rail is not LEGACY_RAIL and envelope is not None:
         safe_projection = safe_candidate_projection(
             report, envelope, bindings=bindings, rail=rail)
@@ -2054,15 +2144,10 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     # to the legacy single-envelope path would be a second, weaker authority for the same
     # facts, so nothing is written there on the success path.
     envelope_doc = None
-    candidate_doc = (safe_projection if safe_projection is not None else {
-        "schema": HOSTED_SCHEMA,
-        "kind": "hosted-candidate-result",
-        "score_status": "none",
-        "decision": "publish",
-        "bindings": dict(bindings),
-        "dispatch_bindings": dict(bindings),
-        "non_claims": list(NON_CLAIMS),
-    })
+    if safe_projection is None:
+        # Unreachable on either rail: both refuse a publish decision without a bound report.
+        raise HostedPublicationError("candidate_report_absent")
+    candidate_doc = safe_projection
     write_separate_artifacts(
         out, setup_doc, envelope_doc, candidate_doc,
         max_bytes=max_artifact_bytes,
@@ -2220,6 +2305,7 @@ def main(argv=None) -> int:
                 expected_run_attempt=args.run_attempt,
             )
             summary = _readback_summary(loaded["projection"])
+            summary["candidate_result_schema"] = loaded["candidate"]["schema"]
             summary["statement"] = "not-provided"
             if args.statement is not None:
                 summary.update(readback_statement(
