@@ -184,6 +184,10 @@ def extract_archive(directory, dest) -> dict:
     root = Path(directory)
     check_archive(root)
     dest = Path(dest)
+    # A linked destination would carry every member to wherever it points; refuse it. Linked
+    # ancestors (a system /tmp) are the reader's own choice and are not judged.
+    if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
+        raise ArchiveError("extract_dest")
     zips = {name: path for name, path in asset_files(root).items() if name.endswith(".zip")}
     if not zips:
         raise ArchiveError("archive_no_zip")
@@ -197,14 +201,28 @@ def extract_archive(directory, dest) -> dict:
                 infos = _safe_members(archive, name)
                 if archive.testzip() is not None:
                     raise ArchiveError("zip_corrupt:%s" % name)
-                plans.append((target, [(info.filename, archive.read(info))
-                                       for info in infos]))
+                members = []
+                actual = 0
+                for info in infos:
+                    data = archive.read(info)
+                    # The declared sizes were bounded above; the bytes actually read are
+                    # bounded here too, so the ceiling does not rest on the header telling the
+                    # truth or on zipfile noticing that it did not.
+                    actual += len(data)
+                    if actual > MAX_EXTRACTED_BYTES:
+                        raise ArchiveError("zip_extracted_bytes:%s" % name)
+                    members.append((info.filename, data))
+                plans.append((target, members))
         except zipfile.BadZipFile as exc:
             raise ArchiveError("zip_corrupt:%s" % name) from exc
     dest.mkdir(parents=True, exist_ok=True)
+    if dest.is_symlink() or not dest.is_dir():
+        raise ArchiveError("extract_dest")
     written = {}
     for target, members in plans:
         target.mkdir()
+        if target.is_symlink() or not target.is_dir():
+            raise ArchiveError("extract_target:%s" % target.name)
         for member_name, data in members:
             (target / member_name).write_bytes(data)
         written[target.name] = sorted(member_name for member_name, _ in members)

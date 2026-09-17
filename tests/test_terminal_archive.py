@@ -253,6 +253,8 @@ class ArchiveRefusals(unittest.TestCase):
             ({"/abs.json": b"x"}, "zip_member_name:setup.zip"),
             ({"dir/setup-status.json": b"x"}, "zip_member_name:setup.zip"),
             ({"..": b"x"}, "zip_member_name:setup.zip"),
+            ({"sub\\setup-status.json": b"x"}, "zip_member_name:setup.zip"),
+            ({"C:setup-status.json": b"x"}, "zip_member_name:setup.zip"),
         ):
             with self.subTest(reason=reason, members=members):
                 self._replace_zip("setup.zip", members)
@@ -277,6 +279,28 @@ class ArchiveRefusals(unittest.TestCase):
         (self.root / "SHA256SUMS").unlink()
         archive.write_sums(self.root)
         self._extract_refused("zip_member_duplicate:setup.zip")
+
+    def test_actual_bytes_are_bounded_even_if_declared_sizes_pass(self):
+        from unittest import mock
+        big = b"0" * (archive.MAX_EXTRACTED_BYTES + 1)
+        self._replace_zip("setup.zip", {"setup-status.json": big})
+        with mock.patch.object(archive, "_safe_members",
+                               side_effect=lambda zf, name: zf.infolist()):
+            self._extract_refused("zip_extracted_bytes:setup.zip")
+
+    def test_a_linked_destination_is_refused_and_nothing_is_written(self):
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        dest = Path(self.tmp.name) / "linked"
+        try:
+            os.symlink(outside, dest, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available on this host")
+        self._refused("extract_dest", lambda: archive.extract_archive(self.root, dest))
+        self.assertEqual(list(outside.iterdir()), [])
+        (Path(self.tmp.name) / "afile").write_bytes(b"x")
+        self._refused("extract_dest", lambda: archive.extract_archive(
+            self.root, Path(self.tmp.name) / "afile"))
 
     def test_not_a_zip(self):
         (self.root / "setup.zip").write_bytes(b"not a zip")
