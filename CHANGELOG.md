@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+The repository-owned `contained-oci-v1` rail now publishes its report (#186). On a publish
+decision the gate writes `report.v0.json`, exactly `encode_report_v0(report)`, after checking
+that the bytes round-trip canonically and hash to the digest the collection index and the
+candidate result carry; a failure is a named post-execute refusal. The owned publication
+workflow uploads it as `owned-contained-v1-report` under the same gate-success condition as the
+verified collection. Withheld, unavailable and refused runs write no report, and a report left
+in a reused out root is removed at gate start (a symlink is removed, not followed; anything
+else at that path refuses as `report_path_occupied` before execution). `readback --report` checks downloaded bytes
+offline: canonical `report.v0`, the collection and candidate digests, and the candidate's
+`control_status`, `unproved` and `adequate`. The external workflow uploads no report, and a test
+pins that. `report.v0` gains no field. The report is first-party evidence about the owned
+fixture only.
+
 ## 0.3.0 — 2026-09-17
 
 Source-only release: the first released revision that names the hosted route. It

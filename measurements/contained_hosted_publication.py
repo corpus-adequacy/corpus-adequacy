@@ -100,6 +100,9 @@ MAX_RERUN_EVIDENCE_BYTES = 262144
 MAX_RERUN_EVIDENCE_ENTRIES = 256
 MAX_RERUN_ENTRY_BYTES = 65536
 CANDIDATE_RESULT_FILENAME = "candidate-result.json"
+# The owned rail's fifth artifact (#186): the canonical report.v0 bytes of a published run. The
+# external rail never writes it; its corpus owner consented to no score and no per-mutant result.
+REPORT_FILENAME = "report.v0.json"
 RERUN_EVIDENCE_FILENAME = "rerun-evidence.jsonl"
 # One name for the bindings file: the packet module's closed file-name set carries it.
 DISPATCH_BINDINGS_FILENAME = packet_delivery.BINDINGS_FILENAME
@@ -1907,6 +1910,13 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     envelope_dest = out / COLLECTION_DIRNAME
+    # A report left by an earlier attempt in a reused out root is not this attempt's evidence.
+    stale_report = out / REPORT_FILENAME
+    if stale_report.is_symlink() or stale_report.is_file():
+        stale_report.unlink()
+    elif stale_report.exists():
+        # Not a file this gate could have written; refuse before anything runs.
+        raise HostedPublicationError("report_path_occupied")
     candidate_diagnostic_rows = []
     if rerun_log is None:
         rerun_log = out / RERUN_EVIDENCE_FILENAME
@@ -2148,10 +2158,28 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         # Unreachable on either rail: both refuse a publish decision without a bound report.
         raise HostedPublicationError("candidate_report_absent")
     candidate_doc = safe_projection
+    report_raw = None
+    if rail is OWNED_V1_RAIL:
+        try:
+            report_raw = owned_report_bytes(
+                report, report_sha256=safe_projection["report_sha256"],
+                max_bytes=max_artifact_bytes)
+        except HostedPublicationError as exc:
+            try:
+                materialize_post_execute_refusal(
+                    out=out, reason=str(exc), bindings=bindings, rerun_log=rerun_log,
+                    identity=identity, max_artifact_bytes=max_artifact_bytes,
+                    workflow_identity=workflow_identity, rail=rail)
+            except BaseException as cleanup_exc:
+                _record_cleanup_failure(rerun_log, str(exc), cleanup_exc, identity, bindings)
+                raise exc from cleanup_exc
+            raise
     write_separate_artifacts(
         out, setup_doc, envelope_doc, candidate_doc,
         max_bytes=max_artifact_bytes,
     )
+    if report_raw is not None:
+        (out / REPORT_FILENAME).write_bytes(report_raw)
     append_rerun_evidence(rerun_log, _terminal_event({
         "kind": RERUN_KIND_TERMINAL,
         "decision": "publish",
@@ -2164,6 +2192,58 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
         "run_attempt": identity["run_attempt"],
     }))
     return decision
+
+
+def owned_report_bytes(report, *, report_sha256, max_bytes=MAX_ARTIFACT_BYTES) -> bytes:
+    """The published report's bytes: canonical, bounded, and the ones the digest names."""
+    try:
+        raw = ca.encode_report_v0(report)
+        reparsed = json.loads(raw.decode("utf-8"))
+        canonical = ca.encode_report_v0(reparsed) == raw
+    except (TypeError, ValueError, ca.ReportEncodingError) as exc:
+        raise HostedPublicationError("report_bytes") from exc
+    if not canonical:
+        raise HostedPublicationError("report_round_trip")
+    if len(raw) > max_bytes:
+        raise HostedPublicationError("max_artifact_bytes")
+    if hashlib.sha256(raw).hexdigest() != report_sha256:
+        raise HostedPublicationError("report_sha256")
+    return raw
+
+
+def load_published_report(path, *, candidate, report_sha256,
+                          max_bytes: int = MAX_INPUT_BYTES) -> dict:
+    """Offline check of downloaded report bytes against the attempt that published them.
+
+    The bytes must be exactly canonical report.v0, hash to the collection's digest and to the
+    digest the candidate result carries, and agree with every run-validity fact the candidate
+    result states. A candidate result that carries no digest has nothing to bind a report to.
+    """
+    if type(candidate) is not dict or candidate.get("report_sha256") is None:
+        raise HostedPublicationError("report_unbound")
+    try:
+        raw = ca.read_bounded_regular_file(Path(path), cap=max_bytes)
+    except ca.ManifestError as exc:
+        raise HostedPublicationError("report_bytes") from exc
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise HostedPublicationError("report_bytes") from exc
+    if type(doc) is not dict or doc.get("schema") != ca.REPORT_SCHEMA:
+        raise HostedPublicationError("report_bytes")
+    try:
+        canonical = ca.encode_report_v0(doc) == raw
+    except (TypeError, ValueError, ca.ReportEncodingError) as exc:
+        raise HostedPublicationError("report_bytes") from exc
+    if not canonical:
+        raise HostedPublicationError("report_round_trip")
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != report_sha256 or digest != candidate["report_sha256"]:
+        raise HostedPublicationError("report_sha256")
+    for key in ("control_status", "unproved", "adequate"):
+        if key in candidate and doc.get(key) != candidate[key]:
+            raise HostedPublicationError("report_fact:%s" % key)
+    return {"report": "verified", "report_sha256": digest}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2202,6 +2282,8 @@ def build_parser() -> argparse.ArgumentParser:
     source = readback.add_mutually_exclusive_group(required=True)
     source.add_argument("--diagnostic")
     source.add_argument("--collection")
+    # Only a published attempt has report bytes to check (#186).
+    readback.add_argument("--report", default=None)
     readback.add_argument("--candidate-revision", required=True)
     readback.add_argument("--runner-revision", required=True)
     readback.add_argument("--image-digest", required=True)
@@ -2306,6 +2388,13 @@ def main(argv=None) -> int:
             )
             summary = _readback_summary(loaded["projection"])
             summary["candidate_result_schema"] = loaded["candidate"]["schema"]
+            summary["report"] = "not-provided"
+            if args.report is not None:
+                if loaded["projection"].get("decision") != "publish":
+                    raise HostedPublicationError("report_not_published")
+                summary.update(load_published_report(
+                    args.report, candidate=loaded["candidate"],
+                    report_sha256=loaded["projection"]["report_sha256"]))
             summary["statement"] = "not-provided"
             if args.statement is not None:
                 summary.update(readback_statement(

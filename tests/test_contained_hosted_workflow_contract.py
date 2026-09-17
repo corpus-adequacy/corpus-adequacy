@@ -544,6 +544,16 @@ class ContainedHostedWorkflowContract(unittest.TestCase):
         checkout = job["steps"][0]
         self.assertIs(checkout["with"]["persist-credentials"], False)
 
+    def test_external_workflow_uploads_no_report(self):
+        # The external corpus owner consented to no score and no per-mutant result (#186).
+        self.assertNotIn(hosted.REPORT_FILENAME, self.text)
+        for step in self.tree["jobs"]["hosted-contained"]["steps"]:
+            self.assertNotIn("report", str((step.get("with") or {}).get("name") or ""))
+        smuggled = self.text.replace(
+            "          path: artifacts/candidate-result.json\n",
+            "          path: artifacts/%s\n" % hosted.REPORT_FILENAME, 1)
+        self.assertNotEqual(parse_workflow_yaml(smuggled), ALLOWED_HOSTED_WORKFLOW)
+
     def test_mutation_unpin_or_unbind_attest_step_is_red(self):
         for old, new, expect in (
             (ATTEST_ACTION, "actions/attest@v4", "pinned"),
