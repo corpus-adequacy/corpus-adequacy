@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+Terminal hosted attempts can now be archived and checked offline (#188).
+`scripts/terminal_archive.py` computes the canonical `SHA256SUMS` over a local directory of
+release assets (`sums`, optionally `--write`), requires the assets to be exactly the listed files
+with those digests (`check`), and unpacks each artifact ZIP flat and bounded into
+`DEST/<zip stem>/` for `readback` (`extract`). It refuses rather than repairs: extra, missing or
+changed assets, a non-canonical checksum file, nested or non-regular entries, and ZIP members that
+traverse, nest, repeat, are links or exceed the 5 MiB artifact ceiling. It never downloads,
+uploads, tags or dispatches, and no workflow runs it. The retained r4 artifacts are now fixtures
+in full, so their `readback` at the current revision is a regression test. README describes the
+owner's archive steps.
+
 The envelope collection now attributes every attempt to the step that ran (#185). Its index is
 `corpus-adequacy.execution-envelope-collection.v1`: each ledger row carries `step` (the engine's
 `{kind, group, id}` for that backend call), `returncode` (the candidate return code the runtime
