@@ -9,6 +9,7 @@ without an execution route.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import sys
 import tempfile
@@ -443,6 +444,21 @@ class TheEngineDrivesTheWrapper(unittest.TestCase):
                 manifest, backend, ca._ProcessReportAccumulator(), {}, 2)
             with self.assertRaises(ca.ManifestError):
                 session.execute(None, rebuild=True, step=ca._step("baseline", GROUP))
+            self.assertEqual(backend.entries, [])
+
+
+class AReaderCanRebindTheRecordToItsRecording(unittest.TestCase):
+    def test_recomputing_the_digest_detects_a_changed_recording(self):
+        """The record carries a digest; the check is the reader's to do, so show it works."""
+        recording = _record(_script())
+        block = execution.execution_block(recording, ["detail-rewording"])
+        self.assertEqual(
+            block["recording_sha256"],
+            "sha256:" + hashlib.sha256(recording.canonical()).hexdigest())
+        tampered = execution.Recording(recording.entries, profile=recording.profile,
+                                       route=recording.route)
+        tampered.entries[1]["outcomes"]["allow"] = {"accepted": False, "reason": "above-maximum"}
+        self.assertNotEqual(block["recording_sha256"], tampered.sha256())
 
 
 class TheModuleStaysOffline(unittest.TestCase):

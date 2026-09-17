@@ -58,7 +58,8 @@ GATE_STATUSES = ("passed", "refused", "not-run")
 DECISIONS = ("refused", "pending-execution")
 DECISIONS_V1 = ("refused", "admitted")
 EXECUTION_KEYS = ("route", "profile", "recording_sha256", "transformations")
-# Only a route that actually ran the candidate can carry an admitted decision.
+# Admitting routes are a label allowlist: a record may claim an admitted decision only under
+# one of these names. It is not evidence that a run happened.
 ADMITTING_ROUTES = ("contained-oci-v1-derived",)
 TERMINAL_STATES = ("admitted", "refused", "no-improvement")
 NON_CLAIMS = (

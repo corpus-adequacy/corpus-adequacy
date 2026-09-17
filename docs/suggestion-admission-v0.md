@@ -98,8 +98,9 @@ The encoder refuses `admitted` unless the record's `route` is one that runs the 
 cannot be encoded.
 
 That is a check on the label the record carries, not proof that a run happened. A hand-built
-record naming a real route encodes. What binds a record to a run is `recording_sha256`, which a
-reader recomputes from the recording; the encoder never sees the recording.
+record naming a real route encodes. What can bind a record to a run is `recording_sha256`: a
+reader holding the recording recomputes it from `Recording.canonical()` and compares. The encoder
+never sees the recording, and nothing here does that comparison for you.
 
 ## Non-claims
 
