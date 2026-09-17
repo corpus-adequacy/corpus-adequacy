@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+Slice B measured and retained (#199, #103). Two local `contained-oci-v1` runs of the same owned
+candidate and corpus, one per selection, at `5918ec4`: the declared selection distinguishes both of
+its mutants (killed 2, survived 0, adequate true) and the independent selection leaves one healthy
+survivor (killed 0, survived 1, adequate false), each with a killed positive control, an unchanged
+inert control and `unproved: 0`. The evidence lives in `measurements/owned-slice-b-5918ec4/`:
+PREPARE, authorize, `report.v0` and the v1 envelope collection per selection, plus
+`class-provenance.v0` and `class-attempt.v0` for the independent one, which reads completed /
+independent / declared. Tests pin every retained byte, both reports, the shared environment, the
+execution identities (which differ only by the manifest path and must still match this checkout),
+the collections' step order and members, and the class artifacts. The facade's class derivation now
+runs where the frozen manifest's `repo_root` resolves. The two denominators are never combined, and
+this is local evidence, not hosted containment proof.
+
 Deterministic admission for proposed test vectors (#200), without any model or provider call.
 `measurements/suggestion_admission.py` judges one proposal for the closed, code-owned selection
 `owned-independent-v0` through named gates: closed proposal shape (a proposal may expect only the
