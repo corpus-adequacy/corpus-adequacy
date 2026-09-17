@@ -74,6 +74,8 @@ class ExternalReducedProjection(unittest.TestCase):
             self.assertEqual(index["report_sha256"], doc["report_sha256"])
             self.assertNotIn(hosted.HOSTED_SCHEMA, (out / hosted.CANDIDATE_RESULT_FILENAME)
                              .read_text(encoding="utf-8"))
+            # The external corpus owner consented to no per-mutant result: no report file (#186).
+            self.assertFalse((out / hosted.REPORT_FILENAME).exists())
 
     def test_decision_stays_envelope_driven_when_the_report_is_not_adequate(self):
         failing = _report(killed=0, survived=1, failures=["survivor"], adequate=False)
@@ -99,6 +101,7 @@ class ExternalReducedProjection(unittest.TestCase):
             self.assertEqual(doc["schema"], EXTERNAL_SCHEMA)
             self.assertEqual(doc["decision"], "withhold")
             self.assertEqual(tuple(sorted(doc)), tuple(sorted(hosted.EXTERNAL_CANDIDATE_KEYS)))
+            self.assertFalse((out / hosted.REPORT_FILENAME).exists())
             manifest = _read(out / hosted.DIAGNOSTIC_DIRNAME / hosted.DIAGNOSTIC_MANIFEST_FILENAME)
             self.assertEqual(manifest["report_sha256"], doc["report_sha256"])
 

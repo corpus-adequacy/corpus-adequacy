@@ -170,6 +170,70 @@ def _non_canonical_encoder():
     return encode
 
 
+class OwnedReportPathOccupied(unittest.TestCase):
+    report = staticmethod(owned_tests.OwnedHostedRailContract.report)
+
+    def test_a_directory_at_the_report_path_is_a_named_refusal(self):
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw)
+            (workspace / "out" / publication.REPORT_FILENAME).mkdir(parents=True)
+            (workspace / "out" / publication.REPORT_FILENAME / "keep").write_bytes(b"x")
+            with self.assertRaises(publication.HostedPublicationError) as ctx:
+                _owned_run(workspace, report=self.report())
+            self.assertEqual(str(ctx.exception), "report_path_occupied")
+            out = workspace / "out"
+            self.assertTrue((out / publication.REPORT_FILENAME / "keep").is_file())
+            self.assertFalse((out / publication.COLLECTION_DIRNAME).exists())
+
+    def test_a_symlink_at_the_report_path_is_removed_not_followed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw)
+            target = workspace / "sentinel"
+            target.write_bytes(b"keep")
+            (workspace / "out").mkdir()
+            (workspace / "out" / publication.REPORT_FILENAME).symlink_to(target)
+            decision, out, _ = _owned_run(workspace, report=self.report())
+            self.assertEqual(decision["decision"], "publish")
+            self.assertEqual(target.read_bytes(), b"keep")
+            self.assertFalse((out / publication.REPORT_FILENAME).is_symlink())
+
+
+class OwnedReportDigestSides(unittest.TestCase):
+    """Both digests are required independently; neither side may vouch for the other."""
+
+    def _report_file(self, raw: str):
+        report = owned_tests.OwnedHostedRailContract.report()
+        data = publication.ca.encode_report_v0(report)
+        path = Path(raw) / publication.REPORT_FILENAME
+        path.write_bytes(data)
+        return path, hashlib.sha256(data).hexdigest(), report
+
+    def test_index_digest_alone_is_not_enough(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path, digest, report = self._report_file(raw)
+            candidate = {"report_sha256": "0" * 64, "control_status": report["control_status"]}
+            with self.assertRaises(publication.HostedPublicationError) as ctx:
+                publication.load_published_report(path, candidate=candidate,
+                                                  report_sha256=digest)
+            self.assertEqual(str(ctx.exception), "report_sha256")
+
+    def test_candidate_digest_alone_is_not_enough(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path, digest, report = self._report_file(raw)
+            candidate = {"report_sha256": digest, "control_status": report["control_status"]}
+            with self.assertRaises(publication.HostedPublicationError) as ctx:
+                publication.load_published_report(path, candidate=candidate,
+                                                  report_sha256="0" * 64)
+            self.assertEqual(str(ctx.exception), "report_sha256")
+
+    def test_both_digests_equal_verifies(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path, digest, report = self._report_file(raw)
+            result = publication.load_published_report(
+                path, candidate={"report_sha256": digest}, report_sha256=digest)
+            self.assertEqual(result, {"report": "verified", "report_sha256": digest})
+
+
 class OwnedReportReadback(unittest.TestCase):
     report = staticmethod(owned_tests.OwnedHostedRailContract.report)
 

@@ -1912,8 +1912,11 @@ def run_gate(*, candidate_revision, runner_revision, image_digest,
     envelope_dest = out / COLLECTION_DIRNAME
     # A report left by an earlier attempt in a reused out root is not this attempt's evidence.
     stale_report = out / REPORT_FILENAME
-    if stale_report.is_symlink() or stale_report.exists():
+    if stale_report.is_symlink() or stale_report.is_file():
         stale_report.unlink()
+    elif stale_report.exists():
+        # Not a file this gate could have written; refuse before anything runs.
+        raise HostedPublicationError("report_path_occupied")
     candidate_diagnostic_rows = []
     if rerun_log is None:
         rerun_log = out / RERUN_EVIDENCE_FILENAME
