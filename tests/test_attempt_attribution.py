@@ -310,6 +310,69 @@ class EngineNamesEachCall(unittest.TestCase):
                 self.assertEqual(calls, [])
 
 
+class RuntimeRecordsStepAndReturncode(unittest.TestCase):
+    """The sealed runtime hands the engine's step and the observed return code to the ledger."""
+
+    def test_recorded_row_carries_both(self):
+        import subprocess
+        from unittest import mock
+        import aee_checker_sealed_runtime as runtime
+        from tests.test_aee_checker_sealed_runtime import _prepare_v1
+
+        completed = subprocess.CompletedProcess(args=[], returncode=75, stdout="", stderr="")
+        completed.unproved_reason = "inner-exit"
+        completed.envelope_record = _valid_record()
+        ledger = collection.Ledger(run_nonce=NONCE)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            materialized = {key: root / key for key in ("corpus", "vendor", "tool")}
+            for path in materialized.values():
+                path.mkdir()
+            (root / "subject").mkdir()
+            manifest = {
+                "_repo_root": root / "subject",
+                "accepted_exit_codes": [0], "unproved_exit_codes": [75],
+                "runner": "batch", "outcome_from": ["rows"],
+                "build": list(runtime.candidate.CONTAINER_BUILD),
+                "entrypoint_command": list(runtime.candidate.CONTAINER_ENTRYPOINT),
+            }
+            with mock.patch.object(
+                    runtime.candidate, "run_sealed_candidate", return_value=completed):
+                backend = runtime.make_sealed_backend(
+                    prepare_raw=_prepare_v1(), materialized=materialized,
+                    execution_profile="contained-oci-v0", ledger=ledger)
+                self.assertIs(getattr(backend, ca.BACKEND_STEP_ATTRIBUTE), True)
+                backend(manifest, [{"vector_id": "<batch>"}], rebuild=True,
+                        step=sealed_step(1))
+        entries = list(ledger.entries())
+        self.assertEqual([state for _, state, _ in entries], [collection.RECORDED])
+        self.assertEqual(ledger.step(0), sealed_step(1))
+        self.assertEqual(ledger.returncode(0), 75)
+
+    def test_a_malformed_step_is_refused_before_the_candidate_runs(self):
+        from unittest import mock
+        import aee_checker_sealed_runtime as runtime
+        from tests.test_aee_checker_sealed_runtime import _prepare_v1
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            materialized = {key: root / key for key in ("corpus", "vendor", "tool")}
+            for path in materialized.values():
+                path.mkdir()
+            (root / "subject").mkdir()
+            manifest = {"_repo_root": root / "subject"}
+            with mock.patch.object(runtime.candidate, "run_sealed_candidate") as run:
+                backend = runtime.make_sealed_backend(
+                    prepare_raw=_prepare_v1(), materialized=materialized,
+                    execution_profile="contained-oci-v0",
+                    ledger=collection.Ledger(run_nonce=NONCE))
+                with self.assertRaises(collection.CollectionError):
+                    backend(manifest, [{"vector_id": "<batch>"}], rebuild=True,
+                            step={"kind": "mutant", "group": "sealed", "id": "x",
+                                  "label": "leak"})
+                run.assert_not_called()
+
+
 class HostedStepOrder(unittest.TestCase):
     def _loaded(self, raw: str, steps):
         rows = [(step, collection.RECORDED, _valid_record(), 0) for step in steps]
@@ -317,19 +380,31 @@ class HostedStepOrder(unittest.TestCase):
         return collection.load_collection(dest)
 
     def test_authorized_order_with_skips_is_accepted_on_both_rails(self):
+        for steps, rail in (
+            ([sealed_step(0), sealed_step(1), sealed_step(4)], LEGACY_RAIL),
+            ([sealed_step(0)], LEGACY_RAIL),
+            ([sealed_step(0), sealed_step(1)], LEGACY_RAIL),
+            ([owned_step(i) for i in range(5)], OWNED_V1_RAIL),
+            ([owned_step(0), owned_step(1)], OWNED_V1_RAIL),
+        ):
+            with self.subTest(steps=steps), tempfile.TemporaryDirectory() as raw:
+                hosted.check_collection_steps(self._loaded(raw, steps), rail=rail)
+
+    def test_a_mutant_needs_every_declared_control_before_it(self):
+        # The owned rail declares a positive and an inert control; the barrier needs both.
         with tempfile.TemporaryDirectory() as raw:
-            hosted.check_collection_steps(
-                self._loaded(raw, [sealed_step(0), sealed_step(1), sealed_step(4)]),
-                rail=LEGACY_RAIL)
-        with tempfile.TemporaryDirectory() as raw:
-            hosted.check_collection_steps(
-                self._loaded(raw, [owned_step(i) for i in range(5)]), rail=OWNED_V1_RAIL)
+            with self.assertRaises(hosted.HostedPublicationError) as ctx:
+                hosted.check_collection_steps(
+                    self._loaded(raw, [owned_step(0), owned_step(1), owned_step(3)]),
+                    rail=OWNED_V1_RAIL)
+            self.assertEqual(str(ctx.exception), "collection_step_order")
 
     def test_refusals(self):
         baseline = sealed_step(0)
         for steps, reason in (
             ([sealed_step(1), sealed_step(0)], "collection_step_order"),
             ([sealed_step(1)], "collection_step_order"),
+            ([baseline, sealed_step(2)], "collection_step_order"),
             ([sealed_step(2), sealed_step(3)], "collection_step_order"),
             ([baseline, sealed_step(2), sealed_step(2)], "collection_step_order"),
             ([dict(baseline, group="owned")], "collection_step_group"),

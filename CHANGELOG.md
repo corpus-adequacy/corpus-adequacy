@@ -12,8 +12,9 @@ attribution. The engine passes `step` only to a backend that declares `accepts_s
 other declared value is refused before the first call, and undeclared backends are called as
 before. The sealed runtime declares it. On the publish path the hosted gate and readback require
 a v1 collection to name the authorized steps of its rail in authorized order, starting with the
-baseline (skips allowed; repeats, reordering, foreign groups, build steps and unnamed rows
-refused); a failure is a named post-execute refusal. `readback` prints `step_attribution`, or
+baseline, with every declared control before any mutant, as the engine's control barrier
+guarantees (other skips allowed; repeats, reordering, foreign groups, build steps and unnamed
+rows refused); a failure is a named post-execute refusal. `readback` prints `step_attribution`, or
 `not-carried` for a v0 index. `corpus_adequacy.py`, `envelope_collection.py` and the sealed
 runtime are inside the sealed execution identity, so any later hosted measurement on either rail
 needs a fresh PREPARE. `report.v0` bytes and frozen fixture digests do not move. The run nonce

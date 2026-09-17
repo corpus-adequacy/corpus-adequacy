@@ -1700,6 +1700,7 @@ def check_collection_steps(loaded, *, rail) -> None:
     contract = require_rail(rail).measurement
     expected = expected_step_ids(rail)
     controls = {contract.control_id, *contract.inert_control_ids}
+    seen_controls = set()
     position = 0
     for row in loaded.get("ledger") or []:
         step = row.get("step")
@@ -1720,6 +1721,12 @@ def check_collection_steps(loaded, *, rail) -> None:
         # collection starts with the baseline row.
         if position == 0 and step_id != expected[0]:
             raise HostedPublicationError("collection_step_order")
+        # The engine's control barrier runs no ordinary mutant until every declared control was
+        # killed, and a control reaches that status only through a call, which registers a row.
+        if step["kind"] == "mutant" and seen_controls != controls:
+            raise HostedPublicationError("collection_step_order")
+        if step["kind"] == "control":
+            seen_controls.add(step_id)
         try:
             position = expected.index(step_id, position) + 1
         except ValueError as exc:
