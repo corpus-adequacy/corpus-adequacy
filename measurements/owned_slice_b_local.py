@@ -51,7 +51,6 @@ SELECTIONS = {
     "declared": OWNED_CONTAINED_V1_CONTRACT,
     "independent": OWNED_INDEPENDENT_V0_CONTRACT,
 }
-REPOSITORY = "corpus-adequacy/corpus-adequacy"
 # The commit that froze the independent selection (Slice A) and its two files.
 SELECTION_COMMIT = "9a73f1c0ab29856443d0a6c6f8fb19bf70989cc8"
 SELECTION_FILES = ("manifest.json", "mutation-bundle.json")
@@ -161,8 +160,20 @@ def _selection_tree_sha256() -> str:
         return "sha256:" + tree_sha256(root)
 
 
+def pinned_repositories(contract) -> dict:
+    """Candidate and corpus repositories as the digest-checked pins name them."""
+    pins = sealed_run.verify_phase_a_frozen(pins_dir(contract), contract=contract)
+    try:
+        return {"candidate": pins["subject"]["repository"],
+                "corpus": pins["corpus"]["repository"],
+                "instrument": pins["instrument"]["repository"]}
+    except (KeyError, TypeError) as exc:
+        raise SliceBError("pins_repository") from exc
+
+
 def build_provenance() -> dict:
     contract = OWNED_INDEPENDENT_V0_CONTRACT
+    repositories = pinned_repositories(contract)
     manifest_raw = _read(pins_dir(contract) / "manifest.json")
     bundle_raw = _read(pins_dir(contract) / "mutation-bundle.json")
     bundle = json.loads(bundle_raw.decode("utf-8"))
@@ -183,9 +194,11 @@ def build_provenance() -> dict:
         "manifest_sha256": _digest(manifest_raw),
         "mutation_bundle_sha256": bundle_digest,
         "candidate_freeze": {
-            "candidate": {"repository": REPOSITORY, "commit": contract.instrument_commit,
+            "candidate": {"repository": repositories["candidate"],
+                          "commit": contract.instrument_commit,
                           "tree_sha256": "sha256:" + contract.subject_tree_sha256},
-            "corpus": {"repository": REPOSITORY, "commit": contract.instrument_commit,
+            "corpus": {"repository": repositories["corpus"],
+                       "commit": contract.instrument_commit,
                        "tree_sha256": "sha256:" + contract.corpus_tree_sha256},
             "observation_declaration_sha256": observation_declaration_sha256(manifest_raw),
         },
@@ -205,7 +218,7 @@ def build_provenance() -> dict:
             "predecessor_event_sha256": None,
         }],
         "origin": {"kind": "authored", "source": {
-            "repository": REPOSITORY, "commit": SELECTION_COMMIT,
+            "repository": repositories["instrument"], "commit": SELECTION_COMMIT,
             "tree_sha256": _selection_tree_sha256()}},
         # The bound observation channel for the one ordinary mutation, not a predicted kill.
         "expected_distinctions": [{
@@ -224,6 +237,9 @@ def manifest_beside_subject():
         root = Path(raw)
         shutil.copyfile(pins_dir(contract) / "manifest.json", root / "manifest.json")
         shutil.copytree(ROOT / contract.subject_subdir, root / "subject")
+        # The copy is trusted only if it is the pinned candidate tree, not merely the checkout.
+        if tree_sha256(root / "subject") != contract.subject_tree_sha256:
+            raise SliceBError("subject_tree")
         yield root / "manifest.json"
 
 

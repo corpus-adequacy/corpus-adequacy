@@ -251,6 +251,29 @@ class Facade(unittest.TestCase):
                 slice_b.derive_class(Path(raw))
             self.assertEqual(slice_b.main(["run", "independent", "--out", raw]), 2)
 
+    def test_identity_strings_are_pinned(self):
+        self.assertEqual(slice_b.CLASS_ID, "owned-independent-v0")
+        self.assertEqual(slice_b.ATTEMPT_ID, "owned-independent-v0-slice-b-01")
+        self.assertEqual(slice_b.SELECTION_COMMIT, "9a73f1c0ab29856443d0a6c6f8fb19bf70989cc8")
+        doc = slice_b.build_provenance()
+        pins = json.loads((INDEPENDENT_PINS / "pins.json").read_text())
+        self.assertEqual(doc["candidate_freeze"]["candidate"]["repository"],
+                         pins["subject"]["repository"])
+        self.assertEqual(doc["candidate_freeze"]["corpus"]["repository"],
+                         pins["corpus"]["repository"])
+        self.assertEqual(doc["origin"]["source"]["repository"],
+                         "corpus-adequacy/corpus-adequacy")
+        self.assertEqual(doc["candidate_freeze"]["candidate"]["tree_sha256"],
+                         "sha256:" + INDEPENDENT.subject_tree_sha256)
+
+    def test_the_validation_copy_must_be_the_pinned_subject_tree(self):
+        from unittest import mock
+        with mock.patch.object(slice_b, "tree_sha256", return_value="0" * 64):
+            with self.assertRaises(slice_b.SliceBError) as ctx:
+                with slice_b.manifest_beside_subject():
+                    pass
+        self.assertEqual(str(ctx.exception), "subject_tree")
+
     def test_the_facade_has_no_hosted_or_network_path(self):
         source = Path(slice_b.__file__).read_text(encoding="utf-8")
         for token in ("hosted_packet", "contained_hosted_publication", "urllib", "gh ",
