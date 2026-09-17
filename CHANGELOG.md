@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+Slice B contract for the frozen independent selection (#199, #103). Sealed measurement contracts
+gain `site_replacement`; the authorized-sequence funnel compares each site against it instead of a
+hard-coded `"false"` (both existing contracts keep `"false"`). `OWNED_INDEPENDENT_V0_CONTRACT`
+measures the frozen `measurements/owned-independent-v0` selection on the same owned candidate,
+corpus, adapter and toolchain; its pins add `control.json` and `pins.json` (byte-equal to the
+declared ones) and a one-site `sites.json`, and the Slice A files are unchanged. The owned hosted
+rail still measures the declared contract, and the two contracts' execution paths differ only in
+the manifest path. `measurements/owned_slice_b_local.py` is a fixed local facade over the closed
+pair (prepare, authorize, run under `contained-oci-v1`, independent class provenance and attempt);
+it has no hosted path. No measurement is included. `sealed_measurement_contract.py`,
+`aee_checker_sealed_authorize.py` and `aee_checker_sealed_candidate.py` are in every sealed
+execution identity, so the next hosted run on either rail needs a fresh PREPARE.
+
 Add `docs/threat-model.md` (#102): assets, trusted computing base per route (local,
 external hosted, repository-owned hosted), untrusted inputs, mechanisms, residual risks and change
 control. It defines "limit applied" as what the code verifies (daemon-stored configuration equal

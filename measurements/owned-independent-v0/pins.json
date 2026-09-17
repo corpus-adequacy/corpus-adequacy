@@ -1,0 +1,18 @@
+{
+  "corpus": {
+    "commit": "0e69b834aa62c7f0fb2bff331884d6ee66a97bfe",
+    "corpusDigest": "d3274de4087bf34f7ca826e9089c8bc80e9358df4fb43cd404d57ed7799bfa45",
+    "repository": "corpus-adequacy/corpus-adequacy",
+    "vectors": "corpus/vectors/MANIFEST.json"
+  },
+  "instrument": {
+    "commit": "0e69b834aa62c7f0fb2bff331884d6ee66a97bfe",
+    "repository": "corpus-adequacy/corpus-adequacy"
+  },
+  "subject": {
+    "check_rs_sha256": "27063bf9ca3ae862121e456105c9af943bafd46dca1b9600a3603ea9a4a8c5c9",
+    "commit": "0e69b834aa62c7f0fb2bff331884d6ee66a97bfe",
+    "path": "src/check.rs",
+    "repository": "corpus-adequacy/corpus-adequacy"
+  }
+}
