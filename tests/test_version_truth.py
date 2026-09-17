@@ -16,6 +16,7 @@ import ast
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -44,6 +45,7 @@ RELEASE_DATES = {
     "0.1.2": "2026-08-23",
     "0.1.3": "2026-09-02",
     "0.2.0": "2026-09-07",
+    "0.3.0": "2026-09-17",
 }
 
 
@@ -625,7 +627,16 @@ INVALID_CHANGELOGS = (
 
 class VersionReleaseTruth(unittest.TestCase):
     def test_checkout_satisfies_version_release_truth(self):
-        self.assertEqual(check_version_release_truth(REPO_ROOT), "0.2.0")
+        self.assertEqual(check_version_release_truth(REPO_ROOT), "0.3.0")
+
+    def test_cli_reports_the_pinned_version_literally(self):
+        # The literal, not ca.VERSION: a bump that misses the constant must fail here.
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "corpus_adequacy.py"), "--version"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("corpus-adequacy 0.3.0 ", result.stdout)
 
     def test_v013_changelog_names_the_trusted_local_boundary(self):
         changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")

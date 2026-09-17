@@ -716,9 +716,10 @@ class ContainedV1ExecutesOnlyThroughADeclaringBackend(unittest.TestCase):
     def test_docs_state_v1_executes_only_through_a_declaring_backend(self):
         root = Path(__file__).resolve().parent.parent
         readme = (root / "README.md").read_text(encoding="utf-8")
-        unreleased = (root / "CHANGELOG.md").read_text(
-            encoding="utf-8").split("## 0.2.0", 1)[0]
-        for text in (readme, unreleased):
+        # Pinned to the 0.3.0 entry the note was released in.
+        release = (root / "CHANGELOG.md").read_text(
+            encoding="utf-8").split("## 0.3.0 — ", 1)[1].split("\n## ", 1)[0]
+        for text in (readme, release):
             self.assertIn(CONTAINED_V1, text)
             self.assertIn("declares its profile", text)
         self.assertNotIn("`contained-oci-v1` is recognised but not yet executable", readme)

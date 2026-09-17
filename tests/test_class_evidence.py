@@ -326,7 +326,9 @@ def _healthy_survivor_report(*, manifest_sha256, runner="module"):
         "adequate": False,
         "failures": failures,
         "mutants": rows,
-        "tool_version": ca.VERSION,
+        # Frozen literal, not ca.VERSION: PINNED_COMPLETED_ATTEMPT_SHA256 hashes
+        # these report bytes through report_sha256 and must not move with a release.
+        "tool_version": "0.2.0",
         "tool_commit": COMMIT_A,
         "tool_source_state": "exact",
         "tool_content_sha256": CONTENT_A,
