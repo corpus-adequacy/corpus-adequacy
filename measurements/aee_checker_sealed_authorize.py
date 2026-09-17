@@ -195,7 +195,7 @@ def required_sequence(sites_doc: dict, *, contract=AEE_CHECKER_SEALED_CONTRACT) 
     ids = [site.get("id") for site in sites]
     if ids != list(contract.site_ids):
         raise AuthorizeError("sequence")
-    if any(site.get("replacement") != "false" for site in sites):
+    if any(site.get("replacement") != contract.site_replacement for site in sites):
         raise AuthorizeError("operator must be %s" % contract.operator)
     return require_authorized_sequence(
         authorized_step_spec(contract=contract), contract=contract)

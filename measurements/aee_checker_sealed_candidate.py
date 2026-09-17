@@ -46,7 +46,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 _ADAPTERS = str(_ROOT / "adapters")
 if _ADAPTERS not in sys.path:
     sys.path.insert(0, _ADAPTERS)
-from sealed_measurement_contract import OWNED_CONTAINED_V1_CONTRACT  # noqa: E402
+from sealed_measurement_contract import (  # noqa: E402
+    OWNED_CONTAINED_V1_CONTRACT,
+    OWNED_INDEPENDENT_V0_CONTRACT,
+)
 
 CANDIDATE_MOUNT_SPEC = DEFAULT_MOUNT_SPEC + (("subject", "/subject"),)
 CANDIDATE_ENTRYPOINT = "/bin/sh"
@@ -169,10 +172,11 @@ def host_vectors_path(mounts: dict) -> str:
 
 
 def sealed_adapter_for(contract):
-    """Resolve only the two code-owned adapters; paths are never operator input."""
+    """Resolve only the code-owned adapters; paths are never operator input."""
     if contract is AEE_CHECKER_SEALED_CONTRACT:
         return importlib.import_module("aee_checker_sealed")
-    if contract is OWNED_CONTAINED_V1_CONTRACT:
+    if contract is OWNED_CONTAINED_V1_CONTRACT or contract is OWNED_INDEPENDENT_V0_CONTRACT:
+        # The independent selection measures the same owned candidate and corpus (#199).
         return importlib.import_module("owned_contained_v1")
     raise PrepareError("sealed measurement adapter")
 

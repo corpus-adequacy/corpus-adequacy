@@ -7,7 +7,7 @@ operator-selectable registry.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -61,6 +61,9 @@ class SealedMeasurementContract:
     inert_control_ids: tuple[str, ...]
     site_ids: tuple[str, ...]
     operator: str
+    # What every authorized site's `replacement` must equal (#199). The two first contracts
+    # replace a whole condition with `false`; the independent selection truncates one.
+    site_replacement: str
     execution_paths: tuple[str, ...]
     container_context_relpath: str
     candidate_build: tuple[str, ...]
@@ -115,6 +118,7 @@ class SealedMeasurementContract:
             ("mutation_group", self.mutation_group),
             ("control_id", self.control_id),
             ("operator", self.operator),
+            ("site_replacement", self.site_replacement),
         ):
             if not isinstance(value, str) or not value:
                 raise ValueError(where)
@@ -187,6 +191,7 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
     inert_control_ids=(),
     site_ids=tuple("sealed-%d" % index for index in range(1, 8)),
     operator="whole-condition-to-false",
+    site_replacement="false",
     execution_paths=(
         "bounded_run.py",
         "corpus_adequacy.py",
@@ -245,6 +250,7 @@ OWNED_CONTAINED_V1_CONTRACT = SealedMeasurementContract(
     inert_control_ids=("control-inert",),
     site_ids=("negative-guard", "upper-guard"),
     operator="whole-condition-to-false",
+    site_replacement="false",
     execution_paths=tuple(
         "adapters/owned_contained_v1.py" if path == "adapters/aee_checker_sealed.py"
         else "measurements/owned-contained-v1/manifest.json"
@@ -260,4 +266,30 @@ OWNED_CONTAINED_V1_CONTRACT = SealedMeasurementContract(
     ),
     candidate_complete_returncodes=(0,),
     vendor_tree_requirement="canonical-empty",
+)
+
+
+# The frozen independent selection of #169, measured beside the declared owned selection (#199).
+# Same candidate, corpus, adapter, toolchain and container context as the owned contract; only the
+# pins directory, the selection and its manifest path differ. The owned contract's own identity
+# inputs are not widened to include this manifest.
+OWNED_INDEPENDENT_V0_CONTRACT = replace(
+    OWNED_CONTAINED_V1_CONTRACT,
+    name="owned-independent-v0",
+    pins_relpath=("measurements", "owned-independent-v0"),
+    pin_digests=(
+        ("control.json", "b34629777838968cb239e4c9bc533c740409c58e7d245722e8c5408a94ac1057"),
+        ("manifest.json", "a13700b6de4f964267be3a52da6a61297878bda8a739cee46de1b353be491942"),
+        ("pins.json", "442c9b891362f1bc28350d6050535fbacf6186c30d5995f0ed4f2f38cb0b2ab4"),
+        ("sites.json", "bbe99500f49808612a66ebd62a99b0303d3089c4bc9a3a9b87156ee31b883a86"),
+    ),
+    mutation_group="independent",
+    site_ids=("upper-guard-first-overflow-only",),
+    operator="upper-guard-truncate-to-first-overflow",
+    site_replacement="value > maximum && value <= maximum.saturating_add(1)",
+    execution_paths=tuple(
+        "measurements/owned-independent-v0/manifest.json"
+        if path == "measurements/owned-contained-v1/manifest.json" else path
+        for path in OWNED_CONTAINED_V1_CONTRACT.execution_paths
+    ),
 )
