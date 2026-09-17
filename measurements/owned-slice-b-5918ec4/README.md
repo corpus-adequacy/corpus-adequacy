@@ -26,6 +26,13 @@ The independent directory adds the class evidence: `class-provenance.v0.json` (r
 `class-attempt.v0.json`, derived from the validated report, which reads `completed` /
 `independent` / `declared` with a healthy survivor.
 
+Each report's `manifest` field records the manifest path exactly as it was handed to the tool,
+which here is absolute and names the operator's worktree. Earlier retained measurements were run
+from the repository root and record a repository-relative path instead. Nothing binds on that
+string: the manifest is bound by `manifest_sha256`, and the publication renderer refuses host
+markers before anything is public. Public corpus-adequacy#204 makes the facade record the
+repository-relative path so the next retained measurement matches the earlier ones.
+
 ## Reading it back
 
 From a checkout at the measured revision:

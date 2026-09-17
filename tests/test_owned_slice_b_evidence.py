@@ -35,7 +35,7 @@ CONTRACTS = {"declared": OWNED_CONTAINED_V1_CONTRACT,
              "independent": OWNED_INDEPENDENT_V0_CONTRACT}
 DIGESTS = {
     "README.md":
-        "ca25cf55fcf5e33f24e6076e0e1551355229f6a8206dc1e467d689acc8dbd918",
+        "0a32c3f759df3f6f71a301be61730d47f2de6ad9a0599f537079841c69e749d4",
     "declared/authorize.v0.json":
         "91aac51bd97dae1848fa3ae5bbd05a4dbe9edc90d35b43b241538f8b51bd9cdf",
     "declared/effective-envelope-collection.v0/collection-index.v0.json":
@@ -277,6 +277,25 @@ class ClassEvidence(unittest.TestCase):
         self.assertEqual(doc["manifest_sha256"],
                          "sha256:" + hashlib.sha256((pins / "manifest.json").read_bytes())
                          .hexdigest())
+
+    def test_the_attempt_is_reproducible_from_the_retained_inputs(self):
+        """Re-deriving from the retained provenance, report and environment reproduces the
+        retained attempt byte for byte. The derivation resolves the frozen manifest's
+        `repo_root` against the working directory, so it only succeeds beside a verified
+        copy of the pinned candidate; running it anywhere else fails instead of binding a
+        tree nobody checked."""
+        with tempfile.TemporaryDirectory() as out:
+            staged = Path(out) / "independent"
+            staged.mkdir()
+            for name in (slice_b.PROVENANCE_FILENAME, slice_b.REPORT_FILENAME,
+                         slice_b.PREPARE_FILENAME):
+                shutil.copyfile(EVIDENCE / "independent" / name, staged / name)
+            result = slice_b.derive_class(Path(out))
+            self.assertEqual((staged / slice_b.ATTEMPT_FILENAME).read_bytes(),
+                             _read("independent/class-attempt.v0.json"))
+        self.assertEqual(result["attempt_sha256"],
+                         DIGESTS["independent/class-attempt.v0.json"])
+        self.assertEqual(result["status"], "completed")
 
     def test_the_declared_selection_has_no_class_artifacts(self):
         for name in ("class-provenance.v0.json", "class-attempt.v0.json"):
