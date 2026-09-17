@@ -2393,19 +2393,32 @@ def seal_attempt_statement(*, out_dir, rail, bindings, packet_release_tag,
         return attempt_statement.seal_attempt(
             out_dir=out_dir, rail=rail_contract.name, bindings=bindings,
             dispatch_inputs=dispatch_inputs, run_identity=identity,
-            workflow_identity=workflow_identity, gate_outcome=gate_outcome)
+            workflow_identity=workflow_identity, gate_outcome=gate_outcome,
+            subject_files=statement_subject_files(rail_contract))
     except attempt_statement.StatementError as exc:
         raise HostedPublicationError("statement:%s" % exc) from exc
 
 
+def statement_subject_files(rail) -> tuple:
+    """The rail's sealed file names: its upload surface, the owned report included (#186)."""
+    rail = require_rail(rail)
+    if REPORT_FILENAME != attempt_statement.REPORT_SUBJECT:
+        raise HostedPublicationError("statement_report_name")
+    return (attempt_statement.OWNED_SUBJECT_FILES if rail is OWNED_V1_RAIL
+            else attempt_statement.SUBJECT_FILES)
+
+
 def _statement_subject_files(*, setup_path, candidate_path, rerun_path,
-                             diagnostic_dir=None, collection_dir=None) -> dict:
+                             diagnostic_dir=None, collection_dir=None,
+                             report_path=None) -> dict:
     """The reader's files under the names the seal used: upload-surface-relative paths."""
     files = {
         SETUP_STATUS_FILENAME: Path(setup_path),
         CANDIDATE_RESULT_FILENAME: Path(candidate_path),
         RERUN_EVIDENCE_FILENAME: Path(rerun_path),
     }
+    if report_path is not None:
+        files[REPORT_FILENAME] = Path(report_path)
     for dirname, root in ((COLLECTION_DIRNAME, collection_dir),
                           (DIAGNOSTIC_DIRNAME, diagnostic_dir)):
         if root is None:
@@ -2419,8 +2432,9 @@ def _statement_subject_files(*, setup_path, candidate_path, rerun_path,
 
 
 def readback_statement(statement_dir, *, setup_path, candidate_path, rerun_path,
-                       diagnostic_dir=None, collection_dir=None, expected_bindings,
-                       expected_run_id, expected_run_attempt) -> dict:
+                       diagnostic_dir=None, collection_dir=None, report_path=None,
+                       expected_bindings, expected_run_id, expected_run_attempt,
+                       expected_rail=None) -> dict:
     """Offline check of the unsigned statement against the reader's own downloaded files."""
     try:
         loaded = attempt_statement.load_statement_dir(statement_dir)
@@ -2429,9 +2443,10 @@ def readback_statement(statement_dir, *, setup_path, candidate_path, rerun_path,
             _statement_subject_files(
                 setup_path=setup_path, candidate_path=candidate_path,
                 rerun_path=rerun_path, diagnostic_dir=diagnostic_dir,
-                collection_dir=collection_dir),
+                collection_dir=collection_dir, report_path=report_path),
             bindings=expected_bindings,
-            run_identity={"run_id": expected_run_id, "run_attempt": expected_run_attempt})
+            run_identity={"run_id": expected_run_id, "run_attempt": expected_run_attempt},
+            rail=None if expected_rail is None else require_rail(expected_rail).name)
     except attempt_statement.StatementError as exc:
         raise HostedPublicationError("statement:%s" % exc) from exc
 
@@ -2467,7 +2482,9 @@ def main(argv=None) -> int:
                     args.statement,
                     setup_path=args.setup, candidate_path=args.candidate,
                     rerun_path=args.rerun, diagnostic_dir=args.diagnostic,
-                    collection_dir=args.collection,
+                    collection_dir=args.collection, report_path=args.report,
+                    expected_rail=_rail_for_operator_profile(
+                        loaded["setup"].get("operator_profile")),
                     expected_bindings=require_bindings(
                         args.candidate_revision, args.runner_revision, args.image_digest),
                     expected_run_id=args.run_id,

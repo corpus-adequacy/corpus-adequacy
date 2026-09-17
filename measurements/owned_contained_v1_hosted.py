@@ -144,6 +144,17 @@ def gate_owned(*, candidate_revision, runner_revision, image_digest,
         packet_manifest_sha256=packet_manifest_sha256, rail=RAIL)
 
 
+def seal_owned(*, candidate_revision, runner_revision, image_digest,
+               packet_release_tag, packet_manifest_sha256, gate_outcome, out_dir) -> dict:
+    """Seal the owned attempt's upload surface, report included, after the gate (#187)."""
+    return publication.seal_attempt_statement(
+        out_dir=out_dir, rail=RAIL.name,
+        bindings=publication.require_bindings(
+            candidate_revision, runner_revision, image_digest),
+        packet_release_tag=packet_release_tag,
+        packet_manifest_sha256=packet_manifest_sha256, gate_outcome=gate_outcome)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="owned_contained_v1_hosted")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -165,6 +176,14 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--image-digest", required=True)
     gate.add_argument("--packet-manifest-sha256", required=True)
     gate.add_argument("--out", required=True)
+    seal = sub.add_parser("seal")
+    seal.add_argument("--candidate-revision", required=True)
+    seal.add_argument("--runner-revision", required=True)
+    seal.add_argument("--image-digest", required=True)
+    seal.add_argument("--packet-release-tag", required=True)
+    seal.add_argument("--packet-manifest-sha256", required=True)
+    seal.add_argument("--gate-outcome", required=True)
+    seal.add_argument("--out", required=True)
     return parser
 
 
@@ -183,6 +202,15 @@ def main(argv=None) -> int:
                 expected_prepare_sha256=args.prepare_sha256,
                 expected_runner_revision=args.runner_revision,
                 out_dir=args.out)
+        elif args.command == "seal":
+            result = seal_owned(
+                candidate_revision=args.candidate_revision,
+                runner_revision=args.runner_revision,
+                image_digest=args.image_digest,
+                packet_release_tag=args.packet_release_tag,
+                packet_manifest_sha256=args.packet_manifest_sha256,
+                gate_outcome=args.gate_outcome,
+                out_dir=args.out)
         else:
             result = gate_owned(
                 candidate_revision=args.candidate_revision,
@@ -196,7 +224,11 @@ def main(argv=None) -> int:
         print("owned hosted rail refused: %s" % exc, file=sys.stderr)
         return 2
     print(json.dumps(result, sort_keys=True))
-    return 0 if result.get("decision", "publish") == "publish" else 3
+    if args.command == "gate":
+        # The workflow uploads the verified collection only on exit 0, so only an explicit
+        # publish decision may exit 0; withhold and unavailable exit 3.
+        return 0 if result.get("decision") == "publish" else 3
+    return 0
 
 
 if __name__ == "__main__":
