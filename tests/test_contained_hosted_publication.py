@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from tests.step_fixtures import owned_step, sealed_step  # noqa: E402
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -82,7 +83,7 @@ def _write_collection(dest, doc, *, report_sha256=_UNSET, report=None):
     if report_sha256 is _UNSET:
         report_sha256 = _report_sha256(report)
     ledger = collection.Ledger()
-    ledger.recorded(ledger.register(), doc)
+    ledger.recorded(ledger.register(step=sealed_step(0)), doc)
     collection.write_collection(ledger, Path(dest), report_sha256=report_sha256)
     return report
 
@@ -1810,7 +1811,7 @@ class QuarantineRetainsEveryRefusal(unittest.TestCase):
         ledger = collection.Ledger()
         doc = dict(_permitted_envelope(prepare_sha256="a" * 64))
         doc["execution_commit"] = marker
-        ledger.recorded(ledger.register(), doc)
+        ledger.recorded(ledger.register(step=sealed_step(0)), doc)
         collection.write_collection(
             ledger, out / hosted.COLLECTION_DIRNAME, report_sha256="e" * 64)
         hosted.write_separate_artifacts(
@@ -2987,7 +2988,7 @@ class WithheldDiagnosticPackage(unittest.TestCase):
 
             def execute(**kwargs):
                 ledger = hosted.collection.Ledger()
-                ledger.recorded(ledger.register(), member)
+                ledger.recorded(ledger.register(step=owned_step(0)), member)
                 hosted.collection.write_collection(
                     ledger, kwargs["envelope_dest"], report_sha256=report_sha)
                 return report
@@ -3087,7 +3088,7 @@ class WithheldDiagnosticPackage(unittest.TestCase):
                 schema=hosted.effective_envelope.ENVELOPE_SCHEMA_V1,
             )
             nonpublish = hosted.collection.Ledger()
-            nonpublish.recorded(nonpublish.register(), unverified_member)
+            nonpublish.recorded(nonpublish.register(step=owned_step(0)), unverified_member)
             hosted.collection.write_collection(
                 nonpublish, coll, report_sha256=report_sha)
             self.assertEqual(

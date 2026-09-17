@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from tests.step_fixtures import sealed_step  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -143,8 +144,8 @@ def _emit_collection(envelope_dest, *docs):
     malformed member still gets exactly the bytes it asked for.
     """
     ledger = collection_mod.Ledger()
-    for doc in docs:
-        ledger.recorded(ledger.register(), doc)
+    for position, doc in enumerate(docs):
+        ledger.recorded(ledger.register(step=sealed_step(position)), doc)
     collection_mod.write_collection(
         ledger, Path(envelope_dest), report_sha256=None)
 

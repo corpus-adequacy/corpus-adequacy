@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from tests.step_fixtures import sealed_step  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GATE_BOUND_UPLOAD_IF = "steps.gate.outcome == 'success' && !cancelled()"
@@ -927,8 +928,8 @@ class UploadSelectionRetainsEveryMember(unittest.TestCase):
         out = Path(tmp) / "artifacts"
         out.mkdir(parents=True)
         ledger = collection.Ledger()
-        for _ in range(members):
-            ledger.recorded(ledger.register(), _inert_record())
+        for position in range(members):
+            ledger.recorded(ledger.register(step=sealed_step(position)), _inert_record())
         collection.write_collection(
             ledger, out / collection_dirname(), report_sha256="c" * 64)
         return out

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from tests.step_fixtures import owned_step  # noqa: E402
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -236,7 +237,7 @@ class OwnedHostedRailContract(unittest.TestCase):
                 kwargs["diagnostic_sink"](
                     diagnostics.observation(0, "unproved", "inner-exit"))
                 ledger = publication.collection.Ledger()
-                ledger.recorded(ledger.register(), member)
+                ledger.recorded(ledger.register(step=owned_step(0)), member)
                 publication.collection.write_collection(
                     ledger, kwargs["envelope_dest"], report_sha256=report_sha)
                 return report
@@ -800,9 +801,9 @@ class OwnedHostedRailContract(unittest.TestCase):
             def execute(**kwargs):
                 live = Path(kwargs["envelope_dest"])
                 ledger = publication.collection.Ledger()
-                recorded = ledger.register()
+                recorded = ledger.register(step=owned_step(0))
                 ledger.recorded(recorded, member)
-                raised = ledger.register()
+                raised = ledger.register(step=owned_step(1))
                 ledger.raised(raised, "SyntheticRaised")
                 publication.collection.write_collection(
                     ledger, live, report_sha256=report_sha)
