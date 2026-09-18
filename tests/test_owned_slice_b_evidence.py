@@ -398,6 +398,7 @@ class TheRemeasurementReproducesTheFirst(unittest.TestCase):
 
     def test_the_class_attempts_differ_only_in_the_digests_they_bind(self):
         first, clean = self._pair("independent/class-attempt.v0.json")
+        self.assertEqual(set(first), set(clean))
         self.assertEqual(sorted(key for key in first if first[key] != clean[key]),
                          ["environment_sha256", "report_sha256"])
 
