@@ -144,7 +144,8 @@ class FakeTransport(FakeKernelMixin):
         if not self.await_release_if_held():
             # The real wrapper gives up on a hold nobody released with its own stage code.
             return subprocess.CompletedProcess(
-                ["docker", "start", "-a", name], 82, "", "")
+                ["docker", "start", "-a", name],
+                cand.wrapper_stage_returncode("readback-hold"), "", "")
         if self.timeout:
             raise subprocess.TimeoutExpired(["docker", "start", "-a", name], 1)
         if self.output_too_large:

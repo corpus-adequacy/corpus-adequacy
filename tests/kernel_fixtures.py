@@ -18,6 +18,9 @@ _READBACK_PATHS = {
     "/sys/fs/cgroup/pids.max": "pids.max",
     "/sys/fs/cgroup/cpu.max": "cpu.max",
     "/proc/1/limits": "limits",
+    # The pids witness's second hold (#197 part 3): the ready file, then the refusal counter.
+    "/tmp/.corpus-adequacy-witness-ready": "ready",
+    "/sys/fs/cgroup/pids.events": "pids.events",
 }
 
 
@@ -38,6 +41,8 @@ def kernel_files_for(argv) -> dict:
         "memory.max": b"%d\n" % memory,
         "memory.swap.max": b"%d\n" % (swap - memory),
         "pids.max": b"%s\n" % _flag(argv, "--pids-limit").encode("ascii"),
+        # A container that never reached its limit. A witness test overrides it.
+        "pids.events": b"max 0\n",
     }
     if "--cpu-period" in argv:
         files["cpu.max"] = b"%s %s\n" % (_flag(argv, "--cpu-quota").encode("ascii"),

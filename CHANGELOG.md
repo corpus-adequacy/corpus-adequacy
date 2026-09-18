@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Kernel read-back, part 3 of 4 (#197). `measurements/pids_witness.py` runs a first-party container
+under the owned profile. It forks until the kernel refuses at `pids.max`, then reads the kernel's
+refusal counter `pids.events` during a second hold of the trusted script. A
+`corpus-adequacy.pids-witness.v0` record is `witnessed` only when that counter is above zero, the
+limits read back as requested, the run exited 0 without create warnings, and the container was
+removed. Anything else is `unproved`, and the payload's output never counts. `run_contained` gains
+an optional second hold, and existing runs are unchanged.
+
 Kernel read-back, part 2 of 4 (#197). New `contained-oci-v1` runs record `execution-envelope.v3`,
 which adds the kernel's own view of the container's memory, swap, pids, CPU and open-file limits.
 The trusted wrapper holds at its start while the host reads those files through `docker exec`, then
