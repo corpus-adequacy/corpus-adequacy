@@ -1,0 +1,66 @@
+name: pids-witness
+
+# The hosted pids witness (#197 part 4). The owner dispatches it from a branch whose head is R,
+# naming R and the witness's execution identity at R (`python measurements/pids_witness.py
+# identity`). The run refuses before any container unless both agree with what it observes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_revision:
+        required: true
+        type: string
+      identity_sha256:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  # Only for the attest step: mint the OIDC token and persist the attestation.
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: pids-witness
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  pids-witness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout immutable runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.runner_revision }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Run pids witness
+        id: witness
+        shell: bash
+        env:
+          RUNNER_REVISION: ${{ inputs.runner_revision }}
+          IDENTITY_SHA256: ${{ inputs.identity_sha256 }}
+        run: python measurements/pids_witness.py hosted --runner-revision "$RUNNER_REVISION" --identity-sha256 "$IDENTITY_SHA256" --out pids-witness-artifacts
+      - name: Upload witness attempt
+        if: steps.witness.outcome == 'success' && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pids-witness-attempt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pids-witness-artifacts/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Attest witness attempt
+        if: steps.witness.outcome == 'success' && !cancelled()
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-checksums: pids-witness-artifacts/SHA256SUMS
+          predicate-type: https://github.com/corpus-adequacy/corpus-adequacy/attestations/pids-witness/v0
+          predicate-path: pids-witness-artifacts/pids-witness-predicate.v0.json
+          show-summary: true
