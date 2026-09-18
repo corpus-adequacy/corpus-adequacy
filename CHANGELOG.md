@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+Kernel read-back, part 1 of 4 (#197). `measurements/kernel_readback.py` parses the kernel's own
+limit files, derives what a validated `resource-profile.v2` should read back as, and names every
+field that differs or did not read, making the record `unverified` rather than assuming a value.
+Swap follows runc's conversion, so the owned profile reads back `memory.swap.max` as `0`. A pids
+witness needs a refused fork in `pids.events`; an open-files hit cannot be kernel-witnessed at all,
+because `RLIMIT_NOFILE` has no kernel-side counter. The positive tests run on bytes the kernel
+really returned inside one container with the owned profile's limits. The module reads nothing
+itself and is outside every execution identity, so no hosted rail needs a fresh PREPARE yet.
+
 Separate evidence classes on the publication site (#103). The site now shows the declared and
 independent Slice B sets side by side, from the clean re-measurement at `20f6d8b`, on
 `classes/owned-slice-b/`. The page leads with each set's mutants, survivors first, then one

@@ -68,3 +68,4 @@ measurements/owned-slice-b-5918ec4/** text eol=lf
 measurements/owned-slice-b-20f6d8b/** text eol=lf
 publications/class-comparisons/** text eol=lf
 site/classes/** text eol=lf
+tests/fixtures/kernel-readback-v0/** text eol=lf
