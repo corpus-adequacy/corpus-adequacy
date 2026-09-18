@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The hosted pids witness route: identity, dispatch binding, sealing and readback (#197 part 4).
 
-Nothing here starts a container or talks to Docker: the pull, the host observation and the
-witness itself are injected.
+Nothing here starts a container or talks to Docker: the readiness check, the pull, the host
+observation and the witness itself are injected, so the suite runs on hosts without a daemon.
 """
 
 from __future__ import annotations
@@ -65,7 +65,8 @@ class Hosted:
         self.test = test
         self.record_over = record_over
 
-    def run(self, *, environ=None, identity_sha256=None, out=None, witness=None):
+    def run(self, *, environ=None, identity_sha256=None, out=None, witness=None,
+            docker_ready=None):
         scratch = Path(tempfile.mkdtemp())
         self.test.addCleanup(shutil.rmtree, scratch)
         self.out = scratch / "out" if out is None else out
@@ -74,16 +75,19 @@ class Hosted:
             identity_sha256=(pw.identity()["content_sha256"] if identity_sha256 is None
                              else identity_sha256),
             out_dir=self.out, environ=_environ() if environ is None else environ,
-            pull=lambda: IMAGE, host=lambda: dict(HOST),
+            docker_ready=docker_ready or (lambda: None), pull=lambda: IMAGE,
+            host=lambda: dict(HOST),
             witness=witness or (lambda image_id: _record(**self.record_over)))
 
 
 class TheIdentity(unittest.TestCase):
     def test_the_paths_are_exactly_the_modules_a_witness_run_imports_and_its_workflow(self):
-        probe = ("import sys, json; sys.path[:0] = [%r, %r]; import pids_witness; "
-                 "root = %r; print(json.dumps(sorted(m.__file__[len(root) + 1:] "
-                 "for m in list(sys.modules.values()) "
-                 "if getattr(m, '__file__', None) and m.__file__.startswith(root + '/'))))"
+        probe = ("import sys, json; from pathlib import Path; "
+                 "sys.path[:0] = [%r, %r]; import pids_witness; root = Path(%r).resolve(); "
+                 "files = [Path(m.__file__).resolve() for m in list(sys.modules.values()) "
+                 "if getattr(m, '__file__', None)]; "
+                 "print(json.dumps(sorted(f.relative_to(root).as_posix() for f in files "
+                 "if f.is_relative_to(root))))"
                  % (str(ROOT / "measurements"), str(ROOT), str(ROOT)))
         loaded = json.loads(subprocess.run([sys.executable, "-B", "-c", probe], check=True,
                                            capture_output=True, text=True).stdout)
@@ -110,7 +114,7 @@ class TheIdentity(unittest.TestCase):
 class TheHostedRunRefusesFirst(unittest.TestCase):
     def _refused(self, reason, **kwargs):
         with self.assertRaises(pw.WitnessRouteError) as caught:
-            Hosted(self).run(witness=_never, **kwargs)
+            Hosted(self).run(witness=_never, docker_ready=_never, **kwargs)
         self.assertEqual(str(caught.exception), reason)
 
     def test_a_workflow_not_at_r_is_refused(self):
@@ -124,12 +128,17 @@ class TheHostedRunRefusesFirst(unittest.TestCase):
         self._refused("identity_binding", identity_sha256="0" * 64)
 
     def test_malformed_dispatch_values_are_refused(self):
-        with self.assertRaises(pw.WitnessRouteError):
-            pw.run_hosted(runner_revision="HEAD", identity_sha256="0" * 64, out_dir=Path("x"),
-                          environ=_environ(), pull=_never, host=_never, witness=_never)
-        with self.assertRaises(pw.WitnessRouteError):
-            pw.run_hosted(runner_revision=R, identity_sha256="abc", out_dir=Path("x"),
-                          environ=_environ(), pull=_never, host=_never, witness=_never)
+        for revision, digest, reason in (("HEAD", "0" * 64, "runner_revision"),
+                                         ("A" * 40, "0" * 64, "runner_revision"),
+                                         (R, "abc", "identity_sha256"),
+                                         (R, "0" * 63 + "G", "identity_sha256")):
+            with self.subTest(reason=reason, revision=revision, digest=digest):
+                with self.assertRaises(pw.WitnessRouteError) as caught:
+                    pw.run_hosted(runner_revision=revision, identity_sha256=digest,
+                                  out_dir=Path("x"), environ=_environ(revision),
+                                  docker_ready=_never, pull=_never, host=_never,
+                                  witness=_never)
+                self.assertEqual(str(caught.exception), reason)
 
 
 class TheHostedRunSeals(unittest.TestCase):

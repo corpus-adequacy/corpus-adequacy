@@ -298,8 +298,8 @@ def _encode(doc) -> bytes:
 
 
 def run_hosted(*, runner_revision: str, identity_sha256: str, out_dir: Path,
-               environ=None, root: Path = ROOT, pull=pull_image, host=observe_host,
-               witness=run_witness) -> dict:
+               environ=None, root: Path = ROOT, docker_ready=None, pull=pull_image,
+               host=observe_host, witness=run_witness) -> dict:
     """The hosted attempt. Refuses before any container unless dispatch, workflow and identity
     agree; after that, every outcome, `unproved` included, is written and sealed."""
     runner_revision = _hex(runner_revision, _HEX40, "runner_revision")
@@ -309,7 +309,7 @@ def run_hosted(*, runner_revision: str, identity_sha256: str, out_dir: Path,
     observed_identity = identity(root)
     if observed_identity["content_sha256"] != identity_sha256:
         raise WitnessRouteError("identity_binding")
-    contained.require_docker_ready()
+    (contained.require_docker_ready if docker_ready is None else docker_ready)()
     image_id = pull()
     attempt = {
         "schema": ATTEMPT_SCHEMA,
@@ -350,6 +350,10 @@ def verify(attempt_raw: bytes, *, runner_revision: str, identity_sha256: str,
     It trusts none of the attempt's own judgements: it recomputes the identity from `root`,
     compares the kernel's recorded values with the owned profile, re-derives every reason and
     the verdict, and requires them to equal what was recorded.
+
+    It catches an attempt that contradicts itself, R, or the owned profile. It cannot catch one
+    forged consistently, values and verdict alike: that the bytes came from the dispatched run
+    rests on the GitHub attestation, which the reader checks first (`gh attestation verify`).
     """
     runner_revision = _hex(runner_revision, _HEX40, "runner_revision")
     identity_sha256 = _hex(identity_sha256, _HEX64, "identity_sha256")
