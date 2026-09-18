@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Kernel read-back, part 4 of 4 (#197). A dispatch-only workflow, `pids-witness`, runs the pids
+witness on a GitHub-hosted runner. It is bound to the runner revision and to the SHA-256 of the
+witness's own execution identity, and refuses before any container if either disagrees. The attempt
+is sealed and attested whatever the verdict. `pids_witness.py verify` is the independent readback: it
+re-derives the verdict from the recorded kernel values and recomputes the identity from a checkout.
+The witness record now carries its create warnings and cleanup state, so the readback can re-derive
+every reason.
+
 Kernel read-back, part 3 of 4 (#197). `measurements/pids_witness.py` runs a first-party container
 under the owned profile. It forks until the kernel refuses at `pids.max`, then reads the kernel's
 refusal counter `pids.events` during a second hold of the trusted script. A
