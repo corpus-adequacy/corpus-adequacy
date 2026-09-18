@@ -57,7 +57,8 @@ class TheRendererRefusesAHostPath(unittest.TestCase):
                          "/home/runner/work/measurements/x/manifest.json",
                          "/private/tmp/x/manifest.json",
                          "/opt/elsewhere/manifest.json",
-                         "C:\\\\work\\\\manifest.json"):
+                         "C:\\\\work\\\\manifest.json",
+                         "D:/work/manifest.json"):
             with self.subTest(manifest=manifest):
                 with tempfile.TemporaryDirectory() as d:
                     path = _completed_tree(Path(d), manifest)
@@ -82,6 +83,7 @@ class RetainedReports(unittest.TestCase):
 
     def test_the_disclosed_pair_is_still_there_and_still_disclosed(self):
         """If the pair is ever removed or replaced, this list must shrink with it."""
+        self.assertEqual(len(DISCLOSED_HOST_PATHS), 2, "nothing may join this list")
         for rel in DISCLOSED_HOST_PATHS:
             self.assertIn(rel, self._retained())
         readme = (ROOT / "measurements" / "owned-slice-b-5918ec4" / "README.md").read_text(

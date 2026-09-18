@@ -9,7 +9,7 @@ The facade now runs the driver from the repository root with the repository-rela
 directory, and resolves its output directory first so a relative `--out` cannot land inside the
 repository. The publication renderer now refuses a completed report whose `manifest` field carries
 a host marker or an absolute path, as it already did for a void attempt's free text; before this,
-a completed report's bytes were bundled verbatim. Neither file is in any contract's execution
+a completed report went out through its raw-report link as written. Neither file is in any contract's execution
 identity, so no hosted rail needs a fresh PREPARE. The two Slice B reports are pinned as the only
 retained exception and stay as retained bytes; publishing Slice B needs a clean re-measurement.
 The regenerated `site/index.html` differs only in its projection digest, which covers the
