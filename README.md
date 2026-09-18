@@ -535,14 +535,16 @@ discrimination, infer equivalence, or replace a positive control.
 `modelcontextprotocol/conformance` reached the same axis earlier still, from the
 other side. Its server-side negative test harness,
 `src/scenarios/server/negative.test.ts`, landed on 2026-04-24 (`5d8595b6`, #249):
-one deliberately broken implementation per check, asserting that the check reports
-the failure. That shows a harness check can fail. This tool shows that a corpus
+it starts deliberately broken servers and asserts that each covered check reports a
+failure, or a warning where that is the expected signal. That shows a harness check
+can fail. This tool shows that a corpus
 notices a deleted implementation rule. It is the same question aimed one layer over,
 and theirs came first.
 
 Its SEP traceability manifest followed on 2026-05-19 (`442ba3b1`, #288,
-`src/traceability/types.ts`). Each quoted normative requirement is either checked or
-`excluded` with a reason, and a row with neither is reported as an authoring gap.
+`src/traceability/types.ts`). Each quoted normative requirement is meant to carry
+either a `check:` or an `excluded:` with a reason, and a row with neither is reported
+as an authoring gap.
 The rule inventory of `corpus-adequacy.manifest.v1` makes the same split: a rule is
 `mutated` or `excluded` with a reason, and a row with neither is refused. That
 mapping, too, was theirs first.
