@@ -5,6 +5,9 @@ whether a declared rule can be removed without changing the corpus's declared
 observation. Contributions should keep that question, its evidence, and its
 limits explicit.
 
+Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+Conduct concerns go to the private route it names, not to a public issue.
+
 ## Before opening a pull request
 
 Open an issue first and agree on one concrete target. Good targets identify a

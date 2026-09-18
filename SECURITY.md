@@ -17,6 +17,9 @@ That opens a private vulnerability report with the maintainers. Please include:
 - resource use, platform details, and any relevant evidence artifact;
 - the impact you believe follows from the behavior.
 
+This route is for vulnerabilities only. A conduct concern goes to the private route in
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
 Do not open a public issue for an undisclosed vulnerability. Do not include
 credentials, access tokens, private candidate material, or third-party secrets.
 

@@ -13,6 +13,8 @@ Choose the route that matches the question:
   channel, consent/publication boundary, and intended non-claims.
 - **Security vulnerability:** use the private reporting route described in
   [SECURITY.md](SECURITY.md).
+- **Conduct concern:** use the private route described in
+  [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 Please do not send credentials, private corpora, embargoed findings, or personal
 data through public issues or Discussions. The project does not provide an SLA,

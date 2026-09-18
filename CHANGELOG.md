@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+Code of Conduct (#166). The project adopts the Contributor Covenant 3.0 by reference, with its own
+reporting route, who reads a report, what happens if a report concerns the only maintainer, and
+what follows a report, promising no response time. The route is kept separate from the
+vulnerability route, and CONTRIBUTING, SECURITY and SUPPORT link the policy.
+
 Separate evidence classes on the publication site (#103). The site now shows the declared and
 independent Slice B sets side by side, from the clean re-measurement at `20f6d8b`, on
 `classes/owned-slice-b/`. The page leads with each set's mutants, survivors first, then one
