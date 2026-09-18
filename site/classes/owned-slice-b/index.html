@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>owned-slice-b: two evidence classes</title>
+<style>
+
+:root { color-scheme: light; }
+html, body { max-width: 100%; overflow-x: hidden; margin: 0; }
+body { font-family: system-ui, sans-serif; line-height: 1.45; color: #1a1a1a; background: #f7f5f0; padding: 1rem; }
+a:focus, button:focus, .skip:focus { outline: 3px solid #0033aa; outline-offset: 2px; }
+.skip { position: absolute; left: -999px; top: 0; background: #fff; padding: 0.5rem; }
+.skip:focus { left: 1rem; z-index: 2; }
+h1, h2, h3 { line-height: 1.2; }
+.non-claims { max-width: 46rem; }
+.ctas { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1rem 0 1.5rem; }
+.ctas a { display: inline-block; padding: 0.5rem 0.75rem; background: #0033aa; color: #fff; text-decoration: underline; }
+.cards { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 1rem; }
+.card { box-sizing: border-box; width: min(100%, 390px); max-width: 100%; background: #fff; border: 2px solid #1a1a1a; padding: 1rem; }
+.counts { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.count { border: 1px solid #333; padding: 0.35rem 0.5rem; min-width: 5rem; }
+.count-label { display: block; font-size: 0.8rem; }
+.mono, pre { overflow-wrap: anywhere; word-break: break-word; }
+pre { background: #eee; padding: 0.5rem; user-select: text; white-space: pre-wrap; }
+.links a { margin-right: 0.75rem; overflow-wrap: anywhere; }
+.finding { box-sizing: border-box; width: min(100%, 390px); max-width: 100%; background: #fff; border: 2px solid #1a1a1a; padding: 1rem; }
+
+</style>
+</head>
+<body>
+<a class="skip" href="#comparison">Skip to comparison</a>
+<header>
+<h1>owned-slice-b: two evidence classes</h1>
+<p><a href="../../index.html">overview</a></p>
+</header>
+<main id="comparison">
+<p>The corpus author&#x27;s own mutant set: 2 of 2 killed. A separately authored set: 0 of 1 killed, 1 not distinguished. Two sets, two denominators, never added together.</p>
+<section aria-labelledby="findings-heading">
+<h2 id="findings-heading">What each set found</h2>
+<p>Each mutant removes or weakens one rule in the candidate. A survivor is a rule the corpus does not notice losing.</p>
+<h3>Declared set</h3>
+<ul>
+<li><strong>killed</strong>: remove owned-fixture negative guard</li>
+<li><strong>killed</strong>: remove owned-fixture upper guard</li>
+</ul>
+<h3>Independent set</h3>
+<ul>
+<li><strong>survived</strong>: truncate owned-fixture upper guard to the first value above maximum</li>
+</ul>
+</section>
+<section aria-labelledby="side-by-side-heading">
+<h2 id="side-by-side-heading">Side by side</h2>
+<table>
+<caption>Two mutant sets for one candidate and one corpus, measured at <span class="mono">20f6d8b1fb99283ce70fd1d8f6016958df5d02b3</span>. Each column has its own denominator. There is no total.</caption>
+<thead><tr><td></td><th scope="col">Declared</th><th scope="col">Independent</th></tr></thead>
+<tbody>
+<tr><th scope="row">Mutants written by</th><td>the corpus author, as declared in the manifest</td><td>Codex delegated selection writer, as recorded and not authenticated</td></tr>
+<tr><th scope="row">Author had seen the candidate&#x27;s outcomes</th><td>not recorded for an author declaration</td><td>no</td></tr>
+<tr><th scope="row">Evidence class</th><td>declared</td><td>independent; committed openly before the run; not held out</td></tr>
+<tr><th scope="row">Killed</th><td>2 of 2</td><td>0 of 1</td></tr>
+<tr><th scope="row">Kills that rest only on the candidate ending abnormally</th><td>0</td><td>0</td></tr>
+<tr><th scope="row">Survived</th><td>0 of 2</td><td>1 of 1</td></tr>
+<tr><th scope="row">Silent</th><td>0 of 2</td><td>0 of 1</td></tr>
+<tr><th scope="row">Unproved, outside the denominator</th><td>0</td><td>0</td></tr>
+<tr><th scope="row">Positive control</th><td>killed: the harness can see a change</td><td>killed: the harness can see a change</td></tr>
+<tr><th scope="row">Inert control</th><td>unchanged: a change that must not matter did not move the outcomes</td><td>unchanged: a change that must not matter did not move the outcomes</td></tr>
+<tr><th scope="row">Every mutant in this set distinguished</th><td>yes</td><td>no</td></tr>
+</tbody>
+</table>
+<p>The engine scores a mutant whose candidate ends abnormally as killed. The row for kills that rest only on that shows how many such kills each set has, because an abnormal ending shows the harness can fail, not that the corpus can tell right from wrong.</p>
+<p>Both columns ran against the same candidate and corpus trees, with the same toolchain image <span class="mono">sha256:e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2</span>, prepared at the same commit. Only the mutant set differs.</p>
+</section>
+<h2>Evidence</h2>
+<p class="links">
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/blob/cb1628cf15b0c7ef9c47c1968f5e66b566e6be66/measurements/owned-slice-b-20f6d8b/README.md">evidence README</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/raw/cb1628cf15b0c7ef9c47c1968f5e66b566e6be66/measurements/owned-slice-b-20f6d8b/declared/report.v0.json">declared/report.v0.json</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/raw/cb1628cf15b0c7ef9c47c1968f5e66b566e6be66/measurements/owned-slice-b-20f6d8b/declared/prepare.v2.json">declared/prepare.v2.json</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/raw/cb1628cf15b0c7ef9c47c1968f5e66b566e6be66/measurements/owned-slice-b-20f6d8b/independent/report.v0.json">independent/report.v0.json</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/raw/cb1628cf15b0c7ef9c47c1968f5e66b566e6be66/measurements/owned-slice-b-20f6d8b/independent/prepare.v2.json">independent/prepare.v2.json</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/raw/cb1628cf15b0c7ef9c47c1968f5e66b566e6be66/measurements/owned-slice-b-20f6d8b/independent/class-provenance.v0.json">independent/class-provenance.v0.json</a>
+<a href="https://github.com/corpus-adequacy/corpus-adequacy/raw/cb1628cf15b0c7ef9c47c1968f5e66b566e6be66/measurements/owned-slice-b-20f6d8b/independent/class-attempt.v0.json">independent/class-attempt.v0.json</a>
+</p>
+<section class="non-claims" aria-labelledby="non-claims-heading">
+<h2 id="non-claims-heading">Non-claims</h2>
+<ul>
+<li>Two evidence classes, two denominators. They are never added together, and neither is a population estimate.</li>
+<li>A declared set that kills every mutant shows its own mutants are distinguished. It does not show the rule set is complete. The independent column is one probe of that, not a proof.</li>
+<li>Authorship names are recorded as written and are not authenticated.</li>
+<li>Local contained evidence, not hosted containment proof. A survivor is bounded to this selection, corpus, projection, environment and host.</li>
+<li>No evidence class proves rule completeness, corpus quality, implementation correctness, real-world prevalence, security, conformance, or author independence.</li>
+<li>Each denominator is one declared selection and is not a population estimate.</li>
+<li>This artifact defines one class only; no aggregate score or overall adequacy exists.</li>
+</ul>
+</section>
+</main>
+</body>
+</html>

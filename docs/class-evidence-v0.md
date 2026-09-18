@@ -129,7 +129,40 @@ Predecessor identity uses the shared UTF-8 class-artifact encoder, including
 when `actor` contains non-ASCII text. Escaping those code points as
 `\uXXXX` is a different digest.
 
+## Publication
+
+`scripts/render_publication_page.py` publishes a declared and an independent class of one
+candidate and corpus side by side, from `publications/class-comparisons/index.v0.json`
+(schema `corpus-adequacy.class-comparison-index.v0`, keys `schema` and `comparisons`). Each
+comparison names an `id`, the `evidence` directory under `measurements/`, and the SHA-256 of
+six files: each side's `report.v0.json` and `prepare.v2.json`, and the independent side's
+`class-provenance.v0.json` and `class-attempt.v0.json`. The declared side has no class
+artifacts: its mutants are the corpus author's own declaration.
+
+The renderer re-encodes both class artifacts and refuses bytes that are not canonical, requires
+the attempt to be `completed` and to bind the listed report, environment and provenance, and
+refuses any `effective_class` other than `independent` in the second column. The two sides
+must share the toolchain, runtime, materialized trees and PREPARE commit, and each report must
+come from that commit. An unproved class, a survived control or any unproved mutant has no
+result to set beside another, so it is refused rather than shown.
+
+The second column must be `independent`: a held-out class is stronger evidence and would need
+its own wording. The two sides must measure different selections, compared by manifest digest as
+well as by path.
+
+The page never adds the two denominators and shows no percentage. It shows how many kills rest
+only on the candidate ending abnormally, because this engine scores that as a kill. Mainstream
+tools differ here: Stryker counts a timeout as detected
+([mutant states](https://stryker-mutator.io/docs/mutation-testing-elements/mutant-states-and-metrics/)),
+PIT marks `TIMED_OUT` as detected
+([DetectionStatus.java](https://github.com/hcoles/pitest/blob/master/pitest/src/main/java/org/pitest/mutationtest/DetectionStatus.java)),
+mutmut counts timeouts in its percentage on its main branch as of September 2026
+([`__main__.py`](https://github.com/boxed/mutmut/blob/main/src/mutmut/__main__.py)), and cargo-mutants keeps timeouts apart from caught
+mutants ([outcome.rs](https://github.com/sourcefrog/cargo-mutants/blob/main/src/outcome.rs)). The visibility status is
+worded for a reader: `declared` on an independent class means the set was committed openly
+before the run and was not held out.
+
 ## Out of scope
 
-F3 experiment, F4 recorder/publication, CLI registration, candidate/Docker
-execution, hosted dispatch, and any cross-class score.
+F3 experiment, CLI registration, candidate/Docker execution, hosted dispatch, and any
+cross-class score.

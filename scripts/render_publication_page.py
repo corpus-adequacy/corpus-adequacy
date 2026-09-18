@@ -31,6 +31,30 @@ INDEX_KEYS = frozenset({"schema", "records"})
 ATTEMPT_INDEX_REL = "publications/run-attempts/index.v0.json"
 ATTEMPT_INDEX_SCHEMA = "corpus-adequacy.run-attempt-index.v0"
 ATTEMPT_INDEX_KEYS = frozenset({"schema", "attempts"})
+CLASS_INDEX_REL = "publications/class-comparisons/index.v0.json"
+CLASS_INDEX_SCHEMA = "corpus-adequacy.class-comparison-index.v0"
+CLASS_INDEX_KEYS = frozenset({"schema", "comparisons"})
+# Every byte a comparison page relies on is listed by digest. The declared side has no class
+# artifacts: its mutants are the corpus author's own declaration.
+CLASS_ENTRY_FILES = {
+    "declared_report_sha256": "declared/report.v0.json",
+    "declared_prepare_sha256": "declared/prepare.v2.json",
+    "independent_report_sha256": "independent/report.v0.json",
+    "independent_prepare_sha256": "independent/prepare.v2.json",
+    "independent_provenance_sha256": "independent/class-provenance.v0.json",
+    "independent_attempt_sha256": "independent/class-attempt.v0.json",
+}
+CLASS_ENTRY_KEYS = frozenset({"id", "evidence"}) | frozenset(CLASS_ENTRY_FILES)
+CLASS_PAGE_PREFIX = "classes"
+CLASS_NON_CLAIMS = (
+    "Two evidence classes, two denominators. They are never added together, and neither is a "
+    "population estimate.",
+    "A declared set that kills every mutant shows its own mutants are distinguished. It does not "
+    "show the rule set is complete. The independent column is one probe of that, not a proof.",
+    "Authorship names are recorded as written and are not authenticated.",
+    "Local contained evidence, not hosted containment proof. A survivor is bounded to this "
+    "selection, corpus, projection, environment and host.",
+)
 RAW_PREFIX = "https://github.com/corpus-adequacy/corpus-adequacy/raw"
 BLOB_PREFIX = "https://github.com/corpus-adequacy/corpus-adequacy/blob"
 ISSUES_INTAKE = "https://github.com/corpus-adequacy/corpus-adequacy/issues/new?template=add-corpus.yml"
@@ -635,6 +659,236 @@ def load_listed_records(root: Path) -> tuple[bytes, list[dict]]:
     return index_bytes, records
 
 
+KIND_CLASS_COMPARISON = "class-comparison"
+VISIBILITY_WORDS = {
+    "declared": "committed openly before the run; not held out",
+    "hidden-until-freeze": "hidden until the candidate froze; held out",
+    "disclosed-before-freeze": "disclosed before the candidate froze; not held out",
+    "unknown": "not established",
+}
+
+
+def load_class_index(root: Path) -> tuple[bytes, list[dict]]:
+    """The optional class-comparison index. Absent means no comparison is published."""
+    index_path = Path(root) / CLASS_INDEX_REL
+    if not index_path.exists():
+        return b"", []
+    raw, doc = _load_json_object(index_path, label=CLASS_INDEX_REL)
+    unknown = sorted(set(doc) - CLASS_INDEX_KEYS)
+    if unknown:
+        raise PublicationError("class-comparison index has unknown fields: %s" % unknown)
+    missing = sorted(CLASS_INDEX_KEYS - set(doc))
+    if missing:
+        raise PublicationError("class-comparison index missing fields: %s" % missing)
+    if doc.get("schema") != CLASS_INDEX_SCHEMA:
+        raise PublicationError("class-comparison index schema is not %s" % CLASS_INDEX_SCHEMA)
+    listed = doc.get("comparisons")
+    if not isinstance(listed, list):
+        raise PublicationError("class-comparison index comparisons must be a list")
+    entries = []
+    seen = set()
+    for i, item in enumerate(listed):
+        if not isinstance(item, dict):
+            raise PublicationError("class-comparison index comparisons[%d] is not an object" % i)
+        unknown = sorted(set(item) - CLASS_ENTRY_KEYS)
+        missing = sorted(CLASS_ENTRY_KEYS - set(item))
+        if unknown or missing:
+            raise PublicationError(
+                "class-comparison index comparisons[%d]: unknown %s, missing %s"
+                % (i, unknown, missing))
+        comparison_id = _require_record_id(item.get("id"))
+        if comparison_id in seen:
+            raise PublicationError(
+                "class-comparison index lists %s more than once" % comparison_id)
+        seen.add(comparison_id)
+        entry = {"id": comparison_id, "evidence": _require_record_id(item.get("evidence"))}
+        for key in CLASS_ENTRY_FILES:
+            entry[key] = _require_hex64(item.get(key), field=key)
+        entries.append(entry)
+    return raw, entries
+
+
+def _parse_bound(raw: bytes, label: str) -> dict:
+    try:
+        doc = _parse_projection_json(raw)
+    except (ca.ManifestError, json.JSONDecodeError) as exc:
+        raise PublicationError("%s: %s" % (label, exc)) from exc
+    if not isinstance(doc, dict):
+        raise PublicationError("%s is not a JSON object" % label)
+    return doc
+
+
+def _repository_file(root: Path, rel: str, *, label: str) -> bytes:
+    """A file this repository ships, named by a repository-relative path, read confined."""
+    parts = Path(rel).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise PublicationError("%s is not a repository path" % label)
+    try:
+        return read_bounded_regular_file(Path(root).joinpath(*parts))
+    except (ca.ManifestError, OSError) as exc:
+        raise PublicationError("%s is missing from this repository" % label) from exc
+
+
+def _is_termination_how(how) -> bool:
+    """A kill whose `how` names only termination kinds rests on the child ending abnormally."""
+    if not isinstance(how, str) or not how:
+        return False
+    return all(token in ca.TERMINATED_KINDS for token in how.split(", "))
+
+
+def _class_side(root: Path, files: dict, side: str, comparison_id: str) -> dict:
+    label = "class comparison %s %s report" % (comparison_id, side)
+    doc = _parse_bound(files["%s/report.v0.json" % side], label)
+    if is_void_run_attempt(doc):
+        raise PublicationError(VOID_RENDER_REFUSAL)
+    try:
+        mutants = _require_report_rows(doc)
+    except ca.ManifestError as exc:
+        raise PublicationError("%s: %s" % (label, exc)) from exc
+    _require_displayed_parity(doc, mutants)
+    manifest_rel = _require_portable_public_text(doc.get("manifest"), field="manifest")
+    manifest_raw = _repository_file(root, manifest_rel, label="%s manifest" % label)
+    if doc.get("manifest_sha256") != "sha256:" + _sha256_bytes(manifest_raw):
+        raise PublicationError("%s names a manifest whose bytes it did not measure" % label)
+    counts = _counts_from_mutants(mutants)
+    scored = counts["killed"] + counts["survived"] + counts["silent"]
+    # A side whose positive control did not die, or that left anything unproved, has no result
+    # to set beside another: its numbers would say nothing about the corpus.
+    if doc.get("control_status") != "killed":
+        raise PublicationError("%s: positive control is %s, so the run has no result"
+                               % (label, doc.get("control_status")))
+    if counts["unproved"]:
+        raise PublicationError("%s: %d mutant(s) unproved" % (label, counts["unproved"]))
+    if scored == 0:
+        raise PublicationError("%s: nothing was scored" % label)
+    for row in mutants:
+        if row.get("verdict") in ("control-MOVED", "control-error"):
+            raise PublicationError("%s: a control is %s, so the run has no result"
+                                   % (label, row.get("verdict")))
+    inert = [row for row in mutants if row.get("verdict") == "control-unchanged"]
+    # Survivors first: an undistinguished mutant is the finding a reader can act on.
+    order = {"survived": 0, "silent": 1, "killed": 2}
+    ordinary = sorted(
+        ((row["verdict"], row["label"], _is_termination_how(row.get("how")))
+         for row in mutants if row.get("verdict") in order),
+        key=lambda item: (order[item[0]], item[1]))
+    return {
+        "doc": doc,
+        "manifest": manifest_rel,
+        "counts": counts,
+        "scored": scored,
+        "control_status": doc.get("control_status"),
+        "adequate": doc.get("adequate") is True,
+        "by_termination": sum(1 for row in mutants if row.get("verdict") == "killed"
+                              and _is_termination_how(row.get("how"))),
+        "not_distinguished": [(row["verdict"], row["label"]) for row in mutants
+                              if row.get("verdict") in ("survived", "silent")],
+        "ordinary": ordinary,
+        "inert_controls": len(inert),
+        "prepare": _parse_bound(files["%s/prepare.v2.json" % side],
+                                "class comparison %s %s prepare" % (comparison_id, side)),
+    }
+
+
+def load_class_comparison(root: Path, entry: dict) -> dict:
+    """Load and bind every byte one comparison page relies on, or refuse."""
+    comparison_id = entry["id"]
+    base = Path(root) / "measurements" / entry["evidence"]
+    files = {}
+    for key, rel in CLASS_ENTRY_FILES.items():
+        try:
+            raw = read_bounded_regular_file(base / rel)
+        except (ca.ManifestError, OSError) as exc:
+            raise PublicationError(
+                "class comparison %s is missing %s" % (comparison_id, rel)) from exc
+        if _sha256_bytes(raw) != entry[key]:
+            raise PublicationError(
+                "class comparison %s digest mismatch for %s" % (comparison_id, rel))
+        files[rel] = raw
+    declared = _class_side(root, files, "declared", comparison_id)
+    independent = _class_side(root, files, "independent", comparison_id)
+    # Compare what was measured, not only where it lives: two paths can hold the same bytes.
+    if (declared["manifest"] == independent["manifest"]
+            or declared["doc"].get("manifest_sha256")
+            == independent["doc"].get("manifest_sha256")):
+        raise PublicationError(
+            "class comparison %s names the same selection on both sides" % comparison_id)
+
+    provenance_raw = files["independent/class-provenance.v0.json"]
+    attempt_raw = files["independent/class-attempt.v0.json"]
+    provenance = _parse_bound(provenance_raw, "class provenance")
+    attempt = _parse_bound(attempt_raw, "class attempt")
+    try:
+        canonical_provenance = ca.encode_class_provenance_v0(provenance)
+        canonical_attempt = ca.encode_class_attempt_v0(attempt)
+    except ca.ManifestError as exc:
+        raise PublicationError("class comparison %s: %s" % (comparison_id, exc)) from exc
+    if canonical_provenance != provenance_raw or canonical_attempt != attempt_raw:
+        raise PublicationError(
+            "class comparison %s: class artifacts are not canonical bytes" % comparison_id)
+    bindings = (
+        ("report_sha256", entry["independent_report_sha256"]),
+        ("environment_sha256", entry["independent_prepare_sha256"]),
+        ("provenance_sha256", entry["independent_provenance_sha256"]),
+    )
+    for key, digest in bindings:
+        if attempt[key] != "sha256:" + digest:
+            raise PublicationError(
+                "class comparison %s: the class attempt does not bind the listed %s"
+                % (comparison_id, key))
+    if attempt["manifest_sha256"] != independent["doc"].get("manifest_sha256"):
+        raise PublicationError(
+            "class comparison %s: the class attempt names another selection" % comparison_id)
+    if attempt["status"] != "completed":
+        raise PublicationError(
+            "class comparison %s: the class attempt is %s, and an unproved class has no "
+            "result to set beside another" % (comparison_id, attempt["status"]))
+    # This page sets a declared set beside an independent one. A held-out class is stronger
+    # evidence and would need its own wording, so it is not published under this header.
+    if attempt["effective_class"] != "independent":
+        raise PublicationError(
+            "class comparison %s: the second column must be an independent class, not %s"
+            % (comparison_id, attempt["effective_class"]))
+    for name in ("killed", "survived", "silent", "unproved"):
+        if attempt["result"][name] != independent["counts"][name]:
+            raise PublicationError(
+                "class comparison %s: the class attempt and its report disagree on %s"
+                % (comparison_id, name))
+
+    # One candidate, one corpus, one environment: only the mutant set may differ.
+    for key in ("toolchain", "runtime", "materialized"):
+        if declared["prepare"].get(key) != independent["prepare"].get(key):
+            raise PublicationError(
+                "class comparison %s: the two sides did not share %s" % (comparison_id, key))
+    measured_at = declared["prepare"].get("execution", {}).get("commit")
+    if independent["prepare"].get("execution", {}).get("commit") != measured_at:
+        raise PublicationError(
+            "class comparison %s: the two sides were prepared at different commits"
+            % comparison_id)
+    for side in (declared, independent):
+        if side["doc"].get("tool_commit") != measured_at:
+            raise PublicationError(
+                "class comparison %s: a report was not produced at the prepared commit"
+                % comparison_id)
+    return {
+        "kind": KIND_CLASS_COMPARISON,
+        "id": comparison_id,
+        "evidence": entry["evidence"],
+        "files": files,
+        "declared": declared,
+        "independent": independent,
+        "provenance": provenance,
+        "attempt": attempt,
+        "measured_at": measured_at,
+        "toolchain_image": declared["prepare"]["toolchain"]["image_id"],
+    }
+
+
+def load_class_comparisons(root: Path) -> tuple[bytes, list[dict]]:
+    index_bytes, entries = load_class_index(Path(root))
+    return index_bytes, [load_class_comparison(Path(root), entry) for entry in entries]
+
+
 def discover_records(root: Path) -> list[dict]:
     """Index-bound records only. Kept as the listed-record loader name."""
     _index_bytes, records = load_listed_records(root)
@@ -1109,7 +1363,8 @@ def _listing_copy(*, has_measurements: bool, has_attempts: bool) -> str:
     return "Committed %s." % parts[0]
 
 
-def _page_body(records: list[dict], source_commit: str, projection_digest: str) -> str:
+def _page_body(records: list[dict], source_commit: str, projection_digest: str,
+               comparisons=()) -> str:
     measurements, attempts = _split_publication_records(records)
     cards = "\n".join(_card_html(rec, source_commit) for rec in measurements)
     first_run = _first_run_html(measurements, source_commit) if measurements else ""
@@ -1165,7 +1420,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
 </nav>
 %s
 <main id="results" tabindex="-1">
-%s%s</main>
+%s%s%s</main>
 </body>
 </html>
 """ % (
@@ -1181,6 +1436,7 @@ def _page_body(records: list[dict], source_commit: str, projection_digest: str) 
         handoff,
         void_section,
         measurement_block,
+        _class_section_html(comparisons),
     )
 
 
@@ -1190,6 +1446,8 @@ def compute_projection_digest(
     renderer_bytes: bytes,
     source_commit: str,
     attempts_index_bytes: bytes = b"",
+    class_index_bytes: bytes = b"",
+    comparisons=(),
 ) -> str:
     """SHA-256 of projection inputs, not of the emitted HTML.
 
@@ -1210,6 +1468,11 @@ def compute_projection_digest(
     _add(b"index", index_bytes)
     if attempts_index_bytes:
         _add(b"attempts_index", attempts_index_bytes)
+    if class_index_bytes:
+        _add(b"class_index", class_index_bytes)
+        for comparison in comparisons:
+            for rel, raw in comparison["files"].items():
+                _add(("class:%s:%s" % (comparison["id"], rel)).encode("utf-8"), raw)
     for record in records:
         kind = record.get("kind", KIND_COMPLETED_MEASUREMENT)
         if kind == KIND_VOID_RUN_ATTEMPT:
@@ -1439,9 +1702,177 @@ def _rule_page(record: dict, finding: dict, build_commit: str) -> str:
     )
 
 
+def _of(count: int, total: int) -> str:
+    """A count with its own denominator. Never a percentage: these denominators are tiny."""
+    return "%d of %d" % (count, total)
+
+
+def _class_sentence(rec: dict) -> str:
+    declared, independent = rec["declared"], rec["independent"]
+    return (
+        "The corpus author's own mutant set: %s killed. A separately authored set: %s killed, "
+        "%d not distinguished. Two sets, two denominators, never added together."
+        % (_of(declared["counts"]["killed"], declared["scored"]),
+           _of(independent["counts"]["killed"], independent["scored"]),
+           len(independent["not_distinguished"])))
+
+
+def _class_card_html(rec: dict) -> str:
+    return (
+        '<li class="card">\n'
+        '<h3><a href="%s/%s/index.html">%s</a></h3>\n'
+        "<p>%s</p>\n"
+        "</li>"
+        % (CLASS_PAGE_PREFIX, _esc(rec["id"]), _esc(rec["id"]), _esc(_class_sentence(rec))))
+
+
+def _class_section_html(comparisons) -> str:
+    if not comparisons:
+        return ""
+    return (
+        '<section id="evidence-classes" aria-labelledby="evidence-classes-heading">\n'
+        '<h2 id="evidence-classes-heading">Separate evidence classes</h2>\n'
+        "<p>Where one candidate and one corpus were measured with more than one mutant set, "
+        "each set keeps its own denominator. They are shown side by side and never added "
+        "together.</p>\n"
+        '<ul class="cards">\n%s\n</ul>\n'
+        "</section>\n"
+        % "\n".join(_class_card_html(rec) for rec in comparisons))
+
+
+def _class_table_html(rec: dict) -> str:
+    declared, independent = rec["declared"], rec["independent"]
+    authoring = rec["provenance"]["authoring"]
+    attempt = rec["attempt"]
+    seen = "yes" if authoring.get("candidate_outcomes_seen") else "no"
+    rows = (
+        ("Mutants written by",
+         "the corpus author, as declared in the manifest",
+         "%s, as recorded and not authenticated" % authoring.get("mutation_author")),
+        ("Author had seen the candidate's outcomes",
+         "not recorded for an author declaration",
+         seen),
+        ("Evidence class",
+         "declared",
+         "%s; %s" % (attempt["effective_class"],
+                     VISIBILITY_WORDS.get(attempt["visibility_status"], "not established"))),
+        ("Killed",
+         _of(declared["counts"]["killed"], declared["scored"]),
+         _of(independent["counts"]["killed"], independent["scored"])),
+        ("Kills that rest only on the candidate ending abnormally",
+         str(declared["by_termination"]),
+         str(independent["by_termination"])),
+        ("Survived",
+         _of(declared["counts"]["survived"], declared["scored"]),
+         _of(independent["counts"]["survived"], independent["scored"])),
+        ("Silent",
+         _of(declared["counts"]["silent"], declared["scored"]),
+         _of(independent["counts"]["silent"], independent["scored"])),
+        ("Unproved, outside the denominator",
+         str(declared["counts"]["unproved"]),
+         str(independent["counts"]["unproved"])),
+        ("Positive control",
+         "killed: the harness can see a change",
+         "killed: the harness can see a change"),
+        ("Inert control",
+         _inert_words(declared["inert_controls"]),
+         _inert_words(independent["inert_controls"])),
+        ("Every mutant in this set distinguished",
+         "yes" if declared["adequate"] else "no",
+         "yes" if independent["adequate"] else "no"),
+    )
+    body = "\n".join(
+        '<tr><th scope="row">%s</th><td>%s</td><td>%s</td></tr>'
+        % (_esc(name), _esc(left), _esc(right)) for name, left, right in rows)
+    return (
+        "<table>\n"
+        "<caption>Two mutant sets for one candidate and one corpus, measured at "
+        '<span class="mono">%s</span>. Each column has its own denominator. There is no '
+        "total.</caption>\n"
+        '<thead><tr><td></td><th scope="col">Declared</th>'
+        '<th scope="col">Independent</th></tr></thead>\n'
+        "<tbody>\n%s\n</tbody>\n"
+        "</table>"
+        % (_esc(rec["measured_at"]), body))
+
+
+def _inert_words(count: int) -> str:
+    if count == 0:
+        return "none declared"
+    return "unchanged: a change that must not matter did not move the outcomes"
+
+
+def _findings_html(rec: dict) -> str:
+    """Every ordinary mutant per set, survivors first: the per-mutant view, not a score."""
+    parts = []
+    for side, title in (("declared", "Declared set"), ("independent", "Independent set")):
+        items = []
+        for verdict, label, by_termination in rec[side]["ordinary"]:
+            word = verdict
+            if verdict == "killed" and by_termination:
+                word = "killed, but only by the candidate ending abnormally"
+            items.append("<li><strong>%s</strong>: %s</li>" % (_esc(word), _esc(label)))
+        parts.append("<h3>%s</h3>\n<ul>\n%s\n</ul>" % (title, "\n".join(items)))
+    return (
+        '<section aria-labelledby="findings-heading">\n'
+        '<h2 id="findings-heading">What each set found</h2>\n'
+        "<p>Each mutant removes or weakens one rule in the candidate. A survivor is a rule the "
+        "corpus does not notice losing.</p>\n"
+        "%s\n</section>" % "\n".join(parts))
+
+
+def _class_links_html(rec: dict, build_commit: str) -> str:
+    base = "measurements/%s" % rec["evidence"]
+    links = ['<a href="%s/%s/%s/README.md">evidence README</a>'
+             % (_esc(BLOB_PREFIX), _esc(build_commit), _esc(base))]
+    for rel in rec["files"]:
+        links.append('<a href="%s/%s/%s/%s">%s</a>'
+                     % (_esc(RAW_PREFIX), _esc(build_commit), _esc(base), _esc(rel), _esc(rel)))
+    return '<p class="links">\n%s\n</p>' % "\n".join(links)
+
+
+def _class_page(rec: dict, build_commit: str) -> str:
+    environment = (
+        "<p>Both columns ran against the same candidate and corpus trees, with the same "
+        'toolchain image <span class="mono">%s</span>, prepared at the same commit. Only '
+        "the mutant set differs.</p>" % _esc(rec["toolchain_image"]))
+    non_claims = list(CLASS_NON_CLAIMS)
+    for item in rec["attempt"]["non_claims"]:
+        if item not in non_claims:
+            non_claims.append(item)
+    body = (
+        "<header>\n"
+        "<h1>%s: two evidence classes</h1>\n"
+        '<p><a href="../../index.html">overview</a></p>\n'
+        "</header>\n"
+        '<main id="comparison">\n'
+        "<p>%s</p>\n"
+        "%s\n"
+        '<section aria-labelledby="side-by-side-heading">\n'
+        '<h2 id="side-by-side-heading">Side by side</h2>\n'
+        "%s\n"
+        "<p>The engine scores a mutant whose candidate ends abnormally as killed. The row "
+        "for kills that rest only on that shows how many such kills each set has, because "
+        "an abnormal ending shows the harness can fail, not that the corpus can tell right "
+        "from wrong.</p>\n"
+        "%s\n"
+        "</section>\n"
+        "<h2>Evidence</h2>\n"
+        "%s\n"
+        "%s\n"
+        "</main>"
+        % (_esc(rec["id"]), _esc(_class_sentence(rec)), _findings_html(rec),
+           _class_table_html(rec), environment,
+           _class_links_html(rec, build_commit),
+           _non_claims_html(None, ceilings=tuple(non_claims))))
+    return _shell_page("%s: two evidence classes" % rec["id"], "#comparison",
+                       "Skip to comparison", body)
+
+
 def render_site(root: Path, source_commit: str) -> dict[str, bytes]:
     index_bytes, records = load_listed_records(Path(root))
     attempts_index_bytes, _attempts = load_attempt_index(Path(root))
+    class_index_bytes, comparisons = load_class_comparisons(Path(root))
     renderer_bytes = read_bounded_regular_file(Path(__file__))
     digest = compute_projection_digest(
         index_bytes,
@@ -1449,10 +1880,16 @@ def render_site(root: Path, source_commit: str) -> dict[str, bytes]:
         renderer_bytes,
         source_commit,
         attempts_index_bytes=attempts_index_bytes,
+        class_index_bytes=class_index_bytes,
+        comparisons=comparisons,
     )
     files = {
-        "index.html": _page_body(records, source_commit, digest).encode("utf-8"),
+        "index.html": _page_body(records, source_commit, digest,
+                                 comparisons).encode("utf-8"),
     }
+    for comparison in comparisons:
+        files["%s/%s/index.html" % (CLASS_PAGE_PREFIX, comparison["id"])] = _class_page(
+            comparison, source_commit).encode("utf-8")
     for record in records:
         rec_id = record["directory"]
         kind = record.get("kind", KIND_COMPLETED_MEASUREMENT)
@@ -1603,7 +2040,8 @@ def _hash_object_oid(root: Path, data: bytes) -> str:
     return oid
 
 
-def _require_recorded_link_commit(root: Path, recorded: str, records: list[dict]) -> None:
+def _require_recorded_link_commit(root: Path, recorded: str, records: list[dict],
+                                  comparisons=()) -> None:
     """Refuse an implicit --check commit that is not a real ancestor with matching bytes."""
     if not _looks_like_commit(recorded):
         raise PublicationError("recorded source-commit is not a 40-hex digest")
@@ -1623,6 +2061,17 @@ def _require_recorded_link_commit(root: Path, recorded: str, records: list[dict]
             current_oid = _hash_object_oid(root, current)
             if recorded_oid != current_oid:
                 raise PublicationError("recorded source-commit bytes differ for %s" % rel)
+    # A comparison page links every byte it binds, plus the evidence README, at that commit.
+    for comparison in comparisons:
+        base = "measurements/%s" % comparison["evidence"]
+        for rel in list(comparison["files"]) + ["README.md"]:
+            path = "%s/%s" % (base, rel)
+            recorded_oid = _git_oid(root, "%s:%s" % (recorded, path))
+            if recorded_oid is None:
+                raise PublicationError("recorded source-commit is missing %s" % path)
+            current_oid = _hash_object_oid(root, read_bounded_regular_file(root / path))
+            if recorded_oid != current_oid:
+                raise PublicationError("recorded source-commit bytes differ for %s" % path)
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Render the publication page")
@@ -1645,7 +2094,8 @@ def main(argv=None) -> int:
         else:
             recorded = source_commit_from_html(existing.decode("utf-8"))
             _index_bytes, records = load_listed_records(root)
-            _require_recorded_link_commit(root, recorded, records)
+            _class_index_bytes, comparisons = load_class_comparisons(root)
+            _require_recorded_link_commit(root, recorded, records, comparisons)
         expected = render_site(root, recorded)
         _check_site(site_root, expected)
         return 0
