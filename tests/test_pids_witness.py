@@ -228,6 +228,47 @@ class TheRun(unittest.TestCase):
         self.assertEqual(argv[-3:], [pw.ENTRYPOINT, "-c", pw.witness_script(PROFILE)])
 
 
+class EveryGateCounts(unittest.TestCase):
+    """Each condition of `witnessed`, taken away alone from a run that otherwise witnessed."""
+
+    def _raw(self):
+        captured = {}
+        real = pw.witness_record
+
+        def keep(raw, **kwargs):
+            captured["raw"] = raw
+            return real(raw, **kwargs)
+
+        pw.witness_record = keep
+        try:
+            _witness(WitnessTransport())
+        finally:
+            pw.witness_record = real
+        return captured["raw"]
+
+    def _judge(self, raw):
+        return pw.witness_record(raw, image_id=TOOLCHAIN_IMAGE)
+
+    def test_the_untouched_raw_witnessed(self):
+        self.assertEqual(self._judge(self._raw())["verdict"], "witnessed")
+
+    def test_a_run_that_did_not_complete_is_unproved(self):
+        for state in ("timeout", "output-cap", None):
+            with self.subTest(state=state):
+                raw = self._raw()
+                raw["state"] = state
+                record = self._judge(raw)
+                self.assertEqual(record["verdict"], "unproved")
+                self.assertEqual(record["unproved_reasons"], ["state:%s" % state])
+
+    def test_a_container_that_was_not_removed_is_unproved(self):
+        raw = self._raw()
+        raw["cleanup"] = "remove-failed"
+        record = self._judge(raw)
+        self.assertEqual(record["verdict"], "unproved")
+        self.assertEqual(record["unproved_reasons"], ["cleanup:remove-failed"])
+
+
 class TheSecondHold(unittest.TestCase):
     def test_it_needs_the_read_back(self):
         with self.assertRaises(PrepareError):
