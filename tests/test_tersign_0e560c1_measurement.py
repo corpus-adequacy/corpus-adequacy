@@ -38,7 +38,10 @@ PRODUCER_COMMIT = "b6f4e3fde79637bc809407bf8efd4c813dfe0959"
 REPORT_SHA256 = "6b8a49ce5f63c2b5a38a6b336a601b5ef7feabe6611c2e44bf5d481702e1f2ee"
 SOURCE_SHA256 = "b9799f2205e4cc051a00bc1daa28f73cc255dff919469f1c036e1385822edd67"
 TOOL_CONTENT_SHA256 = "7a0f37f6c9f93daf88f96efc1f58f1f6f75264d150ab6eb72a0765d67c99037e"
-PUBLICATION_SOURCE_COMMIT = "aa2ef19efaa8f6140f7a1766553768984b60e5aa"
+# The site's evidence-link commit. It was aa2ef19 when this record was published and moved to
+# cb1628c when the Slice B class comparison was published (#103), the first commit holding that
+# evidence. `--check` below verifies this record's linked bytes are identical at that commit.
+PUBLICATION_SOURCE_COMMIT = "cb1628cf15b0c7ef9c47c1968f5e66b566e6be66"
 PROCESS_LOCK_SKIP = "process/batch scoring requires an advisory lock"
 
 

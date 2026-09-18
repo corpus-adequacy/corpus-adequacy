@@ -132,9 +132,22 @@ Closed offline codecs `corpus-adequacy.class-provenance.v0` and
 not inside it. Loaders bound every path to the existing 4 MiB no-follow reader
 and compare a dependent digest before parsing those bytes. They do not execute a
 candidate, register a CLI, or emit an aggregate or overall adequacy score.
-Field tables live in `docs/class-evidence-v0.md`. Publishable attempt
-construction remains unreachable until a later visibility slice. `report.v0`,
-`survivors.v0`, `rules.v0` and `diff.v0` bytes are unchanged.
+Field tables live in `docs/class-evidence-v0.md`. `report.v0`, `survivors.v0`,
+`rules.v0` and `diff.v0` bytes are unchanged.
+
+The publication site shows separately authored classes side by side (#103). An optional index,
+`publications/class-comparisons/index.v0.json`, lists each comparison with the SHA-256 of every
+byte its page relies on: both reports and both PREPAREs, plus the independent side's class
+provenance and class attempt. The renderer refuses the page unless every digest matches, both
+reports name a manifest in this repository whose bytes they measured, neither carries a host
+path, both sides have a killed positive control and nothing unproved, the class attempt is
+completed and binds that report, environment and provenance, and both sides ran in one
+environment at one commit. The page leads with each set's mutants, survivors first, then a table
+with one column per set. Counts carry their own denominator, as in `2 of 2` and `0 of 1`. It
+shows no percentage and no total, because these denominators are too small for either to mean
+anything and adding them would pool evidence of different provenance. A row shows how many kills
+rest only on the candidate ending abnormally, because the engine scores that as a kill; Stryker,
+PIT and mutmut count a timeout as detected, and cargo-mutants keeps it apart.
 
 ```
 python3 adapters/tersign_evidence_record.py <tersign-checkout> <empty-dest>

@@ -1,0 +1,15 @@
+{
+  "comparisons": [
+    {
+      "declared_prepare_sha256": "1d7319e7b1ccf9722d28e0ccaf84b1fccc49eba77c9410d93294b18d8a939830",
+      "declared_report_sha256": "93a9fe9123ddac732bd70f9b9897733fd3fca36d37a7576bbd8410e57d99dbed",
+      "evidence": "owned-slice-b-20f6d8b",
+      "id": "owned-slice-b",
+      "independent_attempt_sha256": "72eea292874eeb41e790172afa9c5633cfba4ed8bceec48d0f2d801d9e3234a6",
+      "independent_prepare_sha256": "c533fc88680a42e91a2d7e470113b3da5a4f3df035589084c376ca88aead0510",
+      "independent_provenance_sha256": "ed764a70fd86825ae081815cd26e7545cc9bb4a8eabb436763ba1499ba48bc77",
+      "independent_report_sha256": "a1abd3594a79c6c2b0a57660fde62f173ffc4302126a56c32060db931b519354"
+    }
+  ],
+  "schema": "corpus-adequacy.class-comparison-index.v0"
+}

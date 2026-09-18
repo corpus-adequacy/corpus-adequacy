@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+Separate evidence classes on the publication site (#103). The site now shows the declared and
+independent Slice B sets side by side, from the clean re-measurement at `20f6d8b`, on
+`classes/owned-slice-b/`. The page leads with each set's mutants, survivors first, then one
+column per set with its own denominator: declared killed 2 of 2, independent killed 0 of 1, both
+with a killed positive control and an unchanged inert control. It shows no percentage and no
+total. It names who wrote each set and what they could see, and it shows how many kills rest only
+on the candidate ending abnormally. A new optional index, `publications/class-comparisons/`,
+binds every byte the page relies on by SHA-256, and the renderer refuses a comparison whose bytes,
+class bindings, controls, environment or manifest paths do not hold. The first Slice B pair
+cannot be published, because its reports carry a host path. The site's evidence-link commit moves
+from `aa2ef19` to `cb1628c`, the first commit that contains the clean evidence; every existing
+record's linked bytes are identical there. No existing published byte changes meaning.
+
 Slice B re-measured cleanly (#103). The first retained Slice B reports record an absolute manifest
 path, so they cannot be published. The same two local `contained-oci-v1` runs were taken again at
 `20f6d8b` with the fixed facade from #208 and retained in `measurements/owned-slice-b-20f6d8b/`. The

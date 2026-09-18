@@ -129,7 +129,28 @@ Predecessor identity uses the shared UTF-8 class-artifact encoder, including
 when `actor` contains non-ASCII text. Escaping those code points as
 `\uXXXX` is a different digest.
 
+## Publication
+
+`scripts/render_publication_page.py` publishes a declared and an independent class of one
+candidate and corpus side by side, from `publications/class-comparisons/index.v0.json`
+(schema `corpus-adequacy.class-comparison-index.v0`, keys `schema` and `comparisons`). Each
+comparison names an `id`, the `evidence` directory under `measurements/`, and the SHA-256 of
+six files: each side's `report.v0.json` and `prepare.v2.json`, and the independent side's
+`class-provenance.v0.json` and `class-attempt.v0.json`. The declared side has no class
+artifacts: its mutants are the corpus author's own declaration.
+
+The renderer re-encodes both class artifacts and refuses bytes that are not canonical, requires
+the attempt to be `completed` and to bind the listed report, environment and provenance, and
+refuses an `effective_class` of `declared` or `unknown` in the second column. The two sides
+must share the toolchain, runtime, materialized trees and PREPARE commit, and each report must
+come from that commit. An unproved class, a survived control or any unproved mutant has no
+result to set beside another, so it is refused rather than shown.
+
+The page never adds the two denominators and shows no percentage. The visibility status is
+worded for a reader: `declared` on an independent class means the set was committed openly
+before the run and was not held out.
+
 ## Out of scope
 
-F3 experiment, F4 recorder/publication, CLI registration, candidate/Docker
-execution, hosted dispatch, and any cross-class score.
+F3 experiment, CLI registration, candidate/Docker execution, hosted dispatch, and any
+cross-class score.
