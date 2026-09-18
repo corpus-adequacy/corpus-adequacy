@@ -141,7 +141,7 @@ artifacts: its mutants are the corpus author's own declaration.
 
 The renderer re-encodes both class artifacts and refuses bytes that are not canonical, requires
 the attempt to be `completed` and to bind the listed report, environment and provenance, and
-refuses an `effective_class` of `declared` or `unknown` in the second column. The two sides
+refuses any `effective_class` other than `independent` in the second column. The two sides
 must share the toolchain, runtime, materialized trees and PREPARE commit, and each report must
 come from that commit. An unproved class, a survived control or any unproved mutant has no
 result to set beside another, so it is refused rather than shown.
@@ -156,7 +156,8 @@ tools differ here: Stryker counts a timeout as detected
 ([mutant states](https://stryker-mutator.io/docs/mutation-testing-elements/mutant-states-and-metrics/)),
 PIT marks `TIMED_OUT` as detected
 ([DetectionStatus.java](https://github.com/hcoles/pitest/blob/master/pitest/src/main/java/org/pitest/mutationtest/DetectionStatus.java)),
-mutmut counts timeouts in its percentage, and cargo-mutants keeps timeouts apart from caught
+mutmut counts timeouts in its percentage on its main branch as of September 2026
+([`__main__.py`](https://github.com/boxed/mutmut/blob/main/src/mutmut/__main__.py)), and cargo-mutants keeps timeouts apart from caught
 mutants ([outcome.rs](https://github.com/sourcefrog/cargo-mutants/blob/main/src/outcome.rs)). The visibility status is
 worded for a reader: `declared` on an independent class means the set was committed openly
 before the run and was not held out.
