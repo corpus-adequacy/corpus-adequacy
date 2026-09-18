@@ -112,6 +112,9 @@ def parse_open_files(raw: bytes) -> tuple[int | str, int | str]:
         lines = raw.decode("ascii")[:-1].split("\n")
     except UnicodeDecodeError as exc:
         raise ReadbackError("proc limits is not ASCII") from exc
+    # The kernel always writes this header first (fs/proc/base.c, proc_pid_limits).
+    if not lines or lines[0].split() != ["Limit", "Soft", "Limit", "Hard", "Limit", "Units"]:
+        raise ReadbackError("proc limits does not start with the kernel's header")
     found = []
     for line in lines[1:]:
         match = _LIMITS_ROW.match(line)
@@ -132,7 +135,8 @@ def cgroup_v2_swap(memory_swap_bytes: int, memory_bytes: int) -> int:
 
     Docker's `--memory-swap` is memory plus swap. cgroup v2 `memory.swap.max` is swap alone, so
     runc subtracts: `ConvertMemorySwapToCgroupV2Value` in opencontainers/cgroups `utils.go`.
-    Only the positive, bounded case a validated profile can produce is accepted here.
+    Only positive memory with swap at least that large is accepted. A profile with less swap
+    than memory can validate, but runc and Docker refuse it too, so it has no read-back.
     """
     if (type(memory_bytes) is not int or type(memory_swap_bytes) is not int
             or memory_bytes <= 0 or memory_swap_bytes < memory_bytes):

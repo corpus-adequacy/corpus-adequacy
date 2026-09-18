@@ -131,6 +131,11 @@ class ADifferingOrUnreadableValueIsNeverVerified(unittest.TestCase):
                 record = kr.readback_record(dict(_files(), **{"pids.max": raw}), PROFILE)
                 self.assertIn("readback_unreadable:pids_max", record["problems"])
 
+    def test_limits_without_the_kernels_header_is_unreadable(self):
+        headerless = b"\n".join(_raw("proc-limits").split(b"\n")[1:])
+        record = kr.readback_record(dict(_files(), limits=headerless), PROFILE)
+        self.assertIn("readback_unreadable:nofile_soft", record["problems"])
+
     def test_an_unknown_file_is_refused_rather_than_ignored(self):
         with self.assertRaises(kr.ReadbackError):
             kr.observe(dict(_files(), **{"memory.high": b"max\n"}))
@@ -151,6 +156,7 @@ class APidsWitness(unittest.TestCase):
 
     def test_a_refused_fork_counted_by_the_kernel_is_a_witness(self):
         self.assertEqual(kr.classify_pids_witness(b"max 3\n"), "witnessed")
+        # No released kernel writes max.imposed; it only shows an extra key is tolerated.
         self.assertEqual(kr.classify_pids_witness(b"max 1\nmax.imposed 1\n"), "witnessed")
 
     def test_unreadable_events_are_unproved(self):
