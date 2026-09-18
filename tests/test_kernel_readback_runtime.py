@@ -139,7 +139,7 @@ class HoldReadRelease(unittest.TestCase):
         self.assertEqual(record["candidate_outcome"], "output-cap")
 
 
-class WhatTheReviewFoundUntested(unittest.TestCase):
+class ReadbackFailurePaths(unittest.TestCase):
     def test_an_interrupt_in_the_attach_thread_reaches_the_caller_unchanged(self):
         """Narrowing the capture to Exception would lose this; the caller must see it as is."""
         class Interrupted(ObservingTransport):

@@ -789,6 +789,9 @@ READBACK_EXEC_SECONDS = 15
 READBACK_RUNNING_POLLS = 200
 READBACK_RUNNING_POLL_SECONDS = 0.025
 READBACK_RELEASE_ATTEMPTS = 3
+# How long the host waits for a second hold's ready file: the witness forks to the limit, then
+# waits for its children to be reaped, which takes a few seconds.
+SECOND_HOLD_READY_POLLS = 1200
 
 
 class DockerTransport:
@@ -902,7 +905,16 @@ def observed_oom_killed(inspect):
     return value if type(value) is bool else None
 
 
-def _start_with_readback(transport, name: str, deadline_seconds: int):
+def _release(transport, name: str, path: str) -> None:
+    for _attempt in range(READBACK_RELEASE_ATTEMPTS):
+        try:
+            if transport.release(name, path):
+                return
+        except PrepareError:
+            pass
+
+
+def _start_with_readback(transport, name: str, deadline_seconds: int, second_hold=None):
     """Attach to the container as usual, and read the kernel's limits while it is held (#197).
 
     `start -a` runs in a helper thread exactly as it would alone, so its deadline and output
@@ -910,6 +922,11 @@ def _start_with_readback(transport, name: str, deadline_seconds: int):
     kernel file through the transport, and then releases the held wrapper. The release is
     attempted even when a read failed, so the run completes and is judged, rather than timing
     out in the hold. A file that did not read is None: never a value.
+
+    `second_hold` is `(ready_path, paths, release_path)` for a wrapper that holds a second time,
+    after its payload ran (the pids witness). Once the first release is done, this thread waits
+    for the wrapper's ready file, reads `paths`, and releases `release_path`, again with the
+    release attempted whatever the reads did. The files of both holds come back in one dict.
     """
     import kernel_readback  # inside the execution identity; imported where it is used
     import threading
@@ -925,31 +942,45 @@ def _start_with_readback(transport, name: str, deadline_seconds: int):
     thread = threading.Thread(target=attach, name="contained-attach", daemon=True)
     thread.start()
     files = {key: None for key, _path in kernel_readback.READBACK_PATHS}
+    if second_hold is not None:
+        ready_path, second_paths, second_release = second_hold
+        files.update({key: None for key, _path in second_paths})
     try:
-        for _ in range(READBACK_RUNNING_POLLS):
-            if not thread.is_alive():
-                break
-            try:
-                if transport.running(name):
-                    for key, path in kernel_readback.READBACK_PATHS:
-                        files[key] = transport.exec_read(name, path)
-                    break
-            except PrepareError:
-                pass
-            time.sleep(READBACK_RUNNING_POLL_SECONDS)
-    finally:
-        # Always try to release: a held wrapper nobody releases would wait out its own bound.
-        # A few attempts, because one failed exec should not cost the run. The join is in its own
-        # finally so an unexpected release error never leaves the attach thread unjoined.
         try:
-            for _attempt in range(READBACK_RELEASE_ATTEMPTS):
+            for _ in range(READBACK_RUNNING_POLLS):
+                if not thread.is_alive():
+                    break
                 try:
-                    if transport.release(name, kernel_readback.RELEASE_PATH):
+                    if transport.running(name):
+                        for key, path in kernel_readback.READBACK_PATHS:
+                            files[key] = transport.exec_read(name, path)
                         break
                 except PrepareError:
                     pass
+                time.sleep(READBACK_RUNNING_POLL_SECONDS)
         finally:
-            thread.join()
+            # Always try to release: a held wrapper nobody releases would wait out its own bound.
+            # A few attempts, because one failed exec should not cost the run.
+            _release(transport, name, kernel_readback.RELEASE_PATH)
+        if second_hold is not None:
+            try:
+                for _ in range(SECOND_HOLD_READY_POLLS):
+                    if not thread.is_alive():
+                        break
+                    try:
+                        if transport.exec_read(name, ready_path) is not None:
+                            for key, path in second_paths:
+                                files[key] = transport.exec_read(name, path)
+                            break
+                    except PrepareError:
+                        pass
+                    time.sleep(READBACK_RUNNING_POLL_SECONDS)
+            finally:
+                _release(transport, name, second_release)
+    finally:
+        # In its own finally, so an unexpected read or release error never leaves the attach
+        # thread unjoined.
+        thread.join()
     if "error" in outcome:
         raise outcome["error"]
     return outcome["process"], files
@@ -959,7 +990,7 @@ def run_contained(
         *, image_id: str, mounts: dict, command: list[str], entrypoint: str,
         mount_spec, resource_profile, sealed: bool,
         name_prefix: str, transport=None, cleanup_label: str = "candidate",
-        record_cleanup: bool = False, readback: bool = False) -> dict:
+        record_cleanup: bool = False, readback: bool = False, second_hold=None) -> dict:
     """Run one container and return its inspect-verified raw outcome.
 
     `record_cleanup` is for callers that keep an execution-envelope record:
@@ -977,6 +1008,8 @@ def run_contained(
     transport = resolve_transport(image_id, transport)
     if getattr(transport, "skip_absent", False):
         raise PrepareError("absence proof skipped")
+    if second_hold is not None and not readback:
+        raise PrepareError("a second hold needs the read-back")
     name = "%s%s" % (name_prefix, token_hex(4))
     state = None
     process = None
@@ -996,7 +1029,7 @@ def run_contained(
         try:
             if readback:
                 process, kernel_files = _start_with_readback(
-                    transport, name, profile["deadline_seconds"])
+                    transport, name, profile["deadline_seconds"], second_hold)
             else:
                 process = transport.start(name, profile["deadline_seconds"])
             state = "completed"
