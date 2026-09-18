@@ -20,6 +20,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 import unittest.mock as mock
@@ -289,6 +290,40 @@ def _docker_ready() -> bool:
         return True
     except run.DockerUnavailable:
         return False
+
+
+# Runner-infrastructure flakes seen on hosted ubuntu-latest, matched by exact
+# message on a plain PrepareError. The production code and its timeouts are in
+# every sealed contract's execution_paths, so the retry lives here instead.
+LIVE_READINESS_FLAKES = frozenset({"docker readiness timed out", "docker daemon is not ready"})
+LIVE_PULL_FLAKES = frozenset({"rust image pull failed"})
+INFRA_RETRY_PAUSES_SECONDS = (5, 20)
+
+
+def _infra_pause(seconds) -> None:
+    time.sleep(seconds)
+
+
+def _retry_runner_infrastructure(fn, retryable, label):
+    attempts = len(INFRA_RETRY_PAUSES_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except run.PrepareError as exc:
+            if type(exc) is not run.PrepareError or str(exc) not in retryable:
+                raise
+            if attempt == attempts:
+                exc.add_note("runner-infrastructure retry: %s on all %d attempts" % (
+                    exc, attempts))
+                raise
+            pause = INFRA_RETRY_PAUSES_SECONDS[attempt - 1]
+            print("runner-infrastructure retry: %s attempt %d/%d failed: %s; retrying in %ss" % (
+                label, attempt, attempts, exc, pause), file=sys.stderr, flush=True)
+            _infra_pause(pause)
+
+
+def _pull_rust_image_with_retry():
+    return _retry_runner_infrastructure(run.pull_rust_image, LIVE_PULL_FLAKES, "rust image pull")
 
 
 CARGO = shutil.which("cargo") is not None
@@ -1844,7 +1879,9 @@ class MaterializeBytes(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "docker executable is not available")
 
     def test_hosted_linux_capability_failure_is_not_a_skip(self):
-        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}):
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}), \
+                mock.patch.object(sys.modules[__name__], "_infra_pause"), \
+                mock.patch.object(sys, "stderr", io.StringIO()):
             with mock.patch.object(
                     run, "require_live_oci_capability",
                     side_effect=run.PrepareError("docker daemon is not ready")):
@@ -1899,7 +1936,9 @@ class MaterializeBytes(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "docker readiness timed out")
 
     def test_hosted_linux_readiness_timeout_is_not_a_skip(self):
-        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}):
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}), \
+                mock.patch.object(sys.modules[__name__], "_infra_pause"), \
+                mock.patch.object(sys, "stderr", io.StringIO()):
             with mock.patch.object(br, "_run_capped", side_effect=self._readiness_timeout()):
                 try:
                     LiveInertProbes.setUpClass()
@@ -2202,6 +2241,21 @@ class LiveInfrastructureRetry(unittest.TestCase):
         self.assertEqual(cap.call_count, 3)
         self.assertEqual(pause.call_count, 2)
 
+    def test_off_hosted_linux_readiness_flake_skips_at_once_without_retry(self):
+        for env in ({"GITHUB_ACTIONS": "true", "RUNNER_OS": "macOS"},
+                    {"GITHUB_ACTIONS": "", "RUNNER_OS": "Linux"}):
+            with self.subTest(env=env):
+                with mock.patch.dict(os.environ, env):
+                    with mock.patch.object(
+                            run, "require_live_oci_capability",
+                            side_effect=run.PrepareError("docker readiness timed out")) as cap:
+                        with mock.patch.object(sys.modules[__name__], "_infra_pause") as pause:
+                            with self.assertRaises(unittest.SkipTest) as ctx:
+                                LiveInertProbes.setUpClass()
+                self.assertEqual(str(ctx.exception), "docker readiness timed out")
+                self.assertEqual(cap.call_count, 1)
+                pause.assert_not_called()
+
     def test_live_class_routes_every_flaky_site_through_the_bounded_retry(self):
         setup = inspect.getsource(LiveInertProbes.setUpClass)
         self.assertIn("_retry_runner_infrastructure", setup)
@@ -2229,10 +2283,14 @@ class LiveInertProbes(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        hosted_linux = (
+            os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_OS") == "Linux")
         try:
-            cls.image_id = run.require_live_oci_capability(CONTAINERFILE.parent)
+            cls.image_id = _retry_runner_infrastructure(
+                lambda: run.require_live_oci_capability(CONTAINERFILE.parent),
+                LIVE_READINESS_FLAKES if hosted_linux else frozenset(), "docker readiness")
         except run.PrepareError as exc:
-            if os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_OS") == "Linux":
+            if hosted_linux:
                 raise
             raise unittest.SkipTest(str(exc)) from exc
         run.require_image_id(cls.image_id)
@@ -2418,7 +2476,7 @@ class LiveInertProbes(unittest.TestCase):
             created = []
             try:
                 owner = run.host_bind_owner(live)
-                run.pull_rust_image()
+                _pull_rust_image_with_retry()
                 run.docker_bounded([
                     "create", "--name", live_name,
                     "--tmpfs", "/vendor:rw,size=1048576,nr_inodes=128",
@@ -2450,7 +2508,7 @@ class LiveInertProbes(unittest.TestCase):
 
     def test_container_written_host_bytes_are_owner_removable(self):
         name = "aee-tmpfs-owner-%s" % hashlib.sha256(os.urandom(8)).hexdigest()[:8]
-        run.pull_rust_image()
+        _pull_rust_image_with_retry()
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "out"
             dest.mkdir()
