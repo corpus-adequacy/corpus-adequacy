@@ -807,7 +807,10 @@ def load_class_comparison(root: Path, entry: dict) -> dict:
         files[rel] = raw
     declared = _class_side(root, files, "declared", comparison_id)
     independent = _class_side(root, files, "independent", comparison_id)
-    if declared["manifest"] == independent["manifest"]:
+    # Compare what was measured, not only where it lives: two paths can hold the same bytes.
+    if (declared["manifest"] == independent["manifest"]
+            or declared["doc"].get("manifest_sha256")
+            == independent["doc"].get("manifest_sha256")):
         raise PublicationError(
             "class comparison %s names the same selection on both sides" % comparison_id)
 
@@ -840,10 +843,12 @@ def load_class_comparison(root: Path, entry: dict) -> dict:
         raise PublicationError(
             "class comparison %s: the class attempt is %s, and an unproved class has no "
             "result to set beside another" % (comparison_id, attempt["status"]))
-    if attempt["effective_class"] in ("declared", "unknown"):
+    # This page sets a declared set beside an independent one. A held-out class is stronger
+    # evidence and would need its own wording, so it is not published under this header.
+    if attempt["effective_class"] != "independent":
         raise PublicationError(
-            "class comparison %s: the second column must be a separately authored class, "
-            "not %s" % (comparison_id, attempt["effective_class"]))
+            "class comparison %s: the second column must be an independent class, not %s"
+            % (comparison_id, attempt["effective_class"]))
     for name in ("killed", "survived", "silent", "unproved"):
         if attempt["result"][name] != independent["counts"][name]:
             raise PublicationError(

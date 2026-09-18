@@ -288,6 +288,40 @@ class Refusals(unittest.TestCase):
                 with self.assertRaisesRegex(rpp.PublicationError, "positive control is survived"):
                     self._load(root)
 
+    def test_the_same_selection_under_two_paths_is_refused(self):
+        """Both sides pointing at byte-identical manifests is one selection, whatever the path."""
+        with tempfile.TemporaryDirectory() as d:
+            root = _tree(Path(d))
+            _write_index(root, [_entry(root)])
+            original = rpp._class_side
+
+            def same_selection(root_, files, side, comparison_id):
+                result = original(root_, files, side, comparison_id)
+                if side == "independent":
+                    other = original(root_, files, "declared", comparison_id)
+                    result["doc"] = dict(result["doc"],
+                                         manifest_sha256=other["doc"]["manifest_sha256"])
+                return result
+
+            with mock.patch.object(rpp, "_class_side", side_effect=same_selection):
+                with self.assertRaisesRegex(rpp.PublicationError, "same selection"):
+                    self._load(root)
+
+    def test_only_an_independent_class_is_published_in_the_second_column(self):
+        for effective in ("held_out", "real_fault", "adaptive"):
+            with self.subTest(effective=effective), tempfile.TemporaryDirectory() as d:
+                root = _tree(Path(d))
+                path = root / "measurements" / EVIDENCE / "independent" / "class-attempt.v0.json"
+                doc = json.loads(path.read_text(encoding="utf-8"))
+                doc["effective_class"] = effective
+                path.write_bytes(ca._encode_class_artifact_v0(doc))
+                _write_index(root, [_entry(root)])
+                with mock.patch.object(rpp.ca, "encode_class_attempt_v0",
+                                       side_effect=ca._encode_class_artifact_v0):
+                    with self.assertRaisesRegex(rpp.PublicationError,
+                                                "must be an independent class"):
+                        self._load(root)
+
     def test_no_index_publishes_nothing(self):
         with tempfile.TemporaryDirectory() as d:
             root = _tree(Path(d))

@@ -146,7 +146,18 @@ must share the toolchain, runtime, materialized trees and PREPARE commit, and ea
 come from that commit. An unproved class, a survived control or any unproved mutant has no
 result to set beside another, so it is refused rather than shown.
 
-The page never adds the two denominators and shows no percentage. The visibility status is
+The second column must be `independent`: a held-out class is stronger evidence and would need
+its own wording. The two sides must measure different selections, compared by manifest digest as
+well as by path.
+
+The page never adds the two denominators and shows no percentage. It shows how many kills rest
+only on the candidate ending abnormally, because this engine scores that as a kill. Mainstream
+tools differ here: Stryker counts a timeout as detected
+([mutant states](https://stryker-mutator.io/docs/mutation-testing-elements/mutant-states-and-metrics/)),
+PIT marks `TIMED_OUT` as detected
+([DetectionStatus.java](https://github.com/hcoles/pitest/blob/master/pitest/src/main/java/org/pitest/mutationtest/DetectionStatus.java)),
+mutmut counts timeouts in its percentage, and cargo-mutants keeps timeouts apart from caught
+mutants ([outcome.rs](https://github.com/sourcefrog/cargo-mutants/blob/main/src/outcome.rs)). The visibility status is
 worded for a reader: `declared` on an independent class means the set was committed openly
 before the run and was not held out.
 
