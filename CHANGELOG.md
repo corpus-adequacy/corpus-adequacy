@@ -18,7 +18,7 @@ Swap follows runc's conversion, so the owned profile reads back `memory.swap.max
 witness needs a refused fork in `pids.events`; an open-files hit cannot be kernel-witnessed at all,
 because `RLIMIT_NOFILE` has no kernel-side counter. The positive tests run on bytes the kernel
 really returned inside one container with the owned profile's limits. The module reads nothing
-itself and is outside every execution identity, so no hosted rail needs a fresh PREPARE yet.
+itself; it was outside every execution identity until part 2 wired it into the runtime.
 
 Separate evidence classes on the publication site (#103). The site now shows the declared and
 independent Slice B sets side by side, from the clean re-measurement at `20f6d8b`, on

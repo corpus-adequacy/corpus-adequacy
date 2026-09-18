@@ -139,6 +139,88 @@ class HoldReadRelease(unittest.TestCase):
         self.assertEqual(record["candidate_outcome"], "output-cap")
 
 
+class WhatTheReviewFoundUntested(unittest.TestCase):
+    def test_an_interrupt_in_the_attach_thread_reaches_the_caller_unchanged(self):
+        """Narrowing the capture to Exception would lose this; the caller must see it as is."""
+        class Interrupted(ObservingTransport):
+            def start(self, name, deadline_seconds=None):
+                self.await_release_if_held()
+                raise KeyboardInterrupt()
+
+        transport = Interrupted(inspect=_observed_inspect(PROFILE))
+        with self.assertRaises(KeyboardInterrupt):
+            _run(transport)
+        self.assertEqual(transport.released, [kr.RELEASE_PATH])
+
+    def test_an_unexpected_error_while_reading_still_releases(self):
+        """The release must sit in a finally: a raise on the read path cannot skip it."""
+        class Exploding(ObservingTransport):
+            def exec_read(self, name, path):
+                raise RuntimeError("reader broke")
+
+        transport = Exploding(inspect=_observed_inspect(PROFILE))
+        with self.assertRaises(RuntimeError):
+            _run(transport)
+        self.assertEqual(transport.released, [kr.RELEASE_PATH])
+
+    def test_an_unexpected_release_error_never_leaves_the_attach_thread_unjoined(self):
+        class ReleaseExplodes(ObservingTransport):
+            hold_wait_seconds = 0.3
+            start_returned = False
+
+            def start(self, name, deadline_seconds=None):
+                result = super().start(name, deadline_seconds)
+                self.start_returned = True
+                return result
+
+            def release(self, name, path):
+                raise RuntimeError("release broke")
+
+        transport = ReleaseExplodes(inspect=_observed_inspect(PROFILE))
+        with self.assertRaises(RuntimeError):
+            _run(transport)
+        self.assertTrue(transport.start_returned,
+                        "the error reached the caller before the attach thread was joined")
+
+    def test_a_failed_release_is_retried_and_the_run_still_completes(self):
+        class FlakyRelease(ObservingTransport):
+            attempts = 0
+
+            def release(self, name, path):
+                self.attempts += 1
+                if self.attempts < 2:
+                    self.released = getattr(self, "released", []) + [path]
+                    return False
+                return super().release(name, path)
+
+        transport = FlakyRelease(inspect=_observed_inspect(PROFILE))
+        record = _run(transport).envelope_record
+        self.assertEqual(transport.attempts, 2)
+        self.assertEqual(record["envelope_status"], "verified", record["unverified_field"])
+
+    def test_a_hold_nobody_releases_ends_as_the_named_unproved_reason(self):
+        """End to end: every release fails, the wrapper gives up with its own stage code, and
+        the run is unproved candidate-readback-hold, never a result."""
+        class NeverReleased(ObservingTransport):
+            release_succeeds = False
+            hold_wait_seconds = 0.2
+
+            def inspect(self, name):
+                # The daemon reports the exit code the wrapper really exited with.
+                import copy
+                doc = copy.deepcopy(super().inspect(name))
+                doc["State"]["ExitCode"] = cand.wrapper_stage_returncode("readback-hold")
+                return doc
+
+        transport = NeverReleased(inspect=_observed_inspect(PROFILE))
+        completed = _run(transport)
+        self.assertEqual(len(transport.released), contained.READBACK_RELEASE_ATTEMPTS)
+        self.assertEqual(completed.returncode, cand.UNPROVED_EXIT)
+        self.assertEqual(completed.unproved_reason, "candidate-readback-hold")
+        self.assertEqual(completed.envelope_record["candidate_outcome"], "unproved")
+        self.assertEqual(completed.envelope_record["publication_permission"], "withheld")
+
+
 class TheWrapperHold(unittest.TestCase):
     def test_the_hold_comes_first_and_only_when_asked(self):
         held = cand.candidate_script(cand.DEFAULT_EXECUTION_CONTRACT, readback_hold=True)

@@ -788,6 +788,7 @@ def classify_cleanup_result(transport, name: str) -> str:
 READBACK_EXEC_SECONDS = 15
 READBACK_RUNNING_POLLS = 200
 READBACK_RUNNING_POLL_SECONDS = 0.025
+READBACK_RELEASE_ATTEMPTS = 3
 
 
 class DockerTransport:
@@ -938,11 +939,17 @@ def _start_with_readback(transport, name: str, deadline_seconds: int):
             time.sleep(READBACK_RUNNING_POLL_SECONDS)
     finally:
         # Always try to release: a held wrapper nobody releases would wait out its own bound.
+        # A few attempts, because one failed exec should not cost the run. The join is in its own
+        # finally so an unexpected release error never leaves the attach thread unjoined.
         try:
-            transport.release(name, kernel_readback.RELEASE_PATH)
-        except PrepareError:
-            pass
-        thread.join()
+            for _attempt in range(READBACK_RELEASE_ATTEMPTS):
+                try:
+                    if transport.release(name, kernel_readback.RELEASE_PATH):
+                        break
+                except PrepareError:
+                    pass
+        finally:
+            thread.join()
     if "error" in outcome:
         raise outcome["error"]
     return outcome["process"], files

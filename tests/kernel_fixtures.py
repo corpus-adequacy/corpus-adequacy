@@ -81,9 +81,12 @@ class FakeKernelMixin:
     def held(self) -> bool:
         return bool(self.created) and any(RELEASE_PATH in token for token in self.created[-1])
 
-    def await_release_if_held(self) -> None:
-        if self.held():
-            self._release_event().wait(self.hold_wait_seconds)
+    def await_release_if_held(self) -> bool:
+        """True if the fake container was released, or never held. False is the real wrapper's
+        hold timing out: the caller returns the `readback-hold` stage code, as the wrapper would."""
+        if not self.held():
+            return True
+        return self._release_event().wait(self.hold_wait_seconds)
 
     def running(self, name) -> bool:
         return True
@@ -96,7 +99,10 @@ class FakeKernelMixin:
             return overrides[key]
         return kernel_files_for(self.created[-1]).get(key)
 
+    release_succeeds = True
+
     def release(self, name, path) -> bool:
         self.released = getattr(self, "released", []) + [path]
-        self._release_event().set()
-        return True
+        if self.release_succeeds:
+            self._release_event().set()
+        return self.release_succeeds

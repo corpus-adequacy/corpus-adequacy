@@ -141,7 +141,10 @@ class FakeTransport(FakeKernelMixin):
     def start(self, name, deadline_seconds=None):
         self.started.append(name)
         self.deadline_seconds = deadline_seconds
-        self.await_release_if_held()
+        if not self.await_release_if_held():
+            # The real wrapper gives up on a hold nobody released with its own stage code.
+            return subprocess.CompletedProcess(
+                ["docker", "start", "-a", name], 82, "", "")
         if self.timeout:
             raise subprocess.TimeoutExpired(["docker", "start", "-a", name], 1)
         if self.output_too_large:

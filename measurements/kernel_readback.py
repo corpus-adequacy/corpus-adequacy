@@ -50,7 +50,9 @@ _MAX_TEXT_BYTES = 4096
 
 # Where the files are read, from inside the held container: with a private cgroup namespace the
 # container's own cgroup is at the root, and PID 1 is the trusted wrapper, whose limits are the
-# container's. `limits` is the only per-process file.
+# container's. `limits` is the only per-process file. A daemon that gave the container the host's
+# cgroup namespace would show the host's root cgroup here instead; its values would not equal the
+# request, so that case fails closed as a mismatch rather than passing, and is not pinned otherwise.
 READBACK_PATHS = (
     ("memory.max", "/sys/fs/cgroup/memory.max"),
     ("memory.swap.max", "/sys/fs/cgroup/memory.swap.max"),

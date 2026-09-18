@@ -656,8 +656,8 @@ def build_envelope_record(*, requested, setup_status, envelope_status,
     """
     _effective_keys(schema)
     require_requested_record(requested, schema=schema)
-    # A v2 resource request needs v1's CPU/nofile fields. Historical v1 records remain valid;
-    # new contained-oci-v1 emissions select v2 so their requested tmpfs owner is also bound.
+    # A v2 resource request needs v1's CPU/nofile fields. Historical v1 and v2 records remain
+    # valid; new contained-oci-v1 emissions select v3, which also carries the kernel read-back.
     if _requests_cpu_and_nofile(requested) and schema not in _RESOURCE_OBSERVING_SCHEMAS:
         raise EnvelopeError("envelope_schema_profile")
     setup_status = _require_member(setup_status, SETUP_STATUSES, "setup_status")
