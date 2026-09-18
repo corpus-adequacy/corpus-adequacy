@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+Execution gates 3 to 6 for proposed test vectors (#205, follow-up to #200), still with no model
+or provider call. `measurements/suggestion_execution.py` judges a proposal from a recording of the
+engine's own backend calls rather than from the report the engine writes: `RecordingBackend` wraps
+a trusted backend, keeps what each call observed and forwards it unchanged, and a call without a
+step is refused rather than recorded. Gate 3 requires a clean reference pass over the proposal's
+corpus, gate 4 requires the positive control to move a row that was already frozen and the inert
+control to move none, gate 5 requires exactly the proposed row to move, and gate 6 requires the
+distinction to survive transformations that are first proved inert. Because the engine scores any
+termination under a mutant as `killed`, a vector that only makes the candidate time out refuses as
+`witness-by-termination`, which is the gate set's reason for existing. A new
+`suggestion-admission.v1` record adds an `execution` block naming the route, profile, recording
+digest and transformations; every gate in it must be judged, and the encoder refuses `admitted` unless
+the record names a route that runs the candidate. That is a check on the label, not proof of a
+run: what binds a record to its run is the recording digest a reader recomputes. The v0 record is unchanged.
+
 Slice B measured and retained (#199, #103). Two local `contained-oci-v1` runs of the same owned
 candidate and corpus, one per selection, at `5918ec4`: the declared selection distinguishes both of
 its mutants (killed 2, survived 0, adequate true) and the independent selection leaves one healthy

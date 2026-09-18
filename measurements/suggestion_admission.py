@@ -32,6 +32,7 @@ from aee_checker_sealed_materialize import tree_sha256  # noqa: E402
 PROPOSAL_SCHEMA = "corpus-adequacy.suggestion-proposal.v0"
 REVIEW_SCHEMA = "corpus-adequacy.suggestion-review.v0"
 ADMISSION_SCHEMA = "corpus-adequacy.suggestion-admission.v0"
+ADMISSION_SCHEMA_V1 = "corpus-adequacy.suggestion-admission.v1"
 PROPOSAL_KEYS = ("schema", "proposal_id", "selection", "target", "vector", "expected",
                  "authorship")
 TARGET_KEYS = ("group", "mutation_id")
@@ -55,6 +56,11 @@ GATES = (
 EXECUTION_GATES = (3, 4, 5, 6)
 GATE_STATUSES = ("passed", "refused", "not-run")
 DECISIONS = ("refused", "pending-execution")
+DECISIONS_V1 = ("refused", "admitted")
+EXECUTION_KEYS = ("route", "profile", "recording_sha256", "transformations")
+# Admitting routes are a label allowlist: a record may claim an admitted decision only under
+# one of these names. It is not evidence that a run happened.
+ADMITTING_ROUTES = ("contained-oci-v1-derived",)
 TERMINAL_STATES = ("admitted", "refused", "no-improvement")
 NON_CLAIMS = (
     "Admission decides whether one proposed vector may be considered for a human-authored corpus "
@@ -63,6 +69,12 @@ NON_CLAIMS = (
     "Authorship names are descriptive and unauthenticated; no suggestion-value, real-fault, "
     "adequacy or provider claim follows.",
 )
+NON_CLAIMS_V1 = NON_CLAIMS[:1] + (
+    "Execution gates judge one recording of one run on one host; they are not a containment, "
+    "adequacy or real-fault claim.",
+    "An admitted proposal is a candidate for a human-authored corpus change; no corpus, "
+    "selection, report or score changes here.",
+) + NON_CLAIMS[2:]
 MAX_PROPOSAL_BYTES = 65536
 MAX_TEXT = 256
 _TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
@@ -304,12 +316,53 @@ def admission_record(proposal_raw: bytes, proposal: dict, gate_results: dict) ->
     }
 
 
+def admission_record_v1(proposal_raw: bytes, proposal: dict, gate_results: dict,
+                        execution: dict) -> dict:
+    """The record for a run that judged the execution gates. Every gate must be accounted for."""
+    _exact(execution, EXECUTION_KEYS, "admission-shape")
+    gates = []
+    refusal = None
+    for number, name in GATES:
+        if number not in gate_results:
+            raise AdmissionError("accounting-gap")
+        status, reason = gate_results[number]
+        if status not in ("passed", "refused") or (status == "refused") != (reason is not None):
+            raise AdmissionError("accounting-gap")
+        if status == "refused" and refusal is None:
+            refusal = reason
+        gates.append({"gate": number, "name": name, "status": status, "refusal": reason})
+    return {
+        "schema": ADMISSION_SCHEMA_V1,
+        "proposal_id": proposal["proposal_id"],
+        "proposal_sha256": _digest(proposal_raw),
+        "selection": proposal["selection"],
+        "gates": gates,
+        "execution": dict(execution),
+        "decision": "refused" if refusal is not None else "admitted",
+        "refusal": refusal,
+        "non_claims": list(NON_CLAIMS_V1),
+    }
+
+
 def encode_admission(record: dict) -> bytes:
-    if record.get("schema") != ADMISSION_SCHEMA or record.get("decision") not in DECISIONS:
+    """Encode a v0 or v1 record. The schema decides what the gates are allowed to say."""
+    schema = record.get("schema")
+    if schema == ADMISSION_SCHEMA:
+        if record.get("decision") not in DECISIONS:
+            raise AdmissionError("admission-shape")
+        # Every execution gate must read not-run here, whatever a hand-built record claims.
+        if any(gate["status"] != "not-run" for gate in record["gates"]
+               if gate["gate"] in EXECUTION_GATES):
+            raise AdmissionError("admission-shape")
+        return ca._encode_class_artifact_v0(record)
+    if schema != ADMISSION_SCHEMA_V1 or record.get("decision") not in DECISIONS_V1:
         raise AdmissionError("admission-shape")
-    # Every execution gate must read not-run here, whatever a hand-built record claims.
-    if any(gate["status"] != "not-run" for gate in record["gates"]
-           if gate["gate"] in EXECUTION_GATES):
+    execution = record.get("execution")
+    _exact(execution, EXECUTION_KEYS, "admission-shape")
+    # A v1 record must have judged every execution gate: not-run belongs to v0.
+    if any(gate["status"] not in ("passed", "refused") for gate in record["gates"]):
+        raise AdmissionError("admission-shape")
+    if record["decision"] == "admitted" and execution["route"] not in ADMITTING_ROUTES:
         raise AdmissionError("admission-shape")
     return ca._encode_class_artifact_v0(record)
 

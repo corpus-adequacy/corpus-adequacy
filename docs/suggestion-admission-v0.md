@@ -58,9 +58,49 @@ human baseline" is a complete result.
 ## Why termination is not a witness
 
 Under the process and batch runners the engine scores a mutant that terminates abnormally as
-`killed`, with the kind only in the row text. The execution gates will therefore read the
-backend's `raised` observation, never the row text. A termination "kill" refuses as
-`witness-by-termination`.
+`killed`, with the kind only in the row text. The execution gates therefore read the backend's
+`raised` observation, never the row text. A termination "kill" refuses as
+`witness-by-termination:<kind>`.
+
+## Execution gates 3 to 6 (#205)
+
+`measurements/suggestion_execution.py` judges the execution gates from a recording of the
+engine's own backend calls. `RecordingBackend` wraps whatever backend the caller already trusts,
+declares that it accepts a step, keeps what each call observed, and forwards the call unchanged.
+A call that arrives without a step cannot be attributed and is refused rather than recorded. The
+module imports no process, socket or HTTP machinery of its own, and a test reads its import list
+to keep it that way. That is a tripwire on this module, not a sandbox: it imports
+`corpus_adequacy`, which runs children by design.
+
+| Gate | Passes when | Refusal |
+|---|---|---|
+| 3 `reference-pass` | the baseline over the proposal's corpus built, raised nothing, the proposal's row reads what the proposal declared, and every frozen row reads what the committed reference says | `reference-abnormal:<kind>`, `reference-fail` |
+| 4 `controls-bite` | both controls raised nothing and cover the same row set; the positive control moves a row that was already frozen, not only the proposal's own; the inert control moves nothing; the engine's own control status agrees | `control-invalid` |
+| 5 `intended-distinction` | the mutant built, raised nothing, and exactly the proposal's row moved | `mutant-unproved:<kind>`, `witness-by-termination:<kind>`, `distinction-not-attributed`, `silent-only`, `no-distinction` |
+| 6 `transformation-robustness` | each declared transformation is first inert on rows, and then gates 3 and 5 hold under it | `transformation-invalid:<t>`, `transformation-fragile:<t>` |
+
+A missing, duplicated or unattributable call refuses as `accounting-gap`, and so does a
+judgement with no transformation at all: a robustness gate that checks nothing passes nothing.
+
+The positive control has to move a frozen row because a control that only the new vector notices
+says nothing about the corpus that was there before.
+
+## Record: `corpus-adequacy.suggestion-admission.v1`
+
+The v0 record stays exactly as it is, so nothing already written changes meaning. A run that
+judged the execution gates writes v1 instead: the same keys plus `execution`, which names the
+`route`, the `profile`, the `recording_sha256` and the `transformations` that were applied. In a
+v1 record every gate must read `passed` or `refused`, because `not-run` belongs to v0, and
+`decision` is `admitted` or `refused`.
+
+The encoder refuses `admitted` unless the record's `route` is one that runs the candidate. The
+`fake` route exists for tests, so a fake-route record can be built, can say `admitted`, and
+cannot be encoded.
+
+That is a check on the label the record carries, not proof that a run happened. A hand-built
+record naming a real route encodes. What can bind a record to a run is `recording_sha256`: a
+reader holding the recording recomputes it from `Recording.canonical()` and compares. The encoder
+never sees the recording, and nothing here does that comparison for you.
 
 ## Non-claims
 
