@@ -78,6 +78,11 @@ def pins_dir(contract) -> Path:
     return ROOT.joinpath(*contract.pins_relpath)
 
 
+def pins_relpath(contract) -> Path:
+    """The pins directory as this repository writes it, relative to its root."""
+    return Path(*contract.pins_relpath)
+
+
 def _new_file(path: Path, raw: bytes) -> None:
     if path.exists() or path.is_symlink():
         raise SliceBError("exists:%s" % path.name)
@@ -116,16 +121,22 @@ def authorize_selection(selection: str, out: Path) -> dict:
 
 def run(selection: str, out: Path) -> dict:
     contract = contract_for(selection)
-    base = Path(out) / selection
+    # Absolute before the working directory changes below.
+    base = (Path(out) / selection).resolve()
     report_path = base / REPORT_FILENAME
     if report_path.exists() or (base / COLLECTION_DIRNAME).exists():
         raise SliceBError("exists:%s" % REPORT_FILENAME)
-    report = driver.run_authorized(
-        authorize_raw=_read(base / AUTHORIZE_FILENAME),
-        prepare_raw=_read(base / PREPARE_FILENAME),
-        pins_dir=pins_dir(contract), materialize_dest=base / "materialize",
-        root=ROOT, execution_profile=PROFILE,
-        envelope_dest=base / COLLECTION_DIRNAME, contract=contract)
+    authorize_raw = _read(base / AUTHORIZE_FILENAME)
+    prepare_raw = _read(base / PREPARE_FILENAME)
+    # The report records the manifest path it is handed. Hand it the repository-relative one,
+    # from the repository root, the way every earlier retained measurement was run, so no path
+    # on the operator's machine enters the report (#204).
+    with contextlib.chdir(ROOT):
+        report = driver.run_authorized(
+            authorize_raw=authorize_raw, prepare_raw=prepare_raw,
+            pins_dir=pins_relpath(contract), materialize_dest=base / "materialize",
+            root=ROOT, execution_profile=PROFILE,
+            envelope_dest=base / COLLECTION_DIRNAME, contract=contract)
     raw = ca.encode_report_v0(report)
     _new_file(report_path, raw)
     return {"selection": selection, "report_sha256": hashlib.sha256(raw).hexdigest(),

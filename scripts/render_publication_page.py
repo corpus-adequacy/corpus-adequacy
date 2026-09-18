@@ -386,6 +386,10 @@ def load_record(
     except ca.ManifestError as exc:
         raise PublicationError(str(exc)) from exc
     _require_displayed_parity(doc, mutants)
+    # A report records the manifest path it was handed, and the page publishes the report's bytes
+    # verbatim. Refuse a host marker or an absolute path there, as the void path already does for
+    # its free text, so an operator's machine never reaches a published page (#204).
+    _require_portable_public_text(doc.get("manifest"), field="manifest")
     digest = _sha256_bytes(raw)
     if expected_report_sha256 is not None and digest != expected_report_sha256:
         raise PublicationError("report digest mismatch for %s" % report_path)

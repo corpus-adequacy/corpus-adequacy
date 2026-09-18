@@ -312,14 +312,32 @@ class VoidRunAttemptPublication(unittest.TestCase):
         self.assertNotIn("Void run attempt", page)
 
     def test_mutation_routing_void_report_through_standard_renderer_is_red(self):
+        """Disable void detection and the page must visibly go wrong.
+
+        Since #204 the standard path also refuses the void fixture's host-path manifest, which
+        would stop the render before this mutation could show anything. The portable-text check
+        is lifted for this one render so the test still isolates the void detection it is about;
+        the next test pins the second defence on its own.
+        """
         with tempfile.TemporaryDirectory() as d:
             root = _void_measurement_tree(Path(d))
             with self.assertRaises(rpp.PublicationError):
                 rpp.render_site(root, BUILD)
-            with mock.patch.object(rpp, "is_void_run_attempt", return_value=False):
+            with mock.patch.object(rpp, "is_void_run_attempt", return_value=False), \
+                    mock.patch.object(rpp, "_require_portable_public_text",
+                                      side_effect=lambda value, field: value):
                 mutated = rpp.render_site(root, BUILD)
             with self.assertRaises(AssertionError):
                 self._assert_void_publication(_text(mutated, "index.html"))
+
+    def test_a_void_report_cannot_reach_a_page_even_with_void_detection_disabled(self):
+        """The second defence: the fixture's manifest is a host path, so the standard path
+        refuses it before rendering, whatever the void check says (#204)."""
+        with tempfile.TemporaryDirectory() as d:
+            root = _void_measurement_tree(Path(d))
+            with mock.patch.object(rpp, "is_void_run_attempt", return_value=False):
+                with self.assertRaisesRegex(rpp.PublicationError, "manifest contains a host"):
+                    rpp.render_site(root, BUILD)
 
     def test_mutation_presenting_null_score_as_zero_is_red(self):
         orig = rpp._void_card_html

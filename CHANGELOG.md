@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+No host path reaches a published page (#204). A report records the manifest path it is handed,
+and the Slice B facade handed it an absolute one, so both retained Slice B reports name the
+operator's worktree where every earlier retained measurement records a repository-relative path.
+The facade now runs the driver from the repository root with the repository-relative pins
+directory, and resolves its output directory first so a relative `--out` cannot land inside the
+repository. The publication renderer now refuses a completed report whose `manifest` field carries
+a host marker or an absolute path, as it already did for a void attempt's free text; before this,
+a completed report's bytes were bundled verbatim. Neither file is in any contract's execution
+identity, so no hosted rail needs a fresh PREPARE. The two Slice B reports are pinned as the only
+retained exception and stay as retained bytes; publishing Slice B needs a clean re-measurement.
+The regenerated `site/index.html` differs only in its projection digest, which covers the
+renderer's own source.
+
 Execution gates 3 to 6 for proposed test vectors (#205, follow-up to #200), still with no model
 or provider call. `measurements/suggestion_execution.py` judges a proposal from a recording of the
 engine's own backend calls rather than from the report the engine writes: `RecordingBackend` wraps
