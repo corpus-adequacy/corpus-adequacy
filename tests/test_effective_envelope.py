@@ -1091,7 +1091,8 @@ class RequestedProfilePairing(unittest.TestCase):
     def test_pairing_vocabulary_is_exactly_the_contained_profiles(self):
         self.assertEqual(set(env.ENVELOPE_SCHEMA_BY_PROFILE), set(ca._CONTAINED_PROFILES))
         self.assertEqual(env.envelope_schema_for_profile("contained-oci-v0"), env.ENVELOPE_SCHEMA)
-        self.assertEqual(env.envelope_schema_for_profile(V1_PROFILE), env.ENVELOPE_SCHEMA_V2)
+        # New contained-oci-v1 runs carry the kernel read-back (#197); v2 stays readable.
+        self.assertEqual(env.envelope_schema_for_profile(V1_PROFILE), env.ENVELOPE_SCHEMA_V3)
         for profile in ("trusted-local", None, ["x"]):
             with self.subTest(profile=profile), self.assertRaises(env.EnvelopeError):
                 env.envelope_schema_for_profile(profile)
@@ -1278,9 +1279,11 @@ class V2TmpfsRequestedObservedEnvelope(unittest.TestCase):
                 env.validate_envelope_record(rehashed)
 
 
-    def test_contained_v1_selects_v2_with_requested_and_observed_owner(self):
-        schema = env.envelope_schema_for_profile(V1_PROFILE)
-        self.assertEqual(schema, "corpus-adequacy.execution-envelope.v2")
+    def test_contained_v1_now_selects_v3_and_a_v2_record_keeps_its_owner_binding(self):
+        """New v1 runs record v3 (#197). The v2 owner-bound shape stays valid as history."""
+        self.assertEqual(env.envelope_schema_for_profile(V1_PROFILE),
+                         "corpus-adequacy.execution-envelope.v3")
+        schema = env.ENVELOPE_SCHEMA_V2
         requested = env.requested_envelope(
             execution_profile=V1_PROFILE, image_id=IMAGE,
             mount_spec=candidate.CANDIDATE_MOUNT_SPEC,

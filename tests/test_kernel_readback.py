@@ -165,16 +165,16 @@ class APidsWitness(unittest.TestCase):
                 self.assertEqual(kr.classify_pids_witness(raw), "unproved")
 
 
-class OutsideTheExecutionIdentity(unittest.TestCase):
-    def test_no_contract_executes_this_module_yet(self):
-        """Part 2 wires the read into the runtime and moves this module inside the identity,
-        with one fresh PREPARE. Until then it must change no contract's identity."""
+class InsideTheExecutionIdentity(unittest.TestCase):
+    def test_every_contract_executes_this_module(self):
+        """Part 2 wired the read into the runtime, so the module is in every contract's
+        identity and changing it needs a fresh PREPARE (#197)."""
         found = [(name, value) for name, value in vars(contracts).items()
                  if isinstance(value, contracts.SealedMeasurementContract)]
         self.assertGreaterEqual(len(found), 3)
         for name, contract in found:
             with self.subTest(contract=name):
-                self.assertNotIn("measurements/kernel_readback.py", contract.execution_paths)
+                self.assertIn("measurements/kernel_readback.py", contract.execution_paths)
 
     def test_the_module_reads_nothing_itself(self):
         tree = ast.parse((ROOT / "measurements" / "kernel_readback.py").read_text(

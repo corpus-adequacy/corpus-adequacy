@@ -3351,6 +3351,7 @@ CLOSED_UNPROVED_REASONS = (
     "candidate-report-missing",
     "candidate-report-empty",
     "candidate-report-read",
+    "candidate-readback-hold",
 )
 
 

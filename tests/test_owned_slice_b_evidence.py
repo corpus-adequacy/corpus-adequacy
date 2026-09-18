@@ -234,14 +234,17 @@ class SliceBEvidenceChecks:
                          {"measurements/owned-contained-v1/manifest.json",
                           "measurements/owned-independent-v0/manifest.json"})
 
-    def test_each_execution_identity_still_matches_this_checkout(self):
-        # If an execution path changes, this fails: the retained evidence then belongs to an
-        # older identity and a fresh PREPARE is required before any new measurement.
+    def test_each_run_was_measured_under_the_identity_before_the_kernel_readback(self):
+        """The PREPARE records the paths its identity hashed. #197 part 2 added the kernel
+        read-back module to every contract, so this evidence belongs to the identity just
+        before that, and any new measurement needs a fresh PREPARE. Its bytes are pinned by
+        digest above, so no later identity change alters what it says. If the contract's path
+        list changes again, this fails and the history below must be extended on purpose."""
+        joined_since = {"measurements/kernel_readback.py"}
         for selection, contract in CONTRACTS.items():
             with self.subTest(selection=selection):
-                self.assertEqual(
-                    sealed_run.execution_identity(ROOT, contract=contract)["content_sha256"],
-                    self._prepare(selection)["execution"]["content_sha256"])
+                recorded = set(self._prepare(selection)["execution"]["paths"])
+                self.assertEqual(recorded, set(contract.execution_paths) - joined_since)
 
     def _loaded(self, selection: str):
         with tempfile.TemporaryDirectory() as raw:
