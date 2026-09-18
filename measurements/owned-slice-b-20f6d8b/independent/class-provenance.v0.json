@@ -1,0 +1,56 @@
+{
+  "authoring": {
+    "candidate_builder": "Rul1an",
+    "candidate_outcomes_seen": false,
+    "mutation_author": "Codex delegated selection writer",
+    "relationship": "independent"
+  },
+  "candidate_freeze": {
+    "candidate": {
+      "commit": "0e69b834aa62c7f0fb2bff331884d6ee66a97bfe",
+      "repository": "corpus-adequacy/corpus-adequacy",
+      "tree_sha256": "sha256:6a6ae2e47737c972f89b7017faa9842b1a8c3ed0b881bc0d6e293dfd0f13b7ca"
+    },
+    "corpus": {
+      "commit": "0e69b834aa62c7f0fb2bff331884d6ee66a97bfe",
+      "repository": "corpus-adequacy/corpus-adequacy",
+      "tree_sha256": "sha256:83e6b981cf2b55812dd6d47c7dcd45da855d8019206744962e8ec0239888ddd3"
+    },
+    "observation_declaration_sha256": "sha256:c913802606611755aafcded4365b09302c8c94bb67997b3ddfc4f90a7eac7e9f"
+  },
+  "class_id": "owned-independent-v0",
+  "expected_distinctions": [
+    {
+      "channel": "outcome",
+      "group": "independent",
+      "label": "truncate owned-fixture upper guard to the first value above maximum",
+      "member": "rows"
+    }
+  ],
+  "manifest_sha256": "sha256:a13700b6de4f964267be3a52da6a61297878bda8a739cee46de1b353be491942",
+  "mutation_bundle_sha256": "sha256:5e82c5267be5b5281c1aacb065bc3c9912c7afb7b4810c06b4fd798aace513f6",
+  "non_claims": [
+    "No evidence class proves rule completeness, corpus quality, implementation correctness, real-world prevalence, security, conformance, or author independence.",
+    "Each denominator is one declared selection and is not a population estimate.",
+    "This artifact defines one class only; no aggregate score or overall adequacy exists."
+  ],
+  "origin": {
+    "kind": "authored",
+    "source": {
+      "commit": "9a73f1c0ab29856443d0a6c6f8fb19bf70989cc8",
+      "repository": "corpus-adequacy/corpus-adequacy",
+      "tree_sha256": "sha256:49def44ab5561ea6008d075c41f363769baa8044d274bd9adf6f3b31043bd423"
+    }
+  },
+  "requested_class": "independent",
+  "schema": "corpus-adequacy.class-provenance.v0",
+  "visibility_events": [
+    {
+      "actor": "Codex delegated selection writer",
+      "event": "selection-committed",
+      "mutation_bundle_sha256": "sha256:5e82c5267be5b5281c1aacb065bc3c9912c7afb7b4810c06b4fd798aace513f6",
+      "ordinal": 0,
+      "predecessor_event_sha256": null
+    }
+  ]
+}

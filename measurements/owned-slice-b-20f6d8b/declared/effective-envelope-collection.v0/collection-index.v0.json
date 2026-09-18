@@ -1,0 +1,104 @@
+{
+  "attempts": 5,
+  "execution_commit": "20f6d8b1fb99283ce70fd1d8f6016958df5d02b3",
+  "ledger": [
+    {
+      "ordinal": 0,
+      "previous_member_sha256": null,
+      "returncode": 0,
+      "run_nonce": "135e6b130f8e2cf63f0c1cea9a8ff551",
+      "state": "recorded",
+      "step": {
+        "group": "owned",
+        "id": null,
+        "kind": "baseline"
+      }
+    },
+    {
+      "ordinal": 1,
+      "previous_member_sha256": "201dd625544f3bc12cab1a045189f2cc3240fc4c8af60a8d544f6d005a720dd4",
+      "returncode": 0,
+      "run_nonce": "135e6b130f8e2cf63f0c1cea9a8ff551",
+      "state": "recorded",
+      "step": {
+        "group": "owned",
+        "id": "control-positive",
+        "kind": "control"
+      }
+    },
+    {
+      "ordinal": 2,
+      "previous_member_sha256": "201dd625544f3bc12cab1a045189f2cc3240fc4c8af60a8d544f6d005a720dd4",
+      "returncode": 0,
+      "run_nonce": "135e6b130f8e2cf63f0c1cea9a8ff551",
+      "state": "recorded",
+      "step": {
+        "group": "owned",
+        "id": "control-inert",
+        "kind": "control"
+      }
+    },
+    {
+      "ordinal": 3,
+      "previous_member_sha256": "201dd625544f3bc12cab1a045189f2cc3240fc4c8af60a8d544f6d005a720dd4",
+      "returncode": 0,
+      "run_nonce": "135e6b130f8e2cf63f0c1cea9a8ff551",
+      "state": "recorded",
+      "step": {
+        "group": "owned",
+        "id": "negative-guard",
+        "kind": "mutant"
+      }
+    },
+    {
+      "ordinal": 4,
+      "previous_member_sha256": "201dd625544f3bc12cab1a045189f2cc3240fc4c8af60a8d544f6d005a720dd4",
+      "returncode": 0,
+      "run_nonce": "135e6b130f8e2cf63f0c1cea9a8ff551",
+      "state": "recorded",
+      "step": {
+        "group": "owned",
+        "id": "upper-guard",
+        "kind": "mutant"
+      }
+    }
+  ],
+  "members": [
+    {
+      "ordinal": 0,
+      "relpath": "member-0000.json",
+      "sha256": "201dd625544f3bc12cab1a045189f2cc3240fc4c8af60a8d544f6d005a720dd4"
+    },
+    {
+      "ordinal": 1,
+      "relpath": "member-0001.json",
+      "sha256": "201dd625544f3bc12cab1a045189f2cc3240fc4c8af60a8d544f6d005a720dd4"
+    },
+    {
+      "ordinal": 2,
+      "relpath": "member-0002.json",
+      "sha256": "201dd625544f3bc12cab1a045189f2cc3240fc4c8af60a8d544f6d005a720dd4"
+    },
+    {
+      "ordinal": 3,
+      "relpath": "member-0003.json",
+      "sha256": "201dd625544f3bc12cab1a045189f2cc3240fc4c8af60a8d544f6d005a720dd4"
+    },
+    {
+      "ordinal": 4,
+      "relpath": "member-0004.json",
+      "sha256": "201dd625544f3bc12cab1a045189f2cc3240fc4c8af60a8d544f6d005a720dd4"
+    }
+  ],
+  "non_claims": [
+    "States that these attempted invocations left these records in one collection run.",
+    "Does not authenticate origin: a digest binds bytes, not who produced them.",
+    "Cannot detect substitution of a byte-identical record from a different run.",
+    "Not a score, not an audit, not a certification, and not publication authorization.",
+    "Step attribution is the engine's own record of what it ran; the run nonce names this index, not its members, so a byte-identical member remains substitutable."
+  ],
+  "prepare_sha256": "1d7319e7b1ccf9722d28e0ccaf84b1fccc49eba77c9410d93294b18d8a939830",
+  "report_sha256": "93a9fe9123ddac732bd70f9b9897733fd3fca36d37a7576bbd8410e57d99dbed",
+  "run_nonce": "135e6b130f8e2cf63f0c1cea9a8ff551",
+  "schema": "corpus-adequacy.execution-envelope-collection.v1"
+}

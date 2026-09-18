@@ -1,0 +1,60 @@
+{
+  "attempt_id": "owned-independent-v0-slice-b-01",
+  "class_id": "owned-independent-v0",
+  "effective_class": "independent",
+  "environment_sha256": "sha256:c533fc88680a42e91a2d7e470113b3da5a4f3df035589084c376ca88aead0510",
+  "manifest_sha256": "sha256:a13700b6de4f964267be3a52da6a61297878bda8a739cee46de1b353be491942",
+  "non_claims": [
+    "No evidence class proves rule completeness, corpus quality, implementation correctness, real-world prevalence, security, conformance, or author independence.",
+    "Each denominator is one declared selection and is not a population estimate.",
+    "This artifact defines one class only; no aggregate score or overall adequacy exists."
+  ],
+  "predecessor_attempt_sha256": null,
+  "provenance_sha256": "sha256:ed764a70fd86825ae081815cd26e7545cc9bb4a8eabb436763ba1499ba48bc77",
+  "report_sha256": "sha256:a1abd3594a79c6c2b0a57660fde62f173ffc4302126a56c32060db931b519354",
+  "result": {
+    "adequate": false,
+    "control_status": "killed",
+    "denominator": 1,
+    "equivalent": 0,
+    "failures": [
+      "1 mutant(s) survived; the required score is 100% of non-equivalent mutants"
+    ],
+    "killed": 0,
+    "known_holes": 0,
+    "score_percent": 0.0,
+    "silent": 0,
+    "survived": 1,
+    "unexercised_out_of_scope": 0,
+    "unproved": 0
+  },
+  "rows": [
+    {
+      "group": "independent",
+      "how": "harness detects a change on this path",
+      "label": "CONTROL immediate owned-fixture refusal",
+      "moved": 1,
+      "scope": "declared",
+      "verdict": "control-killed"
+    },
+    {
+      "group": "independent",
+      "how": "pinned outcomes stayed unchanged under a declared inert transformation",
+      "label": "CONTROL remove unreachable minimum sentinel",
+      "moved": 0,
+      "scope": "declared",
+      "verdict": "control-unchanged"
+    },
+    {
+      "group": "independent",
+      "how": "no vector distinguishes it. An implementation can delete this rule and still reproduce the digest",
+      "label": "truncate owned-fixture upper guard to the first value above maximum",
+      "moved": 0,
+      "scope": "declared",
+      "verdict": "survived"
+    }
+  ],
+  "schema": "corpus-adequacy.class-attempt.v0",
+  "status": "completed",
+  "visibility_status": "declared"
+}
