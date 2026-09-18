@@ -7,10 +7,11 @@ cgroup never received. The kernel's own files are the better witness, and this m
 half of reading them: parse the kernel's formats, derive what a validated resource profile should
 read back as, compare, and classify a limit-hit witness.
 
-Nothing here touches a container, a file or a process. Part 2 reads the files while the container
-lives, because the cgroup is removed when the container's init exits, and wires the result into a
-separately versioned `execution-envelope.v3`. Until then this module sits outside every contract's
-execution identity, so adding it needs no fresh PREPARE.
+Nothing here touches a container, a file or a process. The runtime reads the files while the
+container lives, because the cgroup is removed when the container's init exits: the trusted
+wrapper holds at its start, the host reads through `docker exec`, then releases it (#197 part 2).
+The record goes into `execution-envelope.v3`. This module is inside every contract's execution
+identity, so changing it needs a fresh PREPARE.
 
 What a read-back can and cannot say:
 
@@ -45,6 +46,24 @@ _EVENTS_KEY = re.compile(r"\A[a-z][a-z._]*\Z")
 _LIMITS_ROW = re.compile(r"\A(?P<name>.{25}) (?P<soft>\S+) +(?P<hard>\S+)(?: +\S+)? *\Z")
 _OPEN_FILES = "Max open files"
 _MAX_TEXT_BYTES = 4096
+
+
+# Where the files are read, from inside the held container: with a private cgroup namespace the
+# container's own cgroup is at the root, and PID 1 is the trusted wrapper, whose limits are the
+# container's. `limits` is the only per-process file.
+READBACK_PATHS = (
+    ("memory.max", "/sys/fs/cgroup/memory.max"),
+    ("memory.swap.max", "/sys/fs/cgroup/memory.swap.max"),
+    ("pids.max", "/sys/fs/cgroup/pids.max"),
+    ("cpu.max", "/sys/fs/cgroup/cpu.max"),
+    ("limits", "/proc/1/limits"),
+)
+# The file the host creates to release the held wrapper. It lives on the container's own /tmp.
+RELEASE_PATH = "/tmp/.corpus-adequacy-readback-release"
+# How long the wrapper waits for the release before it gives up: HOLD_POLLS polls of
+# HOLD_POLL_SECONDS. A hold that times out is the wrapper stage `readback-hold`, unproved.
+HOLD_POLLS = 600
+HOLD_POLL_SECONDS = "0.05"
 
 
 class ReadbackError(ValueError):

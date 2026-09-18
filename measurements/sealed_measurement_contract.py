@@ -20,6 +20,9 @@ CANDIDATE_WRAPPER_STAGE_RETURNCODES = (
     ("report-missing", 79),
     ("report-empty", 80),
     ("report-read", 81),
+    # The wrapper held for a kernel read-back and was never released (#197). Unproved, not a
+    # candidate result: no candidate code ran.
+    ("readback-hold", 82),
 )
 
 
@@ -203,6 +206,7 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
         "measurements/aee_checker_sealed_common.py",
         "measurements/contained_oci.py",
         "measurements/effective_envelope.py",
+        "measurements/kernel_readback.py",
         "measurements/envelope_collection.py",
         "measurements/aee_checker_sealed_oci.py",
         "measurements/aee_checker_sealed_candidate.py",

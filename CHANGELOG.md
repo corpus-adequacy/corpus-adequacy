@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+Kernel read-back, part 2 of 4 (#197). New `contained-oci-v1` runs record `execution-envelope.v3`,
+which adds the kernel's own view of the container's memory, swap, pids, CPU and open-file limits.
+The trusted wrapper holds at its start while the host reads those files through `docker exec`, then
+the host releases it, so the read happens while the cgroup exists and before any candidate code
+runs. A differing or unreadable value leaves the envelope unverified and withheld; a hold that is
+never released is the new unproved reason `candidate-readback-hold`. v0 to v2 records and the
+external route are unchanged. The read-back module joins every execution identity, so both hosted
+rails need a fresh PREPARE, and the retained Slice B evidence now records the identity before this.
+
 Kernel read-back, part 1 of 4 (#197). `measurements/kernel_readback.py` parses the kernel's own
 limit files, derives what a validated `resource-profile.v2` should read back as, and names every
 field that differs or did not read, making the record `unverified` rather than assuming a value.

@@ -37,6 +37,7 @@ from aee_checker_sealed_run import load_prepare_for_profile
 import bounded_run as br
 import contained_oci as contained
 import effective_envelope as envelope
+import kernel_readback
 from sealed_measurement_contract import (
     AEE_CHECKER_SEALED_CONTRACT,
     CANDIDATE_WRAPPER_STAGE_RETURNCODES,
@@ -75,8 +76,26 @@ def _wrapper_stage(returncode) -> str | None:
     return None
 
 
+def _readback_hold() -> str:
+    """Wait for the host's release before anything else runs (#197).
+
+    The host reads the kernel's limits through `docker exec` while the container is held here,
+    then creates the release file. No candidate code has run yet. A release that never comes is
+    the wrapper stage `readback-hold`, unproved, rather than a hang.
+    """
+    stage = WRAPPER_STAGE_RETURNCODES["readback-hold"]
+    release = shlex.quote(kernel_readback.RELEASE_PATH)
+    return "".join((
+        "i=0; while test ! -e %s; do i=$((i+1)); " % release,
+        "test \"$i\" -gt %d && candidate_stage %d; " % (kernel_readback.HOLD_POLLS, stage),
+        "sleep %s; done; " % kernel_readback.HOLD_POLL_SECONDS,
+        "rm -f %s || candidate_stage %d; " % (release, stage),
+    ))
+
+
 def candidate_script(execution_contract: dict,
-                     *, contract=AEE_CHECKER_SEALED_CONTRACT) -> str:
+                     *, contract=AEE_CHECKER_SEALED_CONTRACT,
+                     readback_hold: bool = False) -> str:
     if type(execution_contract) is not dict:
         raise PrepareError("candidate execution contract")
     build = execution_contract.get("build")
@@ -89,6 +108,7 @@ def candidate_script(execution_contract: dict,
     return "".join((
         "set -u; ",
         "candidate_stage() { exit \"$1\"; }; ",
+        _readback_hold() if readback_hold else "",
         "test -d /input/vectors && test -d /vendor && test -f /tool/config.toml ",
         "&& test -d /subject || candidate_stage %d; " % stage["preflight"],
         "cp -R /subject/. /work/ || candidate_stage %d; " % stage["copy"],
@@ -336,7 +356,8 @@ def _observed(transport, name: str, *args):
     return reader(*args)
 
 
-def _project_effective(transport, inspect, *, image_id: str, schema: str) -> dict:
+def _project_effective(transport, inspect, *, image_id: str, schema: str,
+                       kernel_files=None) -> dict:
     """Project this run's envelope with the projector its schema names.
 
     A v1 envelope adds this run's daemon observation, read from the transport's own daemon
@@ -344,6 +365,10 @@ def _project_effective(transport, inspect, *, image_id: str, schema: str) -> dic
     """
     image_env_names = _observed(transport, "image_env_names", image_id)
     runtime_version = _observed(transport, "version")
+    if schema == envelope.ENVELOPE_SCHEMA_V3:
+        return envelope.project_effective_envelope_v3(
+            inspect, image_env_names=image_env_names, runtime_version=runtime_version,
+            daemon_info=_observed(transport, "daemon_info"), kernel_files=kernel_files)
     if schema == envelope.ENVELOPE_SCHEMA_V2:
         return envelope.project_effective_envelope_v2(
             inspect, image_env_names=image_env_names, runtime_version=runtime_version,
@@ -372,7 +397,10 @@ def _require_no_create_warnings(create_warnings) -> None:
 def _contained_candidate_run(*, image_id: str, mounts: dict, resource_profile,
                              name_prefix: str, sealed: bool, transport,
                              execution_contract, record_cleanup: bool,
-                             contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
+                             contract=AEE_CHECKER_SEALED_CONTRACT,
+                             readback: bool = False) -> dict:
+    # The wrapper holds only when this run will release it: a hold nobody releases would wait
+    # out its bound and turn every run unproved.
     return contained.run_contained(
         image_id=image_id,
         mounts=mounts,
@@ -380,7 +408,8 @@ def _contained_candidate_run(*, image_id: str, mounts: dict, resource_profile,
             {"build": list(contract.candidate_build),
              "entrypoint_command": list(contract.candidate_entrypoint)}
             if execution_contract is None else execution_contract,
-            contract=contract)],
+            contract=contract, readback_hold=readback)],
+        readback=readback,
         entrypoint=CANDIDATE_ENTRYPOINT,
         mount_spec=CANDIDATE_MOUNT_SPEC,
         resource_profile=resource_profile,
@@ -400,7 +429,8 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
     The envelope is projected from this run's own inspect output and this
     run's own runtime version. PREPARE's inert-probe evidence describes a
     different image and profile and cannot stand in for either. The record's
-    schema follows the execution profile: new contained-oci-v1 records v2.
+    schema follows the execution profile: new contained-oci-v1 records v3, which also
+    carries the kernel's read-back taken while this container was held (#197).
     """
     schema = envelope.envelope_schema_for_profile(execution_profile)
     requested = _requested_envelope(
@@ -413,7 +443,8 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
             resource_profile=resource_profile, name_prefix=name_prefix,
             sealed=sealed, transport=transport,
             execution_contract=execution_contract, record_cleanup=True,
-            contract=contract)
+            contract=contract,
+            readback=schema == envelope.ENVELOPE_SCHEMA_V3)
     except DockerUnavailable as exc:
         return _refused_envelope(binding, requested, "unavailable", str(exc), schema)
     except PrepareError as exc:
@@ -425,7 +456,8 @@ def _recorded_sealed_candidate(*, image_id, mounts, resource_profile,
     unverified_field = None
     try:
         effective = _project_effective(
-            transport, raw["inspect"], image_id=image_id, schema=schema)
+            transport, raw["inspect"], image_id=image_id, schema=schema,
+            kernel_files=raw.get("kernel_files"))
         envelope.require_envelope_matches_request(effective, requested, schema=schema)
         _require_no_create_warnings(raw["create_warnings"])
     except (envelope.EnvelopeError, PrepareError) as exc:
