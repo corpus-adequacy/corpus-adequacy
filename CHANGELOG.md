@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+Slice B re-measured cleanly (#103). The first retained Slice B reports record an absolute manifest
+path, so they cannot be published. The same two local `contained-oci-v1` runs were taken again at
+`20f6d8b` with the fixed facade from #208 and retained in `measurements/owned-slice-b-20f6d8b/`. The
+results are unchanged: declared killed 2, survived 0, adequate true; independent killed 0,
+survived 1, adequate false; both with a killed control and `unproved: 0`. The reports differ from
+the first pair only in `manifest`, now a repository path, and `tool_commit`. The class attempts
+differ only in the two digests they bind, and the provenance is byte-identical. No execution
+identity moved. The evidence tests now run one shared set of checks over both directories, add a
+check that each README names the commit it was measured at, and pin which directory is
+publishable. The first directory stays as retained evidence.
+
 No host path reaches a published page (#204). A report records the manifest path it is handed,
 and the Slice B facade handed it an absolute one, so both retained Slice B reports name the
 operator's worktree where every earlier retained measurement records a repository-relative path.

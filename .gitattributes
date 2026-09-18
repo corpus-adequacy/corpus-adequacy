@@ -65,3 +65,4 @@ tests/fixtures/hosted-r4-terminal/** text eol=lf
 tests/fixtures/suggestion-v0/** text eol=lf
 measurements/owned-independent-v0/** text eol=lf
 measurements/owned-slice-b-5918ec4/** text eol=lf
+measurements/owned-slice-b-20f6d8b/** text eol=lf

@@ -1,0 +1,158 @@
+{
+  "candidate_outcome": "completed",
+  "cleanup": "removed-and-absent",
+  "effective": {
+    "cap_add": [],
+    "cap_drop": [
+      "ALL"
+    ],
+    "cpu_period": 100000,
+    "cpu_quota": 100000,
+    "daemon": {
+      "cgroup_driver": "cgroupfs",
+      "cgroup_version": "2",
+      "kernel_version": "7.0.12-linuxkit",
+      "security_options": [
+        "name=cgroupns",
+        "name=seccomp,profile=builtin"
+      ]
+    },
+    "devices": [],
+    "env_names": [
+      "CARGO_HOME",
+      "CARGO_NET_OFFLINE",
+      "PATH",
+      "RUSTUP_HOME",
+      "RUST_VERSION"
+    ],
+    "image": "sha256:e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2",
+    "image_env_names": [
+      "CARGO_HOME",
+      "PATH",
+      "RUSTUP_HOME",
+      "RUST_VERSION"
+    ],
+    "memory": 4294967296,
+    "memory_swap": 4294967296,
+    "mounts": [
+      {
+        "destination": "/input",
+        "rw": false,
+        "type": "bind"
+      },
+      {
+        "destination": "/subject",
+        "rw": false,
+        "type": "bind"
+      },
+      {
+        "destination": "/tool",
+        "rw": false,
+        "type": "bind"
+      },
+      {
+        "destination": "/vendor",
+        "rw": false,
+        "type": "bind"
+      }
+    ],
+    "nano_cpus": 0,
+    "network_mode": "none",
+    "no_new_privileges": true,
+    "pid_mode": "",
+    "pids_limit": 512,
+    "privileged": false,
+    "read_only_root": true,
+    "runtime_version": "29.7.2",
+    "tmpfs": {
+      "/tmp": {
+        "exec": false,
+        "gid": 65532,
+        "mode": "1777",
+        "nr_inodes": 2048,
+        "rw": true,
+        "size": 16777216,
+        "uid": 65532
+      },
+      "/work": {
+        "exec": true,
+        "gid": 65532,
+        "mode": "1777",
+        "nr_inodes": 16384,
+        "rw": true,
+        "size": 268435456,
+        "uid": 65532
+      }
+    },
+    "ulimit_nofile": {
+      "hard": 1024,
+      "soft": 1024
+    },
+    "user": "65532:65532",
+    "userns_mode": ""
+  },
+  "envelope_status": "verified",
+  "execution_commit": "20f6d8b1fb99283ce70fd1d8f6016958df5d02b3",
+  "non_claims": [
+    "States the envelope one Docker daemon reported for one container on one host at one time.",
+    "Does not prove kernel or runtime escape resistance.",
+    "Does not prove the absence of side channels.",
+    "Does not prove an uncompromised daemon or operator.",
+    "Does not authenticate the candidate author or prove candidate correctness.",
+    "Not a sandbox-completeness claim, not a score, not an audit, not a certification, and not publication authorization."
+  ],
+  "prepare_sha256": "c533fc88680a42e91a2d7e470113b3da5a4f3df035589084c376ca88aead0510",
+  "publication_permission": "permitted",
+  "report_sha256": "a1abd3594a79c6c2b0a57660fde62f173ffc4302126a56c32060db931b519354",
+  "requested": {
+    "execution_profile": "contained-oci-v1",
+    "image_id": "sha256:e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2",
+    "mount_spec": [
+      "/input",
+      "/subject",
+      "/tool",
+      "/vendor"
+    ],
+    "resource_profile": {
+      "cpu_rate_millicpu": 1000,
+      "deadline_seconds": 120,
+      "memory_bytes": 4294967296,
+      "memory_swap_bytes": 4294967296,
+      "nofile_hard": 1024,
+      "nofile_soft": 1024,
+      "output_bytes": 4194304,
+      "pids": 512,
+      "schema": "corpus-adequacy.aee-checker-sealed.resource-profile.v2",
+      "tmp_bytes": 16777216,
+      "tmp_inodes": 2048,
+      "work_bytes": 268435456,
+      "work_exec": true,
+      "work_inodes": 16384
+    },
+    "sealed": true,
+    "tmpfs": {
+      "/tmp": {
+        "exec": false,
+        "gid": 65532,
+        "mode": "1777",
+        "nr_inodes": 2048,
+        "rw": true,
+        "size": 16777216,
+        "uid": 65532
+      },
+      "/work": {
+        "exec": true,
+        "gid": 65532,
+        "mode": "1777",
+        "nr_inodes": 16384,
+        "rw": true,
+        "size": 268435456,
+        "uid": 65532
+      }
+    }
+  },
+  "schema": "corpus-adequacy.execution-envelope.v2",
+  "setup_status": "ready",
+  "unverified_field": null,
+  "withheld_reason": null
+}
