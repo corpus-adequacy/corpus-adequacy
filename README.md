@@ -532,6 +532,23 @@ control adds the inverse metamorphic check: a declared semantically neutral
 transformation must not move the pinned outcomes. It does not prove semantic
 discrimination, infer equivalence, or replace a positive control.
 
+`modelcontextprotocol/conformance` reached the same axis earlier still, from the
+other side. Its server-side negative test harness,
+`src/scenarios/server/negative.test.ts`, landed on 2026-04-24 (`5d8595b6`, #249):
+it starts deliberately broken servers and asserts that each covered check reports a
+failure, or a warning where that is the expected signal. That shows a harness check
+can fail. This tool shows that a corpus
+notices a deleted implementation rule. It is the same question aimed one layer over,
+and theirs came first.
+
+Its SEP traceability manifest followed on 2026-05-19 (`442ba3b1`, #288,
+`src/traceability/types.ts`). Each quoted normative requirement is meant to carry
+either a `check:` or an `excluded:` with a reason, and a row with neither is reported
+as an authoring gap.
+The rule inventory of `corpus-adequacy.manifest.v1` makes the same split: a rule is
+`mutated` or `excluded` with a reason, and a row with neither is refused. That
+mapping, too, was theirs first.
+
 With [Maaz Ahmed](https://github.com/MaazAhmed47)’s permission, a private candidate workflow was exercised against four owner-confirmed effective-permission rules at [Interlock](https://getinterlock.dev) snapshot bec2e8f0aa8c6c962333947a5b673182eab9e99e. Maaz confirmed the factual rule mapping and required this interpretation boundary: ‘distinguished’ means only that the named mutation changed the declared projection for the fixed private probe set. No Interlock source, mutations, per-rule results, denominator, score, or product-wide claim is published. This is not an audit, endorsement, or partnership.
 
 ## Trust boundary
