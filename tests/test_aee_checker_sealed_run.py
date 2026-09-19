@@ -20,6 +20,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 import unittest.mock as mock
@@ -291,6 +292,40 @@ def _docker_ready() -> bool:
         return True
     except run.DockerUnavailable:
         return False
+
+
+# Runner-infrastructure flakes seen on hosted ubuntu-latest, matched by exact
+# message on a plain PrepareError. The production code and its timeouts are in
+# every sealed contract's execution_paths, so the retry lives here instead.
+LIVE_READINESS_FLAKES = frozenset({"docker readiness timed out", "docker daemon is not ready"})
+LIVE_PULL_FLAKES = frozenset({"rust image pull failed"})
+INFRA_RETRY_PAUSES_SECONDS = (5, 20)
+
+
+def _infra_pause(seconds) -> None:
+    time.sleep(seconds)
+
+
+def _retry_runner_infrastructure(fn, retryable, label):
+    attempts = len(INFRA_RETRY_PAUSES_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except run.PrepareError as exc:
+            if type(exc) is not run.PrepareError or str(exc) not in retryable:
+                raise
+            if attempt == attempts:
+                exc.add_note("runner-infrastructure retry: %s on all %d attempts" % (
+                    exc, attempts))
+                raise
+            pause = INFRA_RETRY_PAUSES_SECONDS[attempt - 1]
+            print("runner-infrastructure retry: %s attempt %d/%d failed: %s; retrying in %ss" % (
+                label, attempt, attempts, exc, pause), file=sys.stderr, flush=True)
+            _infra_pause(pause)
+
+
+def _pull_rust_image_with_retry():
+    return _retry_runner_infrastructure(run.pull_rust_image, LIVE_PULL_FLAKES, "rust image pull")
 
 
 CARGO = shutil.which("cargo") is not None
@@ -1846,7 +1881,9 @@ class MaterializeBytes(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "docker executable is not available")
 
     def test_hosted_linux_capability_failure_is_not_a_skip(self):
-        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}):
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}), \
+                mock.patch.object(sys.modules[__name__], "_infra_pause"), \
+                mock.patch.object(sys, "stderr", io.StringIO()):
             with mock.patch.object(
                     run, "require_live_oci_capability",
                     side_effect=run.PrepareError("docker daemon is not ready")):
@@ -1901,7 +1938,9 @@ class MaterializeBytes(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "docker readiness timed out")
 
     def test_hosted_linux_readiness_timeout_is_not_a_skip(self):
-        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}):
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}), \
+                mock.patch.object(sys.modules[__name__], "_infra_pause"), \
+                mock.patch.object(sys, "stderr", io.StringIO()):
             with mock.patch.object(br, "_run_capped", side_effect=self._readiness_timeout()):
                 try:
                     LiveInertProbes.setUpClass()
@@ -2101,6 +2140,144 @@ class DurableVendorConfig(unittest.TestCase):
             self.assertTrue(any(vendor.iterdir()))
 
 
+class LiveInfrastructureRetry(unittest.TestCase):
+    def _call(self, effects, retryable, label="docker readiness"):
+        calls = []
+        pauses = []
+
+        def fn():
+            calls.append(1)
+            effect = effects[len(calls) - 1]
+            if isinstance(effect, BaseException):
+                raise effect
+            return effect
+
+        err = io.StringIO()
+        with mock.patch.object(sys.modules[__name__], "_infra_pause", side_effect=pauses.append):
+            with mock.patch.object(sys, "stderr", err):
+                try:
+                    result = _retry_runner_infrastructure(fn, retryable, label)
+                except BaseException as exc:
+                    return exc, calls, pauses, err.getvalue()
+        return result, calls, pauses, err.getvalue()
+
+    def test_retryable_messages_are_exactly_the_observed_runner_flakes(self):
+        self.assertEqual(
+            LIVE_READINESS_FLAKES,
+            frozenset({"docker readiness timed out", "docker daemon is not ready"}))
+        self.assertEqual(LIVE_PULL_FLAKES, frozenset({"rust image pull failed"}))
+        self.assertEqual(INFRA_RETRY_PAUSES_SECONDS, (5, 20))
+
+    def test_transient_flake_then_success_returns_and_leaves_a_visible_trail(self):
+        flake = run.PrepareError("docker readiness timed out")
+        result, calls, pauses, err = self._call(
+            [flake, flake, "sha256:" + "ab" * 32], LIVE_READINESS_FLAKES)
+        self.assertEqual(result, "sha256:" + "ab" * 32)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(pauses, [5, 20])
+        self.assertEqual(err.count("runner-infrastructure retry: docker readiness"), 2)
+        self.assertIn("attempt 1/3 failed: docker readiness timed out", err)
+        self.assertIn("attempt 2/3 failed: docker readiness timed out", err)
+
+    def test_persistent_flake_reraises_the_original_error_unchanged_and_loud(self):
+        flake = run.PrepareError("rust image pull failed")
+        exc, calls, pauses, err = self._call(
+            [flake, flake, flake], LIVE_PULL_FLAKES, "rust image pull")
+        self.assertIs(exc, flake)
+        self.assertIs(type(exc), run.PrepareError)
+        self.assertEqual(str(exc), "rust image pull failed")
+        self.assertNotIsInstance(exc, unittest.SkipTest)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(pauses, [5, 20])
+        self.assertEqual(
+            exc.__notes__,
+            ["runner-infrastructure retry: rust image pull failed on all 3 attempts"])
+
+    def test_non_allowlisted_errors_are_raised_on_the_first_attempt(self):
+        for error in (
+                run.DockerUnavailable("docker executable is not available"),
+                run.DockerUnavailable("docker daemon is not ready"),
+                run.PrepareError("docker build failed"),
+                run.PrepareError("rust image must be a digest"),
+                run.PrepareError("rust image platform"),
+                run.PrepareError("toolchain observation failed"),
+                subprocess.TimeoutExpired(["docker", "pull"], 1),
+                AssertionError("docker readiness timed out")):
+            with self.subTest(error=repr(error)):
+                exc, calls, pauses, err = self._call(
+                    [error, "unreached"], LIVE_READINESS_FLAKES | LIVE_PULL_FLAKES)
+                self.assertIs(exc, error)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(pauses, [])
+                self.assertEqual(err, "")
+                self.assertFalse(getattr(exc, "__notes__", None))
+
+    def test_hosted_linux_setup_survives_transient_readiness_and_runs(self):
+        flake = run.PrepareError("docker readiness timed out")
+        image = "sha256:" + "cd" * 32
+        saved = LiveInertProbes.image_id
+        try:
+            with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}):
+                with mock.patch.object(
+                        run, "require_live_oci_capability", side_effect=[flake, image]) as cap:
+                    with mock.patch.object(sys.modules[__name__], "_infra_pause"):
+                        with mock.patch.object(sys, "stderr", io.StringIO()):
+                            LiveInertProbes.setUpClass()
+            self.assertEqual(cap.call_count, 2)
+            self.assertEqual(LiveInertProbes.image_id, image)
+        finally:
+            LiveInertProbes.tearDownClass()
+            LiveInertProbes._tmp = None
+            LiveInertProbes.image_id = saved
+
+    def test_hosted_linux_persistent_readiness_raises_after_bounded_attempts(self):
+        flake = run.PrepareError("docker readiness timed out")
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_OS": "Linux"}):
+            with mock.patch.object(
+                    run, "require_live_oci_capability", side_effect=flake) as cap:
+                with mock.patch.object(sys.modules[__name__], "_infra_pause") as pause:
+                    with mock.patch.object(sys, "stderr", io.StringIO()):
+                        with self.assertRaises(run.PrepareError) as ctx:
+                            LiveInertProbes.setUpClass()
+        self.assertIs(ctx.exception, flake)
+        self.assertEqual(cap.call_count, 3)
+        self.assertEqual(pause.call_count, 2)
+
+    def test_off_hosted_linux_readiness_flake_skips_at_once_without_retry(self):
+        for env in ({"GITHUB_ACTIONS": "true", "RUNNER_OS": "macOS"},
+                    {"GITHUB_ACTIONS": "", "RUNNER_OS": "Linux"}):
+            with self.subTest(env=env):
+                with mock.patch.dict(os.environ, env):
+                    with mock.patch.object(
+                            run, "require_live_oci_capability",
+                            side_effect=run.PrepareError("docker readiness timed out")) as cap:
+                        with mock.patch.object(sys.modules[__name__], "_infra_pause") as pause:
+                            with self.assertRaises(unittest.SkipTest) as ctx:
+                                LiveInertProbes.setUpClass()
+                self.assertEqual(str(ctx.exception), "docker readiness timed out")
+                self.assertEqual(cap.call_count, 1)
+                pause.assert_not_called()
+
+    def test_live_class_routes_every_flaky_site_through_the_bounded_retry(self):
+        setup = inspect.getsource(LiveInertProbes.setUpClass)
+        self.assertIn("_retry_runner_infrastructure", setup)
+        self.assertIn("LIVE_READINESS_FLAKES", setup)
+        self.assertLess(
+            setup.index("_retry_runner_infrastructure"), setup.index("except run.PrepareError"))
+        for test in (
+                LiveInertProbes.test_container_written_host_bytes_are_owner_removable,
+                LiveInertProbes.test_tmpfs_copy_after_stop_is_empty_copy_while_running_is_not):
+            src = inspect.getsource(test)
+            self.assertNotIn("run.pull_rust_image()", src)
+            self.assertIn("_pull_rust_image_with_retry()", src)
+        pull = inspect.getsource(_pull_rust_image_with_retry)
+        self.assertIn("run.pull_rust_image", pull)
+        self.assertIn("LIVE_PULL_FLAKES", pull)
+        helper = inspect.getsource(_retry_runner_infrastructure)
+        self.assertNotIn("SkipTest", helper)
+        self.assertNotIn("skipTest", helper)
+
+
 class LiveInertProbes(unittest.TestCase):
     image_id = ""
     prefix = "aee-sealed-inert-"
@@ -2108,10 +2285,14 @@ class LiveInertProbes(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        hosted_linux = (
+            os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_OS") == "Linux")
         try:
-            cls.image_id = run.require_live_oci_capability(CONTAINERFILE.parent)
+            cls.image_id = _retry_runner_infrastructure(
+                lambda: run.require_live_oci_capability(CONTAINERFILE.parent),
+                LIVE_READINESS_FLAKES if hosted_linux else frozenset(), "docker readiness")
         except run.PrepareError as exc:
-            if os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_OS") == "Linux":
+            if hosted_linux:
                 raise
             raise unittest.SkipTest(str(exc)) from exc
         run.require_image_id(cls.image_id)
@@ -2297,7 +2478,7 @@ class LiveInertProbes(unittest.TestCase):
             created = []
             try:
                 owner = run.host_bind_owner(live)
-                run.pull_rust_image()
+                _pull_rust_image_with_retry()
                 run.docker_bounded([
                     "create", "--name", live_name,
                     "--tmpfs", "/vendor:rw,size=1048576,nr_inodes=128",
@@ -2329,7 +2510,7 @@ class LiveInertProbes(unittest.TestCase):
 
     def test_container_written_host_bytes_are_owner_removable(self):
         name = "aee-tmpfs-owner-%s" % hashlib.sha256(os.urandom(8)).hexdigest()[:8]
-        run.pull_rust_image()
+        _pull_rust_image_with_retry()
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "out"
             dest.mkdir()
