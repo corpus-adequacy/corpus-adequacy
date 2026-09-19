@@ -133,6 +133,237 @@ def stop_after_controls(data):
             'event': 'not-started', 'reason': 'prerequisite-refused'})
 
 
+def basis_snapshot():
+    root = ROOT / 'fixtures/contained-v1-owned/corpus'
+    return tuple(sorted((str(p.relative_to(root)), p.read_bytes())
+                        for p in root.rglob('*') if p.is_file()))
+
+
+class Basis(unittest.TestCase):
+    def test_factory_tree_accepts_and_vectors_only_refuses(self):
+        raw = basis_snapshot()
+        result = ev.require_basis(raw)
+        self.assertEqual(set(result), {'MANIFEST.json', 'allow.json', 'boundary.json',
+                                       'negative.json', 'over-limit.json'})
+        flat = tuple((name.removeprefix('vectors/'), data) for name, data in raw
+                     if name.startswith('vectors/'))
+        with self.assertRaises(ev.EvidenceError):
+            ev.require_basis(flat)
+        changed = tuple((name, data+b'x' if name == 'LICENSE' else data)
+                        for name, data in raw)
+        with self.assertRaises(ev.EvidenceError):
+            ev.require_basis(changed)
+
+    def test_basis_closed_immutable_bounded_inventory(self):
+        original = basis_snapshot()
+        for snapshot in (list(original), original[:-1], original + (original[0],),
+                         tuple(reversed(original)),
+                         tuple((p, bytearray(b)) for p, b in original),
+                         tuple((p, b'x'*65537 if p == 'LICENSE' else b) for p, b in original)):
+            with self.subTest(kind=type(snapshot)), self.assertRaises(ev.EvidenceError):
+                ev.require_basis(snapshot)
+
+
+def prepared_inputs():
+    # Synthetic reference only: no real approval or candidate execution.
+    from sealed_measurement_contract import OWNED_INDEPENDENT_V0_CONTRACT as owned
+    basis = basis_snapshot()
+    files = {p.removeprefix('vectors/'): b for p, b in basis if p.startswith('vectors/')}
+    proposal = json.loads((ROOT/'tests/fixtures/suggestion-v0/good.json').read_bytes())
+    proposal['vector'].update(id='proposal', file='proposal.json')
+    proposal['expected'] = copy.deepcopy(ROWS['proposal'])
+    members = {'proposal.json': ev.encode(proposal)}
+    reference = {'schema': ev.PREFIX+'reference.v0',
+        'proposal_sha256': ev.digest(members['proposal.json']),
+        'selection': 'owned-independent-v0', 'rule_sources': [
+            {'path': path, 'sha256': ev.digest((ROOT/path).read_bytes())}
+            for path in ('fixtures/contained-v1-owned/candidate/src/check.rs',
+                         'measurements/owned-independent-v0/mutation-bundle.json')],
+        'rows': copy.deepcopy(ROWS), 'rationale': 'Synthetic test',
+        'reviewer': 'test-only', 'decision': 'accept'}
+    members['reference.json'] = ev.encode(reference)
+    def ref(path):
+        return {'member': path, 'sha256': ev.digest(members[path]), 'bytes': len(members[path])}
+    old = json.loads(files.pop('MANIFEST.json'))
+    files['proposal.json'] = b'{"value":12}'
+    rows = old['vectors'] + [{'id': 'proposal', 'file': 'proposal.json',
+                             'value_class': proposal['vector']['value_class']}]
+    variants = []
+    for variant in ev.VARIANTS:
+        import hashlib
+        vector_files = {p: b if variant == 'base' else b' \n'+b+b'\n\t'
+                        for p, b in files.items()}
+        h = hashlib.sha256()
+        for row in rows:
+            h.update(row['file'].encode()+b'\0'+vector_files[row['file']])
+        manifest = {'vectors': rows, 'corpusDigest': h.hexdigest()}
+        vector_files['MANIFEST.json'] = (json.dumps(manifest, indent=2, sort_keys=True)+'\n').encode()
+        prefix = variant+'/corpus/'
+        members.update({prefix+p: raw for p, raw in vector_files.items()})
+        tree = hashlib.sha256()
+        for p, raw in sorted(vector_files.items()):
+            tree.update(p.encode()+b'\0'+str(len(raw)).encode()+b'\0'+raw)
+        variants.append({'variant': variant, 'manifest': ref(prefix+'MANIFEST.json'),
+            'vectors': [{'id': row['id'], 'file': row['file'],
+                         'sha256': ev.digest(vector_files[row['file']]),
+                         'bytes': len(vector_files[row['file']])} for row in rows],
+            'tree_sha256': tree.hexdigest(), 'corpus_digest': h.hexdigest()})
+    slots = [copy.deepcopy(o['slot']) for o in assessment()[1]]
+    plan = {'schema': ev.PREFIX+'plan.v0', 'family': ev.FAMILY,
+        'proposal': ref('proposal.json'), 'reference': ref('reference.json'),
+        'source': {'commit': 'a'*40, 'content_sha256': 'b'*64,
+                   'files': [{'path': p, 'sha256': 'c'*64} for p in ev.SOURCE_PATHS]},
+        'instrument_commit': owned.instrument_commit, 'subject_tree_sha256': owned.subject_tree_sha256,
+        'adapter_sha256': owned.adapter_sha256, 'profile': ev.PROFILE, 'policy': ev.POLICY,
+        'variants': variants, 'slots': slots, 'control_sha256': owned.pin_digest('control.json'),
+        'sites_sha256': owned.pin_digest('sites.json')}
+    members['plan.json'] = ev.encode(plan)
+    return ev.AssessmentInputs(tuple(sorted(members.items())), basis)
+
+
+class Preflight(unittest.TestCase):
+    def test_complete_snapshot_passes_all_preflight_gates(self):
+        inputs = prepared_inputs()
+        gates, data = ev.evaluate_preflight(inputs)
+        self.assertEqual([g['status'] for g in gates], ['passed']*3)
+        self.assertEqual(data['execution']['ids'], IDS)
+        self.assertEqual(data['execution']['plan_sha256'], ev.digest(dict(inputs.retained_members)['plan.json']))
+
+    def test_plan_freeze_change_is_recomputed_not_trusted(self):
+        inputs = prepared_inputs(); members = dict(inputs.retained_members)
+        plan = ev.decode(members['plan.json']); plan['adapter_sha256'] = 'd'*64
+        members['plan.json'] = ev.encode(plan)
+        gates, _ = ev.evaluate_preflight(ev.AssessmentInputs(tuple(sorted(members.items())), inputs.basis_members))
+        self.assertEqual(gates[1]['reason'], 'freeze-drift')
+        self.assertEqual(gates[2]['status'], 'not-run')
+
+    def test_coherent_wrong_vector_is_gate2_refusal(self):
+        inputs=prepared_inputs(); members=dict(inputs.retained_members)
+        plan=ev.decode(members['plan.json'])
+        path='base/corpus/proposal.json'; members[path]=b'{"value":13}'
+        row=plan['variants'][0]['vectors'][-1]
+        row.update(sha256=ev.digest(members[path]),bytes=len(members[path]))
+        # Repair the retained tree ref as an attacker could; original derivation
+        # remains anchored in proposal+basis and must still reject.
+        files={p.removeprefix('base/corpus/'): b for p,b in members.items() if p.startswith('base/corpus/')}
+        plan['variants'][0]['tree_sha256']=ev._tree(files)
+        members['plan.json']=ev.encode(plan)
+        gates,_=ev.evaluate_preflight(ev.AssessmentInputs(tuple(sorted(members.items())),inputs.basis_members))
+        self.assertEqual(gates[2]['reason'],'corpus-separation')
+
+    def test_ref_only_or_forged_mutable_inputs_refuse(self):
+        inputs = prepared_inputs()
+        forged = object.__new__(ev.AssessmentInputs)
+        object.__setattr__(forged, 'retained_members', inputs.retained_members[:1])
+        object.__setattr__(forged, 'basis_members', inputs.basis_members)
+        with self.assertRaises(ev.EvidenceError):
+            ev.evaluate_preflight(forged)
+        with self.assertRaises(ev.EvidenceError):
+            ev.evaluate_preflight(ev.decode(dict(inputs.retained_members)['plan.json']))
+
+
+def wire_execution(inputs):
+    data = assessment()
+    plan_hash = ev.digest(dict(inputs.retained_members)['plan.json'])
+    refs = {}
+    views = []
+    for obs in data[1]:
+        obs['plan_sha256'] = plan_hash
+        slot = obs['slot']; member = slot['variant']+'/observations/'+str(slot['ordinal'])+'.json'
+        refs[(slot['variant'], slot['ordinal'])] = {'member': member,
+            'sha256': ev.digest(ev.encode(obs)), 'bytes': len(ev.encode(obs))}
+        view = ev.project_observation(obs, ids=IDS, plan_sha256=plan_hash)
+        views.append({'schema': ev.PREFIX+'view.v0', 'plan_sha256': plan_hash,
+            'slot': copy.deepcopy(slot), 'observation': copy.deepcopy(refs[(slot['variant'], slot['ordinal'])]),
+            'adapter_sha256': ev._OWNED.adapter_sha256, **view})
+    journal = []
+    for event in data[4]:
+        slot = event['slot']
+        journal.append({'schema': ev.PREFIX+'journal-event.v0', 'plan_sha256': plan_hash,
+            **copy.deepcopy(event), 'observation': copy.deepcopy(refs[(slot['variant'], slot['ordinal'])])
+                if event['event'] == 'returned' else None})
+    return data[1], views, data[3], journal
+
+
+class FinalReview(unittest.TestCase):
+    def test_review_is_separate_and_cannot_rewrite_gates(self):
+        inputs=prepared_inputs(); execution=wire_execution(inputs)
+        gates=ev.evaluate_assessment(inputs,*execution); before=ev.encode(gates)
+        proposal_hash=ev.digest(dict(inputs.retained_members)['proposal.json'])
+        review={'schema':ev.PREFIX+'review.v0','proposal_sha256':proposal_hash,
+            'evidence_index_sha256':'a'*64,'reviewer':'synthetic-only','decision':'accept','rationale':'test'}
+        args=dict(proposal_sha256=proposal_hash,evidence_index_sha256='a'*64)
+        self.assertEqual(ev.derive_disposition(gates,execution[0],None,**args),'pending-review')
+        self.assertEqual(ev.derive_disposition(gates,execution[0],review,**args),'eligible-for-human-corpus-PR')
+        review['decision']='reject'
+        self.assertEqual(ev.derive_disposition(gates,execution[0],review,**args),'refused')
+        review['decision']='accept';review['evidence_index_sha256']='b'*64
+        with self.assertRaises(ev.EvidenceError):
+            ev.derive_disposition(gates,execution[0],review,**args)
+        self.assertEqual(ev.encode(gates),before)
+        review['evidence_index_sha256']='a'*64
+        abnormal=copy.deepcopy(execution[0])
+        abnormal[3]['raw']['raised']={'<batch>':'unproved'}
+        refused=copy.deepcopy(gates);refused[5].update(status='refused',reason='abnormal-execution')
+        self.assertEqual(ev.derive_disposition(refused,abnormal,review,**args),'unproved')
+
+
+class ProjectionParity(unittest.TestCase):
+    def test_proposal_shape_agrees_with_installed_validator(self):
+        import suggestion_admission as legacy
+        doc=json.loads((ROOT/'tests/fixtures/suggestion-v0/good.json').read_bytes())
+        for mutation in (lambda x:None, lambda x:x.update(extra=True),
+                lambda x:x['vector']['document'].update(value=True),
+                lambda x:x['expected'].update(accepted=1),
+                lambda x:x['authorship'].update(author_kind='unknown')):
+            changed=copy.deepcopy(doc); mutation(changed)
+            results=[]
+            for validator in (legacy.require_proposal,ev._proposal):
+                try: validator(changed)
+                except (legacy.AdmissionError,ev.EvidenceError):results.append(False)
+                else:results.append(True)
+            self.assertEqual(results[0],results[1])
+
+    def test_pure_import_does_not_import_execution_modules(self):
+        import subprocess
+        script="import sys;sys.path.insert(0,'measurements');import suggestion_evidence;assert not any(x.startswith('aee_checker_sealed_') or x in ('contained_oci','suggestion_admission') for x in sys.modules)"
+        result=subprocess.run([sys.executable,'-c',script],cwd=ROOT,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+
+class FullEvaluation(unittest.TestCase):
+    def test_same_full_evaluator_computes_all_nine_gates(self):
+        inputs = prepared_inputs()
+        gates = ev.evaluate_assessment(inputs, *wire_execution(inputs))
+        self.assertEqual([g['id'] for g in gates], list(range(9)))
+        self.assertEqual([g['status'] for g in gates], ['passed']*7+['not-run', 'passed'])
+
+    def test_preflight_refusal_never_requires_or_invents_calls(self):
+        inputs=prepared_inputs(); members=dict(inputs.retained_members)
+        plan=ev.decode(members['plan.json']);plan['adapter_sha256']='d'*64
+        members['plan.json']=ev.encode(plan)
+        inputs=ev.AssessmentInputs(tuple(sorted(members.items())),inputs.basis_members)
+        h=ev.digest(members['plan.json'])
+        journal=[{'schema':ev.PREFIX+'journal-event.v0','seq':n,'plan_sha256':h,
+                  'slot':slot,'event':'preflight-refused' if n==0 else 'not-started',
+                  'observation':None,'reason':'preflight-refusal' if n==0 else 'prerequisite-refused'}
+                 for n,slot in enumerate(plan['slots'])]
+        controls=[{'variant':v,'positive':'not-run','inert':'not-run','barrier':'stop'} for v in ev.VARIANTS]
+        gates=ev.evaluate_assessment(inputs,[],[],controls,journal)
+        self.assertEqual(gates[1]['reason'],'freeze-drift')
+        self.assertEqual(gates[8]['status'],'passed')
+        self.assertTrue(all(g['status']=='not-run' for g in gates[2:8]))
+
+    def test_view_and_journal_reference_bytes_are_checked(self):
+        inputs = prepared_inputs()
+        for which in ('view', 'journal'):
+            obs, views, controls, journal = wire_execution(inputs)
+            target = views[0] if which == 'view' else journal[1]
+            target['observation']['sha256'] = '0'*64
+            with self.subTest(which=which), self.assertRaises(ev.EvidenceError):
+                ev.evaluate_assessment(inputs, obs, views, controls, journal)
+
+
 class Evaluation(unittest.TestCase):
     def evaluate(self, data):
         return ev.evaluate_execution_gates(*data)
@@ -249,6 +480,17 @@ class Evaluation(unittest.TestCase):
         with self.assertRaises(ev.EvidenceError) as caught:
             self.evaluate(data)
         self.assertEqual(caught.exception.code, 'schedule-mismatch')
+
+    def test_omitted_slot_cannot_be_followed_by_resumed_calls(self):
+        data=assessment()
+        data[0]['reference_rows']['allow']['accepted']=False
+        omitted_slot=copy.deepcopy(data[1][3]['slot'])
+        data[1].pop(3); self.refresh(data)
+        data[4][6:8]=[{'seq':6,'slot':omitted_slot,'event':'not-started','reason':'prerequisite-refused'}]
+        for seq,event in enumerate(data[4]):event['seq']=seq
+        with self.assertRaises(ev.EvidenceError) as caught:
+            self.evaluate(data)
+        self.assertEqual(caught.exception.code,'schedule-mismatch')
 
     def test_missing_duplicate_and_reordered_journal_never_pass(self):
         for edit in (lambda j: j.pop(), lambda j: j.append(copy.deepcopy(j[-1])),

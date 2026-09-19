@@ -328,36 +328,31 @@ class OwnedAssessmentVariantContract:
 
 @dataclass(frozen=True, slots=True)
 class OwnedAssessmentAdmissionContext:
-    """Immutable input carrier, NOT a capability or proof of admission.
+    """Snapshot carrier, not a capability, cached verdict or authenticated consent.
 
-    The pure admission function must recheck the bytes at every consumer. There
-    is intentionally no validated flag and no runtime caller uses this yet.
+    Every consumer must call require_assessment_context again. Current filesystem
+    source measurement additionally belongs to the driver before backend entry.
     """
 
     family: str
     profile: str
     variant: str
-    plan_raw: bytes
+    assessment_inputs: object
+    expected_raw: bytes
     prepare_raw: bytes
     parent_authorization_raw: bytes
     variant_authorization_raw: bytes
-    expected_plan_sha256: str
-    expected_reference_sha256: str
-    expected_source_content_sha256: str
-    variant_contract: OwnedAssessmentVariantContract
 
     def __post_init__(self):
         if (self.family != 'owned-suggestion-assessment-v0'
                 or self.profile != 'contained-oci-v1'
                 or self.variant not in ('base', 'outer-whitespace')):
             raise ValueError('assessment context family/profile/variant')
-        for raw in (self.plan_raw, self.prepare_raw, self.parent_authorization_raw,
+        for raw in (self.expected_raw, self.prepare_raw, self.parent_authorization_raw,
                     self.variant_authorization_raw):
             if type(raw) is not bytes or not raw or len(raw) > 65536:
                 raise ValueError('assessment context bytes')
-        for value in (self.expected_plan_sha256, self.expected_reference_sha256,
-                      self.expected_source_content_sha256):
-            if type(value) is not str or not _HEX64.fullmatch(value):
-                raise ValueError('assessment context digest')
-        if type(self.variant_contract) is not OwnedAssessmentVariantContract:
-            raise ValueError('assessment context contract type')
+        # Local import avoids a module-load cycle; both modules are pure.
+        from suggestion_evidence import AssessmentInputs
+        if type(self.assessment_inputs) is not AssessmentInputs:
+            raise ValueError('assessment input type')
