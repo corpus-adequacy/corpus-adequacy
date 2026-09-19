@@ -5,8 +5,8 @@
 ## 0.4.0 — 2026-09-19
 
 Source-only release. It identifies source, not a run. Since 0.3.0:
-- The owned rail uploads its report, and seals and attests its attempts, as the external rail
-  already did.
+- The owned rail now uploads its report. It also seals and attests its attempts, as the external
+  rail already did.
 - Collection members name the step that ran them, and terminal attempts can be archived and
   checked offline.
 - There is a threat model.
@@ -16,7 +16,8 @@ Source-only release. It identifies source, not a run. Since 0.3.0:
 - Proposed test vectors are admitted deterministically, with no model call.
 - The owned `contained-oci-v1` rail reads the kernel's own limits into `execution-envelope.v3`.
 - A first-party pids witness has one hosted run, which was read back independently: run
-  35427166071 at `fb2f28cd1ad6ca89656f12f574d1b728340f8986`, verdict `witnessed`. This release
+  35427166071 at `fb2f28cd1ad6ca89656f12f574d1b728340f8986`, verdict `witnessed`, with the
+  readback recorded on #197. This release
   includes that revision as history. The run is evidence about one runner at one time, not an
   adequacy score.
 - The AI test-suggestion pilot's precondition fails on the owned fixture (`template-exhausted`).
