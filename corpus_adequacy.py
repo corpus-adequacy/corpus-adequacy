@@ -110,7 +110,7 @@ ANCHOR_EXCERPT_MAX = 200
 # One place. The report, --version, and CHANGELOG name this.
 # A tag v+VERSION exists only after the documented cut.
 # A SHA pin is exact and opaque; this is the name a measurement can quote.
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # Every shipped runtime source, in one ordered explicit set. HEAD byte equality
 # and the content digest read this same tuple, so a runtime file added without
@@ -345,11 +345,11 @@ def load_json_document(raw, *, root=None, where: str):
 def error_envelope(exc: BaseException, *, operation: str) -> dict:
     """Parseable --json body for a run that never produced a report.
 
-    `operation` is the verb (`measure`, `project`, or `inspect`). One envelope, no
+    `operation` is the verb (`measure`, `project`, `inspect`, or `invoke`). One envelope, no
     second parser rule. The field and stderr share that verb.
     """
-    if operation not in ("measure", "project", "inspect"):
-        raise ValueError("error_envelope operation must be measure, project or inspect")
+    if operation not in ("measure", "project", "inspect", "invoke"):
+        raise ValueError("error_envelope operation must be measure, project, inspect or invoke")
     return {
         "schema": ERROR_SCHEMA,
         "ok": False,
@@ -3351,6 +3351,7 @@ CLOSED_UNPROVED_REASONS = (
     "candidate-report-missing",
     "candidate-report-empty",
     "candidate-report-read",
+    "candidate-readback-hold",
 )
 
 
@@ -4857,6 +4858,13 @@ def _rules_cli(args) -> int:
     return 0
 
 
+def _diff_text_value(value) -> str:
+    """Quote values on one line; retain printable Unicode, escape controls."""
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return "".join(char if char.isprintable() else json.dumps(char)[1:-1]
+                   for char in encoded)
+
+
 def _render_diff_v0(projected: dict) -> None:
     """Render identity and row facts already projected; never infers a cause."""
     old_input = projected["old_input"]
@@ -4869,16 +4877,23 @@ def _render_diff_v0(projected: dict) -> None:
              new_input["unproved"]))
     identity = projected["identity"]
     print("identity:")
-    print("  manifest_sha256: %s" % identity["manifest_sha256"]["status"])
-    print("  corpus_digest: %s" % identity["corpus_digest"]["status"])
-    for key in ("tool_version", "tool_commit", "tool_source_state", "tool_content_sha256"):
-        print("  %s: %s" % (key, identity["tool"][key]["status"]))
+    components = [(key, identity[key]) for key in ("manifest_sha256", "corpus_digest")]
+    components.extend((key, identity["tool"][key]) for key in (
+        "tool_version", "tool_commit", "tool_source_state", "tool_content_sha256"))
+    for key, component in components:
+        print("  %s: %s (old=%s new=%s)" % (
+            key, component["status"], _diff_text_value(component["old"]),
+            _diff_text_value(component["new"])))
     print("rows:")
     for row in projected["rows"]:
         print("%s presence=%s verdict_transition=%s acknowledgement_retired=%s changed_fields=%s"
-              % (row["label"], row["presence"], row["verdict_transition"],
+              % (_diff_text_value(row["label"]), row["presence"], row["verdict_transition"],
                  str(row["acknowledgement_retired"]).lower(),
                  ",".join(row["changed_fields"])))
+        for key in ["verdict"] + [key for key in row["changed_fields"] if key != "verdict"]:
+            values = [(_diff_text_value(side[key]) if side is not None and key in side
+                       else "<absent>") for side in (row["old"], row["new"])]
+            print("  %s: %s -> %s" % (key, values[0], values[1]))
     counts = projected["counts"]
     print("counts: common=%d added=%d removed=%d verdict_changed=%d verdict_same=%d "
           "acknowledgement_retired=%d"
@@ -4914,8 +4929,33 @@ def _diff_cli(args) -> int:
     return 0
 
 
+class _InvocationParser(argparse.ArgumentParser):
+    """Keep explicit JSON refusal output available even before parsing succeeds."""
+
+    def __init__(self, *, argv, **kwargs):
+        super().__init__(**kwargs)
+        # Only the literal option requests JSON on the parser-error path. After
+        # `--` the same spelling is positional data, not an output-mode request.
+        options = argv[:argv.index("--")] if "--" in argv else argv
+        self._json_errors = "--json" in options
+
+    def error(self, message):
+        if self._json_errors:
+            print(json.dumps(error_envelope(ValueError(message), operation="invoke"),
+                             indent=2, sort_keys=True))
+        super().error(message)
+
+    def diff_report_path(self, value):
+        # Some argparse versions consume a recognized option as a nargs=2
+        # operand. Refuse the literal flag before Path normalizes ./--json,
+        # which is still a valid way to name a report file.
+        if self._json_errors and value == "--json":
+            raise argparse.ArgumentTypeError("--json is an output option, not a report path")
+        return Path(value)
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = _InvocationParser(argv=sys.argv[1:], description=__doc__.split("\n")[0])
     ap.add_argument("--version", action="store_true",
                     help="print tool version (and commit, if resolvable) and exit")
     ap.add_argument("manifest", type=Path, nargs="?")
@@ -4925,7 +4965,7 @@ def main() -> int:
                             help="project survivors.v0 from an existing report.v0 file")
     projection.add_argument("--rules", action="store_true",
                             help="project rules.v0 from an existing report.v0 and manifest")
-    projection.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), type=Path,
+    projection.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), type=ap.diff_report_path,
                             help="project diff.v0 from two existing report.v0 files")
     projection.add_argument("--inspect", type=Path,
                             help="inspect manifest declarations without binding or execution")

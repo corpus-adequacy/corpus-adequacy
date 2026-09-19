@@ -253,7 +253,7 @@ class RuntimeReachesTheRealCandidate(unittest.TestCase):
         for flag in ("--cpu-period", "--cpu-quota", "--ulimit"):
             self.assertEqual(argv.count(flag), 1, flag)
         self.assertNotIn("--cpus", argv)
-        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v2")
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v3")
         self.assertEqual(record["requested"]["tmpfs"], record["effective"]["tmpfs"])
         self.assertEqual(record["effective"]["tmpfs"]["/tmp"], {
             "exec": False, "gid": 65532, "mode": "1777", "nr_inodes": 2048,

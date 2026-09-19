@@ -2,6 +2,69 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-09-19
+
+Source-only release. It identifies source, not a run. Since 0.3.0:
+- The owned rail now uploads its report. It also seals and attests its attempts, as the external
+  rail already did.
+- Collection members name the step that ran them, and terminal attempts can be archived and
+  checked offline.
+- There is a threat model.
+- Slice B was measured, then re-measured cleanly: the declared selection is adequate, 2 killed and
+  0 survived, while the independent selection finds a survivor. Both are published as separate
+  evidence classes with no combined score.
+- Proposed test vectors are admitted deterministically, with no model call.
+- The owned `contained-oci-v1` rail reads the kernel's own limits into `execution-envelope.v3`.
+- A first-party pids witness has one hosted run, which was read back independently: run
+  35427166071 at `fb2f28cd1ad6ca89656f12f574d1b728340f8986`, verdict `witnessed`, with the
+  readback recorded on #197. This release
+  includes that revision as history. The run is evidence about one runner at one time, not an
+  adequacy score.
+- The AI test-suggestion pilot's precondition fails on the owned fixture (`template-exhausted`).
+
+Several of these changes move the sealed execution identity, so **both hosted rails need a fresh
+PREPARE** before their next run. The witness identity moves with this release too.
+
+G feasibility (#270): the pilot's precondition fails on the owned fixture. A boundary-value
+template killed every guard perturbation the probe tried that the authoring rules admit, so the verdict is
+`template-exhausted`. The probe and its output are published under
+`docs/design/g-feasibility-probe/` as non-evidence. The fixture's `minimum-sentinel` guard is dead
+code. No model was called.
+
+Kernel read-back, part 4 of 4 (#197). A dispatch-only workflow, `pids-witness`, runs the pids
+witness on a GitHub-hosted runner. It is bound to the runner revision and to the SHA-256 of the
+witness's own execution identity, and refuses before any container if either disagrees. The attempt
+is sealed and attested whatever the verdict. `pids_witness.py verify` is the independent readback: it
+re-derives the verdict from the recorded kernel values and recomputes the identity from a checkout.
+The witness record now carries its create warnings and cleanup state, so the readback can re-derive
+every reason.
+
+Kernel read-back, part 3 of 4 (#197). `measurements/pids_witness.py` runs a first-party container
+under the owned profile. It forks until the kernel refuses at `pids.max`, then reads the kernel's
+refusal counter `pids.events` during a second hold of the trusted script. A
+`corpus-adequacy.pids-witness.v0` record is `witnessed` only when that counter is above zero, the
+limits read back as requested, the run exited 0 without create warnings, and the container was
+removed. Anything else is `unproved`, and the payload's output never counts. `run_contained` gains
+an optional second hold, and existing runs are unchanged.
+
+Kernel read-back, part 2 of 4 (#197). New `contained-oci-v1` runs record `execution-envelope.v3`,
+which adds the kernel's own view of the container's memory, swap, pids, CPU and open-file limits.
+The trusted wrapper holds at its start while the host reads those files through `docker exec`, then
+the host releases it, so the read happens while the cgroup exists and before any candidate code
+runs. A differing or unreadable value leaves the envelope unverified and withheld; a hold that is
+never released is the new unproved reason `candidate-readback-hold`. v0 to v2 records and the
+external route are unchanged. The read-back module joins every execution identity, so both hosted
+rails need a fresh PREPARE, and the retained Slice B evidence now records the identity before this.
+
+Kernel read-back, part 1 of 4 (#197). `measurements/kernel_readback.py` parses the kernel's own
+limit files, derives what a validated `resource-profile.v2` should read back as, and names every
+field that differs or did not read, making the record `unverified` rather than assuming a value.
+Swap follows runc's conversion, so the owned profile reads back `memory.swap.max` as `0`. A pids
+witness needs a refused fork in `pids.events`; an open-files hit cannot be kernel-witnessed at all,
+because `RLIMIT_NOFILE` has no kernel-side counter. The positive tests run on bytes the kernel
+really returned inside one container with the owned profile's limits. The module reads nothing
+itself; it was outside every execution identity until part 2 wired it into the runtime.
+
 Separate evidence classes on the publication site (#103). The site now shows the declared and
 independent Slice B sets side by side, from the clean re-measurement at `20f6d8b`, on
 `classes/owned-slice-b/`. The page leads with each set's mutants, survivors first, then one

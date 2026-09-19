@@ -99,13 +99,20 @@ def _inspect(dests, *, exit_code=0):
     }
 
 
-class FakeTransport:
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kernel_fixtures import FakeKernelMixin  # noqa: E402
+
+
+class FakeTransport(FakeKernelMixin):
     def __init__(
             self, *, returncode=0, stdout="", inspect=None,
             timeout=False, output_too_large=False,
             skip_absent=False,
             leave_present=False, fail_create=False, create_error=None,
-            remove_error=None, absent_error=None, create_warnings=()):
+            remove_error=None, absent_error=None, create_warnings=(),
+            kernel_overrides=None):
+        self.kernel_overrides = kernel_overrides or {}
         self.returncode = returncode
         self.stdout = stdout
         self.inspect_doc = inspect
@@ -134,6 +141,11 @@ class FakeTransport:
     def start(self, name, deadline_seconds=None):
         self.started.append(name)
         self.deadline_seconds = deadline_seconds
+        if not self.await_release_if_held():
+            # The real wrapper gives up on a hold nobody released with its own stage code.
+            return subprocess.CompletedProcess(
+                ["docker", "start", "-a", name],
+                cand.wrapper_stage_returncode("readback-hold"), "", "")
         if self.timeout:
             raise subprocess.TimeoutExpired(["docker", "start", "-a", name], 1)
         if self.output_too_large:
@@ -1154,7 +1166,7 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
             self.assertEqual(argv.count(flag), 1, flag)
         self.assertNotIn("--cpus", argv)
         record = completed.envelope_record
-        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v2")
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v3")
         self.assertEqual(record["envelope_status"], "verified", record["unverified_field"])
         self.assertEqual(record["requested"]["execution_profile"], V1_PROFILE)
         self.assertEqual(record["requested"]["resource_profile"],
@@ -1365,9 +1377,9 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
         record = completed.envelope_record
         self.assertEqual(record["envelope_status"], "unverified")
         self.assertEqual(record["unverified_field"], "daemon_info")
-        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v2")
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v3")
 
-    def test_refused_setup_under_v1_still_records_the_v2_schema(self):
+    def test_refused_setup_under_v1_still_records_the_v3_schema(self):
         transport = ObservingTransport(
             inspect=_observed_inspect(contained.CANDIDATE_RESOURCE_PROFILE_V2),
             create_error=contained.DockerUnavailable("docker missing"))
@@ -1376,7 +1388,7 @@ class ProfileDispatchedCandidateAdmission(unittest.TestCase):
         record = completed.envelope_record
         self.assertEqual(record["setup_status"], "unavailable")
         self.assertEqual(record["candidate_outcome"], "not-run")
-        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v2")
+        self.assertEqual(record["schema"], "corpus-adequacy.execution-envelope.v3")
         self.assertEqual(record["requested"]["execution_profile"], V1_PROFILE)
 
     def test_alternate_values_below_admission_match_argv_and_verify(self):

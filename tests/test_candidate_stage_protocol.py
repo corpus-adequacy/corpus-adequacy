@@ -157,8 +157,8 @@ class GeneratedWrapperStages(unittest.TestCase):
     def test_complete_returncodes_are_contract_specific(self):
         self.assertEqual(AEE_CHECKER_SEALED_CONTRACT.candidate_complete_returncodes, (0, 1))
         self.assertEqual(OWNED_CONTAINED_V1_CONTRACT.candidate_complete_returncodes, (0,))
-        self.assertEqual(len(candidate.WRAPPER_STAGE_RETURNCODES), 6)
-        self.assertEqual(len(set(candidate.WRAPPER_STAGE_RETURNCODES.values())), 6)
+        self.assertEqual(len(candidate.WRAPPER_STAGE_RETURNCODES), 7)
+        self.assertEqual(len(set(candidate.WRAPPER_STAGE_RETURNCODES.values())), 7)
         for contract in (AEE_CHECKER_SEALED_CONTRACT, OWNED_CONTAINED_V1_CONTRACT):
             self.assertTrue(set(contract.candidate_complete_returncodes).isdisjoint(
                 candidate.WRAPPER_STAGE_RETURNCODES.values()))

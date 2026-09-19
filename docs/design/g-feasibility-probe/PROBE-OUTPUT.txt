@@ -1,0 +1,20 @@
+template vectors (7): [-9223372036854775808, -9223372036854775807, 0, 1, 9, 9223372036854775806, 9223372036854775807]
+frozen corpus: [-1, 5, 10, 11]   published counterexample: [12]
+
+mutant               vs frozen corpus + 12     vs template         rows that moved
+lower-shift-to-one   survives                  killed              t2
+lower-inclusive      survives                  killed              t2
+sentinel-reachable   survives                  killed              t0
+upper-exclude-max    survives                  killed              t6
+lower-catches-max    survives                  killed              t6
+upper-shift-by-two   killed-by-frozen-corpus   SURVIVES-TEMPLATE   over-limit
+upper-interior-hole  survives                  SURVIVES-TEMPLATE   nothing moved
+sentinel-removed     survives                  SURVIVES-TEMPLATE   nothing moved
+
+7 of 8 mutants survive the frozen corpus and the published counterexample.
+2 of those survive the boundary template.
+
+  upper-interior-hole  killable only at interior points [37]: refused by the authoring rules as not a rule
+  sentinel-removed     no killer found in 409 values: equivalent, nothing can kill it
+
+VERDICT: template-exhausted
