@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-09-19
+
+Source-only release. It identifies source, not a run. Since 0.3.0:
+- The owned rail uploads its report, and seals and attests its attempts, as the external rail
+  already did.
+- Collection members name the step that ran them, and terminal attempts can be archived and
+  checked offline.
+- There is a threat model.
+- Slice B was measured, then re-measured cleanly: the declared selection is adequate, 2 killed and
+  0 survived, while the independent selection finds a survivor. Both are published as separate
+  evidence classes with no combined score.
+- Proposed test vectors are admitted deterministically, with no model call.
+- The owned `contained-oci-v1` rail reads the kernel's own limits into `execution-envelope.v3`.
+- A first-party pids witness has one hosted run, which was read back independently: run
+  35427166071 at `fb2f28cd1ad6ca89656f12f574d1b728340f8986`, verdict `witnessed`. This release
+  includes that revision as history. The run is evidence about one runner at one time, not an
+  adequacy score.
+- The AI test-suggestion pilot's precondition fails on the owned fixture (`template-exhausted`).
+
+Several of these changes move the sealed execution identity, so **both hosted rails need a fresh
+PREPARE** before their next run. The witness identity moves with this release too.
+
 G feasibility (#270): the pilot's precondition fails on the owned fixture. A boundary-value
 template killed every guard perturbation the probe tried that the authoring rules admit, so the verdict is
 `template-exhausted`. The probe and its output are published under
