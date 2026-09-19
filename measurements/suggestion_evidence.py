@@ -1831,3 +1831,267 @@ def _assessment_envelopes(structure, observations):
             if doc['publication_permission']!='permitted' or doc['envelope_status']!='verified':
                 unproved.append(ordinal)
     return tuple(unproved)
+
+
+# Closed package grammar. Neither an index nor a package field can widen it.
+CORPUS_NAMES = ('MANIFEST.json', 'allow.json', 'boundary.json', 'negative.json',
+                'over-limit.json')
+RETAINED_PATHS = frozenset(('plan.json', 'proposal.json', 'reference.json')) | frozenset(
+    f'{v}/corpus/{name}' for v in VARIANTS for name in CORPUS_NAMES)
+PREPARATION_PATHS = frozenset(('authorization.json',)) | frozenset(
+    f'{v}/{name}' for v in VARIANTS for name in ('prepare.json', 'authorization.json',
+    'pins/control.json', 'pins/sites.json', 'pins/manifest.json', 'pins/pins.json'))
+COLLECTION_INDICES = frozenset(f'{v}/envelopes/collection-index.v0.json' for v in VARIANTS)
+COLLECTION_MEMBERS = frozenset(f'{v}/envelopes/member-{i:04d}.json' for v in VARIANTS for i in range(4))
+OBSERVATION_PATHS = tuple(f'{v}/observations/{i}.json' for v in VARIANTS for i in range(4))
+VIEW_PATHS = tuple(f'{v}/views/{i}.json' for v in VARIANTS for i in range(4))
+FINAL_PATHS = frozenset(('evidence-index.json', 'decision.json', 'receipt.json'))
+REQUIRED_PATHS = RETAINED_PATHS | PREPARATION_PATHS | COLLECTION_INDICES | FINAL_PATHS | {'journal.jsonl', 'gates.json'}
+PACKAGE_PATHS = REQUIRED_PATHS | COLLECTION_MEMBERS | frozenset(OBSERVATION_PATHS+VIEW_PATHS) | {'review.json'}
+PACKAGE_DIRS = frozenset('/'.join(p.split('/')[:i]) for p in PACKAGE_PATHS for i in range(1, len(p.split('/'))))
+
+
+def package_member_kind(path):
+    if type(path) is str and re.fullmatch(r'(base|outer-whitespace)/corpus/[a-z0-9][a-z0-9-]{0,62}\.json',path):
+        return ('corpora',65536)
+    if path not in PACKAGE_PATHS:
+        refuse('filesystem', 'surplus-member')
+    if path in COLLECTION_INDICES: return ('envelopes', 262144)
+    if path in COLLECTION_MEMBERS: return ('envelopes', 65536)
+    if path in OBSERVATION_PATHS: return ('observations', 1048576)
+    if path in VIEW_PATHS: return ('views', 1048576)
+    if '/corpus/' in path: return ('corpora', 65536)
+    if path == 'journal.jsonl': return ('journal', 65536)
+    return ('metadata', 65536)
+
+
+def read_journal(raw):
+    """Frame first; a final valid JSON fragment still is not a settled event."""
+    if len(raw) > 65536: refuse('limits', 'member-bytes')
+    if raw and not raw.endswith(b'\n'): refuse('journal', 'partial-event')
+    lines = raw.splitlines(keepends=True)
+    if len(lines) > 32: refuse('limits', 'journal-events')
+    events = []
+    for line in lines:
+        event = decode(line, max_bytes=2048, canonical=True)
+        exact(event, ('schema', 'seq', 'plan_sha256', 'slot', 'event', 'observation', 'reason'))
+        if event['schema'] != PREFIX+'journal-event.v0': refuse('support', 'unsupported-schema')
+        require_digest(event['plan_sha256']); require_slot(event['slot'])
+        if event['observation'] is not None: require_ref(event['observation'])
+        events.append(event)
+    # Reuse the sole schedule validator, with event-derived shape-only observations.
+    # This catches an unsettled start before surplus observation/index checks.
+    normalized = [{k: e[k] for k in ('seq','slot','event','reason')} for e in events]
+    settled = [{'slot': e['slot'], 'state': 'returned' if e['event']=='returned' else 'exception'}
+               for e in events if e['event'] in ('returned','exception')]
+    _journal(normalized, settled)
+    return events
+
+
+def _new_record(raw, schema, fields, *, max_bytes=65536):
+    doc = decode(raw, max_bytes=max_bytes, canonical=True)
+    exact(doc, fields)
+    if doc['schema'] != PREFIX+schema: refuse('support', 'unsupported-schema')
+    return doc
+
+
+def _raw_ref(members, path):
+    return {'member': path, 'sha256': digest(members[path]), 'bytes': len(members[path])}
+
+
+def _check_ref(ref, members):
+    require_ref(ref)
+    if ref['member'] not in members: refuse('filesystem', 'missing-member')
+    if encode(ref) != encode(_raw_ref(members, ref['member'])): refuse('binding', 'member-digest')
+
+
+def decode_package(snapshot, basis):
+    """Closed raw-byte/index framing followed by inputs for the one evaluator.
+
+    This is not another gate judge. All assessment semantics live in
+    evaluate_assessment; package framing cannot select a smaller policy.
+    """
+    if type(snapshot) is not tuple or len(snapshot) > 128: refuse('limits', 'entry-count')
+    members = _members(snapshot, count=len(snapshot), max_bytes=1048576)
+    for path, raw in members.items():
+        _, cap = package_member_kind(path)
+        if len(raw)>cap: refuse('limits','member-bytes')
+    if REQUIRED_PATHS-set(members): refuse('filesystem','missing-member')
+    journal = read_journal(members['journal.jsonl'])
+    # Refuse unsupported/malformed bytes before interpreting digest or gate claims.
+    # This pass has no dispatch and does not read the filesystem again.
+    new_schemas = {'plan.json':'plan.v0','reference.json':'reference.v0',
+        'authorization.json':'authorization.v0','gates.json':'gates.v0',
+        'evidence-index.json':'evidence-index.v0','review.json':'review.v0',
+        'decision.json':'decision.v0','receipt.json':'receipt.v0'}
+    for variant in VARIANTS:
+        new_schemas.update({variant+'/'+p:schema for p,schema in (
+            ('prepare.json','prepare.v0'),('authorization.json','variant-authorization.v0'),
+            ('pins/pins.json','pins.v0'))})
+    new_schemas.update({p:'observation.v0' for p in OBSERVATION_PATHS})
+    new_schemas.update({p:'view.v0' for p in VIEW_PATHS})
+    for path,raw in members.items():
+        if path=='journal.jsonl': continue
+        doc=decode(raw,max_bytes=package_member_kind(path)[1],canonical=path in new_schemas)
+        schema=new_schemas.get(path)
+        if schema and (type(doc) is not dict or doc.get('schema')!=PREFIX+schema):
+            refuse('support','crossed-prepare' if path.endswith('/prepare.json') else 'unsupported-schema')
+        if path in COLLECTION_INDICES and (type(doc) is not dict or doc.get('schema')!=_COLLECTION_SCHEMAS[1]):
+            refuse('support','unsupported-schema')
+        if path in COLLECTION_MEMBERS and (type(doc) is not dict or doc.get('schema')!=_envelope_ENVELOPE_SCHEMA_V3):
+            refuse('support','unsupported-schema')
+
+    observation_paths = []
+    observations, views = [], []
+    view_paths = []
+    for event in journal:
+        if event['event'] not in ('returned','exception'): continue
+        n = require_slot(event['slot']); path=OBSERVATION_PATHS[n]
+        observation_paths.append(path)
+        if path not in members: refuse('filesystem','missing-member')
+        observation=_new_record(members[path],'observation.v0',
+            ('schema','plan_sha256','slot','route','profile','state','raw','sanitized_reason','exception_kind','envelope'),
+            max_bytes=1048576)
+        if type(observation) is not dict or 'slot' not in observation: refuse('syntax','wrong-shape')
+        if encode(observation['slot']) != encode(event['slot']): refuse('replay','schedule-mismatch')
+        observations.append(observation)
+        if event['event']=='returned':
+            view_path=VIEW_PATHS[n];view_paths.append(view_path)
+            if view_path not in members: refuse('filesystem','missing-member')
+            view=_new_record(members[view_path],'view.v0',
+                ('schema','plan_sha256','slot','observation','adapter_sha256','state','rows','diagnostics','abnormal_kind'),
+                max_bytes=1048576)
+            require_digest(view['plan_sha256']);require_digest(view['adapter_sha256'])
+            require_slot(view['slot']);require_ref(view['observation'])
+            if view['state'] not in ('normal','abnormal'): refuse('syntax','wrong-shape')
+            if view['state']=='normal':
+                if type(view['rows']) is not dict or type(view['diagnostics']) is not dict or view['abnormal_kind'] is not None:
+                    refuse('syntax','wrong-shape')
+                require_rows(view['rows'],require_ids(list(view['rows'])))
+                require_rows(view['diagnostics'],require_ids(list(view['diagnostics'])),diagnostic=True)
+            else:
+                kinds=view['abnormal_kind']
+                if (view['rows'] is not None or view['diagnostics'] is not None
+                        or type(kinds) is not list or not 1<=len(kinds)<=2
+                        or any(type(k) is not str or k not in ABNORMAL_KINDS for k in kinds)
+                        or kinds!=sorted(set(kinds))): refuse('syntax','wrong-shape')
+            views.append(view)
+    if (set(members)&set(OBSERVATION_PATHS)) != set(observation_paths): refuse('filesystem','surplus-member')
+    if (set(members)&set(VIEW_PATHS)) != set(view_paths): refuse('filesystem','surplus-member')
+    gates = _new_record(members['gates.json'],'gates.v0',
+        ('schema','plan_sha256','policy','views','engine_controls','gates'))
+    require_digest(gates['plan_sha256'])
+    if gates['policy'] != POLICY: refuse('support','unsupported-policy')
+    if type(gates['views']) is not list or len(gates['views'])>8: refuse('syntax','wrong-shape')
+    for ref in gates['views']: require_ref(ref)
+    if type(gates['gates']) is not list or len(gates['gates'])!=9: refuse('syntax','wrong-shape')
+    for gate in gates['gates']:
+        exact(gate,('id','status','reason','witnesses'))
+        if (type(gate['id']) is not int or not 0<=gate['id']<=8
+                or gate['status'] not in ('passed','refused','not-run')
+                or gate['reason'] not in (None,'proposal-shape','freeze-drift','corpus-separation',
+                    'reference-mismatch','positive-control-inert','positive-control-proposal-only',
+                    'inert-control-moved','target-no-distinction','target-frozen-row-change',
+                    'diagnostic-only','transformation-mismatch','abnormal-execution','missing-review',
+                    'review-rejected','accounting-gap','prerequisite-refused')
+                or type(gate['witnesses']) is not list or len(gate['witnesses'])>8):
+            refuse('syntax','wrong-shape')
+        for slot in gate['witnesses']: require_slot(slot)
+    if type(gates['engine_controls']) is not list or len(gates['engine_controls'])!=2: refuse('syntax','wrong-shape')
+    for control in gates['engine_controls']:
+        exact(control,('variant','positive','inert','barrier'))
+        if (control['variant'] not in VARIANTS or control['positive'] not in ('passed','failed','not-run')
+                or control['inert'] not in ('passed','failed','not-run') or control['barrier'] not in ('continue','stop')):
+            refuse('syntax','wrong-shape')
+    index = _new_record(members['evidence-index.json'],'evidence-index.v0',
+        ('schema','plan_sha256','members','gate_result_sha256','journal_sha256'))
+    for key in ('plan_sha256','gate_result_sha256','journal_sha256'): require_digest(index[key])
+    if type(index['members']) is not list or len(index['members'])>128: refuse('syntax','wrong-shape')
+    for ref in index['members']: require_ref(ref)
+    paths = [r['member'] for r in index['members']]
+    if paths != sorted(set(paths)): refuse('syntax','wrong-shape')
+    indexed = set(members)-FINAL_PATHS-{'review.json'}
+    if set(paths)-set(members): refuse('filesystem','missing-member')
+    if set(paths)!=indexed: refuse('filesystem','surplus-member')
+    decision = _new_record(members['decision.json'],'decision.v0',
+        ('schema','plan_sha256','evidence_index_sha256','gates_sha256','review_sha256','disposition'))
+    receipt = _new_record(members['receipt.json'],'receipt.v0',
+        ('schema','plan_sha256','evidence_index_sha256','decision_sha256','review_sha256',
+         'family','profile','source_content_sha256','origin'))
+    for doc in (decision,receipt):
+        for key in doc:
+            if key.endswith('_sha256') and (key!='review_sha256' or doc[key] is not None): require_digest(doc[key])
+    if decision['disposition'] not in ('eligible-for-human-corpus-PR','refused','pending-review','unproved'):
+        refuse('syntax','wrong-shape')
+    if receipt['family'] != FAMILY: refuse('support','unsupported-family')
+    if receipt['profile'] != PROFILE: refuse('support','unsupported-profile')
+    if receipt['origin'] != 'producer-reported': refuse('syntax','wrong-shape')
+    review=None
+    if 'review.json' not in members and (decision['review_sha256'] is not None
+            or receipt['review_sha256'] is not None or decision['disposition']=='eligible-for-human-corpus-PR'):
+        refuse('filesystem','missing-member')
+    if 'review.json' in members:
+        review=_new_record(members['review.json'],'review.v0',
+            ('schema','proposal_sha256','evidence_index_sha256','reviewer','decision','rationale'))
+        require_digest(review['proposal_sha256']);require_digest(review['evidence_index_sha256'])
+        text(review['reviewer']);text(review['rationale'])
+        if review['decision'] not in ('accept','reject'): refuse('syntax','wrong-shape')
+    plan=decode(members['plan.json'],max_bytes=65536,canonical=True)
+    # Validate the external-comparison surface without replaying preflight twice.
+    exact(plan, ('schema','family','proposal','reference','source','instrument_commit',
+        'subject_tree_sha256','adapter_sha256','profile','policy','variants','slots','control_sha256','sites_sha256'))
+    if plan['schema']!=PREFIX+'plan.v0': refuse('support','unsupported-schema')
+    if plan['family']!=FAMILY: refuse('support','unsupported-family')
+    if plan['profile']!=PROFILE: refuse('support','unsupported-profile')
+    if plan['policy']!=POLICY: refuse('support','unsupported-policy')
+    _source(plan['source'])
+    require_ref(plan['reference']);require_ref(plan['proposal'])
+    retained=set(RETAINED_PATHS)
+    if type(plan['variants']) is not list or len(plan['variants'])!=2: refuse('syntax','wrong-shape')
+    for name,variant in zip(VARIANTS,plan['variants']):
+        if type(variant) is not dict or type(variant.get('vectors')) is not list or len(variant['vectors'])!=5:
+            refuse('syntax','wrong-shape')
+        for vector in variant['vectors']:
+            if type(vector) is not dict or type(vector.get('file')) is not str:
+                refuse('syntax','wrong-shape')
+            path=name+'/corpus/'+vector['file']
+            if not re.fullmatch(r'(base|outer-whitespace)/corpus/[a-z0-9][a-z0-9-]{0,62}\.json',path):
+                refuse('filesystem','unsafe-member')
+            retained.add(path)
+    if retained-set(members): refuse('filesystem','missing-member')
+    if {p for p in members if '/corpus/' in p}-retained: refuse('filesystem','surplus-member')
+    if len(retained)!=15: refuse('syntax','wrong-shape')
+    inputs=AssessmentInputs(tuple((p,members[p]) for p in sorted(retained)),basis,
+        tuple((p,raw) for p,raw in snapshot if p in PREPARATION_PATHS|COLLECTION_INDICES|COLLECTION_MEMBERS))
+    return {'members':members,'plan':plan,'inputs':inputs,'observations':observations,'views':views,
+        'view_paths':view_paths,'journal':journal,'gates':gates,'index':index,'review':review,
+        'decision':decision,'receipt':receipt}
+
+
+def compare_package(package):
+    """Replay once, then compare the acyclic stored evidence graph to fresh facts."""
+    m=package['members'];plan_hash=digest(m['plan.json']);index=package['index']
+    for ref in index['members']: _check_ref(ref,m)
+    if (index['plan_sha256']!=plan_hash or index['gate_result_sha256']!=digest(m['gates.json'])
+            or index['journal_sha256']!=digest(m['journal.jsonl'])): refuse('binding','member-digest')
+    gates=package['gates']
+    if gates['plan_sha256']!=plan_hash: refuse('binding','plan-variant')
+    if encode(gates['views'])!=encode([_raw_ref(m,p) for p in package['view_paths']]):
+        refuse('binding','member-digest')
+    evaluation=evaluate_assessment(package['inputs'],package['observations'],package['views'],
+        gates['engine_controls'],package['journal'])
+    issues=[]
+    if encode(gates['gates'])!=evaluation.gates_raw: issues.append(('replay','gate-mismatch','gates.json'))
+    disposition=derive_disposition(evaluation,package['observations'],package['review'],
+        proposal_sha256=digest(m['proposal.json']),evidence_index_sha256=digest(m['evidence-index.json']))
+    review_hash=digest(m['review.json']) if 'review.json' in m else None
+    expected_decision={'schema':PREFIX+'decision.v0','plan_sha256':plan_hash,
+        'evidence_index_sha256':digest(m['evidence-index.json']),'gates_sha256':digest(m['gates.json']),
+        'review_sha256':review_hash,'disposition':disposition}
+    if encode(package['decision'])!=encode(expected_decision): issues.append(('replay','decision-mismatch','decision.json'))
+    expected_receipt={'schema':PREFIX+'receipt.v0','plan_sha256':plan_hash,
+        'evidence_index_sha256':digest(m['evidence-index.json']),'decision_sha256':digest(m['decision.json']),
+        'review_sha256':review_hash,'family':FAMILY,'profile':PROFILE,
+        'source_content_sha256':package['plan']['source']['content_sha256'],'origin':'producer-reported'}
+    if encode(package['receipt'])!=encode(expected_receipt): issues.append(('replay','receipt-mismatch','receipt.json'))
+    return disposition,issues

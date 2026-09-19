@@ -165,29 +165,30 @@ class Basis(unittest.TestCase):
                 ev.require_basis(snapshot)
 
 
-def prepared_inputs():
+def prepared_inputs(proposal_id='proposal'):
     # Synthetic reference only: no real approval or candidate execution.
     from sealed_measurement_contract import OWNED_INDEPENDENT_V0_CONTRACT as owned
     basis = basis_snapshot()
     files = {p.removeprefix('vectors/'): b for p, b in basis if p.startswith('vectors/')}
     proposal = json.loads((ROOT/'tests/fixtures/suggestion-v0/good.json').read_bytes())
-    proposal['vector'].update(id='proposal', file='proposal.json')
+    proposal['vector'].update(id=proposal_id, file=proposal_id+'.json')
     proposal['expected'] = copy.deepcopy(ROWS['proposal'])
     members = {'proposal.json': ev.encode(proposal)}
+    rows = {proposal_id if k=='proposal' else k: copy.deepcopy(v) for k,v in ROWS.items()}
     reference = {'schema': ev.PREFIX+'reference.v0',
         'proposal_sha256': ev.digest(members['proposal.json']),
         'selection': 'owned-independent-v0', 'rule_sources': [
             {'path': path, 'sha256': ev.digest((ROOT/path).read_bytes())}
             for path in ('fixtures/contained-v1-owned/candidate/src/check.rs',
                          'measurements/owned-independent-v0/mutation-bundle.json')],
-        'rows': copy.deepcopy(ROWS), 'rationale': 'Synthetic test',
+        'rows': rows, 'rationale': 'Synthetic test',
         'reviewer': 'test-only', 'decision': 'accept'}
     members['reference.json'] = ev.encode(reference)
     def ref(path):
         return {'member': path, 'sha256': ev.digest(members[path]), 'bytes': len(members[path])}
     old = json.loads(files.pop('MANIFEST.json'))
-    files['proposal.json'] = b'{"value":12}'
-    rows = old['vectors'] + [{'id': 'proposal', 'file': 'proposal.json',
+    files[proposal_id+'.json'] = b'{"value":12}'
+    rows = old['vectors'] + [{'id': proposal_id, 'file': proposal_id+'.json',
                              'value_class': proposal['vector']['value_class']}]
     variants = []
     for variant in ev.VARIANTS:
@@ -265,6 +266,12 @@ class Preflight(unittest.TestCase):
 
 def wire_execution(inputs):
     data = assessment()
+    plan=ev.decode(dict(inputs.retained_members)['plan.json'])
+    ids=tuple(row['id'] for row in plan['variants'][0]['vectors'])
+    if ids[-1]!='proposal':
+        for obs in data[1]:
+            for channel in ('outcomes','diagnostics'):
+                rows=obs['raw'][channel]['<batch>'][0];rows[ids[-1]]=rows.pop('proposal')
     plan_hash = ev.digest(dict(inputs.retained_members)['plan.json'])
     refs = {}
     views = []
@@ -273,7 +280,7 @@ def wire_execution(inputs):
         slot = obs['slot']; member = slot['variant']+'/observations/'+str(slot['ordinal'])+'.json'
         refs[(slot['variant'], slot['ordinal'])] = {'member': member,
             'sha256': ev.digest(ev.encode(obs)), 'bytes': len(ev.encode(obs))}
-        view = ev.project_observation(obs, ids=IDS, plan_sha256=plan_hash)
+        view = ev.project_observation(obs, ids=ids, plan_sha256=plan_hash)
         views.append({'schema': ev.PREFIX+'view.v0', 'plan_sha256': plan_hash,
             'slot': copy.deepcopy(slot), 'observation': copy.deepcopy(refs[(slot['variant'], slot['ordinal'])]),
             'adapter_sha256': ev._OWNED.adapter_sha256, **view})
@@ -544,7 +551,7 @@ def structural_members(inputs):
             'adapter_sha256':plan['adapter_sha256'],
             'corpus':{'kind':'local-derived-owned-v0','plan_sha256':plan_hash,'variant':v,
                 'manifest_sha256':variant['manifest']['sha256'],'tree_sha256':variant['tree_sha256'],
-                'corpus_digest':variant['corpus_digest'],'ids':list(IDS)},
+                'corpus_digest':variant['corpus_digest'],'ids':[row['id'] for row in variant['vectors']]},
             'control_sha256':plan['control_sha256'],'sites_sha256':plan['sites_sha256'],
             'manifest_sha256':ev.digest(members[f'{v}/pins/manifest.json'])}
         members[f'{v}/pins/pins.json']=ev.encode(pins)
@@ -572,6 +579,7 @@ def structural_members(inputs):
 
 def refresh_wire(inputs, observations, controls, journal):
     plan_hash=ev.digest(dict(inputs.retained_members)['plan.json']); refs={}; views=[]
+    ids=tuple(row['id'] for row in ev.decode(dict(inputs.retained_members)['plan.json'])['variants'][0]['vectors'])
     for obs in observations:
         slot=obs['slot']; n=ev.require_slot(slot)
         refs[n]={'member':f"{slot['variant']}/observations/{slot['ordinal']}.json",
@@ -579,20 +587,20 @@ def refresh_wire(inputs, observations, controls, journal):
         if obs['state']=='returned':
             views.append({'schema':ev.PREFIX+'view.v0','plan_sha256':plan_hash,'slot':copy.deepcopy(slot),
                 'observation':refs[n], 'adapter_sha256':ev._OWNED.adapter_sha256,
-                **ev.project_observation(obs,ids=IDS,plan_sha256=plan_hash)})
+                **ev.project_observation(obs,ids=ids,plan_sha256=plan_hash)})
     for event in journal:
         if event['event'] in ('returned','exception'):
             event['observation']=refs[ev.require_slot(event['slot'])]
     return observations,views,controls,journal
 
 
-def full_fixture(*, state='recorded'):
+def full_fixture(*, state='recorded', proposal_id='proposal'):
     """Exercise actual legacy collection writer using synthetic records only."""
     import dataclasses,tempfile
     import envelope_collection as collection
     import kernel_readback
     from test_effective_envelope import _wire_v2_record
-    inputs=prepared_inputs();members=structural_members(inputs)
+    inputs=prepared_inputs(proposal_id);members=structural_members(inputs)
     obs,views,controls,journal=wire_execution(inputs)
     for v in ev.VARIANTS:
         prepare=ev.decode(members[f'{v}/prepare.json'])
