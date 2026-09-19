@@ -297,3 +297,67 @@ OWNED_INDEPENDENT_V0_CONTRACT = replace(
         for path in OWNED_CONTAINED_V1_CONTRACT.execution_paths
     ),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedAssessmentVariantContract:
+    """A derived corpus identity, deliberately not a legacy sealed contract.
+
+    Construction only checks shape. Assessment admission must independently bind
+    this value to the retained plan and authorization before it can be used.
+    """
+
+    plan_sha256: str
+    variant: str
+    corpus_manifest_sha256: str
+    corpus_tree_sha256: str
+    ids: tuple[str, ...]
+
+    def __post_init__(self):
+        for value in (self.plan_sha256, self.corpus_manifest_sha256, self.corpus_tree_sha256):
+            if type(value) is not str or not _HEX64.fullmatch(value):
+                raise ValueError('assessment digest')
+        if self.variant not in ('base', 'outer-whitespace'):
+            raise ValueError('assessment variant')
+        if (type(self.ids) is not tuple or len(self.ids) != 5
+                or any(type(i) is not str or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}', i)
+                       for i in self.ids)
+                or len(set(self.ids)) != 5):
+            raise ValueError('assessment ids')
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedAssessmentAdmissionContext:
+    """Immutable input carrier, NOT a capability or proof of admission.
+
+    The pure admission function must recheck the bytes at every consumer. There
+    is intentionally no validated flag and no runtime caller uses this yet.
+    """
+
+    family: str
+    profile: str
+    variant: str
+    plan_raw: bytes
+    prepare_raw: bytes
+    parent_authorization_raw: bytes
+    variant_authorization_raw: bytes
+    expected_plan_sha256: str
+    expected_reference_sha256: str
+    expected_source_content_sha256: str
+    variant_contract: OwnedAssessmentVariantContract
+
+    def __post_init__(self):
+        if (self.family != 'owned-suggestion-assessment-v0'
+                or self.profile != 'contained-oci-v1'
+                or self.variant not in ('base', 'outer-whitespace')):
+            raise ValueError('assessment context family/profile/variant')
+        for raw in (self.plan_raw, self.prepare_raw, self.parent_authorization_raw,
+                    self.variant_authorization_raw):
+            if type(raw) is not bytes or not raw or len(raw) > 65536:
+                raise ValueError('assessment context bytes')
+        for value in (self.expected_plan_sha256, self.expected_reference_sha256,
+                      self.expected_source_content_sha256):
+            if type(value) is not str or not _HEX64.fullmatch(value):
+                raise ValueError('assessment context digest')
+        if type(self.variant_contract) is not OwnedAssessmentVariantContract:
+            raise ValueError('assessment context contract type')
