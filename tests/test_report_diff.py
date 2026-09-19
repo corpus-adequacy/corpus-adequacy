@@ -124,11 +124,12 @@ def _project(old, new):
     return ca.diff_reports(old, new)
 
 
-def _cli(*argv, timeout=30):
+def _cli(*argv, timeout=30, env=None):
     return subprocess.run(
         [sys.executable, str(ca.__file__), *argv],
         capture_output=True,
         timeout=timeout,
+        env=env,
     )
 
 
@@ -751,9 +752,12 @@ class ReportDiffReadableValues(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             old_path = _write_report(Path(directory), "old.json", old)
             new_path = _write_report(Path(directory), "new.json", new)
-            proc = _cli("--diff", str(old_path), str(new_path))
+            # Text stdout uses the host encoding; choose UTF-8 for this Unicode
+            # comparison without changing the separate JSON byte contract.
+            proc = _cli("--diff", str(old_path), str(new_path),
+                        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.decode("utf-8"), text)
+        self.assertEqual(proc.stdout.decode("utf-8").replace("\r\n", "\n"), text)
 
 
 class ReportDiffEncoderClosure(unittest.TestCase):
