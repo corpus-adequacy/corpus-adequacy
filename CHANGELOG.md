@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+G feasibility (#270): the pilot's precondition fails on the owned fixture. A boundary-value
+template killed every guard perturbation the probe tried that the authoring rules admit, so the verdict is
+`template-exhausted`. The probe and its output are published under
+`docs/design/g-feasibility-probe/` as non-evidence. The fixture's `minimum-sentinel` guard is dead
+code. No model was called.
+
 Kernel read-back, part 4 of 4 (#197). A dispatch-only workflow, `pids-witness`, runs the pids
 witness on a GitHub-hosted runner. It is bound to the runner revision and to the SHA-256 of the
 witness's own execution identity, and refuses before any container if either disagrees. The attempt
