@@ -4858,6 +4858,13 @@ def _rules_cli(args) -> int:
     return 0
 
 
+def _diff_text_value(value) -> str:
+    """Quote values on one line; retain printable Unicode, escape controls."""
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return "".join(char if char.isprintable() else json.dumps(char)[1:-1]
+                   for char in encoded)
+
+
 def _render_diff_v0(projected: dict) -> None:
     """Render identity and row facts already projected; never infers a cause."""
     old_input = projected["old_input"]
@@ -4870,16 +4877,23 @@ def _render_diff_v0(projected: dict) -> None:
              new_input["unproved"]))
     identity = projected["identity"]
     print("identity:")
-    print("  manifest_sha256: %s" % identity["manifest_sha256"]["status"])
-    print("  corpus_digest: %s" % identity["corpus_digest"]["status"])
-    for key in ("tool_version", "tool_commit", "tool_source_state", "tool_content_sha256"):
-        print("  %s: %s" % (key, identity["tool"][key]["status"]))
+    components = [(key, identity[key]) for key in ("manifest_sha256", "corpus_digest")]
+    components.extend((key, identity["tool"][key]) for key in (
+        "tool_version", "tool_commit", "tool_source_state", "tool_content_sha256"))
+    for key, component in components:
+        print("  %s: %s (old=%s new=%s)" % (
+            key, component["status"], _diff_text_value(component["old"]),
+            _diff_text_value(component["new"])))
     print("rows:")
     for row in projected["rows"]:
         print("%s presence=%s verdict_transition=%s acknowledgement_retired=%s changed_fields=%s"
-              % (row["label"], row["presence"], row["verdict_transition"],
+              % (_diff_text_value(row["label"]), row["presence"], row["verdict_transition"],
                  str(row["acknowledgement_retired"]).lower(),
                  ",".join(row["changed_fields"])))
+        for key in ["verdict"] + [key for key in row["changed_fields"] if key != "verdict"]:
+            values = [(_diff_text_value(side[key]) if side is not None and key in side
+                       else "<absent>") for side in (row["old"], row["new"])]
+            print("  %s: %s -> %s" % (key, values[0], values[1]))
     counts = projected["counts"]
     print("counts: common=%d added=%d removed=%d verdict_changed=%d verdict_same=%d "
           "acknowledgement_retired=%d"

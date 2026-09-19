@@ -686,6 +686,76 @@ class ReportDiffCLI(unittest.TestCase):
         self.assertEqual(json.loads(encoded)["schema"], DIFF_SCHEMA)
 
 
+class ReportDiffReadableValues(unittest.TestCase):
+    def render(self, projected):
+        output = io.StringIO()
+        with mock.patch.object(sys, "stdout", output), \
+                mock.patch.object(ca, "read_bounded_regular_file",
+                                  side_effect=AssertionError("renderer reads files")), \
+                mock.patch.object(ca, "diff_reports",
+                                  side_effect=AssertionError("renderer recomputes diff")):
+            ca._render_diff_v0(projected)
+        return output.getvalue()
+
+    def test_cli_shows_direction_and_same_verdict_field_changes(self):
+        proc = _cli("--diff", str(OLD_FIXTURE), str(NEW_FIXTURE))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        text = proc.stdout.decode("utf-8")
+        for fact in ('verdict: "survived" -> "killed"',
+                     'moved: 0 -> 1', 'moved_diagnostic: 1 -> 2',
+                     'group: "axis-a" -> "axis-b"',
+                     'verdict: "known-hole" -> "survived"',
+                     'verdict: <absent> -> "survived"',
+                     'verdict: "killed" -> <absent>'):
+            self.assertIn(fact, text)
+        self.assertIn('corpus_digest: changed (old="declared-corpus-v1" '
+                      'new="declared-corpus-v2")', text)
+        for identity in ("sha256:" + "a" * 64, "sha256:" + "b" * 64):
+            self.assertIn(identity, text)
+
+    def test_missing_optional_field_is_explicitly_absent(self):
+        projected = json.loads(EXPECTED_DIFF.read_text())
+        text = self.render(projected)
+        self.assertIn('moved_diagnostic: 1 -> <absent>', text)
+
+    def test_unknown_identity_and_invalid_input_remain_visible(self):
+        projected = _project(
+            _report([producer_shaped_row("survived", "only")], corpus_digest=None,
+                    control_status="survived", adequate=False, unproved=2),
+            _report([producer_shaped_row("survived", "only")], corpus_digest="declared"))
+        text = self.render(projected)
+        self.assertIn('corpus_digest: undeclared (old=null new="declared")', text)
+        self.assertIn('old_input: adequate=false control_status=survived unproved=2', text)
+        self.assertIn('new_input: adequate=true control_status=killed unproved=0', text)
+        for claim in NON_CLAIMS:
+            self.assertIn(claim, text)
+
+    def test_all_author_text_is_quoted_and_nonprintable_text_is_escaped(self):
+        attack = 'café\nFAKE\r\t\x1b[2J\x7f\x85\u202e\u2066\u200b\u2028'
+        old = _report([producer_shaped_row("survived", attack, group=attack, how=attack)],
+                      corpus_digest=attack)
+        new = _report([producer_shaped_row("survived", attack, group="normal", how="next")],
+                      corpus_digest="next")
+        projected = _project(old, new)
+        text = self.render(projected)
+        self.assertIn('café', text)
+        self.assertNotIn('\nFAKE', text)
+        for char in ('\r', '\t', '\x1b', '\x7f', '\x85', '\u202e', '\u2066', '\u200b', '\u2028'):
+            self.assertNotIn(char, text)
+        for escaped in (r'\nFAKE', r'\r', r'\t', r'\u001b', r'\u007f', r'\u0085',
+                        r'\u202e', r'\u2066', r'\u200b', r'\u2028'):
+            self.assertIn(escaped, text)
+        self.assertIn('group: "café', text)
+        self.assertIn('how: "café', text)
+        self.assertIn('corpus_digest: changed (old="café', text)
+        with tempfile.TemporaryDirectory() as directory:
+            old_path = _write_report(Path(directory), "old.json", old)
+            new_path = _write_report(Path(directory), "new.json", new)
+            proc = _cli("--diff", str(old_path), str(new_path))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.decode("utf-8"), text)
+
+
 class ReportDiffEncoderClosure(unittest.TestCase):
     def _valid(self):
         old = _report(
