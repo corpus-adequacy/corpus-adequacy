@@ -135,6 +135,14 @@ files. It classifies by pinned identities only and never reads the corpus or the
 label, and counts that are not one denominator. It does not print a percentage delta, does not infer a cause, and does not change `report.v0` or
 `survivors.v0` bytes. `corpus_digest` remains an author-declared string.
 
+The text view shows old/new identity values and each row's verdict, plus
+old/new values for every changed field, even when the verdict stays the same.
+`<absent>` marks a missing row or field; `null` is an explicit value. Strings
+are quoted with JSON escaping; remaining nonprintable Unicode characters are
+escaped too, while printable Unicode remains readable. These are reported
+facts: a changed identity or a `survived` to `killed` transition does not by
+itself establish a cause or an improvement.
+
 Closed offline codecs `corpus-adequacy.class-provenance.v0` and
 `corpus-adequacy.class-attempt.v0` address one evidence class beside `report.v0`,
 not inside it. Loaders bound every path to the existing 4 MiB no-follow reader
