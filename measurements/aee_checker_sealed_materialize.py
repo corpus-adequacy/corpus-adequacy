@@ -812,6 +812,9 @@ def copy_owned_assessment_preparation(source, dest, *, context):
     if raw!=context.prepare_raw:ev.refuse('binding','prepare-authorization')
     snapshots={key:_assessment_tree_snapshot(source/key,budget,empty=key=='vendor')
                for key in ('subject','corpus','vendor','tool')}
+    corpus_files,corpus_directories=snapshots['corpus']
+    if corpus_directories!=('vectors',) or any(not name.startswith('vectors/') for name in corpus_files):
+        ev.refuse('filesystem','surplus-member')
     dest.mkdir()
     for key,snapshot in snapshots.items():_write_assessment_tree(snapshot,dest/key)
     plan=ev.decode(dict(context.assessment_inputs.retained_members)['plan.json'])
@@ -821,3 +824,17 @@ def copy_owned_assessment_preparation(source, dest, *, context):
         if mats[key]!=value:ev.refuse('binding','corpus-derivation')
     mats['toolchain']=prepare['runtime']['toolchain']
     return mats
+
+
+def commit_assessment_dest(state):
+    """Publish a settled execution, retaining diagnostics on publication failure.
+
+    Same documented lease/precheck/rename exclusion and residual TOCTOU as the
+    historical helper. Unlike preparation, failed execution staging is evidence.
+    """
+    dest=Path(state['dest']);staging=Path(state['staging'])
+    if dest.exists() or dest.is_symlink():raise PrepareError('assessment dest exists')
+    _fsync_tree(staging)
+    os.rename(staging,dest)
+    _release_owned_lease(state['lease'],state['token'])
+    return dest

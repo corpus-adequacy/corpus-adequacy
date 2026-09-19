@@ -315,6 +315,22 @@ class FourConsumerAdmission(unittest.TestCase):
                         self.invoke(name,context,contract,**changes)
             self.assertEqual((run.call_count,mat.call_count,engine.call_count),(0,0,0))
 
+    def test_each_consumer_reports_rejected_external_approval_at_admission(self):
+        from unittest import mock
+        import aee_checker_sealed_candidate as candidate
+        context,contract=context_fixture()
+        expected=ev.decode(context.expected_raw);expected['reference_approval']='reject'
+        context=dataclasses.replace(context,expected_raw=ev.encode(expected))
+        with mock.patch.object(candidate,'_run_sealed_candidate',side_effect=AssertionError('unexpected transport')) as transport:
+            for consumer in ('candidate','runtime','funnel','driver'):
+                with self.subTest(consumer=consumer):
+                    caught=None
+                    try:self.invoke(consumer,context,contract)
+                    except Exception as exc:caught=exc
+                    self.assertIsInstance(caught,ev.EvidenceError)
+                    self.assertEqual((caught.stage,caught.code),('input','reference-rejected'))
+            self.assertEqual(transport.call_count,0)
+
     def test_candidate_admits_context_and_checks_binding(self):
         from unittest import mock
         import aee_checker_sealed_candidate as candidate
@@ -393,6 +409,10 @@ class OfflinePreparation(unittest.TestCase):
         (root/'out/prepare.json').write_bytes(context.prepare_raw)
         copied=mat.copy_owned_assessment_preparation(root/'out',root/'copy',context=context)
         self.assertEqual(copied['tool_sha256'],'25a225d61331c075a8bf7c7dddff0767cdf055074aa0da20bdbfed8eee0302e9')
+        extra=root/'out/corpus/unbound.json';extra.write_bytes(b'{}')
+        with self.assertRaises(ev.EvidenceError):
+            mat.copy_owned_assessment_preparation(root/'out',root/'surplus',context=context)
+        extra.unlink()
         (root/'out/tool/config.toml').rename(root/'out/tool/cargo-config.toml')
         with self.assertRaises(ev.EvidenceError):
             mat.copy_owned_assessment_preparation(root/'out',root/'wrong',context=context)
@@ -691,7 +711,9 @@ class ProducerJournal(unittest.TestCase):
             self.assertEqual(event['event'],'started')
             self.assertGreater(flush.call_count,0)
             ledger.no_envelope(ledger.register(step=step))
-            return ca._ProcessExecution(raw['built'],'safe',raw['outcomes'],raw['diagnostics'],raw['raised'],{})
+            return ca._ProcessExecution(raw['built'],'safe',
+                {'<batch>': tuple(raw['outcomes']['<batch>'])},
+                {'<batch>': tuple(raw['diagnostics']['<batch>'])},raw['raised'],{})
         inner.execution_profile=ev.PROFILE;inner.accepts_step=True
         with mock.patch.object(os,'fsync',wraps=os.fsync) as flush:
             result=recorder.wrap(inner,ledger)({},[{}],rebuild=True,step=raw['step'])
@@ -744,3 +766,175 @@ class EngineControlObservation(RealDriverEngine):
     def test_observer_failure_does_not_replace_original_backend_exception(self):
         def observer(event):raise ValueError('secondary observer failure')
         self._drive(failure_slot=1,control_observer=observer)
+
+
+class ProducerLifecycle(unittest.TestCase):
+    def test_all_five_commands_emit_a_package_the_real_reader_replays(self):
+        self.lifecycle()
+
+    def test_each_interruption_retains_truthful_partial_evidence(self):
+        for slot in (0, 1, 2, 3, 5):
+            with self.subTest(slot=slot):
+                self.lifecycle(failure_slot=slot)
+
+    def test_execution_crashes_preserve_diagnostic_staging_without_publication(self):
+        for seam in ('before-call','observation','settlement','index','rename'):
+            with self.subTest(seam=seam):
+                self.lifecycle(crash=seam)
+
+    def lifecycle(self, failure_slot=None, crash=None):
+        from argparse import Namespace
+        from unittest import mock
+        import subprocess
+        import owned_suggestion_assessment as producer
+        import suggestion_readback as reader
+        import aee_checker_sealed_materialize as mat
+        import aee_checker_sealed_run as run
+        import aee_checker_sealed_candidate as candidate
+        from test_suggestion_evidence import full_fixture
+        base,source,basis,_=producer_workspace(self)
+        root,local_inputs,context,tc=OfflinePreparation.inputs(self)
+        plan_dir=base/'plan'
+        producer.plan_command(Namespace(proposal=base/'proposal.json',reference=base/'reference.json',
+            reference_sha256=ev.digest((base/'reference.json').read_bytes()),reference_approval='accept',
+            root=source,basis_dir=basis,out=plan_dir))
+        plan_raw=(plan_dir/'plan.json').read_bytes();plan=ev.decode(plan_raw)
+        expected=ev.decode(context.expected_raw)
+        expected.update(plan_sha256=ev.digest(plan_raw),source_content_sha256=plan['source']['content_sha256'],source_files=plan['source']['files'])
+        expected_path=base/'expected.json';expected_path.write_bytes(ev.encode(expected))
+        runtime=ev.decode(context.prepare_raw)['runtime'];rows={r['mechanism']:r for r in runtime['probe_evidence']}
+        def probe(**kw):
+            if kw['mode']=='network':mechanism,side='network-off','refusal' if kw['sealed'] else 'control'
+            else:
+                mechanism,side=next((m,s) for m,pair in run.SEALED_PROBE_PAIRS.items()
+                    for s,mode in zip(('control','refusal'),pair) if mode==kw['mode'])
+            return {'state':rows[mechanism][side],'contract':rows[mechanism]['inspect'][side]}
+        image_inspect=json.dumps([{'Id':tc['image_id'],'Os':'linux','Architecture':tc['platform'].split('/')[1]}]).encode()
+        fixture,wire=full_fixture();envelopes=dict(fixture.evidence_members);attempts=[]
+        def terminal(**kw):
+            ordinal=len(attempts);attempts.append((kw['mounts']['subject']/'src/check.rs').read_text())
+            if ordinal==failure_slot:raise RuntimeError('synthetic secret must not be exported')
+            raw=wire[0][ordinal]['raw']
+            result=subprocess.CompletedProcess([],0,json.dumps({'rows':raw['outcomes']['<batch>'][0],
+                'diagnostics':raw['diagnostics']['<batch>'][0]}),'')
+            variant=ev.VARIANTS[ordinal//4]
+            record=ev.decode(envelopes[variant+'/envelopes/member-%04d.json'%(ordinal%4)])
+            record.update(execution_commit=kw['binding']['execution_commit'],prepare_sha256=kw['binding']['prepare_sha256'])
+            result.envelope_record=record
+            return result
+        with mock.patch.object(producer,'_HERE',source/'measurements'), \
+             mock.patch.object(mat,'docker_bounded',return_value=image_inspect), \
+             mock.patch.object(mat,'_observe_image_cmd',side_effect=lambda image,command:tc['rustc_Vv'] if command[0]=='rustc' else tc['cargo_V']+'\n'), \
+             mock.patch.object(run,'require_docker_ready'),mock.patch.object(run,'require_local_image'), \
+             mock.patch.object(run,'image_platform',return_value=runtime['image']['platform']), \
+             mock.patch.object(run,'docker_bounded',return_value=runtime['runtime']['docker'].encode()), \
+             mock.patch.object(run,'run_inert_probe',side_effect=probe), \
+             mock.patch.object(candidate,'_run_sealed_candidate',side_effect=terminal):
+            for variant in ev.VARIANTS:
+                producer.prepare_command(Namespace(plan_dir=plan_dir,basis_dir=basis,expected=expected_path,
+                    variant=variant,image_id=runtime['image']['id'],inputs_dir=local_inputs,out=base/('prepared-'+variant)))
+            producer.authorize_command(Namespace(plan_dir=plan_dir,basis_dir=basis,expected=expected_path,
+                base_prepare=base/'prepared-base/prepare.json',whitespace_prepare=base/'prepared-outer-whitespace/prepare.json',
+                operator='synthetic operator',out=base/'authorized'))
+            execution_args=Namespace(plan_dir=plan_dir,basis_dir=basis,expected=expected_path,
+                authorization_dir=base/'authorized',base_prepare_dir=base/'prepared-base',
+                whitespace_prepare_dir=base/'prepared-outer-whitespace',out=base/'assessment')
+            if crash is not None:
+                original_event=producer.AssessmentRecorder._event
+                original_write=producer._write_members
+                def event(recorder,slot,event,**kwargs):
+                    if (crash=='before-call' and event=='started') or (crash=='settlement' and event=='returned'):
+                        raise OSError('synthetic durable write failure')
+                    return original_event(recorder,slot,event,**kwargs)
+                def write(directory,members):
+                    if crash=='index' and 'evidence-index.json' in members:
+                        raise OSError('synthetic index failure')
+                    return original_write(directory,members)
+                from contextlib import ExitStack
+                with ExitStack() as patches:
+                    patches.enter_context(mock.patch.object(producer.AssessmentRecorder,'_event',event))
+                    patches.enter_context(mock.patch.object(producer,'_write_members',side_effect=write))
+                    if crash=='observation':
+                        patches.enter_context(mock.patch.object(producer.AssessmentRecorder,'_write',side_effect=OSError('synthetic observation failure')))
+                    if crash=='rename':
+                        patches.enter_context(mock.patch.object(mat.os,'rename',side_effect=OSError('synthetic publication failure')))
+                    with self.assertRaises(OSError):producer.execute_command(execution_args)
+                self.assertFalse((base/'assessment').exists())
+                self.assertTrue((base/'assessment.lease').is_file())
+                stages=list(base.glob('assessment.tmp-*'));self.assertEqual(len(stages),1)
+                staged=reader.load_package(stages[0])
+                if crash!='rename':
+                    with self.assertRaises(ev.EvidenceError):ev.decode_assessment_stage(staged,context.assessment_inputs.basis_members)
+                else:
+                    self.assertIn('evidence-index.json',dict(staged))
+                self.assertEqual(len(attempts),0 if crash=='before-call' else (1 if crash in ('observation','settlement') else 8))
+                return dict(staged)
+            result,code=producer.execute_command(execution_args)
+        diagnostic = {p: ev.decode(raw) for p, raw in reader.load_package(base/'assessment')
+                      if p == 'gates.json' or '/observations/' in p}
+        self.assertEqual(code,0 if failure_slot is None else 1,(result, diagnostic, len(attempts)))
+        self.assertEqual(len(attempts),8 if failure_slot is None else failure_slot+1)
+        if len(attempts)>1:self.assertIn('control-refusal',attempts[1])
+        if len(attempts)>2:self.assertIn('if false',attempts[2])
+        if len(attempts)>3:self.assertIn('maximum.saturating_add(1)',attempts[3])
+        retained=dict(reader.load_package(base/'assessment'))
+        self.assertNotIn('receipt.json',retained);self.assertNotIn('decision.json',retained)
+        self.assertEqual(result['artifacts'],[{'kind':'evidence-index','sha256':ev.digest(retained['evidence-index.json'])}])
+        final,exitcode=producer.finalize_command(Namespace(assessment_dir=base/'assessment',basis_dir=basis,
+            expected=expected_path,review=None,pending_review=True,out=base/'final'))
+        self.assertEqual(exitcode,0)
+        verified,exitcode=reader.verify_package(base/'final',basis,expected=expected_path)
+        self.assertEqual(exitcode,0,verified)
+        self.assertEqual(verified['replay_disposition'],'pending-review' if failure_slot is None else 'unproved')
+        if failure_slot is None:
+            command=[sys.executable,'-I',str(ROOT/'measurements/suggestion_readback.py'),
+                'verify','--package',str(base/'final'),'--basis-dir',str(basis),
+                '--expected',str(expected_path)]
+            checked=subprocess.run(command,cwd=base,capture_output=True,timeout=5)
+            self.assertLessEqual(len(checked.stdout)+len(checked.stderr),65536)
+            self.assertEqual(checked.returncode,0,checked.stderr+checked.stdout)
+            self.assertEqual(ev.decode(checked.stdout)['replay_disposition'],'pending-review')
+        for raw in retained.values():self.assertNotIn(b'synthetic secret',raw)
+        return retained
+
+
+class ExecutionPublication(unittest.TestCase):
+    def test_foreign_destination_and_lease_are_preserved(self):
+        import tempfile
+        import aee_checker_sealed_materialize as mat
+        from aee_checker_sealed_common import PrepareError
+        root=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        state=mat.begin_atomic_dest(root/'out')
+        (state['staging']/'journal.jsonl').write_bytes(b'retained diagnostic\n')
+        state['dest'].mkdir();(state['dest']/'foreign').write_bytes(b'owner bytes')
+        state['lease'].write_bytes(b'foreign lease')
+        with self.assertRaises(PrepareError):mat.commit_assessment_dest(state)
+        self.assertEqual((state['dest']/'foreign').read_bytes(),b'owner bytes')
+        self.assertEqual(state['lease'].read_bytes(),b'foreign lease')
+        self.assertEqual((state['staging']/'journal.jsonl').read_bytes(),b'retained diagnostic\n')
+
+    def test_new_destination_publishes_and_only_owned_lease_is_released(self):
+        import tempfile
+        import aee_checker_sealed_materialize as mat
+        root=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        for foreign in (False,True):
+            state=mat.begin_atomic_dest(root/str(foreign))
+            (state['staging']/'journal.jsonl').write_bytes(b'retained diagnostic\n')
+            if foreign:state['lease'].write_bytes(b'foreign lease')
+            mat.commit_assessment_dest(state)
+            self.assertFalse(state['staging'].exists())
+            self.assertEqual((state['dest']/'journal.jsonl').read_bytes(),b'retained diagnostic\n')
+            self.assertEqual(state['lease'].exists(),foreign)
+            if foreign:self.assertEqual(state['lease'].read_bytes(),b'foreign lease')
+
+
+class ProducerImageRoles(unittest.TestCase):
+    def test_candidate_role_guard_accepts_only_distinct_toolchain_image(self):
+        import aee_checker_sealed_candidate as candidate
+        from aee_checker_sealed_common import PrepareError
+        probe='sha256:'+'a'*64;toolchain='sha256:'+'b'*64
+        self.assertEqual(candidate.require_candidate_image(image_id=toolchain,
+            toolchain_image_id=toolchain,probe_image_id=probe),toolchain)
+        for image in (probe,'sha256:'+'c'*64):
+            with self.subTest(image=image),self.assertRaises(PrepareError):
+                candidate.require_candidate_image(image_id=image,toolchain_image_id=toolchain,probe_image_id=probe)
