@@ -996,6 +996,8 @@ class V2TmpfsOwnerContract(unittest.TestCase):
                 contained.CANDIDATE_RESOURCE_PROFILE_V2,
                 destination="/tmp", owner_bound=True)
             self.assertEqual((requested["uid"], requested["gid"]), (42, 43))
+            encoded = contained.encode_tmpfs_options(requested, owner_bound=True)
+            self.assertEqual(contained.parse_tmpfs_options(encoded, owner_bound=True), requested)
 
     def test_v2_create_binds_owner_and_explicit_exec_state_while_v1_is_unchanged(self):
         with tempfile.TemporaryDirectory() as d:

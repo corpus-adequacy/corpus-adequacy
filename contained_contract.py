@@ -295,7 +295,7 @@ def _canonical_uint(value: str) -> int:
     return number
 
 
-def parse_tmpfs_options(value, *, owner_bound: bool) -> dict:
+def parse_tmpfs_options(value, *, owner_bound: bool, user=None) -> dict:
     """Parse a closed Docker tmpfs declaration; v2 additionally binds its owner."""
     if not isinstance(value, str) or type(owner_bound) is not bool:
         raise ContractError("tmpfs", code='tmpfs')
@@ -337,14 +337,14 @@ def parse_tmpfs_options(value, *, owner_bound: bool) -> dict:
         "size": _canonical_uint(values["size"]),
     }
     if owner_bound:
-        uid, gid = contained_user_ids()
+        uid, gid = contained_user_ids(user)
         if values["uid"] != str(uid) or values["gid"] != str(gid):
             raise ContractError("tmpfs", code='tmpfs')
         parsed.update(uid=uid, gid=gid)
     return parsed
 
 
-def tmpfs_request(profile: dict, *, destination: str, owner_bound: bool) -> dict:
+def tmpfs_request(profile: dict, *, destination: str, owner_bound: bool, user=None) -> dict:
     profile = require_versioned_resource_profile(profile)
     if destination not in ("/tmp", "/work"):
         raise ContractError("tmpfs", code='tmpfs')
@@ -355,12 +355,12 @@ def tmpfs_request(profile: dict, *, destination: str, owner_bound: bool) -> dict
         "rw": True, "size": profile[prefix + "_bytes"],
     }
     if owner_bound:
-        uid, gid = contained_user_ids()
+        uid, gid = contained_user_ids(user)
         result.update(uid=uid, gid=gid)
     return result
 
 
-def require_tmpfs_spec(spec, *, owner_bound: bool) -> dict:
+def require_tmpfs_spec(spec, *, owner_bound: bool, user=None) -> dict:
     """Validate the exact structured tmpfs value shared by writers and readers."""
     keys = {"exec", "mode", "nr_inodes", "rw", "size"}
     if owner_bound:
@@ -374,7 +374,7 @@ def require_tmpfs_spec(spec, *, owner_bound: bool) -> dict:
         if type(spec[key]) is not int or spec[key] <= 0:
             raise ContractError("tmpfs", code='tmpfs')
     if owner_bound:
-        uid, gid = contained_user_ids()
+        uid, gid = contained_user_ids(user)
         if (type(spec["uid"]) is not int or type(spec["gid"]) is not int or
                 spec["uid"] != uid or spec["gid"] != gid):
             raise ContractError("tmpfs", code='tmpfs')

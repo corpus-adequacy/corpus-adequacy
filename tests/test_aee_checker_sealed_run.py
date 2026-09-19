@@ -129,6 +129,7 @@ AEE_LF_PATHS = (
 )
 REQUIRED_EXECUTION_PATHS = (
     "bounded_run.py",
+    "contained_contract.py",
     "corpus_adequacy.py",
     "isolated_tree.py",
     "module_child.py",
@@ -138,6 +139,7 @@ REQUIRED_EXECUTION_PATHS = (
     "measurements/aee_checker_sealed_common.py",
     "measurements/contained_oci.py",
     "measurements/effective_envelope.py",
+    "measurements/suggestion_evidence.py",
     "measurements/kernel_readback.py",
     "measurements/envelope_collection.py",
     "measurements/aee_checker_sealed_oci.py",

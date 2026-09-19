@@ -240,7 +240,7 @@ def parse_inspect_payload(raw: bytes) -> dict:
 
 def contained_user_ids(value=None) -> tuple[int, int]:
     """Parse the one canonical Docker uid:gid declaration without normalization."""
-    return _contract_call(_contract.contained_user_ids, value)
+    return _contract_call(_contract.contained_user_ids, CONTAINED_USER if value is None else value)
 
 
 def _canonical_uint(value: str) -> int:
@@ -249,16 +249,17 @@ def _canonical_uint(value: str) -> int:
 
 def parse_tmpfs_options(value, *, owner_bound: bool) -> dict:
     """Parse a closed Docker tmpfs declaration; v2 additionally binds its owner."""
-    return _contract_call(_contract.parse_tmpfs_options, value, owner_bound=owner_bound)
+    return _contract_call(_contract.parse_tmpfs_options, value, owner_bound=owner_bound, user=CONTAINED_USER)
 
 
 def tmpfs_request(profile: dict, *, destination: str, owner_bound: bool) -> dict:
-    return _contract_call(_contract.tmpfs_request, profile, destination=destination, owner_bound=owner_bound)
+    return _contract_call(_contract.tmpfs_request, profile, destination=destination,
+                          owner_bound=owner_bound, user=CONTAINED_USER)
 
 
 def require_tmpfs_spec(spec, *, owner_bound: bool) -> dict:
     """Validate the exact structured tmpfs value shared by writers and readers."""
-    return _contract_call(_contract.require_tmpfs_spec, spec, owner_bound=owner_bound)
+    return _contract_call(_contract.require_tmpfs_spec, spec, owner_bound=owner_bound, user=CONTAINED_USER)
 
 
 def encode_tmpfs_options(spec: dict, *, owner_bound: bool) -> str:

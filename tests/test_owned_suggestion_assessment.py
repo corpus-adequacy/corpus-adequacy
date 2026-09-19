@@ -1,4 +1,5 @@
 """Admission type/dispatch tests. No production caller is wired by this slice."""
+import os
 import dataclasses
 import copy
 import json
@@ -218,6 +219,8 @@ class ProducerSourceIdentity(unittest.TestCase):
         with self.assertRaises(ev.EvidenceError):run.assessment_execution_identity(untracked)
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class ProducerPlan(ProducerCLI):
     def test_actual_plan_cli_preserves_basis_and_derives_both_corpora(self):
         base,source,basis,git=producer_workspace(self)
@@ -365,6 +368,8 @@ class FourConsumerAdmission(unittest.TestCase):
         self.assertTrue(callable(self.invoke('runtime',context,contract)))
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class OfflinePreparation(unittest.TestCase):
     def inputs(self):
         import tempfile, tarfile
@@ -470,6 +475,8 @@ class ProducerAuthorization(unittest.TestCase):
                 ev.build_assessment_authorization(inputs,pins,changed,expected,'test operator')
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class ProducerAuthorizationCLI(ProducerCLI):
     def test_cli_authorizes_exact_plan_and_publishes_only_three_records(self):
         import tempfile
@@ -589,6 +596,8 @@ class PreparationCommand(OfflinePreparation):
         self.assertEqual(set(p.name for p in args.out.iterdir()),{'prepare.json','subject','corpus','vendor','tool'})
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class ProducerFinalization(ProducerCLI):
     def test_finalizes_real_staging_frame_without_synthetic_final_records(self):
         import tempfile
@@ -768,6 +777,8 @@ class EngineControlObservation(RealDriverEngine):
         self._drive(failure_slot=1,control_observer=observer)
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class ProducerLifecycle(unittest.TestCase):
     def test_all_five_commands_emit_a_package_the_real_reader_replays(self):
         self.lifecycle()

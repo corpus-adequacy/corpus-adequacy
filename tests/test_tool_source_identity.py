@@ -53,6 +53,7 @@ SHA256_FIELD_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 EXPECTED_TOOL_SOURCE_PATHS = (
     "bounded_run.py",
+    "contained_contract.py",
     "corpus_adequacy.py",
     "isolated_tree.py",
     "module_child.py",

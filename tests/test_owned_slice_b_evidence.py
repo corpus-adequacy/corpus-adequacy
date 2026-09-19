@@ -240,7 +240,10 @@ class SliceBEvidenceChecks:
         before that, and any new measurement needs a fresh PREPARE. Its bytes are pinned by
         digest above, so no later identity change alters what it says. If the contract's path
         list changes again, this fails and the history below must be extended on purpose."""
-        joined_since = {"measurements/kernel_readback.py"}
+        # Shared policy extraction adds these modules after the retained runs.
+        # Historical artifacts stay bound to their original source inventory.
+        joined_since = {"measurements/kernel_readback.py", "contained_contract.py",
+                        "measurements/suggestion_evidence.py"}
         for selection, contract in CONTRACTS.items():
             with self.subTest(selection=selection):
                 recorded = set(self._prepare(selection)["execution"]["paths"])

@@ -73,3 +73,9 @@ tests/fixtures/kernel-readback-v0/** text eol=lf
 measurements/pids_witness.py text eol=lf
 .github/workflows/pids-witness.yml text eol=lf
 docs/design/g-feasibility-probe/** text eol=lf
+
+# Assessment source identities compare checkout bytes to Git blobs.
+contained_contract.py text eol=lf
+measurements/suggestion_evidence.py text eol=lf
+measurements/suggestion_readback.py text eol=lf
+measurements/owned_suggestion_assessment.py text eol=lf

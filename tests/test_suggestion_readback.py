@@ -275,6 +275,8 @@ def refresh_package_refs(members, *, review=None, disposition=None):
     rebind_final(members,review=review,disposition=disposition)
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class PackageCLI(ReaderCLI):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
@@ -544,6 +546,8 @@ class PackageCLI(ReaderCLI):
                          (1,'mismatch','member-digest'),result)
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class PackageFilesystem(unittest.TestCase):
     setUp = PackageCLI.setUp
     install = PackageCLI.install
@@ -597,6 +601,8 @@ class PackageFilesystem(unittest.TestCase):
         self.members['receipt.json']=raw
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class OfflineBoundary(unittest.TestCase):
     setUp=PackageCLI.setUp
     install=PackageCLI.install
@@ -699,6 +705,8 @@ if __name__ == '__main__':
     unittest.main()
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class AncestorIdentity(unittest.TestCase):
     def test_sibling_creation_does_not_change_selected_directory_identity(self):
         import tempfile

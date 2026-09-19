@@ -57,7 +57,7 @@ class SharedContract(unittest.TestCase):
         for contract in (v for v in vars(contracts).values()
                          if isinstance(v, contracts.SealedMeasurementContract)):
             self.assertIn('contained_contract.py', contract.execution_paths)
-            self.assertEqual(len(contract.execution_paths), 25)
+            self.assertEqual(len(contract.execution_paths), 26)
         self.assertEqual(len(ev.SOURCE_PATHS), 30)
         self.assertEqual(ev.SOURCE_PATHS, tuple(sorted(set(ev._OWNED.execution_paths) | {
             'measurements/owned_suggestion_assessment.py', 'measurements/suggestion_admission.py',

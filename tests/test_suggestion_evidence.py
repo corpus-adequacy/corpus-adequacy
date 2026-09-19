@@ -136,7 +136,7 @@ def stop_after_controls(data):
 
 def basis_snapshot():
     root = ROOT / 'fixtures/contained-v1-owned/corpus'
-    return tuple(sorted((str(p.relative_to(root)), p.read_bytes())
+    return tuple(sorted((p.relative_to(root).as_posix(), p.read_bytes())
                         for p in root.rglob('*') if p.is_file()))
 
 
