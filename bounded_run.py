@@ -20,7 +20,7 @@ from pathlib import Path
 # Output ceiling per child process. Both children can emit arbitrary output and
 # a timeout does not bound memory, so the cap is applied while the process runs
 # rather than after it exits.
-OUTPUT_CAP_BYTES = 4 * 1024 * 1024
+from contained_contract import OUTPUT_CAP_BYTES
 
 # One fixed read size. Charge-before-retain keeps combined stdout+stderr at
 # most OUTPUT_CAP_BYTES. The two reader threads may each already hold a

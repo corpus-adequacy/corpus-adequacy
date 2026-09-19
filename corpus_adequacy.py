@@ -118,6 +118,7 @@ VERSION = "0.4.0"
 # sys.modules instead would absorb whatever the measured candidate imports.
 TOOL_SOURCE_PATHS = (
     "bounded_run.py",
+    "contained_contract.py",
     "corpus_adequacy.py",
     "isolated_tree.py",
     "module_child.py",
@@ -4243,10 +4244,12 @@ def _require_contained_execution(*, profile, runner, execution_backend) -> None:
 
 def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
                  mutation_order=None, separate_build_phase=True,
-                 execution_profile) -> dict:
+                 execution_profile, control_observer=None) -> dict:
     """Mutate declared sources, rebuild, and run the corpus against the binary."""
     if type(separate_build_phase) is not bool:
         raise ManifestError("separate_build_phase must be a bool")
+    if control_observer is not None and not callable(control_observer):
+        raise ManifestError("control observer must be callable")
     profile = resolve_execution_profile(operator=execution_profile, manifest=m)
     _require_contained_execution(
         profile=profile, runner=m.get("runner"),
@@ -4382,7 +4385,30 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
                 prev_ordinary = group
             if group not in session.baselines:
                 continue
-            _run_mutation_step(session, group, mut)
+            if control_observer is None or not mut.get("control"):
+                _run_mutation_step(session, group, mut)
+            else:
+                # Opt-in observation of the engine's own result, not a second
+                # movement comparison. Detached events cannot mutate its tally.
+                start = len(tally["results"])
+                event = {"group": group, "id": mut.get("id"),
+                         "polarity": _control_polarity(mut)}
+                try:
+                    _run_mutation_step(session, group, mut)
+                except BaseException as primary:
+                    try:
+                        control_observer({**event, "state": "interrupted", "verdict": None})
+                    except BaseException as observer_error:
+                        primary.add_note("control observer failed: " + type(observer_error).__name__)
+                    raise
+                rows = tally["results"][start:]
+                if (len(rows) != 1 or rows[0].get("group") != group
+                        or rows[0].get("label") != mut["label"]
+                        or rows[0].get("verdict") not in (
+                            "control-killed", "control-unchanged", "control-SURVIVED",
+                            "control-MOVED", "control-error")):
+                    raise ManifestError("control observer has no exact engine result")
+                control_observer({**event, "state": "evaluated", "verdict": rows[0]["verdict"]})
         if prev_ordinary is not None:
             tally["equivalent"] += _append_group_equivalents(
                 tally["results"], m, prev_ordinary,

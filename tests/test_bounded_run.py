@@ -694,3 +694,14 @@ class Mutations(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
+
+
+class SharedOutputCeiling(unittest.TestCase):
+    def test_runtime_reexports_leaf_ceiling(self):
+        import importlib.util
+        self.assertIsNotNone(importlib.util.find_spec('contained_contract'),
+                             'one shared output ceiling requires pure leaf')
+        import contained_contract
+        import bounded_run
+        self.assertEqual(bounded_run.OUTPUT_CAP_BYTES, 4194304)
+        self.assertEqual(bounded_run.OUTPUT_CAP_BYTES, contained_contract.OUTPUT_CAP_BYTES)

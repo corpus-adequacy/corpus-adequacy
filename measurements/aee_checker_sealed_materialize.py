@@ -687,3 +687,154 @@ def abort_atomic_dest(state: dict) -> None:
     if staging.exists() and staging.resolve() != dest.resolve():
         shutil.rmtree(staging)
     _release_owned_lease(state["lease"], state["token"])
+
+
+def _assessment_tree_snapshot(path, budget, *, empty=False):
+    """Bounded no-follow snapshot before copying local preparation material."""
+    import stat
+    import suggestion_readback as reader
+    import suggestion_evidence as ev
+    reader._require_support()
+    files = {}; directories = []; seen = set()
+    def visit(parts, prefix):
+        budget.check_deadline()
+        with reader._directory(parts) as fd:
+            names = sorted(os.listdir(fd))
+            for name in names:
+                budget.charge(entries=1)
+                if name in ('.', '..') or '/' in name or '\\' in name:
+                    ev.refuse('filesystem', 'unsafe-member')
+                rel = prefix+name
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    directories.append(rel)
+                    visit(parts+(name,), rel+'/')
+                else:
+                    raw = reader._read_file(fd,name,remaining=budget.remaining_bytes(),cap=budget.remaining_bytes(),seen=seen)
+                    budget.charge(bytes=len(raw)); files[rel]=raw
+    visit(reader._absolute_parts(path), '')
+    if not files and not (empty and not directories):
+        raise PrepareError('empty assessment tree')
+    return files, tuple(directories)
+
+
+def _write_assessment_tree(snapshot, dest):
+    files, directories = snapshot
+    dest.mkdir()
+    for name in directories:
+        (dest/name).mkdir(parents=True,exist_ok=True)
+    for name, raw in files.items():
+        path=dest/name;path.parent.mkdir(parents=True,exist_ok=True)
+        with path.open('xb') as stream:
+            stream.write(raw)
+
+
+def observe_local_assessment_toolchain(expected):
+    """No pull/build/cache fallback. Observe exactly the supplied local image."""
+    require_vendor_toolchain(expected)
+    image_id=expected['image_id']
+    inspect=parse_inspect_payload(docker_bounded(['image','inspect',image_id]))
+    actual={'image_id':require_image_id(inspect.get('Id')),
+        'platform':str(inspect.get('Os'))+'/'+str(inspect.get('Architecture')),
+        'rustc_Vv':_observe_image_cmd(image_id,['rustc','-Vv']),
+        'cargo_V':_observe_image_cmd(image_id,['cargo','-V']).strip(),
+        'index':RUST_IMAGE,'observation':'vendor-image; checker was not run'}
+    require_vendor_toolchain(actual)
+    if actual != expected:
+        raise PrepareError('local assessment toolchain drift')
+    return actual
+
+
+def _assessment_materialized(dest, *, variant, plan):
+    from sealed_measurement_contract import OWNED_INDEPENDENT_V0_CONTRACT as owned
+    row=next(item for item in plan['variants'] if item['variant']==variant)
+    result={key:Path(dest)/key for key in ('subject','corpus','vendor','tool')}
+    result.update(subject_tree_sha256=tree_sha256(result['subject']),
+        corpus_tree_sha256=tree_sha256(result['corpus']/'vectors'),
+        corpus_manifest_sha256=hashlib.sha256((result['corpus']/'vectors/MANIFEST.json').read_bytes()).hexdigest(),
+        corpus_id_count=5, vendor_sha256=tree_sha256(result['vendor'],allow_canonical_empty=True),
+        tool_sha256=tree_sha256(result['tool']))
+    if (result['subject_tree_sha256']!=owned.subject_tree_sha256
+            or result['corpus_tree_sha256']!=row['tree_sha256']
+            or result['corpus_manifest_sha256']!=row['manifest']['sha256']
+            or result['vendor_sha256']!=EMPTY_SHA256):
+        raise PrepareError('assessment materialization drift')
+    return result
+
+
+def materialize_owned_assessment(inputs_dir, dest, *, retained_members, variant, template):
+    """Derive preparation trees solely from bounded local inputs and admitted plan."""
+    import tempfile
+    import suggestion_evidence as ev
+    import suggestion_readback as reader
+    from sealed_measurement_contract import OWNED_INDEPENDENT_V0_CONTRACT as owned
+    budget=MaterializeBudget(MATERIALIZE_CEILINGS)
+    parts=reader._absolute_parts(inputs_dir)
+    with reader._directory(parts) as fd:
+        reader._inventory(fd,('subject.tar.gz','toolchain.json','vendor'))
+        archive=reader._read_file(fd,'subject.tar.gz',remaining=budget.remaining_bytes(),cap=budget.remaining_bytes(),seen=set())
+        budget.charge(bytes=len(archive),entries=1)
+        toolchain_raw=reader._read_file(fd,'toolchain.json',remaining=65536,seen=set())
+    with reader._directory(parts+('vendor',)) as fd:
+        reader._inventory(fd,())
+    toolchain=require_vendor_toolchain(ev.decode(toolchain_raw,canonical=True))
+    members=dict(retained_members);plan=ev.decode(members['plan.json'],canonical=True)
+    if variant not in ev.VARIANTS:ev.refuse('binding','plan-variant')
+    dest=Path(dest);dest.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory() as temp:
+        archive_path=Path(temp)/'subject.tar.gz';archive_path.write_bytes(archive)
+        extract_pinned_archive(archive_path,dest/'subject',budget=budget,selected_subdir=owned.subject_subdir)
+    (dest/'vendor').mkdir();(dest/'corpus/vectors').mkdir(parents=True)
+    prefix=variant+'/corpus/'
+    for name,raw in members.items():
+        if name.startswith(prefix):
+            budget.charge(entries=1,bytes=len(raw))
+            path=dest/'corpus/vectors'/name[len(prefix):]
+            with path.open('xb') as stream:stream.write(raw)
+    bind_vendor_config(dest/'tool',template)
+    result=_assessment_materialized(dest,variant=variant,plan=plan)
+    if result['tool_sha256']!=ev._TOOL_TREE_SHA256:
+        raise PrepareError('assessment cargo config drift')
+    budget.check_deadline()
+    result['toolchain']=observe_local_assessment_toolchain(toolchain)
+    return result
+
+
+def copy_owned_assessment_preparation(source, dest, *, context):
+    """Re-snapshot selected preparation; no network or trust in reported hashes."""
+    import suggestion_evidence as ev
+    import suggestion_readback as reader
+    source=Path(source);dest=Path(dest)
+    budget=MaterializeBudget(MATERIALIZE_CEILINGS)
+    with reader._directory(reader._absolute_parts(source)) as fd:
+        reader._inventory(fd,('prepare.json','subject','corpus','vendor','tool'))
+        raw=reader._read_file(fd,'prepare.json',remaining=65536,seen=set())
+    if raw!=context.prepare_raw:ev.refuse('binding','prepare-authorization')
+    snapshots={key:_assessment_tree_snapshot(source/key,budget,empty=key=='vendor')
+               for key in ('subject','corpus','vendor','tool')}
+    corpus_files,corpus_directories=snapshots['corpus']
+    if corpus_directories!=('vectors',) or any(not name.startswith('vectors/') for name in corpus_files):
+        ev.refuse('filesystem','surplus-member')
+    dest.mkdir()
+    for key,snapshot in snapshots.items():_write_assessment_tree(snapshot,dest/key)
+    plan=ev.decode(dict(context.assessment_inputs.retained_members)['plan.json'])
+    mats=_assessment_materialized(dest,variant=context.variant,plan=plan)
+    prepare=ev.decode(context.prepare_raw)
+    for key,value in prepare['materialized'].items():
+        if mats[key]!=value:ev.refuse('binding','corpus-derivation')
+    mats['toolchain']=prepare['runtime']['toolchain']
+    return mats
+
+
+def commit_assessment_dest(state):
+    """Publish a settled execution, retaining diagnostics on publication failure.
+
+    Same documented lease/precheck/rename exclusion and residual TOCTOU as the
+    historical helper. Unlike preparation, failed execution staging is evidence.
+    """
+    dest=Path(state['dest']);staging=Path(state['staging'])
+    if dest.exists() or dest.is_symlink():raise PrepareError('assessment dest exists')
+    _fsync_tree(staging)
+    os.rename(staging,dest)
+    _release_owned_lease(state['lease'],state['token'])
+    return dest

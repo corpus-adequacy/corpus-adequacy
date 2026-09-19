@@ -7,6 +7,8 @@ Does not run a real corpus/checker experiment.
 
 from __future__ import annotations
 
+import suggestion_evidence as assessment_evidence
+
 import importlib
 import json
 import corpus_adequacy as ca
@@ -193,6 +195,9 @@ def host_vectors_path(mounts: dict) -> str:
 
 def sealed_adapter_for(contract):
     """Resolve only the code-owned adapters; paths are never operator input."""
+    from sealed_measurement_contract import OwnedAssessmentVariantContract
+    if type(contract) is OwnedAssessmentVariantContract:
+        return importlib.import_module("owned_contained_v1")
     if contract is AEE_CHECKER_SEALED_CONTRACT:
         return importlib.import_module("aee_checker_sealed")
     if contract is OWNED_CONTAINED_V1_CONTRACT or contract is OWNED_INDEPENDENT_V0_CONTRACT:
@@ -532,7 +537,7 @@ def require_recording(*, execution_profile, binding) -> None:
 def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict, execution_profile,
                          name_prefix: str = "aee-cand-",
                          transport=None, execution_contract=None,
-                         binding=None,
+                         binding=None, assessment_context=None,
                          contract=AEE_CHECKER_SEALED_CONTRACT) -> subprocess.CompletedProcess:
     """Admit PREPARE bytes under the resolved execution profile, then run them.
 
@@ -540,8 +545,18 @@ def run_sealed_candidate(*, prepare_raw: bytes, mounts: dict, execution_profile,
     contained-oci-v0. The shared dispatcher admits prepare.v1 only under
     contained-oci-v0 and prepare.v2 only under contained-oci-v1, before any effect.
     """
-    prepare = load_prepare_for_profile(
-        prepare_raw, execution_profile=execution_profile, contract=contract)
+    admitted = assessment_evidence.admit_assessment_call(
+        assessment_context, execution_profile, contract, prepare_raw)
+    if admitted is None:
+        prepare = load_prepare_for_profile(
+            prepare_raw, execution_profile=execution_profile, contract=contract)
+    else:
+        expected_binding = envelope_binding(
+            prepare_sha256=assessment_evidence.digest(prepare_raw),
+            execution_commit=admitted['source']['commit'])
+        if binding != expected_binding:
+            assessment_evidence.refuse('binding', 'prepare-authorization')
+        prepare = admitted['runtime']
     require_recording(execution_profile=execution_profile, binding=binding)
     image_id = require_candidate_image(
         image_id=prepare["toolchain"]["image_id"],

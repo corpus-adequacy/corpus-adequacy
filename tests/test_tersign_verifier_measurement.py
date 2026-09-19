@@ -540,7 +540,11 @@ class ClaimedReport(unittest.TestCase):
 
     def test_released_tool_content_matches_the_measured_report(self):
         sources = []
-        for rel in ca.TOOL_SOURCE_PATHS:
+        # This retained report predates the shared containment module. Hash the
+        # exact runtime inventory shipped at RELEASED_TOOL_COMMIT, not today's.
+        released_paths = ("bounded_run.py", "corpus_adequacy.py",
+                          "isolated_tree.py", "module_child.py")
+        for rel in released_paths:
             sources.append((rel, _git_show(RELEASED_TOOL_COMMIT, rel)))
         digest = ca._tool_content_digest(sources)
         self.assertEqual(digest, TOOL_CONTENT)

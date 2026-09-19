@@ -197,6 +197,7 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
     site_replacement="false",
     execution_paths=(
         "bounded_run.py",
+        "contained_contract.py",
         "corpus_adequacy.py",
         "isolated_tree.py",
         "module_child.py",
@@ -206,6 +207,7 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
         "measurements/aee_checker_sealed_common.py",
         "measurements/contained_oci.py",
         "measurements/effective_envelope.py",
+        "measurements/suggestion_evidence.py",
         "measurements/kernel_readback.py",
         "measurements/envelope_collection.py",
         "measurements/aee_checker_sealed_oci.py",
@@ -297,3 +299,121 @@ OWNED_INDEPENDENT_V0_CONTRACT = replace(
         for path in OWNED_CONTAINED_V1_CONTRACT.execution_paths
     ),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedAssessmentVariantContract:
+    """A derived corpus identity, deliberately not a legacy sealed contract.
+
+    Construction only checks shape. Assessment admission must independently bind
+    this value to the retained plan and authorization before it can be used.
+    """
+
+    plan_sha256: str
+    variant: str
+    corpus_manifest_sha256: str
+    corpus_tree_sha256: str
+    ids: tuple[str, ...]
+
+    # Only these immutable code-owned fields are shared with the legacy machinery.
+    # No generic delegation: corpus identity remains the derived five-row variant.
+    @property
+    def mutation_group(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.mutation_group
+
+    @property
+    def control_id(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.control_id
+
+    @property
+    def inert_control_ids(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.inert_control_ids
+
+    @property
+    def site_ids(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.site_ids
+
+    @property
+    def operator(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.operator
+
+    @property
+    def site_replacement(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.site_replacement
+
+    @property
+    def candidate_build(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.candidate_build
+
+    @property
+    def candidate_entrypoint(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.candidate_entrypoint
+
+    @property
+    def candidate_complete_returncodes(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.candidate_complete_returncodes
+
+    @property
+    def subject_subdir(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.subject_subdir
+
+    @property
+    def subject_tree_sha256(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.subject_tree_sha256
+
+    @property
+    def container_context_relpath(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.container_context_relpath
+
+    @property
+    def corpus_id_count(self):
+        return len(self.ids)
+
+    def pin_digest(self, name):
+        if name not in ('control.json', 'sites.json', 'manifest.json'):
+            raise ValueError('assessment pin is plan-derived')
+        return OWNED_INDEPENDENT_V0_CONTRACT.pin_digest(name)
+
+    def __post_init__(self):
+        for value in (self.plan_sha256, self.corpus_manifest_sha256, self.corpus_tree_sha256):
+            if type(value) is not str or not _HEX64.fullmatch(value):
+                raise ValueError('assessment digest')
+        if self.variant not in ('base', 'outer-whitespace'):
+            raise ValueError('assessment variant')
+        if (type(self.ids) is not tuple or len(self.ids) != 5
+                or any(type(i) is not str or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}', i)
+                       for i in self.ids)
+                or len(set(self.ids)) != 5):
+            raise ValueError('assessment ids')
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedAssessmentAdmissionContext:
+    """Snapshot carrier, not a capability, cached verdict or authenticated consent.
+
+    Every consumer must call require_assessment_context again. Current filesystem
+    source measurement additionally belongs to the driver before backend entry.
+    """
+
+    family: str
+    profile: str
+    variant: str
+    assessment_inputs: object
+    expected_raw: bytes
+    prepare_raw: bytes
+    parent_authorization_raw: bytes
+    variant_authorization_raw: bytes
+
+    def __post_init__(self):
+        if (self.family != 'owned-suggestion-assessment-v0'
+                or self.profile != 'contained-oci-v1'
+                or self.variant not in ('base', 'outer-whitespace')):
+            raise ValueError('assessment context family/profile/variant')
+        for raw in (self.expected_raw, self.prepare_raw, self.parent_authorization_raw,
+                    self.variant_authorization_raw):
+            if type(raw) is not bytes or not raw or len(raw) > 65536:
+                raise ValueError('assessment context bytes')
+        # Local import avoids a module-load cycle; both modules are pure.
+        from suggestion_evidence import AssessmentInputs
+        if type(self.assessment_inputs) is not AssessmentInputs:
+            raise ValueError('assessment input type')

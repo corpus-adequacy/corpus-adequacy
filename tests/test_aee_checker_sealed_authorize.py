@@ -415,7 +415,10 @@ class SequenceAndDisposition(unittest.TestCase):
     def test_removing_exact_key_check_from_sequence_validator_bites(self):
         src = inspect.getsource(auth.require_authorized_sequence)
         self.assertTrue("_exact(" in src or "exact_object(" in src, src)
-        self.assertIn("set(", inspect.getsource(common.exact_object))
+        steps = list(auth.required_sequence(_sites()))
+        steps[0] = dict(steps[0], surplus=True)
+        with self.assertRaises(auth.AuthorizeError):
+            auth.require_authorized_sequence(steps)
 
     def test_right_ids_with_wrong_kind_or_operator_are_refused(self):
         steps = list(auth.required_sequence(_sites()))

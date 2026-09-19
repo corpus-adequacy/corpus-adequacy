@@ -248,6 +248,45 @@ def execution_identity(root: Path, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> d
     return identity
 
 
+def assessment_execution_identity(root: Path) -> dict:
+    """Measure the closed assessment Source from immutable HEAD-bound raw bytes."""
+    import suggestion_evidence as evidence
+    import suggestion_readback as readback
+    root = Path(root)
+    paths = evidence.SOURCE_PATHS
+    def git(*args):
+        try:
+            return _git_ok(['-C', str(root), *args], root, 5)
+        except PrepareError:
+            evidence.refuse('binding', 'source-identity')
+    def clean():
+        if git('status', '--porcelain', '--untracked-files=normal', '--', *paths):
+            evidence.refuse('binding', 'source-identity')
+    clean()
+    commit = git('rev-parse', 'HEAD')
+    if len(commit) != 40:
+        evidence.refuse('binding', 'source-identity')
+    aggregate = hashlib.sha256()
+    files = []
+    for name in paths:
+        parts = readback._absolute_parts(root / name)
+        try:
+            with readback._directory(parts[:-1]) as parent:
+                raw = readback._read_file(parent, parts[-1], remaining=ca.OUTPUT_CAP_BYTES,
+                                          cap=ca.OUTPUT_CAP_BYTES, seen=set())
+        except OSError:
+            evidence.refuse('binding', 'source-identity')
+        object_id = hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+        if git('rev-parse', 'HEAD:'+name) != object_id:
+            evidence.refuse('binding', 'source-identity')
+        aggregate.update(name.encode()+b'\0'+str(len(raw)).encode()+b'\0'+raw)
+        files.append({'path': name, 'sha256': hashlib.sha256(raw).hexdigest()})
+    clean()
+    if git('rev-parse', 'HEAD') != commit:
+        evidence.refuse('binding', 'source-identity')
+    return {'commit': commit, 'content_sha256': aggregate.hexdigest(), 'files': files}
+
+
 def record_toolchain(toolchain: dict) -> dict:
     return require_vendor_toolchain(toolchain)
 
@@ -263,6 +302,44 @@ def resolve_prepare_image(image_id, *, root: Path,
         return build_inert_image(container_context(root, contract=contract))
     require_local_image(image_id)
     return require_image_id(image_id)
+
+
+def prepare_owned_assessment_runtime(*, image_id, materialized):
+    """Observe an explicitly local inert image; never build or run a candidate."""
+    import suggestion_evidence as evidence
+    require_image_id(image_id)
+    if image_id == materialized['toolchain']['image_id']:
+        raise PrepareError('assessment probe and candidate image must differ')
+    require_docker_ready()
+    require_local_image(image_id)
+    mounts={'input':materialized['corpus'],'vendor':materialized['vendor'],'tool':materialized['tool']}
+    with tempfile.TemporaryDirectory() as scratch:
+        pre_mounts={name:Path(scratch)/name for name in ('input','vendor','tool')}
+        for path in pre_mounts.values():path.mkdir()
+        network_control=run_inert_probe(image_id=image_id,mode='network',mounts=pre_mounts,
+            name_prefix='owned-assessment-prep-',sealed=False)
+    probes=[]
+    for mechanism in PROBE_MECHANISMS:
+        if mechanism=='network-off':
+            control=network_control
+            refusal=run_inert_probe(image_id=image_id,mode='network',mounts=mounts,
+                name_prefix='owned-assessment-prep-',sealed=True)
+        else:
+            control_mode,refusal_mode=SEALED_PROBE_PAIRS[mechanism]
+            control=run_inert_probe(image_id=image_id,mode=control_mode,mounts=mounts,
+                name_prefix='owned-assessment-prep-',sealed=True)
+            refusal=run_inert_probe(image_id=image_id,mode=refusal_mode,mounts=mounts,
+                name_prefix='owned-assessment-prep-',sealed=True)
+        probes.append(record_probe_pair(mechanism,control,refusal))
+    runtime={'toolchain':record_toolchain(materialized['toolchain']),
+        'image':{'id':image_id,'id_scope':'host-local','kind':'inert-probe','platform':image_platform(image_id)},
+        'candidate_profile':dict(CANDIDATE_RESOURCE_PROFILE_V2),'probe_evidence':probes,
+        'network':dict(NETWORK_CUTOFF),'oci':OCI_CONTRACT,'ceilings':dict(DECLARED_CEILINGS),
+        'materialize_ceilings':dict(MATERIALIZE_CEILINGS),
+        'runtime':{'docker':docker_bounded(['version','--format','{{.Server.Version}}']).decode('utf-8').strip(),
+                   'observation':'host-local; not a portable bound'}}
+    evidence.require_runtime_preparation(runtime)
+    return runtime
 
 
 def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = None,

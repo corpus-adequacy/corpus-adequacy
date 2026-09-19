@@ -185,7 +185,7 @@ class InsideTheExecutionIdentity(unittest.TestCase):
                 imported.update(alias.name.split(".")[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported.add(node.module.split(".")[0])
-        self.assertEqual(imported, {"__future__", "re", "sys", "pathlib", "contained_oci"})
+        self.assertEqual(imported, {"__future__", "re", "contained_contract"})
         source = (ROOT / "measurements" / "kernel_readback.py").read_text(encoding="utf-8")
         for call in ("open(", "read_bytes(", "read_text(", "subprocess"):
             self.assertNotIn(call, source)

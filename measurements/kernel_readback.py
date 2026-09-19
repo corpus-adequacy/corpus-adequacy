@@ -26,14 +26,7 @@ What a read-back can and cannot say:
 from __future__ import annotations
 
 import re
-import sys
-from pathlib import Path
-
-_HERE = Path(__file__).resolve().parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
-
-import contained_oci as contained  # noqa: E402
+import contained_contract as contained
 
 READBACK_SCHEMA = "corpus-adequacy.kernel-readback.v0"
 READBACK_FIELDS = ("memory_max", "memory_swap_max", "pids_max", "cpu_max",
@@ -167,16 +160,19 @@ def cgroup_v2_swap(memory_swap_bytes: int, memory_bytes: int) -> int:
 
 def expected_readback(profile) -> dict:
     """What the kernel should hold for a validated `resource-profile.v2`."""
-    checked = contained.require_resource_profile_v2(profile)
-    return {
-        "memory_max": checked["memory_bytes"],
-        "memory_swap_max": cgroup_v2_swap(checked["memory_swap_bytes"], checked["memory_bytes"]),
-        "pids_max": checked["pids"],
-        # The one shared mapping from the v2 rate, so argv, comparator and read-back cannot drift.
-        "cpu_max": [contained.cpu_quota_usec(checked), contained.CPU_PERIOD_USEC],
-        "nofile_soft": checked["nofile_soft"],
-        "nofile_hard": checked["nofile_hard"],
-    }
+    try:
+        checked = contained.require_resource_profile_v2(profile)
+        return {
+            "memory_max": checked["memory_bytes"],
+            "memory_swap_max": cgroup_v2_swap(checked["memory_swap_bytes"], checked["memory_bytes"]),
+            "pids_max": checked["pids"],
+            # The one shared mapping from the v2 rate, so argv, comparator and read-back cannot drift.
+            "cpu_max": [contained.cpu_quota_usec(checked), contained.CPU_PERIOD_USEC],
+            "nofile_soft": checked["nofile_soft"],
+            "nofile_hard": checked["nofile_hard"],
+        }
+    except contained.ContractError as exc:
+        raise ReadbackError(str(exc)) from exc
 
 
 def observe(files: dict) -> dict:

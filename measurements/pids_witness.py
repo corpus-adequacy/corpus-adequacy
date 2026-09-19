@@ -210,6 +210,7 @@ IMAGE_INDEX = ("docker.io/library/rust@sha256:"
 EXECUTION_PATHS = (
     ".github/workflows/pids-witness.yml",
     "bounded_run.py",
+    "contained_contract.py",
     "corpus_adequacy.py",
     "isolated_tree.py",
     "measurements/contained_oci.py",

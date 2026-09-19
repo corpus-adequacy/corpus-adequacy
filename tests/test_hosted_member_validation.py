@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from tests.step_fixtures import sealed_step  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -615,30 +616,21 @@ class MemberValidationMutations(unittest.TestCase):
             self.assertEqual(leaked["publication_permission"], "permitted")
 
     def test_mutation_omit_rebuilt_comparison_is_red(self):
-        """Omission of rebuilt-vs-original equality check in validate_envelope_record must fail."""
-        original = Path(env_mod.__file__).read_text(encoding="utf-8")
+        """Removing the shared production comparison reaches the legacy consumer."""
+        original = Path(env_mod._evidence.__file__).read_text(encoding="utf-8")
         cmp_snippet = (
             "    if rebuilt != record:\n"
-            '        raise EnvelopeError("envelope_semantic_mismatch")\n'
+            '        raise EnvelopeContractError("envelope_semantic_mismatch")\n'
         )
-        self.assertIn(
-            cmp_snippet, original,
-            "comparison snippet not found in source; harness maintenance required",
-        )
-        mutated = original.replace(cmp_snippet, "    pass  # mutated: comparison omitted\n", 1)
-        bad_mod = _load_mutated_module(
-            mutated, "mut_omit_comparison", "effective_envelope.py"
-        )
-
+        self.assertIn(cmp_snippet, original)
+        mutated = original.replace(cmp_snippet, "    pass  # comparison omitted\n", 1)
+        bad_mod = _load_mutated_module(mutated, "mut_omit_comparison", "suggestion_evidence.py")
         doc = _valid_envelope_record()
-        doc["cleanup"] = "remove-failed"  # stale permitted
-
-        # Unmutated module rejects stale permission
+        doc["cleanup"] = "remove-failed"
         with self.assertRaises(env_mod.EnvelopeError):
             env_mod.validate_envelope_record(doc)
-
-        # Mutated module accepts stale permission
-        passed = bad_mod.validate_envelope_record(doc)
+        with mock.patch.object(env_mod, "_evidence", bad_mod):
+            passed = env_mod.validate_envelope_record(doc)
         self.assertEqual(passed["publication_permission"], "permitted")
 
     def test_mutation_noop_comment_control_stays_green(self):

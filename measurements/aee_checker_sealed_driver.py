@@ -9,6 +9,8 @@ contained-oci-v1) and authorize-v0 bytes supplied by the caller.
 
 from __future__ import annotations
 
+import suggestion_evidence as assessment_evidence
+
 import hashlib
 import sys
 from pathlib import Path
@@ -89,7 +91,9 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
                    pins_dir: Path, materialize_dest: Path, root: Path,
                    execution_profile, transport=None,
                    envelope_dest: Path | None = None,
-                   diagnostic_sink=None,
+                   diagnostic_sink=None, assessment_context=None,
+                   assessment_prepare_dir=None, assessment_backend_wrapper=None,
+                   assessment_control_observer=None,
                    contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     """Validate, rematerialize, then invoke the sole generic process engine.
 
@@ -98,6 +102,16 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
     and before the execution identity; the same profile then builds the backend and reaches
     the funnel, and the engine refuses a backend that declares any other.
     """
+    admitted = assessment_evidence.admit_assessment_call(
+        assessment_context, execution_profile, contract, prepare_raw,
+        authorization_raw=authorize_raw)
+    if admitted is not None:
+        return _run_owned_assessment(
+            context=assessment_context, prepare=admitted, contract=contract,
+            root=Path(root), prepare_dir=assessment_prepare_dir,
+            materialize_dest=Path(materialize_dest), pins_dir=Path(pins_dir),
+            envelope_dest=envelope_dest, transport=transport,
+            backend_wrapper=assessment_backend_wrapper, control_observer=assessment_control_observer)
     try:
         validate_authorize(authorize_raw, prepare_raw, contract=contract)
         prepare = load_prepare_for_profile(
@@ -168,6 +182,45 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
     except (AuthorizeError, PrepareError, ca.ManifestError, execute.ExecuteError,
             envelope.EnvelopeError, collection.CollectionError) as exc:
         raise DriverError(str(exc)) from exc
+
+
+def _run_owned_assessment(*, context, prepare, contract, root, prepare_dir,
+                          materialize_dest, pins_dir, envelope_dest, transport,
+                          backend_wrapper, control_observer):
+    from aee_checker_sealed_run import assessment_execution_identity
+    from aee_checker_sealed_materialize import copy_owned_assessment_preparation
+    if assessment_execution_identity(root) != prepare['source']:
+        assessment_evidence.refuse('binding', 'source-identity')
+    if prepare_dir is None or envelope_dest is None:
+        assessment_evidence.refuse('input', 'argument-invalid')
+    # Actual source is measured before rematerialization and backend construction.
+    materialized=copy_owned_assessment_preparation(prepare_dir,materialize_dest,context=context)
+    evidence=dict(context.assessment_inputs.evidence_members)
+    for name in ('control.json','sites.json','manifest.json','pins.json'):
+        raw=verify_file_digest(pins_dir/name,
+            assessment_evidence.digest(evidence[context.variant+'/pins/'+name]))
+    manifest_raw=evidence[context.variant+'/pins/manifest.json']
+    manifest_path=pins_dir/'manifest.json'
+    manifest=ca.load_manifest_bytes(manifest_raw,manifest_path,path_root=materialize_dest)
+    ledger=collection.Ledger(max_members=4)
+    backend=runtime.make_sealed_backend(prepare_raw=context.prepare_raw,materialized=materialized,
+        execution_profile=context.profile,transport=transport,envelope_sink=lambda record: None,
+        ledger=ledger,contract=contract,assessment_context=context)
+    if backend_wrapper is not None:
+        backend=backend_wrapper(backend,ledger)
+    try:
+        report=execute.run_execution_funnel(authorize_raw=context.variant_authorization_raw,
+            prepare_raw=context.prepare_raw,pins_dir=pins_dir,manifest=manifest,
+            manifest_path=manifest_path,execution_backend=backend,execution_profile=context.profile,
+            contract=contract,assessment_context=context,control_observer=control_observer)
+    except BaseException as primary:
+        try:
+            collection.write_collection(ledger,Path(envelope_dest),report_sha256=None)
+        except BaseException as cleanup:
+            preserve_cleanup_failure(primary,'assessment collection',cleanup)
+        raise
+    collection.write_collection(ledger,Path(envelope_dest),report_sha256=None)
+    return report
 
 
 def main(argv: list[str]) -> int:
