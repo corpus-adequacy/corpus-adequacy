@@ -193,6 +193,8 @@ def producer_workspace(test):
     return base,source,basis,git
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class ProducerSourceIdentity(unittest.TestCase):
     def test_real_source_measurement_and_dirty_missing_untracked_refusals(self):
         import aee_checker_sealed_run as run
@@ -703,6 +705,8 @@ class RealDriverEngine(OfflinePreparation):
         self.assertEqual(index['attempts'],4)
 
 
+@unittest.skipUnless(hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd
+                     and os.scandir in os.supports_fd, 'safe descriptor filesystem required')
 class ProducerJournal(unittest.TestCase):
     def test_started_is_durable_before_call_and_exact_return_is_retained(self):
         import tempfile
