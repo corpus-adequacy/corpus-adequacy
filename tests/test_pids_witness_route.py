@@ -301,6 +301,16 @@ class TheWorkflow(unittest.TestCase):
                       self.text)
 
 
+class TheReadmeReadback(unittest.TestCase):
+    def test_the_attestation_command_names_the_witness_predicate_type(self):
+        # `gh attestation verify` looks only for SLSA provenance unless told otherwise, so a
+        # reader following a command without the witness predicate type gets a 404 (#197).
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("--predicate-type %s" % pw.PREDICATE_TYPE, readme)
+        self.assertIn("--signer-workflow corpus-adequacy/corpus-adequacy/"
+                      ".github/workflows/pids-witness.yml", readme)
+
+
 class TheCommandLine(unittest.TestCase):
     def test_identity_prints_the_digest_of_this_checkout(self):
         proc = subprocess.run([sys.executable, "-B", str(ROOT / "measurements" / "pids_witness.py"),
