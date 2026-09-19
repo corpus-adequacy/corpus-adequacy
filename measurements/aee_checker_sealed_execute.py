@@ -108,6 +108,7 @@ def bind_authorized_mutation_order(*, manifest: dict, sites: dict,
 def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
                          pins_dir: Path, manifest: dict, manifest_path: Path,
                          execution_backend, execution_profile, assessment_context=None,
+                         control_observer=None,
                          contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     """Admit the authorized PREPARE under the resolved profile, then run the engine.
 
@@ -139,6 +140,7 @@ def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
         mutation_order=order,
         separate_build_phase=False,
         execution_profile=execution_profile,
+        **({'control_observer':control_observer} if control_observer is not None else {}),
     )
 
 

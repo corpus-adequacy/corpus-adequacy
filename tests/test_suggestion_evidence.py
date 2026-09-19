@@ -296,7 +296,7 @@ def wire_execution(inputs):
 class FinalReview(unittest.TestCase):
     def test_indexed_gate7_cannot_be_replaced_by_final_review_verdict(self):
         inputs, (observations, views, controls, journal) = full_fixture()
-        gates = ev.evaluate_assessment(inputs, observations, views, controls, journal)
+        gates = evaluate_fixture(inputs, observations, views, controls, journal)
         proposal_hash = ev.digest(dict(inputs.retained_members)['proposal.json'])
         review = {'schema': ev.PREFIX+'review.v0', 'proposal_sha256': proposal_hash,
                   'evidence_index_sha256': 'a'*64, 'reviewer': 'synthetic-only',
@@ -317,7 +317,7 @@ class FinalReview(unittest.TestCase):
 
     def test_review_is_separate_and_cannot_rewrite_gates(self):
         inputs, execution=full_fixture()
-        gates=ev.evaluate_assessment(inputs,*execution); before=gates.gates_raw
+        gates=evaluate_fixture(inputs,*execution); before=gates.gates_raw
         proposal_hash=ev.digest(dict(inputs.retained_members)['proposal.json'])
         review={'schema':ev.PREFIX+'review.v0','proposal_sha256':proposal_hash,
             'evidence_index_sha256':'a'*64,'reviewer':'synthetic-only','decision':'accept','rationale':'test'}
@@ -364,7 +364,7 @@ class ProjectionParity(unittest.TestCase):
 class FullEvaluation(unittest.TestCase):
     def test_same_full_evaluator_computes_all_nine_gates(self):
         inputs, execution = full_fixture()
-        gates = ev.evaluate_assessment(inputs, *execution)
+        gates = evaluate_fixture(inputs, *execution)
         self.assertEqual([g['id'] for g in ev.decode(gates.gates_raw)], list(range(9)))
         self.assertEqual([g['status'] for g in ev.decode(gates.gates_raw)], ['passed']*7+['not-run', 'passed'])
 
@@ -380,7 +380,7 @@ class FullEvaluation(unittest.TestCase):
                  for n,slot in enumerate(plan['slots'])]
         controls=[{'variant':v,'positive':'not-run','inert':'not-run','barrier':'stop'} for v in ev.VARIANTS]
         with self.assertRaises(ev.EvidenceError) as caught:
-            ev.evaluate_assessment(inputs,[],[],controls,journal)
+            evaluate_fixture(inputs,[],[],controls,journal)
         self.assertEqual((caught.exception.stage,caught.exception.code),('replay','preflight-refused'))
 
     def test_view_and_journal_reference_bytes_are_checked(self):
@@ -390,7 +390,7 @@ class FullEvaluation(unittest.TestCase):
             target = views[0] if which == 'view' else journal[1]
             target['observation']['sha256'] = '0'*64
             with self.subTest(which=which), self.assertRaises(ev.EvidenceError):
-                ev.evaluate_assessment(inputs, obs, views, controls, journal)
+                evaluate_fixture(inputs, obs, views, controls, journal)
 
 
 class Evaluation(unittest.TestCase):
@@ -634,11 +634,11 @@ class FullEnvelopeEvaluation(unittest.TestCase):
     def test_faithful_missing_envelopes_prevent_eligibility(self):
         self.require_boundary()
         inputs,wire=full_fixture(state='no-envelope')
-        result=ev.evaluate_assessment(inputs,*wire)
+        result=evaluate_fixture(inputs,*wire)
         self.assertEqual(result.envelope_unproved_slots,tuple(range(8)))
         kwargs=dict(proposal_sha256=ev.digest(dict(inputs.retained_members)['proposal.json']),evidence_index_sha256='a'*64)
         self.assertEqual(ev.derive_disposition(result,wire[0],None,**kwargs),'unproved')
-        healthy,wire=full_fixture();result=ev.evaluate_assessment(healthy,*wire)
+        healthy,wire=full_fixture();result=evaluate_fixture(healthy,*wire)
         self.assertEqual(result.envelope_unproved_slots,())
         self.assertEqual(ev.derive_disposition(result,wire[0],None,**kwargs),'pending-review')
 
@@ -652,7 +652,7 @@ class FullEnvelopeEvaluation(unittest.TestCase):
         wire[0][3]['envelope'].update(sha256=ev.digest(members[path]),bytes=len(members[path]))
         inputs=dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items())))
         wire=refresh_wire(inputs,wire[0],wire[2],wire[3])
-        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        with self.assertRaises(ev.EvidenceError) as caught:evaluate_fixture(inputs,*wire)
         self.assertEqual((caught.exception.stage,caught.exception.code),('envelope','contradictory-record'))
 
     def test_missing_claimed_member_is_not_faithful_no_envelope(self):
@@ -660,7 +660,7 @@ class FullEnvelopeEvaluation(unittest.TestCase):
         import dataclasses
         inputs,wire=full_fixture();members=dict(inputs.evidence_members);del members['base/envelopes/member-0003.json']
         inputs=dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items())))
-        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        with self.assertRaises(ev.EvidenceError) as caught:evaluate_fixture(inputs,*wire)
         self.assertEqual((caught.exception.stage,caught.exception.code),('filesystem','missing-member'))
 
     def test_complete_preflight_refusal_never_returns_finalized_gates(self):
@@ -669,7 +669,7 @@ class FullEnvelopeEvaluation(unittest.TestCase):
         inputs,wire=full_fixture();members=dict(inputs.retained_members)
         plan=ev.decode(members['plan.json']);plan['adapter_sha256']='d'*64;members['plan.json']=ev.encode(plan)
         inputs=dataclasses.replace(inputs,retained_members=tuple(sorted(members.items())))
-        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        with self.assertRaises(ev.EvidenceError) as caught:evaluate_fixture(inputs,*wire)
         self.assertEqual((caught.exception.stage,caught.exception.code),('replay','preflight-refused'))
 
     def test_audit_does_not_consult_external_expected(self):
@@ -677,7 +677,7 @@ class FullEnvelopeEvaluation(unittest.TestCase):
         from unittest import mock
         inputs,wire=full_fixture()
         with mock.patch.object(ev,'require_expected',side_effect=AssertionError('audit consulted approval')):
-            self.assertEqual(ev.evaluate_assessment(inputs,*wire).envelope_unproved_slots,())
+            self.assertEqual(evaluate_fixture(inputs,*wire).envelope_unproved_slots,())
 
 
 class CollectionSnapshot(unittest.TestCase):
@@ -735,7 +735,7 @@ class CollectionSnapshot(unittest.TestCase):
         inputs,wire=full_fixture();members=dict(inputs.evidence_members)
         members['base/prepare.json']=b' '+members['base/prepare.json']
         with self.assertRaises(ev.EvidenceError) as caught:
-            ev.evaluate_assessment(dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items()))),*wire)
+            evaluate_fixture(dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items()))),*wire)
         self.assertEqual(caught.exception.code,'noncanonical-new-object')
 
 
@@ -757,7 +757,7 @@ class FullEnvelopeBindings(unittest.TestCase):
             publication_permission='withheld',withheld_reason='envelope_status')
         for mutate in (withheld,unverified):
             inputs,wire=alter_last_member(*full_fixture(),mutate)
-            self.assertEqual(ev.evaluate_assessment(inputs,*wire).envelope_unproved_slots,(3,))
+            self.assertEqual(evaluate_fixture(inputs,*wire).envelope_unproved_slots,(3,))
 
     def test_envelope_cross_bindings_are_checked_after_coherent_rehash(self):
         def change_image(d):
@@ -765,12 +765,12 @@ class FullEnvelopeBindings(unittest.TestCase):
         for mutate in (lambda d:d.update(prepare_sha256='c'*64),
                        lambda d:d.update(execution_commit='c'*40),change_image):
             inputs,wire=alter_last_member(*full_fixture(),mutate)
-            with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+            with self.assertRaises(ev.EvidenceError) as caught:evaluate_fixture(inputs,*wire)
             self.assertEqual((caught.exception.stage,caught.exception.code),('binding','envelope-binding'))
 
     def test_kernel_mismatch_is_not_hidden_by_hashes(self):
         inputs,wire=alter_last_member(*full_fixture(),lambda d:d['effective']['kernel'].update(pids_max=513))
-        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        with self.assertRaises(ev.EvidenceError) as caught:evaluate_fixture(inputs,*wire)
         self.assertEqual((caught.exception.stage,caught.exception.code),('envelope','contradictory-record'))
 
     def test_index_identity_null_only_without_recorded_members(self):
@@ -779,13 +779,13 @@ class FullEnvelopeBindings(unittest.TestCase):
             name='base/envelopes/collection-index.v0.json';index=ev.decode(members[name])
             index['prepare_sha256']=None if state=='recorded' else 'a'*64;members[name]=ev.encode(index)
             with self.assertRaises(ev.EvidenceError) as caught:
-                ev.evaluate_assessment(dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items()))),*wire)
+                evaluate_fixture(dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items()))),*wire)
             self.assertEqual(caught.exception.code,'envelope-binding')
 
     def test_a_present_reference_cannot_point_to_a_different_member(self):
         inputs,wire=full_fixture();wire[0][3]['envelope']=copy.deepcopy(wire[0][2]['envelope'])
         wire=refresh_wire(inputs,wire[0],wire[2],wire[3])
-        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        with self.assertRaises(ev.EvidenceError) as caught:evaluate_fixture(inputs,*wire)
         self.assertEqual(caught.exception.code,'envelope-binding')
 
     def test_complete_stop_empty_variant_and_raised_null_collection(self):
@@ -808,14 +808,14 @@ class FullEnvelopeBindings(unittest.TestCase):
                 collection.write_collection(ledger,directory,report_sha256=None)
                 members[v+'/envelopes/collection-index.v0.json']=(Path(directory)/'collection-index.v0.json').read_bytes()
         inputs=dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items())))
-        wire=refresh_wire(inputs,obs,controls,journal);result=ev.evaluate_assessment(inputs,*wire)
+        wire=refresh_wire(inputs,obs,controls,journal);result=evaluate_fixture(inputs,*wire)
         self.assertEqual(result.envelope_unproved_slots,(0,))
         self.assertEqual(ev.decode(result.gates_raw)[8]['status'],'passed')
         # Raised ledger cannot accompany a returned observation.
         obs[0].update(state='returned',raw=observation()['raw'],exception_kind=None)
         journal[1].update(event='returned',reason=None)
         with self.assertRaises(ev.EvidenceError):
-            ev.evaluate_assessment(inputs,*refresh_wire(inputs,obs,controls,journal))
+            evaluate_fixture(inputs,*refresh_wire(inputs,obs,controls,journal))
 
     def test_structural_inventory_pins_and_both_variant_authorizations(self):
         inputs,wire=full_fixture();original=dict(inputs.evidence_members)
@@ -828,9 +828,47 @@ class FullEnvelopeBindings(unittest.TestCase):
         for mutate in changes:
             members=dict(original);mutate(members)
             with self.subTest(mutate=mutate),self.assertRaises(ev.EvidenceError):
-                ev.evaluate_assessment(dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items()))),*wire)
+                evaluate_fixture(dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items()))),*wire)
 
     def test_engine_disagreement_remains_semantic_not_envelope_unproved(self):
         inputs,wire=full_fixture();wire[2][0]['positive']='failed'
-        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        with self.assertRaises(ev.EvidenceError) as caught:evaluate_fixture(inputs,*wire)
         self.assertEqual((caught.exception.stage,caught.exception.code),('replay','engine-control-mismatch'))
+
+
+def fixture_engine_events(observations, controls):
+    """Synthetic engine inputs for fixtures; never production-derived evidence."""
+    events=[]
+    for observation in observations:
+        slot=observation['slot']
+        if slot['ordinal'] not in (1,2):continue
+        polarity='positive' if slot['ordinal']==1 else 'inert'
+        disposition=controls[ev.VARIANTS.index(slot['variant'])][polarity]
+        interrupted=observation['state']!='returned'
+        verdict=None
+        if not interrupted:
+            if observation['raw']['raised']:verdict='control-error'
+            elif disposition=='passed':verdict='control-killed' if polarity=='positive' else 'control-unchanged'
+            else:verdict='control-SURVIVED' if polarity=='positive' else 'control-MOVED'
+        events.append({'variant':slot['variant'],'ordinal':slot['ordinal'],'group':'independent',
+            'id':slot['step']['id'],'polarity':polarity,
+            'state':'interrupted' if interrupted else 'evaluated','verdict':verdict})
+    return events
+
+
+def evaluate_fixture(inputs,observations,views,controls,journal):
+    return ev.evaluate_assessment(inputs,observations,views,controls,journal,
+        engine_control_events=fixture_engine_events(observations,controls))
+
+
+class EngineEventEvidence(unittest.TestCase):
+    def test_actual_event_domain_is_required_separately_from_control_summary(self):
+        inputs,wire=full_fixture();events=fixture_engine_events(wire[0],wire[2])
+        result=ev.evaluate_assessment(inputs,*wire,engine_control_events=events)
+        self.assertEqual(ev.decode(result.gates_raw)[8]['status'],'passed')
+        attacks=[[],events[1:],list(reversed(events)),events+[events[0]]]
+        for field,value in (('state','interrupted'),('verdict',None),('ordinal',2),('group','other')):
+            changed=copy.deepcopy(events);changed[0][field]=value;attacks.append(changed)
+        for attack in attacks:
+            with self.subTest(attack=attack),self.assertRaises(ev.EvidenceError):
+                ev.evaluate_assessment(inputs,*wire,engine_control_events=attack)

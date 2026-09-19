@@ -304,6 +304,44 @@ def resolve_prepare_image(image_id, *, root: Path,
     return require_image_id(image_id)
 
 
+def prepare_owned_assessment_runtime(*, image_id, materialized):
+    """Observe an explicitly local inert image; never build or run a candidate."""
+    import suggestion_evidence as evidence
+    require_image_id(image_id)
+    if image_id == materialized['toolchain']['image_id']:
+        raise PrepareError('assessment probe and candidate image must differ')
+    require_docker_ready()
+    require_local_image(image_id)
+    mounts={'input':materialized['corpus'],'vendor':materialized['vendor'],'tool':materialized['tool']}
+    with tempfile.TemporaryDirectory() as scratch:
+        pre_mounts={name:Path(scratch)/name for name in ('input','vendor','tool')}
+        for path in pre_mounts.values():path.mkdir()
+        network_control=run_inert_probe(image_id=image_id,mode='network',mounts=pre_mounts,
+            name_prefix='owned-assessment-prep-',sealed=False)
+    probes=[]
+    for mechanism in PROBE_MECHANISMS:
+        if mechanism=='network-off':
+            control=network_control
+            refusal=run_inert_probe(image_id=image_id,mode='network',mounts=mounts,
+                name_prefix='owned-assessment-prep-',sealed=True)
+        else:
+            control_mode,refusal_mode=SEALED_PROBE_PAIRS[mechanism]
+            control=run_inert_probe(image_id=image_id,mode=control_mode,mounts=mounts,
+                name_prefix='owned-assessment-prep-',sealed=True)
+            refusal=run_inert_probe(image_id=image_id,mode=refusal_mode,mounts=mounts,
+                name_prefix='owned-assessment-prep-',sealed=True)
+        probes.append(record_probe_pair(mechanism,control,refusal))
+    runtime={'toolchain':record_toolchain(materialized['toolchain']),
+        'image':{'id':image_id,'id_scope':'host-local','kind':'inert-probe','platform':image_platform(image_id)},
+        'candidate_profile':dict(CANDIDATE_RESOURCE_PROFILE_V2),'probe_evidence':probes,
+        'network':dict(NETWORK_CUTOFF),'oci':OCI_CONTRACT,'ceilings':dict(DECLARED_CEILINGS),
+        'materialize_ceilings':dict(MATERIALIZE_CEILINGS),
+        'runtime':{'docker':docker_bounded(['version','--format','{{.Server.Version}}']).decode('utf-8').strip(),
+                   'observation':'host-local; not a portable bound'}}
+    evidence.require_runtime_preparation(runtime)
+    return runtime
+
+
 def prepare(pins_dir: Path, dest: Path, *, root: Path, adapter: Path | None = None,
             image_id=None, schema=PREPARE_SCHEMA,
             contract=AEE_CHECKER_SEALED_CONTRACT) -> bytes:

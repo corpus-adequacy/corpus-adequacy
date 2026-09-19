@@ -93,6 +93,7 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
                    envelope_dest: Path | None = None,
                    diagnostic_sink=None, assessment_context=None,
                    assessment_prepare_dir=None, assessment_backend_wrapper=None,
+                   assessment_control_observer=None,
                    contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     """Validate, rematerialize, then invoke the sole generic process engine.
 
@@ -110,7 +111,7 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
             root=Path(root), prepare_dir=assessment_prepare_dir,
             materialize_dest=Path(materialize_dest), pins_dir=Path(pins_dir),
             envelope_dest=envelope_dest, transport=transport,
-            backend_wrapper=assessment_backend_wrapper)
+            backend_wrapper=assessment_backend_wrapper, control_observer=assessment_control_observer)
     try:
         validate_authorize(authorize_raw, prepare_raw, contract=contract)
         prepare = load_prepare_for_profile(
@@ -185,7 +186,7 @@ def run_authorized(*, authorize_raw: bytes, prepare_raw: bytes,
 
 def _run_owned_assessment(*, context, prepare, contract, root, prepare_dir,
                           materialize_dest, pins_dir, envelope_dest, transport,
-                          backend_wrapper):
+                          backend_wrapper, control_observer):
     from aee_checker_sealed_run import assessment_execution_identity
     from aee_checker_sealed_materialize import copy_owned_assessment_preparation
     if assessment_execution_identity(root) != prepare['source']:
@@ -211,7 +212,7 @@ def _run_owned_assessment(*, context, prepare, contract, root, prepare_dir,
         report=execute.run_execution_funnel(authorize_raw=context.variant_authorization_raw,
             prepare_raw=context.prepare_raw,pins_dir=pins_dir,manifest=manifest,
             manifest_path=manifest_path,execution_backend=backend,execution_profile=context.profile,
-            contract=contract,assessment_context=context)
+            contract=contract,assessment_context=context,control_observer=control_observer)
     except BaseException as primary:
         try:
             collection.write_collection(ledger,Path(envelope_dest),report_sha256=None)

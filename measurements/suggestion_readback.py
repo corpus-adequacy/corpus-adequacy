@@ -45,8 +45,17 @@ def _assert_same(before, after):
 
 
 @contextmanager
-def _child(parent, name, *, directory):
+def _child(parent, name, *, directory, ancestor=False):
     """Open one component and detect replacement between stat and open/close."""
+    def same(before, after):
+        if ancestor:
+            # Sibling writes change directory times/size/link count, not the
+            # selected path identity. Retain replacement/type/owner/mode checks.
+            identity=lambda st:(st.st_dev,st.st_ino,st.st_mode,st.st_uid,st.st_gid)
+            if identity(before)!=identity(after):
+                ev.refuse('filesystem','nonregular-member')
+        else:
+            _assert_same(before,after)
     before = _stat_at(parent, name)
     check = stat.S_ISDIR if directory else stat.S_ISREG
     if not check(before.st_mode) or (not directory and before.st_nlink != 1):
@@ -59,10 +68,10 @@ def _child(parent, name, *, directory):
         opened = os.fstat(fd)
         if not check(opened.st_mode) or (not directory and opened.st_nlink != 1):
             ev.refuse('filesystem', 'nonregular-member')
-        _assert_same(before, opened)
+        same(before, opened)
         yield fd
-        _assert_same(opened, os.fstat(fd))
-        _assert_same(opened, _stat_at(parent, name))
+        same(opened, os.fstat(fd))
+        same(opened, _stat_at(parent, name))
     finally:
         os.close(fd)
 
@@ -84,8 +93,9 @@ def _directory(parts):
     try:
         with ExitStack() as stack:
             current = fd
-            for part in parts:
-                current = stack.enter_context(_child(current, part, directory=True))
+            for index,part in enumerate(parts):
+                current = stack.enter_context(_child(current, part, directory=True,
+                    ancestor=index<len(parts)-1))
             yield current
     finally:
         os.close(fd)

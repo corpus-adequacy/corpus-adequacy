@@ -753,7 +753,49 @@ def evaluate_preflight(inputs):
     return gates, {'plan': plan, 'proposal': proposal, 'reference': reference, 'execution': execution}
 
 
-def evaluate_assessment(inputs, observations, views, engine_controls, journal):
+def require_engine_control_events(events, observations, controls, journal):
+    """Bind actual engine evaluations/interruption to retained attempted slots."""
+    if type(events) is not list or len(events)>4:refuse('syntax','wrong-shape')
+    entered={require_slot(o['slot']):o for o in observations if o['slot']['ordinal'] in (1,2)}
+    settlements={require_slot(e['slot']):e['event'] for e in journal
+                 if e['event'] in ('returned','exception')}
+    expected=[{'variant':name,'positive':'not-run','inert':'not-run','barrier':'stop'} for name in VARIANTS]
+    actual=[]
+    for event in events:
+        exact(event,('variant','ordinal','group','id','polarity','state','verdict'))
+        if (event['variant'] not in VARIANTS or type(event['ordinal']) is not int
+                or event['ordinal'] not in (1,2)):
+            refuse('replay','engine-control-mismatch')
+        polarity='positive' if event['ordinal']==1 else 'inert'
+        number=VARIANTS.index(event['variant'])*4+event['ordinal'];actual.append(number)
+        if (event['group']!='independent' or event['id']!='control-'+polarity
+                or event['polarity']!=polarity or number not in entered):
+            refuse('replay','engine-control-mismatch')
+        observation=entered[number]
+        if event['state']=='interrupted':
+            if (event['verdict'] is not None or observation['state'] not in ('exception','invalid-return')
+                    or settlements.get(number)!='exception'):
+                refuse('replay','engine-control-mismatch')
+            result='failed'
+        elif event['state']=='evaluated':
+            allowed=('control-killed','control-SURVIVED','control-error') if polarity=='positive' else (
+                'control-unchanged','control-MOVED','control-error')
+            if (event['verdict'] not in allowed or observation['state']!='returned'
+                    or settlements.get(number)!='returned'):
+                refuse('replay','engine-control-mismatch')
+            if observation['raw']['raised'] and event['verdict']!='control-error':
+                refuse('replay','engine-control-mismatch')
+            result='passed' if event['verdict'] in ('control-killed','control-unchanged') else 'failed'
+        else:refuse('syntax','wrong-shape')
+        expected[VARIANTS.index(event['variant'])][polarity]=result
+    if actual!=sorted(entered):refuse('replay','engine-control-mismatch')
+    for row in expected:
+        row['barrier']='continue' if row['positive']==row['inert']=='passed' else 'stop'
+    if encode(controls)!=encode(expected):refuse('replay','engine-control-mismatch')
+    return events
+
+
+def evaluate_assessment(inputs, observations, views, engine_controls, journal, *, engine_control_events):
     """Full structural replay, deliberately independent of external expectations.
 
     Arguments are decoded retained wire records. Package loading must separately
@@ -805,6 +847,7 @@ def evaluate_assessment(inputs, observations, views, engine_controls, journal):
                  for o in observations]
     gates += evaluate_execution_gates(validated['execution'], observations, projected,
                                       engine_controls, normalized_journal)
+    require_engine_control_events(engine_control_events,observations,engine_controls,journal)
     unproved = _assessment_envelopes(structure, observations)
     return AssessmentEvaluation(encode(gates), unproved)
 
@@ -1922,7 +1965,7 @@ def _check_ref(ref, members):
     if encode(ref) != encode(_raw_ref(members, ref['member'])): refuse('binding', 'member-digest')
 
 
-def decode_package(snapshot, basis):
+def _decode_assessment_frame(snapshot, basis, *, finalized):
     """Closed raw-byte/index framing followed by inputs for the one evaluator.
 
     This is not another gate judge. All assessment semantics live in
@@ -1933,7 +1976,10 @@ def decode_package(snapshot, basis):
     for path, raw in members.items():
         _, cap = package_member_kind(path)
         if len(raw)>cap: refuse('limits','member-bytes')
-    if REQUIRED_PATHS-set(members): refuse('filesystem','missing-member')
+    required = REQUIRED_PATHS if finalized else REQUIRED_PATHS-{'decision.json','receipt.json'}
+    if required-set(members): refuse('filesystem','missing-member')
+    if not finalized and {'decision.json','receipt.json','review.json'} & set(members):
+        refuse('filesystem','surplus-member')
     journal = read_journal(members['journal.jsonl'])
     # Refuse unsupported/malformed bytes before interpreting digest or gate claims.
     # This pass has no dispatch and does not read the filesystem again.
@@ -1996,7 +2042,7 @@ def decode_package(snapshot, basis):
     if (set(members)&set(OBSERVATION_PATHS)) != set(observation_paths): refuse('filesystem','surplus-member')
     if (set(members)&set(VIEW_PATHS)) != set(view_paths): refuse('filesystem','surplus-member')
     gates = _new_record(members['gates.json'],'gates.v0',
-        ('schema','plan_sha256','policy','views','engine_controls','gates'))
+        ('schema','plan_sha256','policy','views','engine_controls','engine_control_events','gates'))
     require_digest(gates['plan_sha256'])
     if gates['policy'] != POLICY: refuse('support','unsupported-policy')
     if type(gates['views']) is not list or len(gates['views'])>8: refuse('syntax','wrong-shape')
@@ -2030,29 +2076,31 @@ def decode_package(snapshot, basis):
     indexed = set(members)-FINAL_PATHS-{'review.json'}
     if set(paths)-set(members): refuse('filesystem','missing-member')
     if set(paths)!=indexed: refuse('filesystem','surplus-member')
-    decision = _new_record(members['decision.json'],'decision.v0',
-        ('schema','plan_sha256','evidence_index_sha256','gates_sha256','review_sha256','disposition'))
-    receipt = _new_record(members['receipt.json'],'receipt.v0',
-        ('schema','plan_sha256','evidence_index_sha256','decision_sha256','review_sha256',
-         'family','profile','source_content_sha256','origin'))
-    for doc in (decision,receipt):
-        for key in doc:
-            if key.endswith('_sha256') and (key!='review_sha256' or doc[key] is not None): require_digest(doc[key])
-    if decision['disposition'] not in ('eligible-for-human-corpus-PR','refused','pending-review','unproved'):
-        refuse('syntax','wrong-shape')
-    if receipt['family'] != FAMILY: refuse('support','unsupported-family')
-    if receipt['profile'] != PROFILE: refuse('support','unsupported-profile')
-    if receipt['origin'] != 'producer-reported': refuse('syntax','wrong-shape')
-    review=None
-    if 'review.json' not in members and (decision['review_sha256'] is not None
-            or receipt['review_sha256'] is not None or decision['disposition']=='eligible-for-human-corpus-PR'):
-        refuse('filesystem','missing-member')
-    if 'review.json' in members:
-        review=_new_record(members['review.json'],'review.v0',
-            ('schema','proposal_sha256','evidence_index_sha256','reviewer','decision','rationale'))
-        require_digest(review['proposal_sha256']);require_digest(review['evidence_index_sha256'])
-        text(review['reviewer']);text(review['rationale'])
-        if review['decision'] not in ('accept','reject'): refuse('syntax','wrong-shape')
+    decision=receipt=review=None
+    if finalized:
+        decision = _new_record(members['decision.json'],'decision.v0',
+            ('schema','plan_sha256','evidence_index_sha256','gates_sha256','review_sha256','disposition'))
+        receipt = _new_record(members['receipt.json'],'receipt.v0',
+            ('schema','plan_sha256','evidence_index_sha256','decision_sha256','review_sha256',
+             'family','profile','source_content_sha256','origin'))
+        for doc in (decision,receipt):
+            for key in doc:
+                if key.endswith('_sha256') and (key!='review_sha256' or doc[key] is not None): require_digest(doc[key])
+        if decision['disposition'] not in ('eligible-for-human-corpus-PR','refused','pending-review','unproved'):
+            refuse('syntax','wrong-shape')
+        if receipt['family'] != FAMILY: refuse('support','unsupported-family')
+        if receipt['profile'] != PROFILE: refuse('support','unsupported-profile')
+        if receipt['origin'] != 'producer-reported': refuse('syntax','wrong-shape')
+        review=None
+        if 'review.json' not in members and (decision['review_sha256'] is not None
+                or receipt['review_sha256'] is not None or decision['disposition']=='eligible-for-human-corpus-PR'):
+            refuse('filesystem','missing-member')
+        if 'review.json' in members:
+            review=_new_record(members['review.json'],'review.v0',
+                ('schema','proposal_sha256','evidence_index_sha256','reviewer','decision','rationale'))
+            require_digest(review['proposal_sha256']);require_digest(review['evidence_index_sha256'])
+            text(review['reviewer']);text(review['rationale'])
+            if review['decision'] not in ('accept','reject'): refuse('syntax','wrong-shape')
     plan=decode(members['plan.json'],max_bytes=65536,canonical=True)
     # Validate the external-comparison surface without replaying preflight twice.
     exact(plan, ('schema','family','proposal','reference','source','instrument_commit',
@@ -2085,8 +2133,22 @@ def decode_package(snapshot, basis):
         'decision':decision,'receipt':receipt}
 
 
-def compare_package(package):
-    """Replay once, then compare the acyclic stored evidence graph to fresh facts."""
+def decode_package(snapshot, basis):
+    """Final reader entrypoint always requires decision and receipt bytes."""
+    return _decode_assessment_frame(snapshot,basis,finalized=True)
+
+
+def decode_assessment_stage(snapshot, basis):
+    """Producer-only prefinal entrypoint rejects review/decision/receipt artifacts.
+
+    Stage selection is a trusted code call, never a package field or reader flag.
+    No placeholder final artifacts are synthesized to reuse this framing.
+    """
+    return _decode_assessment_frame(snapshot,basis,finalized=False)
+
+
+def replay_assessment_evidence(package):
+    """Common evidence graph replay before final decision/receipt comparison."""
     m=package['members'];plan_hash=digest(m['plan.json']);index=package['index']
     for ref in index['members']: _check_ref(ref,m)
     if (index['plan_sha256']!=plan_hash or index['gate_result_sha256']!=digest(m['gates.json'])
@@ -2096,9 +2158,16 @@ def compare_package(package):
     if encode(gates['views'])!=encode([_raw_ref(m,p) for p in package['view_paths']]):
         refuse('binding','member-digest')
     evaluation=evaluate_assessment(package['inputs'],package['observations'],package['views'],
-        gates['engine_controls'],package['journal'])
+        gates['engine_controls'],package['journal'],engine_control_events=gates['engine_control_events'])
     issues=[]
     if encode(gates['gates'])!=evaluation.gates_raw: issues.append(('replay','gate-mismatch','gates.json'))
+    return evaluation,issues
+
+
+def compare_package(package):
+    """Replay once, then compare stored final artifacts to fresh facts."""
+    evaluation,issues=replay_assessment_evidence(package)
+    m=package['members'];plan_hash=digest(m['plan.json'])
     disposition=derive_disposition(evaluation,package['observations'],package['review'],
         proposal_sha256=digest(m['proposal.json']),evidence_index_sha256=digest(m['evidence-index.json']))
     review_hash=digest(m['review.json']) if 'review.json' in m else None

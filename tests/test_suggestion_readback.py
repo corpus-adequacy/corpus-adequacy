@@ -201,7 +201,7 @@ class ReaderCLI(unittest.TestCase):
 
 def package_fixture(*, state='recorded', review=None, proposal_id='proposal'):
     """Synthetic final bytes; gate oracle is literal, not evaluator output."""
-    from test_suggestion_evidence import full_fixture
+    from test_suggestion_evidence import full_fixture, fixture_engine_events
     inputs, (observations, views, controls, journal) = full_fixture(state=state,proposal_id=proposal_id)
     members = dict(inputs.retained_members + inputs.evidence_members)
     plan = ev.decode(members['plan.json'])
@@ -220,7 +220,8 @@ def package_fixture(*, state='recorded', review=None, proposal_id='proposal'):
     members['journal.jsonl'] = b''.join(ev.encode(e) for e in journal)
     members['gates.json'] = ev.encode({'schema': ev.PREFIX+'gates.v0',
         'plan_sha256': ev.digest(members['plan.json']), 'policy': ev.POLICY,
-        'views': [ref(p) for p in view_paths], 'engine_controls': controls, 'gates': gates})
+        'views': [ref(p) for p in view_paths], 'engine_controls': controls,
+        'engine_control_events':fixture_engine_events(observations,controls),'gates': gates})
     rebind_final(members, review=review, disposition='unproved' if state != 'recorded' else None)
     expected = {'schema': ev.PREFIX+'expected.v0', 'plan_sha256': ev.digest(members['plan.json']),
         'source_content_sha256': plan['source']['content_sha256'],
@@ -511,6 +512,7 @@ class PackageCLI(ReaderCLI):
         gates['gates'][3].update(status='refused',reason='abnormal-execution',witnesses=[copy.deepcopy(slot)])
         for i in (4,5,6):gates['gates'][i].update(status='not-run',reason='prerequisite-refused',witnesses=[])
         for control in gates['engine_controls']:control.update(positive='not-run',inert='not-run',barrier='stop')
+        gates['engine_control_events']=[]
         self.members['gates.json']=ev.encode(gates)
         refresh_package_refs(self.members,review='accept',disposition='unproved')
         code,result=self.verify(anchored=False)
@@ -695,3 +697,37 @@ sys.argv=[{str(ROOT/'measurements/suggestion_readback.py')!r},'verify','--packag
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AncestorIdentity(unittest.TestCase):
+    def test_sibling_creation_does_not_change_selected_directory_identity(self):
+        import tempfile
+        import os
+        import suggestion_readback as reader
+        root=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        target=root/'selected';target.mkdir();(target/'data').write_bytes(b'fixed')
+        before=os.stat(root)
+        with reader._directory(reader._absolute_parts(target)) as fd:
+            (root/'unrelated-sibling').mkdir()
+            after=os.stat(root)
+            self.assertEqual((before.st_dev,before.st_ino),(after.st_dev,after.st_ino))
+            self.assertNotEqual(reader._signature(before),reader._signature(after))
+            self.assertEqual(reader._read_file(fd,'data',remaining=100,seen=set()),b'fixed')
+
+    def test_ancestor_replacement_still_refuses(self):
+        import tempfile
+        import suggestion_readback as reader
+        root=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        ancestor=root/'ancestor';ancestor.mkdir();target=ancestor/'selected';target.mkdir()
+        with self.assertRaises(ev.EvidenceError):
+            with reader._directory(reader._absolute_parts(target)):
+                ancestor.rename(root/'moved');ancestor.mkdir();(ancestor/'selected').mkdir()
+
+    def test_selected_directory_inventory_change_still_refuses(self):
+        import tempfile
+        import suggestion_readback as reader
+        root=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        target=root/'selected';target.mkdir()
+        with self.assertRaises(ev.EvidenceError):
+            with reader._directory(reader._absolute_parts(target)):
+                (target/'surplus').write_bytes(b'x')

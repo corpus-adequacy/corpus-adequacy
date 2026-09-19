@@ -52,8 +52,8 @@ class AdmissionTypes(unittest.TestCase):
                     ev.require_assessment_dispatch(family, profile, schema)
 
 
-def context_fixture():
-    inputs = prepared_inputs()
+def context_fixture(inputs=None):
+    inputs = prepared_inputs() if inputs is None else inputs
     members = dict(inputs.retained_members); plan = ev.decode(members['plan.json'])
     plan_hash = ev.digest(members['plan.json']); variant = plan['variants'][0]
     expected = {'schema': ev.PREFIX+'expected.v0', 'plan_sha256': plan_hash,
@@ -514,3 +514,233 @@ class DriverSourceAdmission(FourConsumerAdmission):
                 self.invoke('driver',context,contract,root=source)
             self.assertEqual(refusal.exception.code,'source-identity')
             self.assertEqual((old.call_count,backend.call_count),(0,0))
+
+
+class PreparationCommand(OfflinePreparation):
+    def test_real_prepare_command_binds_source_and_both_local_images(self):
+        from unittest import mock
+        from argparse import Namespace
+        import owned_suggestion_assessment as producer
+        import aee_checker_sealed_materialize as mat
+        import aee_checker_sealed_run as run
+        root,local_inputs,old_context,tc=self.inputs()
+        base,source,basis,_=producer_workspace(self)
+        identity=run.assessment_execution_identity(source)
+        retained=ev.build_assessment_plan((base/'proposal.json').read_bytes(),
+            (base/'reference.json').read_bytes(),old_context.assessment_inputs.basis_members,identity)
+        plan=ev.decode(dict(retained)['plan.json']);plan_dir=base/'plan'
+        producer._publish({**dict(retained),**producer._plan_pins(dict(retained)['plan.json'],source)},plan_dir)
+        expected=ev.decode(old_context.expected_raw)
+        expected.update(plan_sha256=ev.digest(dict(retained)['plan.json']),source_content_sha256=identity['content_sha256'],
+                        source_files=identity['files'])
+        expected_path=base/'expected.json';expected_path.write_bytes(ev.encode(expected))
+        runtime=ev.decode(old_context.prepare_raw)['runtime']
+        args=Namespace(plan_dir=plan_dir,basis_dir=basis,expected=expected_path,variant='base',
+                       image_id=runtime['image']['id'],inputs_dir=local_inputs,out=base/'prepared')
+        inspect=json.dumps([{'Id':tc['image_id'],'Os':'linux','Architecture':tc['platform'].split('/')[1]}]).encode()
+        probe_results=[]
+        by_mechanism={row['mechanism']:row for row in runtime['probe_evidence']}
+        def probe(**kw):
+            probe_results.append(kw)
+            if kw['mode']=='network':
+                row=by_mechanism['network-off'];side='refusal' if kw['sealed'] else 'control'
+            else:
+                mechanism,side=next((m,side) for m,pair in run.SEALED_PROBE_PAIRS.items()
+                    for side,mode in zip(('control','refusal'),pair) if mode==kw['mode'])
+                row=by_mechanism[mechanism]
+            return {'state':row[side],'contract':row['inspect'][side]}
+        with mock.patch.object(producer,'_HERE',source/'measurements'), \
+             mock.patch.object(mat,'docker_bounded',return_value=inspect), \
+             mock.patch.object(mat,'_observe_image_cmd',side_effect=[tc['rustc_Vv'],tc['cargo_V']+'\n']), \
+             mock.patch.object(run,'require_docker_ready'), \
+             mock.patch.object(run,'require_local_image') as local, \
+             mock.patch.object(run,'image_platform',return_value=runtime['image']['platform']), \
+             mock.patch.object(run,'docker_bounded',return_value=runtime['runtime']['docker'].encode()), \
+             mock.patch.object(run,'run_inert_probe',side_effect=probe), \
+             mock.patch.object(run,'build_inert_image',side_effect=AssertionError('image build')), \
+             mock.patch.object(mat,'materialize_pinned',side_effect=AssertionError('network materializer')):
+            result,code=producer.prepare_command(args)
+        self.assertEqual(code,0);self.assertEqual(result['command'],'prepare')
+        prepared=ev.decode((args.out/'prepare.json').read_bytes(),canonical=True)
+        self.assertEqual(prepared['source'],identity)
+        self.assertEqual(prepared['runtime'],runtime)
+        self.assertEqual(len(probe_results),12)
+        local.assert_called_once_with(args.image_id)
+        self.assertEqual(set(p.name for p in args.out.iterdir()),{'prepare.json','subject','corpus','vendor','tool'})
+
+
+class ProducerFinalization(ProducerCLI):
+    def test_finalizes_real_staging_frame_without_synthetic_final_records(self):
+        import tempfile
+        import owned_suggestion_assessment as producer
+        import suggestion_readback as reader
+        from test_suggestion_readback import package_fixture
+        fixture=package_fixture()
+        self.assertIsInstance(fixture,tuple)
+        members,basis,expected=fixture
+        root=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        stage={p:b for p,b in members.items() if p not in ('decision.json','receipt.json','review.json')}
+        producer._publish(stage,root/'stage')
+        basis_path=root/'basis';basis_path.mkdir()
+        for name,raw in basis:
+            p=basis_path/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(raw)
+        expected_path=root/'expected.json';expected_path.write_bytes(ev.encode(expected))
+        code,raw,err=self.run_cli('finalize','--assessment-dir',str(root/'stage'),'--pending-review',
+            '--out',str(root/'final'),'--expected',str(expected_path),'--basis-dir',str(basis_path))
+        self.assertEqual((code,err),(0,b''),raw)
+        final=dict(reader.load_package(root/'final'))
+        self.assertEqual(final['gates.json'],members['gates.json'])
+        self.assertEqual(final['evidence-index.json'],members['evidence-index.json'])
+        self.assertEqual(ev.decode(final['decision.json'])['disposition'],'pending-review')
+        self.assertEqual(reader.verify_package(root/'final',basis_path,expected=expected_path)[1],0)
+
+
+class RealDriverEngine(OfflinePreparation):
+    def test_real_driver_engine_and_four_mutated_calls(self):
+        self._drive()
+
+    def test_actual_control_exception_has_no_returned_engine_control_result(self):
+        self._drive(failure_slot=1)
+
+    def _drive(self, failure_slot=None, control_observer=None):
+        from unittest import mock
+        import subprocess
+        import aee_checker_sealed_driver as driver
+        import aee_checker_sealed_candidate as candidate
+        import aee_checker_sealed_run as run
+        import aee_checker_sealed_materialize as mat
+        import envelope_collection as collection
+        import effective_envelope as envelope
+        from test_suggestion_evidence import full_fixture
+        base,source,basis,_=producer_workspace(self)
+        original=prepared_inputs();raws=dict(original.retained_members)
+        retained=ev.build_assessment_plan(raws['proposal.json'],raws['reference.json'],original.basis_members,
+            run.assessment_execution_identity(source))
+        context,contract=context_fixture(ev.AssessmentInputs(retained,original.basis_members))
+        root,local_inputs,_,tc=self.inputs()
+        inspect=json.dumps([{'Id':tc['image_id'],'Os':'linux','Architecture':tc['platform'].split('/')[1]}]).encode()
+        with mock.patch.object(mat,'docker_bounded',return_value=inspect), \
+             mock.patch.object(mat,'_observe_image_cmd',side_effect=[tc['rustc_Vv'],tc['cargo_V']+'\n']):
+            materialized=self.materialize(root,local_inputs,context)
+        (root/'out/prepare.json').write_bytes(context.prepare_raw)
+        evidence=dict(context.assessment_inputs.evidence_members)
+        pins=base/'pins';pins.mkdir()
+        for path,raw in evidence.items():
+            if path.startswith('base/pins/'):(pins/path.split('/')[-1]).write_bytes(raw)
+        fixture,wire=full_fixture();reference=wire[0]
+        records=dict(fixture.evidence_members)
+        actual_sources=[]
+        def terminal(**kw):
+            ordinal=len(actual_sources)
+            if ordinal == failure_slot:
+                raise RuntimeError('synthetic terminal interruption')
+            actual_sources.append((kw['mounts']['subject']/'src/check.rs').read_text())
+            obs=reference[ordinal]
+            # Literal synthetic terminal responses, never real candidate execution.
+            raw=obs['raw'];stdout=json.dumps({'rows':raw['outcomes']['<batch>'][0],
+                'diagnostics':raw['diagnostics']['<batch>'][0]})
+            result=subprocess.CompletedProcess([],0,stdout,'')
+            record=ev.decode(records['base/envelopes/member-%04d.json'%ordinal])
+            record['execution_commit']=kw['binding']['execution_commit']
+            record['prepare_sha256']=kw['binding']['prepare_sha256']
+            result.envelope_record=record
+            return result
+        with mock.patch.object(candidate,'_run_sealed_candidate',side_effect=terminal), \
+             mock.patch.object(driver,'materialize_pinned',side_effect=AssertionError('network')):
+            if failure_slot is not None:
+                with self.assertRaisesRegex(RuntimeError,'synthetic terminal interruption'):
+                    driver.run_authorized(authorize_raw=context.variant_authorization_raw,
+                        prepare_raw=context.prepare_raw,pins_dir=pins,materialize_dest=base/'execution',root=source,
+                        execution_profile=ev.PROFILE,assessment_context=context,contract=contract,
+                        assessment_prepare_dir=root/'out',envelope_dest=base/'envelopes',
+                        **({'assessment_control_observer':control_observer} if control_observer is not None else {}))
+                index=ev.decode((base/'envelopes/collection-index.v0.json').read_bytes())
+                self.assertEqual([r['state'] for r in index['ledger']],['recorded']*failure_slot+['raised'])
+                self.assertEqual(index['attempts'],failure_slot+1)
+                return
+            report=driver.run_authorized(authorize_raw=context.variant_authorization_raw,
+                prepare_raw=context.prepare_raw,pins_dir=pins,materialize_dest=base/'execution',root=source,
+                execution_profile=ev.PROFILE,assessment_context=context,contract=contract,
+                assessment_prepare_dir=root/'out',envelope_dest=base/'envelopes',
+                        **({'assessment_control_observer':control_observer} if control_observer is not None else {}))
+        self.assertEqual(len(actual_sources),4)
+        self.assertNotIn('return (false, "control-refusal"',actual_sources[0])
+        self.assertIn('return (false, "control-refusal"',actual_sources[1])
+        self.assertIn('if false',actual_sources[2])
+        self.assertIn('maximum.saturating_add(1)',actual_sources[3])
+        self.assertEqual(report['control_status'],'killed')
+        index=ev.decode((base/'envelopes/collection-index.v0.json').read_bytes())
+        self.assertIsNone(index['report_sha256'])
+        self.assertEqual(index['attempts'],4)
+
+
+class ProducerJournal(unittest.TestCase):
+    def test_started_is_durable_before_call_and_exact_return_is_retained(self):
+        import tempfile
+        import owned_suggestion_assessment as producer
+        import corpus_adequacy as ca
+        import envelope_collection as collection
+        from test_suggestion_evidence import wire_execution
+        context,_=context_fixture();wire=wire_execution(dataclasses.replace(context.assessment_inputs,evidence_members=()))
+        raw=wire[0][0]['raw'];stage=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        ledger=collection.Ledger();recorder=producer.AssessmentRecorder(stage,context)
+        from unittest import mock
+        import os
+        def inner(manifest,vectors,*,rebuild,step):
+            event=ev.decode((stage/'journal.jsonl').read_bytes(),canonical=True)
+            self.assertEqual(event['event'],'started')
+            self.assertGreater(flush.call_count,0)
+            ledger.no_envelope(ledger.register(step=step))
+            return ca._ProcessExecution(raw['built'],'safe',raw['outcomes'],raw['diagnostics'],raw['raised'],{})
+        inner.execution_profile=ev.PROFILE;inner.accepts_step=True
+        with mock.patch.object(os,'fsync',wraps=os.fsync) as flush:
+            result=recorder.wrap(inner,ledger)({},[{}],rebuild=True,step=raw['step'])
+        self.assertEqual(len(recorder.observations),1)
+        retained=ev.decode((stage/'base/observations/0.json').read_bytes(),canonical=True)
+        self.assertEqual(retained['raw'],raw)
+        self.assertEqual(retained['state'],'returned');self.assertIsNone(retained['envelope'])
+        self.assertEqual([ev.decode(line)['event'] for line in (stage/'journal.jsonl').read_bytes().splitlines()],['started','returned'])
+        view=ev.decode((stage/'base/views/0.json').read_bytes(),canonical=True)
+        self.assertEqual(view['observation']['sha256'],ev.digest((stage/'base/observations/0.json').read_bytes()))
+        self.assertIs(result.built,True)
+
+    def test_exception_settles_once_and_never_exports_message(self):
+        import tempfile
+        import owned_suggestion_assessment as producer
+        import envelope_collection as collection
+        context,_=context_fixture();stage=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        recorder=producer.AssessmentRecorder(stage,context);ledger=collection.Ledger()
+        def inner(manifest,vectors,*,rebuild,step):
+            ledger.raised(ledger.register(step=step),'RuntimeError')
+            raise RuntimeError('/Users/private-secret')
+        inner.execution_profile=ev.PROFILE;inner.accepts_step=True
+        backend=recorder.wrap(inner,ledger)
+        step=ev.decode(dict(context.assessment_inputs.retained_members)['plan.json'])['slots'][0]['step']
+        with self.assertRaises(RuntimeError):backend({},[{}],step=step)
+        raw=(stage/'base/observations/0.json').read_bytes()
+        self.assertNotIn(b'private-secret',raw)
+        self.assertEqual(ev.decode(raw)['state'],'exception')
+        self.assertEqual(len((stage/'journal.jsonl').read_bytes().splitlines()),2)
+        self.assertFalse((stage/'base/views/0.json').exists())
+
+
+class EngineControlObservation(RealDriverEngine):
+    def test_actual_evaluated_and_interrupted_events_survive_later_exceptions(self):
+        for failure_slot in (1,2,3,None):
+            events=[]
+            with self.subTest(failure_slot=failure_slot):
+                self._drive(failure_slot=failure_slot,control_observer=events.append)
+                expected=[]
+                for ordinal,control_id,polarity,verdict in (
+                    (1,'control-positive','positive','control-killed'),
+                    (2,'control-inert','inert','control-unchanged')):
+                    if failure_slot is not None and ordinal>failure_slot:break
+                    interrupted=ordinal==failure_slot
+                    expected.append({'group':'independent','id':control_id,'polarity':polarity,
+                        'state':'interrupted' if interrupted else 'evaluated',
+                        'verdict':None if interrupted else verdict})
+                self.assertEqual(events,expected)
+
+    def test_observer_failure_does_not_replace_original_backend_exception(self):
+        def observer(event):raise ValueError('secondary observer failure')
+        self._drive(failure_slot=1,control_observer=observer)
