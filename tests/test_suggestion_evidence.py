@@ -286,6 +286,27 @@ def wire_execution(inputs):
 
 
 class FinalReview(unittest.TestCase):
+    def test_indexed_gate7_cannot_be_replaced_by_final_review_verdict(self):
+        inputs = prepared_inputs()
+        observations, views, controls, journal = wire_execution(inputs)
+        gates = ev.evaluate_assessment(inputs, observations, views, controls, journal)
+        proposal_hash = ev.digest(dict(inputs.retained_members)['proposal.json'])
+        review = {'schema': ev.PREFIX+'review.v0', 'proposal_sha256': proposal_hash,
+                  'evidence_index_sha256': 'a'*64, 'reviewer': 'synthetic-only',
+                  'decision': 'accept', 'rationale': 'test'}
+        kwargs = {'proposal_sha256': proposal_hash, 'evidence_index_sha256': 'a'*64}
+        # Same-seam positive: final review is accepted without rewriting indexed gate7.
+        self.assertEqual(ev.derive_disposition(gates, observations, review, **kwargs),
+                         'eligible-for-human-corpus-PR')
+        for status, reason in (('passed', None), ('refused', 'review-rejected')):
+            changed = copy.deepcopy(gates)
+            changed[7].update(status=status, reason=reason)
+            with self.subTest(status=status):
+                with self.assertRaises(ev.EvidenceError) as caught:
+                    ev.derive_disposition(changed, observations, review, **kwargs)
+                self.assertEqual((caught.exception.stage, caught.exception.code),
+                                 ('replay', 'gate-mismatch'))
+
     def test_review_is_separate_and_cannot_rewrite_gates(self):
         inputs=prepared_inputs(); execution=wire_execution(inputs)
         gates=ev.evaluate_assessment(inputs,*execution); before=ev.encode(gates)
