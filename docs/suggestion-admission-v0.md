@@ -117,7 +117,9 @@ perturbations:
 - one is equivalent. The fixture's `minimum-sentinel` guard is unreachable, because `value < 0`
   catches `i64::MIN` first.
 
-So on this fixture no pilot can yield suggestion-value evidence, whoever authors the held-out set.
+The probe found no guard perturbation that could carry value evidence on this fixture. The
+geometry argument above suggests a different held-out author would not find one either, but eight
+mutants do not prove that.
 The probe, its recorded output and its limits are in
 [`design/g-feasibility-probe/`](design/g-feasibility-probe/README.md). It is not evidence and no
 record derives from it. Value evidence would need a subject with more comparisons, or a

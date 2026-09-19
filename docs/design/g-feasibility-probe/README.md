@@ -51,13 +51,14 @@ which the rules refuse.
 - **The `minimum-sentinel` rule is dead code.** `value < 0` returns first for `i64::MIN`, so the
   `value == i64::MIN` guard can never fire, and removing it is an equivalent mutant. The fixture
   is frozen inside sealed execution identities and is not changed here.
-- **Changing the author does not help.** A held-out author other than Claude would face the same
-  twenty-line function. Room for value evidence needs a subject with more comparisons, or a
-  consented structured corpus.
+- **A different author probably would not help.** A held-out author other than Claude would face
+  the same twenty-line function and the same three comparison points. That is an argument, not
+  something eight mutants prove. Room for value evidence more likely needs a subject with more
+  comparisons, or a consented structured corpus.
 
 ## What this does not show
 
 It shows nothing about any model's ability, about test-suggestion value in general, or about any
 fixture other than this one. It does not claim the eight mutants are the only plausible ones. It
-claims only that on this candidate, a boundary-value template already kills every guard
-perturbation that the authoring rules admit.
+claims only that on this candidate, a boundary-value template killed every guard perturbation the
+probe tried that the authoring rules admit.

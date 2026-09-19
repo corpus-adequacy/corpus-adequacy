@@ -47,6 +47,24 @@ class TheProbeIsLabelledAndPlaced(unittest.TestCase):
                       (ROOT / "docs" / "suggestion-admission-v0.md").read_text(encoding="utf-8"))
 
 
+def _probe_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("g_probe", PROBE_DIR / "g_probe.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # defines only; main() runs cargo and is not called
+    return module
+
+
+class TheTemplateIsTheOneRecorded(unittest.TestCase):
+    def test_the_template_vectors_are_the_ones_in_the_output_and_the_readme(self):
+        vectors = sorted(_probe_module().template_vectors().values())
+        output = (PROBE_DIR / "PROBE-OUTPUT.txt").read_text(encoding="utf-8")
+        self.assertEqual(output.splitlines()[0],
+                         "template vectors (%d): %s" % (len(vectors), vectors))
+        self.assertEqual(len(vectors), 7)
+        self.assertIn("seven-vector", (PROBE_DIR / "README.md").read_text(encoding="utf-8"))
+
+
 class TheProbeStillDescribesTheFixture(unittest.TestCase):
     def setUp(self):
         self.check = CHECK_RS.read_text(encoding="utf-8")

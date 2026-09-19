@@ -3,7 +3,7 @@
 ## Unreleased
 
 G feasibility (#270): the pilot's precondition fails on the owned fixture. A boundary-value
-template kills every guard perturbation that the authoring rules admit, so the verdict is
+template killed every guard perturbation the probe tried that the authoring rules admit, so the verdict is
 `template-exhausted`. The probe and its output are published under
 `docs/design/g-feasibility-probe/` as non-evidence. The fixture's `minimum-sentinel` guard is dead
 code. No model was called.
