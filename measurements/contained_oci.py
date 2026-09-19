@@ -8,55 +8,48 @@ import time
 from pathlib import Path
 from secrets import token_hex
 
+import contained_contract as _contract
 import bounded_run as br
 import corpus_adequacy as ca
 
-HEX64 = frozenset("0123456789abcdef")
-CONTAINED_USER = "65532:65532"
-TMPFS_BYTES = 1048576
-TMPFS_INODES = 128
-MEMORY_4G = 4 * 1024 * 1024 * 1024
-DECLARED_CEILINGS = {
-    "deadline_seconds": 8,
-    "disk_bytes": TMPFS_BYTES,
-    "file_count": TMPFS_INODES,
-    "output_bytes": br.OUTPUT_CAP_BYTES,
-}
-RESOURCE_PROFILE_SCHEMA = "corpus-adequacy.aee-checker-sealed.resource-profile.v1"
-RESOURCE_PROFILE_V2_SCHEMA = "corpus-adequacy.aee-checker-sealed.resource-profile.v2"
+HEX64 = _contract.HEX64
+CONTAINED_USER = _contract.CONTAINED_USER
+TMPFS_BYTES = _contract.TMPFS_BYTES
+TMPFS_INODES = _contract.TMPFS_INODES
+MEMORY_4G = _contract.MEMORY_4G
+DECLARED_CEILINGS = _contract.DECLARED_CEILINGS
+RESOURCE_PROFILE_SCHEMA = _contract.RESOURCE_PROFILE_SCHEMA
+RESOURCE_PROFILE_V2_SCHEMA = _contract.RESOURCE_PROFILE_V2_SCHEMA
 # One CPU expressed in thousandths, so the Docker rate argument is exact integer arithmetic and
 # no float ever reaches the wire. Operator policy, not measured tuning.
-CPU_PERIOD_USEC = 100000
-MILLICPU_PER_CPU = 1000
+CPU_PERIOD_USEC = _contract.CPU_PERIOD_USEC
+MILLICPU_PER_CPU = _contract.MILLICPU_PER_CPU
 # A representational ceiling, NOT a tuned CPU policy and not an applied host limit. The emitted
 # quota is written into a cgroup interface that reads a signed 64-bit microsecond value, so a rate
 # whose quota cannot be represented there is refused here rather than encoded and rejected later
 # by something that never sees this codec. Positive-and-integer was not bounded: 10**100 passed.
-_INT64_MAX = 2 ** 63 - 1
-MAX_CPU_RATE_MILLICPU = _INT64_MAX * MILLICPU_PER_CPU // CPU_PERIOD_USEC
+_INT64_MAX = _contract._INT64_MAX
+MAX_CPU_RATE_MILLICPU = _contract.MAX_CPU_RATE_MILLICPU
 # Descriptor limits are per-process RLIMIT values passed as decimal on the wire; bound them by the
 # same representational argument rather than leaving an unbounded integer.
-MAX_NOFILE = _INT64_MAX
-RESOURCE_PROFILE_KEYS = (
-    "schema", "work_bytes", "tmp_bytes", "work_inodes", "tmp_inodes",
-    "work_exec", "deadline_seconds", "output_bytes", "memory_bytes",
-    "memory_swap_bytes", "pids",
-)
+MAX_NOFILE = _contract.MAX_NOFILE
+RESOURCE_PROFILE_KEYS = _contract.RESOURCE_PROFILE_KEYS
 # v2 is a sibling: v1's keys and its fixture are untouched, and neither loader admits the other.
-RESOURCE_PROFILE_V2_KEYS = RESOURCE_PROFILE_KEYS + (
-    "cpu_rate_millicpu", "nofile_soft", "nofile_hard",
-)
+RESOURCE_PROFILE_V2_KEYS = _contract.RESOURCE_PROFILE_V2_KEYS
 
 _INSPECT_ABSENT = ("no such object", "no such container")
-DEFAULT_MOUNT_SPEC = (
-    ("input", "/input"),
-    ("vendor", "/vendor"),
-    ("tool", "/tool"),
-)
+DEFAULT_MOUNT_SPEC = _contract.DEFAULT_MOUNT_SPEC
 
 
 class PrepareError(Exception):
     """Contained execution was refused before candidate code could run."""
+
+
+def _contract_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except _contract.ContractError as exc:
+        raise PrepareError(str(exc)) from exc
 
 
 class DockerUnavailable(PrepareError):
@@ -85,13 +78,7 @@ def preserve_cleanup_failure(primary: BaseException, action: str,
 
 
 def exact_object(doc, keys, where: str) -> None:
-    if type(doc) is not dict:
-        raise PrepareError("%s must be an object" % where)
-    want, got = set(keys), set(doc)
-    if got != want:
-        raise PrepareError(
-            "%s exact keys missing=%s unknown=%s" % (
-                where, sorted(want - got), sorted(got - want)))
+    return _contract_call(_contract.exact_object, doc, keys, where)
 
 
 def load_strict(raw: bytes):
@@ -101,117 +88,43 @@ def load_strict(raw: bytes):
         raise PrepareError(str(exc)) from exc
 
 
-def _resource_profile(*, work_bytes, tmp_bytes, work_inodes, tmp_inodes,
-                      work_exec, deadline_seconds, output_bytes, memory_bytes,
-                      memory_swap_bytes, pids) -> dict:
-    return {
-        "schema": RESOURCE_PROFILE_SCHEMA,
-        "work_bytes": work_bytes,
-        "tmp_bytes": tmp_bytes,
-        "work_inodes": work_inodes,
-        "tmp_inodes": tmp_inodes,
-        "work_exec": work_exec,
-        "deadline_seconds": deadline_seconds,
-        "output_bytes": output_bytes,
-        "memory_bytes": memory_bytes,
-        "memory_swap_bytes": memory_swap_bytes,
-        "pids": pids,
-    }
+def _resource_profile(*, work_bytes, tmp_bytes, work_inodes, tmp_inodes, work_exec, deadline_seconds, output_bytes, memory_bytes, memory_swap_bytes, pids) -> dict:
+    return _contract_call(_contract._resource_profile, work_bytes=work_bytes, tmp_bytes=tmp_bytes, work_inodes=work_inodes, tmp_inodes=tmp_inodes, work_exec=work_exec, deadline_seconds=deadline_seconds, output_bytes=output_bytes, memory_bytes=memory_bytes, memory_swap_bytes=memory_swap_bytes, pids=pids)
 
 
-INERT_RESOURCE_PROFILE = _resource_profile(
-    work_bytes=TMPFS_BYTES,
-    tmp_bytes=TMPFS_BYTES,
-    work_inodes=TMPFS_INODES,
-    tmp_inodes=TMPFS_INODES,
-    work_exec=False,
-    deadline_seconds=DECLARED_CEILINGS["deadline_seconds"],
-    output_bytes=DECLARED_CEILINGS["output_bytes"],
-    memory_bytes=MEMORY_4G,
-    memory_swap_bytes=MEMORY_4G,
-    pids=512,
-)
-CANDIDATE_RESOURCE_PROFILE = _resource_profile(
-    work_bytes=256 * 1024 * 1024,
-    tmp_bytes=16 * 1024 * 1024,
-    work_inodes=16384,
-    tmp_inodes=2048,
-    work_exec=True,
-    deadline_seconds=120,
-    output_bytes=DECLARED_CEILINGS["output_bytes"],
-    memory_bytes=MEMORY_4G,
-    memory_swap_bytes=MEMORY_4G,
-    pids=512,
-)
-CANDIDATE_RESOURCE_PROFILE_V2 = {
-    **CANDIDATE_RESOURCE_PROFILE,
-    "schema": RESOURCE_PROFILE_V2_SCHEMA,
-    # Operator policy, not measured tuning and not a cumulative CPU-seconds budget:
-    # one CPU of aggregate cgroup rate, and a per-process descriptor limit.
-    "cpu_rate_millicpu": 1 * MILLICPU_PER_CPU,
-    "nofile_soft": 1024,
-    "nofile_hard": 1024,
-}
+INERT_RESOURCE_PROFILE = _contract.INERT_RESOURCE_PROFILE
+CANDIDATE_RESOURCE_PROFILE = _contract.CANDIDATE_RESOURCE_PROFILE
+CANDIDATE_RESOURCE_PROFILE_V2 = _contract.CANDIDATE_RESOURCE_PROFILE_V2
 
 
 def _require_positive_int(profile, key) -> int:
     """`type(...) is not int` rather than isinstance: bool is an int subclass, and a profile
     carrying True where a count belongs must refuse rather than be read as 1."""
-    value = profile[key]
-    if type(value) is not int or value <= 0:
-        raise PrepareError("resource profile %s" % key)
-    return value
+    return _contract_call(_contract._require_positive_int, profile, key)
 
 
 def _require_cpu_and_nofile(profile) -> None:
     """v2-only policy. Ints only, so no float, NaN, infinity or bool can reach the argv, and
     finite, so an unrepresentable rate refuses here instead of being encoded."""
-    rate = _require_positive_int(profile, "cpu_rate_millicpu")
-    if rate * CPU_PERIOD_USEC % MILLICPU_PER_CPU:
-        raise PrepareError("resource profile cpu_rate_millicpu is not exactly representable")
-    if rate > MAX_CPU_RATE_MILLICPU:
-        raise PrepareError("resource profile cpu_rate_millicpu exceeds the representable ceiling")
-    soft = _require_positive_int(profile, "nofile_soft")
-    hard = _require_positive_int(profile, "nofile_hard")
-    if soft > hard:
-        raise PrepareError("resource profile nofile_soft exceeds nofile_hard")
-    if hard > MAX_NOFILE:
-        raise PrepareError("resource profile nofile_hard exceeds the representable ceiling")
+    return _contract_call(_contract._require_cpu_and_nofile, profile)
 
 
 # Closed schema selection over ONE rule. Two copied validators would drift, and the drift would
 # be invisible until a profile validated differently in two places.
-_PROFILE_POLICIES = {
-    RESOURCE_PROFILE_SCHEMA: (RESOURCE_PROFILE_KEYS, None),
-    RESOURCE_PROFILE_V2_SCHEMA: (RESOURCE_PROFILE_V2_KEYS, _require_cpu_and_nofile),
-}
+_PROFILE_POLICIES = _contract._PROFILE_POLICIES
 
 
 def _require_profile(profile, *, schema: str) -> dict:
-    keys, extra = _PROFILE_POLICIES[schema]
-    exact_object(profile, keys, "resource profile")
-    if profile.get("schema") != schema:
-        raise PrepareError("resource profile schema")
-    for key in keys:
-        if key in ("schema", "work_exec"):
-            continue
-        _require_positive_int(profile, key)
-    if type(profile["work_exec"]) is not bool:
-        raise PrepareError("resource profile work_exec")
-    if profile["output_bytes"] != br.OUTPUT_CAP_BYTES:
-        raise PrepareError("resource profile output_bytes is not enforced")
-    if extra is not None:
-        extra(profile)
-    return dict(profile)
+    return _contract_call(_contract._require_profile, profile, schema=schema)
 
 
 def require_resource_profile(profile) -> dict:
     """The v1 loader, unchanged in meaning: it admits v1 and refuses v2 by exact keys."""
-    return _require_profile(profile, schema=RESOURCE_PROFILE_SCHEMA)
+    return _contract_call(_contract.require_resource_profile, profile)
 
 
 def require_resource_profile_v2(profile) -> dict:
-    return _require_profile(profile, schema=RESOURCE_PROFILE_V2_SCHEMA)
+    return _contract_call(_contract.require_resource_profile_v2, profile)
 
 
 def require_versioned_resource_profile(profile) -> dict:
@@ -220,16 +133,12 @@ def require_versioned_resource_profile(profile) -> dict:
     For the container funnel only, which serves both versions. Which version a run may use is
     decided upstream by the resolved execution profile; this selects the validator, not the policy.
     """
-    schema = profile.get("schema") if type(profile) is dict else None
-    if type(schema) is not str or schema not in _PROFILE_POLICIES:
-        raise PrepareError("resource profile schema")
-    return _require_profile(profile, schema=schema)
+    return _contract_call(_contract.require_versioned_resource_profile, profile)
 
 
 def cpu_quota_usec(profile) -> int:
     """The one mapping from a v2 rate to the CFS quota, shared by the argv and the comparator."""
-    checked = require_resource_profile_v2(profile)
-    return checked["cpu_rate_millicpu"] * CPU_PERIOD_USEC // MILLICPU_PER_CPU
+    return _contract_call(_contract.cpu_quota_usec, profile)
 
 
 def docker_resource_argv_v2(profile) -> list[str]:
@@ -250,52 +159,17 @@ def docker_resource_argv_v2(profile) -> list[str]:
     ]
 
 
-def validate_mount_destinations(
-    destinations, *, strictly_sorted: bool = False
-) -> tuple[str, ...]:
+def validate_mount_destinations(destinations, *, strictly_sorted: bool=False) -> tuple[str, ...]:
     """Validate a sequence of mount destinations.
 
     Destinations must be a non-empty sequence of non-empty absolute path strings,
     with no duplicates. When strictly_sorted is True, items must be strictly increasing.
     """
-    if type(destinations) not in (list, tuple) or not destinations:
-        raise PrepareError("mount specification")
-    seen = set()
-    prev = None
-    res = []
-    for dest in destinations:
-        if not isinstance(dest, str) or not dest or not dest.startswith("/"):
-            raise PrepareError("mount specification")
-        if dest in seen:
-            raise PrepareError("mount specification")
-        if strictly_sorted:
-            if prev is not None and dest <= prev:
-                raise PrepareError("mount specification")
-            prev = dest
-        seen.add(dest)
-        res.append(dest)
-    return tuple(res)
+    return _contract_call(_contract.validate_mount_destinations, destinations, strictly_sorted=strictly_sorted)
 
 
 def _require_mount_spec(mount_spec) -> tuple[tuple[str, str], ...]:
-    if type(mount_spec) not in (list, tuple) or not mount_spec:
-        raise PrepareError("mount specification")
-    normalized = []
-    keys = set()
-    destinations = []
-    for item in mount_spec:
-        if type(item) not in (list, tuple) or len(item) != 2:
-            raise PrepareError("mount specification")
-        key, destination = item
-        if not isinstance(key, str) or not key:
-            raise PrepareError("mount specification")
-        if key in keys:
-            raise PrepareError("mount specification")
-        keys.add(key)
-        destinations.append(destination)
-        normalized.append((key, destination))
-    validate_mount_destinations(destinations, strictly_sorted=False)
-    return tuple(normalized)
+    return _contract_call(_contract._require_mount_spec, mount_spec)
 
 
 def docker_run_capped(args, *, cwd: Path | None = None, timeout: int):
@@ -366,117 +240,25 @@ def parse_inspect_payload(raw: bytes) -> dict:
 
 def contained_user_ids(value=None) -> tuple[int, int]:
     """Parse the one canonical Docker uid:gid declaration without normalization."""
-    if value is None:
-        value = CONTAINED_USER
-    if not isinstance(value, str) or value.count(":") != 1:
-        raise PrepareError("user")
-    values = value.split(":")
-    parsed = []
-    for item in values:
-        if (not item or not item.isascii() or not item.isdecimal() or
-                (len(item) > 1 and item.startswith("0"))):
-            raise PrepareError("user")
-        number = int(item)
-        if not 0 <= number <= 0xffffffff:
-            raise PrepareError("user")
-        parsed.append(number)
-    return parsed[0], parsed[1]
+    return _contract_call(_contract.contained_user_ids, value)
 
 
 def _canonical_uint(value: str) -> int:
-    if (not value or not value.isascii() or not value.isdecimal() or
-            (len(value) > 1 and value.startswith("0"))):
-        raise PrepareError("tmpfs")
-    number = int(value)
-    if number <= 0:
-        raise PrepareError("tmpfs")
-    return number
+    return _contract_call(_contract._canonical_uint, value)
 
 
 def parse_tmpfs_options(value, *, owner_bound: bool) -> dict:
     """Parse a closed Docker tmpfs declaration; v2 additionally binds its owner."""
-    if not isinstance(value, str) or type(owner_bound) is not bool:
-        raise PrepareError("tmpfs")
-    flags, values = set(), {}
-    for part in value.split(","):
-        if not part:
-            raise PrepareError("tmpfs")
-        if "=" not in part:
-            if part not in {"rw", "exec", "noexec", "nosuid", "nodev"} or part in flags:
-                raise PrepareError("tmpfs")
-            flags.add(part)
-            continue
-        key, raw = part.split("=", 1)
-        if key not in {"mode", "uid", "gid", "size", "nr_inodes"} or key in values:
-            raise PrepareError("tmpfs")
-        values[key] = raw
-    if owner_bound and "rw" not in flags:
-        raise PrepareError("tmpfs")
-    if "exec" in flags and "noexec" in flags:
-        raise PrepareError("tmpfs")
-    required = {"size", "nr_inodes"}
-    if owner_bound:
-        required |= {"mode", "uid", "gid"}
-        if flags & {"nosuid", "nodev"} or ("exec" in flags) == ("noexec" in flags):
-            raise PrepareError("tmpfs")
-    elif "uid" in values or "gid" in values:
-        raise PrepareError("tmpfs")
-    if ((owner_bound and set(values) != required) or
-            (not owner_bound and (
-                not {"size", "nr_inodes"} <= set(values) or
-                set(values) - {"size", "nr_inodes", "mode"})) or
-            owner_bound and values["mode"] != "1777"):
-        raise PrepareError("tmpfs")
-    parsed = {
-        "exec": "exec" in flags,
-        "mode": values.get("mode", "1777"),
-        "nr_inodes": _canonical_uint(values["nr_inodes"]),
-        "rw": True,
-        "size": _canonical_uint(values["size"]),
-    }
-    if owner_bound:
-        uid, gid = contained_user_ids()
-        if values["uid"] != str(uid) or values["gid"] != str(gid):
-            raise PrepareError("tmpfs")
-        parsed.update(uid=uid, gid=gid)
-    return parsed
+    return _contract_call(_contract.parse_tmpfs_options, value, owner_bound=owner_bound)
 
 
 def tmpfs_request(profile: dict, *, destination: str, owner_bound: bool) -> dict:
-    profile = require_versioned_resource_profile(profile)
-    if destination not in ("/tmp", "/work"):
-        raise PrepareError("tmpfs")
-    prefix = "tmp" if destination == "/tmp" else "work"
-    result = {
-        "exec": False if destination == "/tmp" else profile["work_exec"],
-        "mode": "1777", "nr_inodes": profile[prefix + "_inodes"],
-        "rw": True, "size": profile[prefix + "_bytes"],
-    }
-    if owner_bound:
-        uid, gid = contained_user_ids()
-        result.update(uid=uid, gid=gid)
-    return result
+    return _contract_call(_contract.tmpfs_request, profile, destination=destination, owner_bound=owner_bound)
 
 
 def require_tmpfs_spec(spec, *, owner_bound: bool) -> dict:
     """Validate the exact structured tmpfs value shared by writers and readers."""
-    keys = {"exec", "mode", "nr_inodes", "rw", "size"}
-    if owner_bound:
-        keys |= {"uid", "gid"}
-    if (type(spec) is not dict or set(spec) != keys or
-            type(spec["rw"]) is not bool or spec["rw"] is not True or
-            type(spec["exec"]) is not bool or
-            type(spec["mode"]) is not str or spec["mode"] != "1777"):
-        raise PrepareError("tmpfs")
-    for key in ("size", "nr_inodes"):
-        if type(spec[key]) is not int or spec[key] <= 0:
-            raise PrepareError("tmpfs")
-    if owner_bound:
-        uid, gid = contained_user_ids()
-        if (type(spec["uid"]) is not int or type(spec["gid"]) is not int or
-                spec["uid"] != uid or spec["gid"] != gid):
-            raise PrepareError("tmpfs")
-    return spec
+    return _contract_call(_contract.require_tmpfs_spec, spec, owner_bound=owner_bound)
 
 
 def encode_tmpfs_options(spec: dict, *, owner_bound: bool) -> str:
@@ -604,12 +386,7 @@ def validate_inspect_contract(
 
 
 def require_image_id(value: str) -> str:
-    if not isinstance(value, str) or not value.startswith("sha256:"):
-        raise PrepareError("image id must be sha256:<64hex>")
-    digest = value[7:]
-    if len(digest) != 64 or any(ch not in HEX64 for ch in digest):
-        raise PrepareError("image id must be sha256:<64hex>")
-    return value
+    return _contract_call(_contract.require_image_id, value)
 
 
 def require_local_image(image_id: str) -> None:

@@ -1,5 +1,6 @@
 """Pure contracts; all records are synthetic and establish no execution origin."""
 import copy
+import dataclasses
 import json
 import sys
 import unittest
@@ -287,8 +288,7 @@ def wire_execution(inputs):
 
 class FinalReview(unittest.TestCase):
     def test_indexed_gate7_cannot_be_replaced_by_final_review_verdict(self):
-        inputs = prepared_inputs()
-        observations, views, controls, journal = wire_execution(inputs)
+        inputs, (observations, views, controls, journal) = full_fixture()
         gates = ev.evaluate_assessment(inputs, observations, views, controls, journal)
         proposal_hash = ev.digest(dict(inputs.retained_members)['proposal.json'])
         review = {'schema': ev.PREFIX+'review.v0', 'proposal_sha256': proposal_hash,
@@ -299,8 +299,9 @@ class FinalReview(unittest.TestCase):
         self.assertEqual(ev.derive_disposition(gates, observations, review, **kwargs),
                          'eligible-for-human-corpus-PR')
         for status, reason in (('passed', None), ('refused', 'review-rejected')):
-            changed = copy.deepcopy(gates)
-            changed[7].update(status=status, reason=reason)
+            changed_gates = ev.decode(gates.gates_raw)
+            changed_gates[7].update(status=status, reason=reason)
+            changed = dataclasses.replace(gates, gates_raw=ev.encode(changed_gates))
             with self.subTest(status=status):
                 with self.assertRaises(ev.EvidenceError) as caught:
                     ev.derive_disposition(changed, observations, review, **kwargs)
@@ -308,8 +309,8 @@ class FinalReview(unittest.TestCase):
                                  ('replay', 'gate-mismatch'))
 
     def test_review_is_separate_and_cannot_rewrite_gates(self):
-        inputs=prepared_inputs(); execution=wire_execution(inputs)
-        gates=ev.evaluate_assessment(inputs,*execution); before=ev.encode(gates)
+        inputs, execution=full_fixture()
+        gates=ev.evaluate_assessment(inputs,*execution); before=gates.gates_raw
         proposal_hash=ev.digest(dict(inputs.retained_members)['proposal.json'])
         review={'schema':ev.PREFIX+'review.v0','proposal_sha256':proposal_hash,
             'evidence_index_sha256':'a'*64,'reviewer':'synthetic-only','decision':'accept','rationale':'test'}
@@ -321,11 +322,12 @@ class FinalReview(unittest.TestCase):
         review['decision']='accept';review['evidence_index_sha256']='b'*64
         with self.assertRaises(ev.EvidenceError):
             ev.derive_disposition(gates,execution[0],review,**args)
-        self.assertEqual(ev.encode(gates),before)
+        self.assertEqual(gates.gates_raw,before)
         review['evidence_index_sha256']='a'*64
         abnormal=copy.deepcopy(execution[0])
         abnormal[3]['raw']['raised']={'<batch>':'unproved'}
-        refused=copy.deepcopy(gates);refused[5].update(status='refused',reason='abnormal-execution')
+        refused_gates=ev.decode(gates.gates_raw);refused_gates[5].update(status='refused',reason='abnormal-execution')
+        refused=dataclasses.replace(gates,gates_raw=ev.encode(refused_gates))
         self.assertEqual(ev.derive_disposition(refused,abnormal,review,**args),'unproved')
 
 
@@ -354,10 +356,10 @@ class ProjectionParity(unittest.TestCase):
 
 class FullEvaluation(unittest.TestCase):
     def test_same_full_evaluator_computes_all_nine_gates(self):
-        inputs = prepared_inputs()
-        gates = ev.evaluate_assessment(inputs, *wire_execution(inputs))
-        self.assertEqual([g['id'] for g in gates], list(range(9)))
-        self.assertEqual([g['status'] for g in gates], ['passed']*7+['not-run', 'passed'])
+        inputs, execution = full_fixture()
+        gates = ev.evaluate_assessment(inputs, *execution)
+        self.assertEqual([g['id'] for g in ev.decode(gates.gates_raw)], list(range(9)))
+        self.assertEqual([g['status'] for g in ev.decode(gates.gates_raw)], ['passed']*7+['not-run', 'passed'])
 
     def test_preflight_refusal_never_requires_or_invents_calls(self):
         inputs=prepared_inputs(); members=dict(inputs.retained_members)
@@ -370,15 +372,14 @@ class FullEvaluation(unittest.TestCase):
                   'observation':None,'reason':'preflight-refusal' if n==0 else 'prerequisite-refused'}
                  for n,slot in enumerate(plan['slots'])]
         controls=[{'variant':v,'positive':'not-run','inert':'not-run','barrier':'stop'} for v in ev.VARIANTS]
-        gates=ev.evaluate_assessment(inputs,[],[],controls,journal)
-        self.assertEqual(gates[1]['reason'],'freeze-drift')
-        self.assertEqual(gates[8]['status'],'passed')
-        self.assertTrue(all(g['status']=='not-run' for g in gates[2:8]))
+        with self.assertRaises(ev.EvidenceError) as caught:
+            ev.evaluate_assessment(inputs,[],[],controls,journal)
+        self.assertEqual((caught.exception.stage,caught.exception.code),('replay','preflight-refused'))
 
     def test_view_and_journal_reference_bytes_are_checked(self):
-        inputs = prepared_inputs()
+        inputs, execution = full_fixture()
         for which in ('view', 'journal'):
-            obs, views, controls, journal = wire_execution(inputs)
+            obs, views, controls, journal = copy.deepcopy(execution)
             target = views[0] if which == 'view' else journal[1]
             target['observation']['sha256'] = '0'*64
             with self.subTest(which=which), self.assertRaises(ev.EvidenceError):
@@ -523,3 +524,305 @@ class Evaluation(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def structural_members(inputs):
+    """Synthetic P inventory, bound independently using pinned retained source bytes."""
+    plan_raw = dict(inputs.retained_members)['plan.json']; plan = ev.decode(plan_raw)
+    plan_hash = ev.digest(plan_raw)
+    historical = json.loads((ROOT/'measurements/owned-slice-b-20f6d8b/declared/prepare.v2.json').read_bytes())
+    runtime = {k: historical[k] for k in ('toolchain','image','candidate_profile','probe_evidence',
+        'network','runtime','oci','ceilings','materialize_ceilings')}
+    config = (ROOT/'execution/aee-checker-sealed/cargo-config.toml').read_bytes()
+    tool_hash = ev._tree({'cargo-config.toml': config})
+    members = {}; prepares = []
+    for v, variant in zip(ev.VARIANTS, plan['variants']):
+        for name in ('control.json','sites.json','manifest.json'):
+            members[f'{v}/pins/{name}'] = (ROOT/'measurements/owned-independent-v0'/name).read_bytes()
+        pins = {'schema':ev.PREFIX+'pins.v0','plan_sha256':plan_hash,'variant':v,
+            'instrument_commit':plan['instrument_commit'],'subject_tree_sha256':plan['subject_tree_sha256'],
+            'adapter_sha256':plan['adapter_sha256'],
+            'corpus':{'kind':'local-derived-owned-v0','plan_sha256':plan_hash,'variant':v,
+                'manifest_sha256':variant['manifest']['sha256'],'tree_sha256':variant['tree_sha256'],
+                'corpus_digest':variant['corpus_digest'],'ids':list(IDS)},
+            'control_sha256':plan['control_sha256'],'sites_sha256':plan['sites_sha256'],
+            'manifest_sha256':ev.digest(members[f'{v}/pins/manifest.json'])}
+        members[f'{v}/pins/pins.json']=ev.encode(pins)
+        prepare={'schema':ev.PREFIX+'prepare.v0','family':ev.FAMILY,'plan_sha256':plan_hash,
+            'variant':v,'profile':ev.PROFILE,'source':plan['source'],
+            'pins_sha256':ev.digest(members[f'{v}/pins/pins.json']),
+            'materialized':{'subject_tree_sha256':plan['subject_tree_sha256'],
+                'corpus_tree_sha256':variant['tree_sha256'],'corpus_manifest_sha256':variant['manifest']['sha256'],
+                'corpus_id_count':5,'vendor_sha256':ev.digest(b''),'tool_sha256':tool_hash},
+            'runtime':copy.deepcopy(runtime)}
+        members[f'{v}/prepare.json']=ev.encode(prepare)
+        prepares.append({'variant':v,'sha256':ev.digest(members[f'{v}/prepare.json'])})
+    parent={'schema':ev.PREFIX+'authorization.v0','plan_sha256':plan_hash,
+        'source_content_sha256':plan['source']['content_sha256'],'profile':ev.PROFILE,
+        'prepares':prepares,'reference_sha256':plan['reference']['sha256'],
+        'operator':'synthetic-only','decision':'execute'}
+    members['authorization.json']=ev.encode(parent)
+    for v,row in zip(ev.VARIANTS,prepares):
+        members[f'{v}/authorization.json']=ev.encode({'schema':ev.PREFIX+'variant-authorization.v0',
+            'parent_authorization_sha256':ev.digest(members['authorization.json']),
+            'plan_sha256':plan_hash,'variant':v,'prepare_sha256':row['sha256'],
+            'profile':ev.PROFILE,'source_content_sha256':plan['source']['content_sha256']})
+    return members
+
+
+def refresh_wire(inputs, observations, controls, journal):
+    plan_hash=ev.digest(dict(inputs.retained_members)['plan.json']); refs={}; views=[]
+    for obs in observations:
+        slot=obs['slot']; n=ev.require_slot(slot)
+        refs[n]={'member':f"{slot['variant']}/observations/{slot['ordinal']}.json",
+                 'sha256':ev.digest(ev.encode(obs)), 'bytes':len(ev.encode(obs))}
+        if obs['state']=='returned':
+            views.append({'schema':ev.PREFIX+'view.v0','plan_sha256':plan_hash,'slot':copy.deepcopy(slot),
+                'observation':refs[n], 'adapter_sha256':ev._OWNED.adapter_sha256,
+                **ev.project_observation(obs,ids=IDS,plan_sha256=plan_hash)})
+    for event in journal:
+        if event['event'] in ('returned','exception'):
+            event['observation']=refs[ev.require_slot(event['slot'])]
+    return observations,views,controls,journal
+
+
+def full_fixture(*, state='recorded'):
+    """Exercise actual legacy collection writer using synthetic records only."""
+    import dataclasses,tempfile
+    import envelope_collection as collection
+    import kernel_readback
+    from test_effective_envelope import _wire_v2_record
+    inputs=prepared_inputs();members=structural_members(inputs)
+    obs,views,controls,journal=wire_execution(inputs)
+    for v in ev.VARIANTS:
+        prepare=ev.decode(members[f'{v}/prepare.json'])
+        ledger=collection.Ledger(run_nonce='1'*32)
+        for observation in [o for o in obs if o['slot']['variant']==v]:
+            ordinal=ledger.register(step=observation['slot']['step'])
+            if state=='no-envelope': ledger.no_envelope(ordinal);continue
+            record=_wire_v2_record();record['schema']='corpus-adequacy.execution-envelope.v3'
+            record['effective']['kernel']=kernel_readback.expected_readback(record['requested']['resource_profile'])
+            image=prepare['runtime']['toolchain']['image_id']
+            record['requested']['image_id']=image;record['effective']['image']=image
+            record['prepare_sha256']=ev.digest(members[f'{v}/prepare.json'])
+            record['execution_commit']=prepare['source']['commit']
+            ledger.recorded(ordinal,record,returncode=0)
+        with tempfile.TemporaryDirectory() as directory:
+            collection.write_collection(ledger,directory,report_sha256=None)
+            for f in Path(directory).iterdir():members[f'{v}/envelopes/{f.name}']=f.read_bytes()
+        for observation in [o for o in obs if o['slot']['variant']==v]:
+            if state=='recorded':
+                path=f"{v}/envelopes/member-{observation['slot']['ordinal']:04d}.json"
+                observation['envelope']={'member':path,'sha256':ev.digest(members[path]),'bytes':len(members[path])}
+    inputs=dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items())))
+    return inputs,refresh_wire(inputs,obs,controls,journal)
+
+
+class FullEnvelopeEvaluation(unittest.TestCase):
+    def require_boundary(self):
+        self.assertIn('evidence_members', ev.AssessmentInputs.__dataclass_fields__,
+                      'the full judge cannot receive envelope/prepare/pin bytes')
+
+    def test_faithful_missing_envelopes_prevent_eligibility(self):
+        self.require_boundary()
+        inputs,wire=full_fixture(state='no-envelope')
+        result=ev.evaluate_assessment(inputs,*wire)
+        self.assertEqual(result.envelope_unproved_slots,tuple(range(8)))
+        kwargs=dict(proposal_sha256=ev.digest(dict(inputs.retained_members)['proposal.json']),evidence_index_sha256='a'*64)
+        self.assertEqual(ev.derive_disposition(result,wire[0],None,**kwargs),'unproved')
+        healthy,wire=full_fixture();result=ev.evaluate_assessment(healthy,*wire)
+        self.assertEqual(result.envelope_unproved_slots,())
+        self.assertEqual(ev.derive_disposition(result,wire[0],None,**kwargs),'pending-review')
+
+    def test_matching_member_hash_cannot_hide_false_permission(self):
+        self.require_boundary()
+        import dataclasses
+        inputs,wire=full_fixture();members=dict(inputs.evidence_members)
+        path='base/envelopes/member-0003.json';doc=ev.decode(members[path]);doc['cleanup']='remove-failed'
+        members[path]=ev.encode(doc)
+        idxpath='base/envelopes/collection-index.v0.json';idx=ev.decode(members[idxpath]);idx['members'][3]['sha256']=ev.digest(members[path]);members[idxpath]=ev.encode(idx)
+        wire[0][3]['envelope'].update(sha256=ev.digest(members[path]),bytes=len(members[path]))
+        inputs=dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items())))
+        wire=refresh_wire(inputs,wire[0],wire[2],wire[3])
+        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        self.assertEqual((caught.exception.stage,caught.exception.code),('envelope','contradictory-record'))
+
+    def test_missing_claimed_member_is_not_faithful_no_envelope(self):
+        self.require_boundary()
+        import dataclasses
+        inputs,wire=full_fixture();members=dict(inputs.evidence_members);del members['base/envelopes/member-0003.json']
+        inputs=dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items())))
+        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        self.assertEqual((caught.exception.stage,caught.exception.code),('filesystem','missing-member'))
+
+    def test_complete_preflight_refusal_never_returns_finalized_gates(self):
+        self.require_boundary()
+        import dataclasses
+        inputs,wire=full_fixture();members=dict(inputs.retained_members)
+        plan=ev.decode(members['plan.json']);plan['adapter_sha256']='d'*64;members['plan.json']=ev.encode(plan)
+        inputs=dataclasses.replace(inputs,retained_members=tuple(sorted(members.items())))
+        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        self.assertEqual((caught.exception.stage,caught.exception.code),('replay','preflight-refused'))
+
+    def test_audit_does_not_consult_external_expected(self):
+        self.require_boundary()
+        from unittest import mock
+        inputs,wire=full_fixture()
+        with mock.patch.object(ev,'require_expected',side_effect=AssertionError('audit consulted approval')):
+            self.assertEqual(ev.evaluate_assessment(inputs,*wire).envelope_unproved_slots,())
+
+
+class CollectionSnapshot(unittest.TestCase):
+    def snapshot(self):
+        inputs,_=full_fixture()
+        return tuple((p.removeprefix('base/envelopes/'),b) for p,b in inputs.evidence_members
+                     if p.startswith('base/envelopes/'))
+
+    def test_legacy_writer_bytes_and_noncanonical_spelling_are_accepted(self):
+        raw=self.snapshot();a=ev.parse_collection_snapshot(raw)
+        members=dict(raw);index=ev.decode(members['collection-index.v0.json'])
+        name='member-0003.json';original=members[name]
+        members[name]=json.dumps(ev.decode(original),separators=(',',':')).encode()
+        self.assertNotEqual(ev.digest(original),ev.digest(members[name]))
+        index['members'][3]['sha256']=ev.digest(members[name]);members['collection-index.v0.json']=ev.encode(index)
+        b=ev.parse_collection_snapshot(tuple(sorted(members.items())))
+        self.assertEqual(a['members'],b['members'])
+
+    def test_strict_integer_nonce_chain_inventory_and_digest(self):
+        raw=dict(self.snapshot())
+        changes=[('bool-attempt',lambda d:d.update(attempts=True),'syntax','wrong-shape'),
+                 ('bool-ordinal',lambda d:d['ledger'][0].update(ordinal=False),'replay','schedule-mismatch'),
+                 ('bool-returncode',lambda d:d['ledger'][0].update(returncode=True),'syntax','wrong-shape'),
+                 ('nonce',lambda d:d['ledger'][0].update(run_nonce='2'*32),'replay','schedule-mismatch'),
+                 ('chain',lambda d:d['ledger'][1].update(previous_member_sha256='0'*64),'replay','schedule-mismatch'),
+                 ('digest',lambda d:d['members'][0].update(sha256='0'*64),'binding','envelope-binding'),
+                 ('path',lambda d:d['members'][0].update(relpath='../escape'),'replay','schedule-mismatch')]
+        for label,mutate,stage,code in changes:
+            members=dict(raw);index=ev.decode(members['collection-index.v0.json']);mutate(index)
+            members['collection-index.v0.json']=ev.encode(index)
+            with self.subTest(label=label):
+                with self.assertRaises(ev.EvidenceError) as caught:
+                    ev.parse_collection_snapshot(tuple(sorted(members.items())))
+                self.assertEqual((caught.exception.stage,caught.exception.code),(stage,code))
+        for label,mutate,code in [
+            ('missing',lambda d:d.pop('member-0003.json'),'missing-member'),
+            ('extra',lambda d:d.update(extra=b'{}'),'surplus-member'),
+            ('oversize',lambda d:d.update({'member-0003.json':b' '*65537}),'member-bytes')]:
+            members=dict(raw);mutate(members)
+            with self.subTest(label=label):
+                with self.assertRaises(ev.EvidenceError) as caught:
+                    ev.parse_collection_snapshot(tuple(sorted(members.items())))
+                self.assertEqual(caught.exception.code,code)
+
+    def test_duplicate_and_nonfinite_member_json_refuse_even_after_rehash(self):
+        raw=dict(self.snapshot())
+        for suffix,code in [(b',"schema":"x"}', 'duplicate-key'),(b',"other":NaN}', 'invalid-number')]:
+            members=dict(raw);name='member-0003.json';members[name]=members[name].rstrip()[:-1]+suffix
+            index=ev.decode(members['collection-index.v0.json']);index['members'][3]['sha256']=ev.digest(members[name])
+            members['collection-index.v0.json']=ev.encode(index)
+            with self.assertRaises(ev.EvidenceError) as caught:ev.parse_collection_snapshot(tuple(sorted(members.items())))
+            self.assertEqual(caught.exception.code,code)
+
+    def test_canonical_new_metadata_and_legacy_member_bytes_stay_separate(self):
+        inputs,wire=full_fixture();members=dict(inputs.evidence_members)
+        members['base/prepare.json']=b' '+members['base/prepare.json']
+        with self.assertRaises(ev.EvidenceError) as caught:
+            ev.evaluate_assessment(dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items()))),*wire)
+        self.assertEqual(caught.exception.code,'noncanonical-new-object')
+
+
+def alter_last_member(inputs,wire,mutate):
+    """Coherently rehash last recorded slot: exercise semantics, not stale digest detection."""
+    members=dict(inputs.evidence_members);path='base/envelopes/member-0003.json'
+    doc=ev.decode(members[path]);mutate(doc);members[path]=ev.encode(doc)
+    ip='base/envelopes/collection-index.v0.json';index=ev.decode(members[ip])
+    index['members'][3]['sha256']=ev.digest(members[path]);members[ip]=ev.encode(index)
+    wire[0][3]['envelope'].update(sha256=ev.digest(members[path]),bytes=len(members[path]))
+    inputs=dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items())))
+    return inputs,refresh_wire(inputs,wire[0],wire[2],wire[3])
+
+
+class FullEnvelopeBindings(unittest.TestCase):
+    def test_faithful_withholding_and_unverified_record_are_unproved(self):
+        def withheld(d):d.update(cleanup='remove-failed',publication_permission='withheld',withheld_reason='cleanup')
+        def unverified(d):d.update(effective=None,envelope_status='unverified',unverified_field='kernel',
+            publication_permission='withheld',withheld_reason='envelope_status')
+        for mutate in (withheld,unverified):
+            inputs,wire=alter_last_member(*full_fixture(),mutate)
+            self.assertEqual(ev.evaluate_assessment(inputs,*wire).envelope_unproved_slots,(3,))
+
+    def test_envelope_cross_bindings_are_checked_after_coherent_rehash(self):
+        def change_image(d):
+            d['requested']['image_id']='sha256:'+'f'*64;d['effective']['image']='sha256:'+'f'*64
+        for mutate in (lambda d:d.update(prepare_sha256='c'*64),
+                       lambda d:d.update(execution_commit='c'*40),change_image):
+            inputs,wire=alter_last_member(*full_fixture(),mutate)
+            with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+            self.assertEqual((caught.exception.stage,caught.exception.code),('binding','envelope-binding'))
+
+    def test_kernel_mismatch_is_not_hidden_by_hashes(self):
+        inputs,wire=alter_last_member(*full_fixture(),lambda d:d['effective']['kernel'].update(pids_max=513))
+        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        self.assertEqual((caught.exception.stage,caught.exception.code),('envelope','contradictory-record'))
+
+    def test_index_identity_null_only_without_recorded_members(self):
+        for state in ('recorded','no-envelope'):
+            inputs,wire=full_fixture(state=state);members=dict(inputs.evidence_members)
+            name='base/envelopes/collection-index.v0.json';index=ev.decode(members[name])
+            index['prepare_sha256']=None if state=='recorded' else 'a'*64;members[name]=ev.encode(index)
+            with self.assertRaises(ev.EvidenceError) as caught:
+                ev.evaluate_assessment(dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items()))),*wire)
+            self.assertEqual(caught.exception.code,'envelope-binding')
+
+    def test_a_present_reference_cannot_point_to_a_different_member(self):
+        inputs,wire=full_fixture();wire[0][3]['envelope']=copy.deepcopy(wire[0][2]['envelope'])
+        wire=refresh_wire(inputs,wire[0],wire[2],wire[3])
+        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        self.assertEqual(caught.exception.code,'envelope-binding')
+
+    def test_complete_stop_empty_variant_and_raised_null_collection(self):
+        import envelope_collection as collection,tempfile
+        inputs,wire=full_fixture(state='no-envelope');obs,_,controls,journal=wire
+        # First invocation raised; every subsequent slot honestly never entered.
+        obs=obs[:1];obs[0].update(state='exception',raw=None,sanitized_reason=None,exception_kind='backend-exception')
+        plan=ev.decode(dict(inputs.retained_members)['plan.json'])
+        journal=journal[:2];journal[1].update(event='exception',reason='backend-exception')
+        for slot in plan['slots'][1:]:
+            journal.append({'schema':ev.PREFIX+'journal-event.v0','seq':len(journal),
+                'plan_sha256':obs[0]['plan_sha256'],'slot':slot,'event':'not-started',
+                'observation':None,'reason':'prerequisite-refused'})
+        controls=[{'variant':v,'positive':'not-run','inert':'not-run','barrier':'stop'} for v in ev.VARIANTS]
+        members=dict(inputs.evidence_members)
+        for v in ev.VARIANTS:
+            ledger=collection.Ledger(run_nonce='1'*32)
+            if v=='base':ledger.raised(ledger.register(step=obs[0]['slot']['step']),'RuntimeError')
+            with tempfile.TemporaryDirectory() as directory:
+                collection.write_collection(ledger,directory,report_sha256=None)
+                members[v+'/envelopes/collection-index.v0.json']=(Path(directory)/'collection-index.v0.json').read_bytes()
+        inputs=dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items())))
+        wire=refresh_wire(inputs,obs,controls,journal);result=ev.evaluate_assessment(inputs,*wire)
+        self.assertEqual(result.envelope_unproved_slots,(0,))
+        self.assertEqual(ev.decode(result.gates_raw)[8]['status'],'passed')
+        # Raised ledger cannot accompany a returned observation.
+        obs[0].update(state='returned',raw=observation()['raw'],exception_kind=None)
+        journal[1].update(event='returned',reason=None)
+        with self.assertRaises(ev.EvidenceError):
+            ev.evaluate_assessment(inputs,*refresh_wire(inputs,obs,controls,journal))
+
+    def test_structural_inventory_pins_and_both_variant_authorizations(self):
+        inputs,wire=full_fixture();original=dict(inputs.evidence_members)
+        changes=[lambda d:d.pop('outer-whitespace/prepare.json'),
+                 lambda d:d.update(extra=b'{}'),
+                 lambda d:d.update({'base/pins/control.json':b'{}'}),
+                 lambda d:d.update({'base/pins/manifest.json':b'{}'}),
+                 lambda d:d.update({'base/pins/pins.json':b'{}'}),
+                 lambda d:d.update({'outer-whitespace/authorization.json':d['base/authorization.json']})]
+        for mutate in changes:
+            members=dict(original);mutate(members)
+            with self.subTest(mutate=mutate),self.assertRaises(ev.EvidenceError):
+                ev.evaluate_assessment(dataclasses.replace(inputs,evidence_members=tuple(sorted(members.items()))),*wire)
+
+    def test_engine_disagreement_remains_semantic_not_envelope_unproved(self):
+        inputs,wire=full_fixture();wire[2][0]['positive']='failed'
+        with self.assertRaises(ev.EvidenceError) as caught:ev.evaluate_assessment(inputs,*wire)
+        self.assertEqual((caught.exception.stage,caught.exception.code),('replay','engine-control-mismatch'))

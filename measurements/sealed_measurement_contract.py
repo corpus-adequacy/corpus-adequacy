@@ -197,6 +197,7 @@ AEE_CHECKER_SEALED_CONTRACT = SealedMeasurementContract(
     site_replacement="false",
     execution_paths=(
         "bounded_run.py",
+    "contained_contract.py",
         "corpus_adequacy.py",
         "isolated_tree.py",
         "module_child.py",

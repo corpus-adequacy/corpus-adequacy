@@ -15,79 +15,60 @@ from __future__ import annotations
 
 import json
 
-import corpus_adequacy as ca
+import suggestion_evidence as _evidence
 import contained_oci as contained
 import kernel_readback
 
-ENVELOPE_SCHEMA = "corpus-adequacy.execution-envelope.v0"
-ENVELOPE_SCHEMA_V1 = "corpus-adequacy.execution-envelope.v1"
-ENVELOPE_SCHEMA_V2 = "corpus-adequacy.execution-envelope.v2"
+ENVELOPE_SCHEMA = _evidence._envelope_ENVELOPE_SCHEMA
+ENVELOPE_SCHEMA_V1 = _evidence._envelope_ENVELOPE_SCHEMA_V1
+ENVELOPE_SCHEMA_V2 = _evidence._envelope_ENVELOPE_SCHEMA_V2
 # v3 is v2 plus the kernel's own read-back of the limits, taken while the container was held
 # (#197). v0 to v2 records are read as before and never gain the field.
-ENVELOPE_SCHEMA_V3 = "corpus-adequacy.execution-envelope.v3"
-ENVELOPE_SCHEMAS = (ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_V1, ENVELOPE_SCHEMA_V2, ENVELOPE_SCHEMA_V3)
+ENVELOPE_SCHEMA_V3 = _evidence._envelope_ENVELOPE_SCHEMA_V3
+ENVELOPE_SCHEMAS = _evidence._envelope_ENVELOPE_SCHEMAS
 # Schemas that bind the owner's tmpfs declaration and require CPU and nofile observations.
-_OWNER_BOUND_SCHEMAS = (ENVELOPE_SCHEMA_V2, ENVELOPE_SCHEMA_V3)
-_RESOURCE_OBSERVING_SCHEMAS = (ENVELOPE_SCHEMA_V1, ENVELOPE_SCHEMA_V2, ENVELOPE_SCHEMA_V3)
-CONTAINED_PROFILE = "contained-oci-v0"
-CONTAINED_PROFILE_V1 = "contained-oci-v1"
+_OWNER_BOUND_SCHEMAS = _evidence._envelope_OWNER_BOUND_SCHEMAS
+_RESOURCE_OBSERVING_SCHEMAS = _evidence._envelope_RESOURCE_OBSERVING_SCHEMAS
+CONTAINED_PROFILE = _evidence._envelope_CONTAINED_PROFILE
+CONTAINED_PROFILE_V1 = _evidence._envelope_CONTAINED_PROFILE_V1
 # The one pairing rule for a request: the resource-profile loader each contained execution
 # profile admits. contained-oci-v0 pairs only with a v1 profile, contained-oci-v1 only with v2.
-_REQUESTED_RESOURCE_PROFILE = {
-    CONTAINED_PROFILE: contained.require_resource_profile,
-    CONTAINED_PROFILE_V1: contained.require_resource_profile_v2,
-}
+_REQUESTED_RESOURCE_PROFILE = _evidence._envelope_REQUESTED_RESOURCE_PROFILE
 # The envelope schema a new candidate run under each profile emits. Historical v1 and v2 bytes
 # remain readable; new contained-oci-v1 records use v3, which adds the kernel read-back.
-ENVELOPE_SCHEMA_BY_PROFILE = {
-    CONTAINED_PROFILE: ENVELOPE_SCHEMA,
-    CONTAINED_PROFILE_V1: ENVELOPE_SCHEMA_V3,
-}
-CONTAINED_USER = contained.CONTAINED_USER
-OFFLINE_ENV_NAME = "CARGO_NET_OFFLINE"
+ENVELOPE_SCHEMA_BY_PROFILE = _evidence._envelope_ENVELOPE_SCHEMA_BY_PROFILE
+CONTAINED_USER = _evidence._envelope_CONTAINED_USER
+OFFLINE_ENV_NAME = _evidence._envelope_OFFLINE_ENV_NAME
 
-SETUP_STATUSES = ("ready", "unavailable", "refused")
+SETUP_STATUSES = _evidence._envelope_SETUP_STATUSES
 # No `degraded`: contained-oci-v0 has no optional containment axis, so a
 # missing or contradicted required field is `unverified` and the run is
 # withheld. A third member here would be a state the engine cannot produce.
-ENVELOPE_STATUSES = ("verified", "unverified")
-CANDIDATE_OUTCOMES = ("completed", "timeout", "output-cap", "unproved", "not-run")
-CLEANUP_RESULTS = ("removed-and-absent", "remove-failed", "absence-unproved")
-PUBLICATION_PERMISSIONS = ("permitted", "withheld")
+ENVELOPE_STATUSES = _evidence._envelope_ENVELOPE_STATUSES
+CANDIDATE_OUTCOMES = _evidence._envelope_CANDIDATE_OUTCOMES
+CLEANUP_RESULTS = _evidence._envelope_CLEANUP_RESULTS
+PUBLICATION_PERMISSIONS = _evidence._envelope_PUBLICATION_PERMISSIONS
 
-EFFECTIVE_KEYS = (
-    "cap_add", "cap_drop", "devices", "env_names", "image", "image_env_names",
-    "memory", "memory_swap", "mounts", "network_mode", "no_new_privileges",
-    "pid_mode", "pids_limit", "privileged", "read_only_root",
-    "runtime_version", "tmpfs", "user", "userns_mode",
-)
-EFFECTIVE_KEYS_V1 = EFFECTIVE_KEYS + (
-    "cpu_period", "cpu_quota", "daemon", "nano_cpus", "ulimit_nofile")
-EFFECTIVE_KEYS_V3 = EFFECTIVE_KEYS_V1 + ("kernel",)
-REQUESTED_KEYS = (
-    "execution_profile", "image_id", "mount_spec", "resource_profile", "sealed",
-)
-REQUESTED_KEYS_V2 = REQUESTED_KEYS + ("tmpfs",)
-ENVELOPE_KEYS = (
-    "candidate_outcome", "cleanup", "effective", "envelope_status",
-    "execution_commit", "non_claims", "prepare_sha256",
-    "publication_permission", "report_sha256", "requested", "schema",
-    "setup_status", "unverified_field", "withheld_reason",
-)
-NON_CLAIMS = (
-    "States the envelope one Docker daemon reported for one container on one "
-    "host at one time.",
-    "Does not prove kernel or runtime escape resistance.",
-    "Does not prove the absence of side channels.",
-    "Does not prove an uncompromised daemon or operator.",
-    "Does not authenticate the candidate author or prove candidate correctness.",
-    "Not a sandbox-completeness claim, not a score, not an audit, not a "
-    "certification, and not publication authorization.",
-)
+EFFECTIVE_KEYS = _evidence._envelope_EFFECTIVE_KEYS
+EFFECTIVE_KEYS_V1 = _evidence._envelope_EFFECTIVE_KEYS_V1
+EFFECTIVE_KEYS_V3 = _evidence._envelope_EFFECTIVE_KEYS_V3
+REQUESTED_KEYS = _evidence._envelope_REQUESTED_KEYS
+REQUESTED_KEYS_V2 = _evidence._envelope_REQUESTED_KEYS_V2
+ENVELOPE_KEYS = _evidence._envelope_ENVELOPE_KEYS
+NON_CLAIMS = _evidence._envelope_NON_CLAIMS
 
 
 class EnvelopeError(contained.PrepareError):
     """An observation was missing, contradicted, or outside the closed model."""
+
+
+def _shared_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except _evidence.EnvelopeContractError as exc:
+        raise EnvelopeError(str(exc)) from exc
+    except _evidence._contained_contract.ContractError as exc:
+        raise contained.PrepareError(str(exc)) from exc
 
 
 def _observed(doc, *path):
@@ -228,51 +209,24 @@ def project_effective_envelope(inspect, *, image_env_names, runtime_version) -> 
 
 
 def _effective_keys(schema):
-    if schema == ENVELOPE_SCHEMA:
-        return EFFECTIVE_KEYS
-    if schema in (ENVELOPE_SCHEMA_V1, ENVELOPE_SCHEMA_V2):
-        return EFFECTIVE_KEYS_V1
-    if schema == ENVELOPE_SCHEMA_V3:
-        return EFFECTIVE_KEYS_V3
-    raise EnvelopeError("envelope_schema_shape")
+    return _shared_call(_evidence._envelope_effective_keys, schema)
 
 
 def _v1_integer(value, where):
-    if type(value) is not int or value < 0:
-        raise EnvelopeError(where)
-    return value
+    return _shared_call(_evidence._envelope_v1_integer, value, where)
 
 
 def _v1_identity(value, where):
-    if not isinstance(value, str) or not value.strip():
-        raise EnvelopeError(where)
-    return value
+    return _shared_call(_evidence._envelope_v1_identity, value, where)
 
 
 def _v1_options(value, where):
-    if type(value) is not list or any(not isinstance(x, str) or not x for x in value):
-        raise EnvelopeError(where)
-    return sorted(value)
+    return _shared_call(_evidence._envelope_v1_options, value, where)
 
 
 def _require_v1_values(effective):
     """Shared stored-value rules; projection cannot stand in for reader validation."""
-    for key in ("cpu_period", "cpu_quota", "nano_cpus"):
-        _v1_integer(effective[key], key)
-    daemon = effective["daemon"]
-    _require_exact(daemon, ("kernel_version", "cgroup_version", "cgroup_driver",
-                            "security_options"), "daemon")
-    for key in ("kernel_version", "cgroup_version", "cgroup_driver"):
-        _v1_identity(daemon[key], "daemon." + key)
-    options = daemon["security_options"]
-    if options != _v1_options(options, "daemon.security_options"):
-        raise EnvelopeError("daemon.security_options")
-    nofile = effective["ulimit_nofile"]
-    if nofile is not None:
-        _require_exact(nofile, ("soft", "hard"), "ulimit_nofile")
-        if (type(nofile["soft"]) is not int or type(nofile["hard"]) is not int or
-                not 0 <= nofile["soft"] <= nofile["hard"]):
-            raise EnvelopeError("ulimit_nofile")
+    return _shared_call(_evidence._envelope_require_v1_values, effective)
 
 
 def _add_v1_observations(effective, inspect, daemon_info):
@@ -352,73 +306,35 @@ def _require_kernel_readback(kernel, profile) -> None:
     own form is `readback_unreadable:<field>`; either leaves the envelope unverified. This is the
     kernel's view for one container at one moment, not proof the limit was ever reached.
     """
-    try:
-        problems = kernel_readback.compare(kernel, kernel_readback.expected_readback(profile))
-    except (kernel_readback.ReadbackError, contained.PrepareError) as exc:
-        raise EnvelopeError("kernel") from exc
-    if problems:
-        raise EnvelopeError(problems[0])
+    return _shared_call(_evidence._envelope_require_kernel_readback, kernel, profile)
 
 
 def _resource_profile_loader(execution_profile):
     """The resource-profile loader a requested execution profile admits; any other refuses."""
-    if (type(execution_profile) is not str or
-            execution_profile not in ca.CLOSED_EXECUTION_PROFILES or
-            execution_profile not in _REQUESTED_RESOURCE_PROFILE):
-        raise EnvelopeError("execution_profile")
-    return _REQUESTED_RESOURCE_PROFILE[execution_profile]
+    return _shared_call(_evidence._envelope_resource_profile_loader, execution_profile)
 
 
 def envelope_schema_for_profile(execution_profile) -> str:
     """The envelope schema a candidate run under `execution_profile` emits."""
-    if (type(execution_profile) is not str or
-            execution_profile not in ENVELOPE_SCHEMA_BY_PROFILE):
-        raise EnvelopeError("execution_profile")
-    return ENVELOPE_SCHEMA_BY_PROFILE[execution_profile]
+    return _shared_call(_evidence._envelope_envelope_schema_for_profile, execution_profile)
 
 
 def _require_schema_profile(schema, execution_profile) -> None:
-    if schema in _OWNER_BOUND_SCHEMAS and execution_profile != CONTAINED_PROFILE_V1:
-        raise EnvelopeError("envelope_schema_profile")
+    return _shared_call(_evidence._envelope_require_schema_profile, schema, execution_profile)
 
 
-def requested_envelope(*, execution_profile, image_id, mount_spec,
-                       resource_profile, sealed, schema=None) -> dict:
+def requested_envelope(*, execution_profile, image_id, mount_spec, resource_profile, sealed, schema=None) -> dict:
     """The declaration side. These values are compared, never projected.
 
     The pinned image's own environment is NOT here: it is an observation of
     an immutable artifact, so it sits in `effective` and the environment
     check is observation against observation, with no declaration involved.
     """
-    loader = _resource_profile_loader(execution_profile)
-    if type(sealed) is not bool:
-        raise EnvelopeError("sealed")
-    if schema is None:
-        schema = ENVELOPE_SCHEMA
-    if schema not in ENVELOPE_SCHEMAS:
-        raise EnvelopeError("envelope_schema_shape")
-    _require_schema_profile(schema, execution_profile)
-    requested = {
-        "execution_profile": execution_profile,
-        "image_id": contained.require_image_id(image_id),
-        "mount_spec": sorted(
-            destination for _key, destination
-            in contained._require_mount_spec(mount_spec)),
-        "resource_profile": loader(resource_profile),
-        "sealed": sealed,
-    }
-    if schema in _OWNER_BOUND_SCHEMAS:
-        requested["tmpfs"] = {
-            destination: contained.tmpfs_request(
-                requested["resource_profile"], destination=destination, owner_bound=True)
-            for destination in ("/tmp", "/work")
-        }
-    return requested
+    return _shared_call(_evidence._envelope_requested_envelope, execution_profile=execution_profile, image_id=image_id, mount_spec=mount_spec, resource_profile=resource_profile, sealed=sealed, schema=schema)
 
 
 def _require_exact(doc, keys, where: str) -> None:
-    if type(doc) is not dict or set(doc) != set(keys):
-        raise EnvelopeError(where)
+    return _shared_call(_evidence._envelope_require_exact, doc, keys, where)
 
 
 def require_requested_record(requested, *, schema=None) -> dict:
@@ -431,39 +347,7 @@ def require_requested_record(requested, *, schema=None) -> dict:
     integer limits and bool work_exec, and mount_spec is a strictly sorted
     list of unique destination strings starting with '/'.
     """
-    keys = REQUESTED_KEYS_V2 if schema in _OWNER_BOUND_SCHEMAS else REQUESTED_KEYS
-    _require_exact(requested, keys, "requested")
-    _require_schema_profile(schema, requested["execution_profile"])
-    loader = _resource_profile_loader(requested["execution_profile"])
-    try:
-        contained.require_image_id(requested["image_id"])
-    except contained.PrepareError as exc:
-        raise EnvelopeError("image_id") from exc
-    if type(requested["sealed"]) is not bool:
-        raise EnvelopeError("sealed")
-    try:
-        loader(requested["resource_profile"])
-    except contained.PrepareError as exc:
-        raise EnvelopeError("resource_profile") from exc
-    mount_spec = requested["mount_spec"]
-    try:
-        contained.validate_mount_destinations(mount_spec, strictly_sorted=True)
-    except contained.PrepareError as exc:
-        raise EnvelopeError("mount_spec") from exc
-    if schema in _OWNER_BOUND_SCHEMAS:
-        expected_tmpfs = {
-            destination: contained.tmpfs_request(
-                requested["resource_profile"], destination=destination, owner_bound=True)
-            for destination in ("/tmp", "/work")
-        }
-        try:
-            for spec in requested["tmpfs"].values():
-                contained.require_tmpfs_spec(spec, owner_bound=True)
-        except (AttributeError, contained.PrepareError) as exc:
-            raise EnvelopeError("tmpfs") from exc
-        if requested["tmpfs"] != expected_tmpfs:
-            raise EnvelopeError("tmpfs")
-    return requested
+    return _shared_call(_evidence._envelope_require_requested_record, requested, schema=schema)
 
 
 def _requests_cpu_and_nofile(requested) -> bool:
@@ -472,7 +356,7 @@ def _requests_cpu_and_nofile(requested) -> bool:
     After `require_requested_record` this is exactly a contained-oci-v1 request, since that
     profile pairs only with a v2 resource profile.
     """
-    return requested["resource_profile"]["schema"] == contained.RESOURCE_PROFILE_V2_SCHEMA
+    return _shared_call(_evidence._envelope_requests_cpu_and_nofile, requested)
 
 
 def _require_cpu_and_nofile_match(effective, profile) -> None:
@@ -483,15 +367,7 @@ def _require_cpu_and_nofile_match(effective, profile) -> None:
     CFS period, so a nonzero value next to the requested period/quota is not what the v2 codec
     asked for. This compares configuration the daemon reports, not a limit the kernel applied.
     """
-    if effective["cpu_period"] != contained.CPU_PERIOD_USEC:
-        raise EnvelopeError("cpu_period")
-    if effective["cpu_quota"] != contained.cpu_quota_usec(profile):
-        raise EnvelopeError("cpu_quota")
-    if effective["nano_cpus"] != 0:
-        raise EnvelopeError("nano_cpus")
-    if effective["ulimit_nofile"] != {
-            "soft": profile["nofile_soft"], "hard": profile["nofile_hard"]}:
-        raise EnvelopeError("ulimit_nofile")
+    return _shared_call(_evidence._envelope_require_cpu_and_nofile_match, effective, profile)
 
 
 def require_envelope_matches_request(effective, requested, *, schema=ENVELOPE_SCHEMA) -> None:
@@ -503,235 +379,35 @@ def require_envelope_matches_request(effective, requested, *, schema=ENVELOPE_SC
     For a v1 resource request those fields, and the daemon fields always, are
     observations with shape checks, not requested limits.
     """
-    require_requested_record(requested, schema=schema)
-    _require_exact(effective, _effective_keys(schema),
-                       "effective" if schema == ENVELOPE_SCHEMA else "envelope_schema_shape")
-    if schema in _RESOURCE_OBSERVING_SCHEMAS:
-        _require_v1_values(effective)
-    profile = requested["resource_profile"]
-    if _requests_cpu_and_nofile(requested) and schema not in _RESOURCE_OBSERVING_SCHEMAS:
-        raise EnvelopeError("envelope_schema_profile")
-
-    if effective["image"] != requested["image_id"]:
-        raise EnvelopeError("image")
-    if not isinstance(effective["runtime_version"], str) or not effective[
-            "runtime_version"].strip():
-        raise EnvelopeError("runtime_version")
-    if type(effective["privileged"]) is not bool or effective["privileged"] is not False:
-        raise EnvelopeError("privileged")
-    if effective["cap_add"] != [] or type(effective["cap_add"]) is not list:
-        raise EnvelopeError("cap_add")
-    if effective["cap_drop"] != ["ALL"] or type(effective["cap_drop"]) is not list:
-        raise EnvelopeError("cap_drop")
-    if effective["devices"] != [] or type(effective["devices"]) is not list:
-        raise EnvelopeError("devices")
-    if effective["pid_mode"] != "":
-        raise EnvelopeError("pid_mode")
-    if effective["userns_mode"] != "":
-        raise EnvelopeError("userns_mode")
-    if type(effective["no_new_privileges"]) is not bool or effective["no_new_privileges"] is not True:
-        raise EnvelopeError("no_new_privileges")
-    if type(effective["read_only_root"]) is not bool or effective["read_only_root"] is not True:
-        raise EnvelopeError("read_only_root")
-    if effective["user"] != CONTAINED_USER:
-        raise EnvelopeError("user")
-
-    sealed = requested["sealed"]
-    if sealed and effective["network_mode"] != "none":
-        raise EnvelopeError("network_mode")
-    if not sealed and effective["network_mode"] == "none":
-        raise EnvelopeError("network_mode")
-
-    if type(effective["memory"]) is not int or effective["memory"] != profile["memory_bytes"]:
-        raise EnvelopeError("memory")
-    if type(effective["memory_swap"]) is not int or effective["memory_swap"] != profile["memory_swap_bytes"]:
-        raise EnvelopeError("memory_swap")
-    if type(effective["pids_limit"]) is not int or effective["pids_limit"] != profile["pids"]:
-        raise EnvelopeError("pids_limit")
-
-    if type(effective["tmpfs"]) is not dict:
-        raise EnvelopeError("tmpfs")
-    expected_tmpfs = requested["tmpfs"] if schema in _OWNER_BOUND_SCHEMAS else {
-        "/tmp": {"exec": False, "nr_inodes": profile["tmp_inodes"],
-                 "size": profile["tmp_bytes"]},
-        "/work": {"exec": profile["work_exec"],
-                  "nr_inodes": profile["work_inodes"], "size": profile["work_bytes"]},
-    }
-    if schema in _OWNER_BOUND_SCHEMAS:
-        try:
-            for spec in effective["tmpfs"].values():
-                contained.require_tmpfs_spec(spec, owner_bound=True)
-        except (AttributeError, contained.PrepareError) as exc:
-            raise EnvelopeError("tmpfs") from exc
-    if effective["tmpfs"] != expected_tmpfs:
-        raise EnvelopeError("tmpfs")
-    if schema not in _OWNER_BOUND_SCHEMAS:
-        for _dest, spec in effective["tmpfs"].items():
-            if type(spec) is not dict:
-                raise EnvelopeError("tmpfs")
-            if type(spec.get("exec")) is not bool:
-                raise EnvelopeError("tmpfs")
-            if type(spec.get("nr_inodes")) is not int or type(spec.get("size")) is not int:
-                raise EnvelopeError("tmpfs")
-
-    # The allowed environment is the pinned image's own observed environment
-    # plus exactly what the create argv adds. A name injected at create time
-    # is outside that set by construction, so no denylist is needed and no
-    # value is ever read.
-    if type(effective["image_env_names"]) not in (list, tuple) or any(
-            not isinstance(name, str) or not name for name in effective["image_env_names"]):
-        raise EnvelopeError("image_env_names")
-    if type(effective["env_names"]) not in (list, tuple) or any(
-            not isinstance(name, str) or not name for name in effective["env_names"]):
-        raise EnvelopeError("env_names")
-
-    allowed = set(effective["image_env_names"])
-    if sealed:
-        allowed.add(OFFLINE_ENV_NAME)
-    if set(effective["env_names"]) - allowed:
-        raise EnvelopeError("env_names")
-    if sealed != (OFFLINE_ENV_NAME in effective["env_names"]):
-        raise EnvelopeError("env_names")
-
-    if type(effective["mounts"]) not in (list, tuple):
-        raise EnvelopeError("mounts")
-    for mount in effective["mounts"]:
-        if type(mount) is not dict:
-            raise EnvelopeError("mounts")
-        if type(mount.get("rw")) is not bool or mount.get("rw") is not False:
-            raise EnvelopeError("mounts")
-        if not isinstance(mount.get("destination"), str) or not isinstance(mount.get("type"), str):
-            raise EnvelopeError("mounts")
-
-    expected_mounts = [
-        {"destination": destination, "rw": False, "type": "bind"}
-        for destination in requested["mount_spec"]
-    ]
-    if effective["mounts"] != expected_mounts:
-        raise EnvelopeError("mounts")
-
-    if _requests_cpu_and_nofile(requested):
-        _require_cpu_and_nofile_match(effective, profile)
-    if schema == ENVELOPE_SCHEMA_V3:
-        _require_kernel_readback(effective["kernel"], profile)
+    return _shared_call(_evidence._envelope_require_envelope_matches_request, effective, requested, schema=schema)
 
 
 def _require_member(value, members, where: str) -> str:
-    for member in members:
-        if value == member:
-            return member
-    raise EnvelopeError(where)
+    return _shared_call(_evidence._envelope_require_member, value, members, where)
 
 
 def _require_hex(value, length: int, where: str) -> str:
-    if (not isinstance(value, str) or len(value) != length or
-            any(ch not in contained.HEX64 for ch in value)):
-        raise EnvelopeError(where)
-    return value
+    return _shared_call(_evidence._envelope_require_hex, value, length, where)
 
 
-def publication_permission(*, setup_status, envelope_status, candidate_outcome,
-                           cleanup) -> tuple[str, str | None]:
+def publication_permission(*, setup_status, envelope_status, candidate_outcome, cleanup) -> tuple[str, str | None]:
     """One rule. Permission is derived, never supplied."""
-    if setup_status != "ready":
-        return "withheld", "setup_status"
-    if envelope_status != "verified":
-        return "withheld", "envelope_status"
-    if candidate_outcome != "completed":
-        return "withheld", "candidate_outcome"
-    if cleanup != "removed-and-absent":
-        return "withheld", "cleanup"
-    return "permitted", None
+    return _shared_call(_evidence.envelope_permission_data, setup_status=setup_status, envelope_status=envelope_status, candidate_outcome=candidate_outcome, cleanup=cleanup)
 
 
-def build_envelope_record(*, requested, setup_status, envelope_status,
-                          unverified_field, effective, candidate_outcome,
-                          cleanup, prepare_sha256, execution_commit,
-                          report_sha256, schema=ENVELOPE_SCHEMA) -> dict:
+def build_envelope_record(*, requested, setup_status, envelope_status, unverified_field, effective, candidate_outcome, cleanup, prepare_sha256, execution_commit, report_sha256, schema=ENVELOPE_SCHEMA) -> dict:
     """Close the state model over one contained run.
 
     Setup, candidate and cleanup failures are preserved rather than folded
     together, and no combination manufactures a score. There is deliberately
     no `publication_permission` parameter: it cannot be caller-supplied.
     """
-    _effective_keys(schema)
-    require_requested_record(requested, schema=schema)
-    # A v2 resource request needs v1's CPU/nofile fields. Historical v1 and v2 records remain
-    # valid; new contained-oci-v1 emissions select v3, which also carries the kernel read-back.
-    if _requests_cpu_and_nofile(requested) and schema not in _RESOURCE_OBSERVING_SCHEMAS:
-        raise EnvelopeError("envelope_schema_profile")
-    setup_status = _require_member(setup_status, SETUP_STATUSES, "setup_status")
-    envelope_status = _require_member(
-        envelope_status, ENVELOPE_STATUSES, "envelope_status")
-    candidate_outcome = _require_member(
-        candidate_outcome, CANDIDATE_OUTCOMES, "candidate_outcome")
-    cleanup = _require_member(cleanup, CLEANUP_RESULTS, "cleanup")
-
-    if setup_status != "ready":
-        if candidate_outcome != "not-run":
-            raise EnvelopeError("candidate_outcome")
-        if envelope_status != "unverified":
-            raise EnvelopeError("envelope_status")
-        if effective is not None:
-            raise EnvelopeError("effective")
-
-    if envelope_status == "verified":
-        if unverified_field is not None:
-            raise EnvelopeError("unverified_field")
-        _require_exact(effective, _effective_keys(schema),
-                       "effective" if schema == ENVELOPE_SCHEMA else "envelope_schema_shape")
-        require_envelope_matches_request(effective, requested, schema=schema)
-    else:
-        if not isinstance(unverified_field, str) or not unverified_field:
-            raise EnvelopeError("unverified_field")
-        if effective is not None:
-            raise EnvelopeError("effective")
-
-    permission, reason = publication_permission(
-        setup_status=setup_status,
-        envelope_status=envelope_status,
-        candidate_outcome=candidate_outcome,
-        cleanup=cleanup,
-    )
-    record = {
-        "candidate_outcome": candidate_outcome,
-        "cleanup": cleanup,
-        "effective": None if effective is None else dict(effective),
-        "envelope_status": envelope_status,
-        "execution_commit": _require_hex(execution_commit, 40, "execution_commit"),
-        "non_claims": list(NON_CLAIMS),
-        "prepare_sha256": _require_hex(prepare_sha256, 64, "prepare_sha256"),
-        "publication_permission": permission,
-        "report_sha256": (
-            None if report_sha256 is None
-            else _require_hex(report_sha256, 64, "report_sha256")),
-        "requested": dict(requested),
-        "schema": schema,
-        "setup_status": setup_status,
-        "unverified_field": unverified_field,
-        "withheld_reason": reason,
-    }
-    _require_exact(record, ENVELOPE_KEYS, "envelope")
-    return record
+    return _shared_call(_evidence._envelope_build_envelope_record, requested=requested, setup_status=setup_status, envelope_status=envelope_status, unverified_field=unverified_field, effective=effective, candidate_outcome=candidate_outcome, cleanup=cleanup, prepare_sha256=prepare_sha256, execution_commit=execution_commit, report_sha256=report_sha256, schema=schema)
 
 
 def bind_report(record: dict, report_sha256) -> dict:
     """Attach the produced report digest. Envelope to report, never back."""
-    _require_exact(record, ENVELOPE_KEYS, "envelope")
-    _effective_keys(record["schema"])
-    return build_envelope_record(
-        schema=record["schema"],
-        requested=record["requested"],
-        setup_status=record["setup_status"],
-        envelope_status=record["envelope_status"],
-        unverified_field=record["unverified_field"],
-        effective=record["effective"],
-        candidate_outcome=record["candidate_outcome"],
-        cleanup=record["cleanup"],
-        prepare_sha256=record["prepare_sha256"],
-        execution_commit=record["execution_commit"],
-        report_sha256=report_sha256,
-    )
+    return _shared_call(_evidence._envelope_bind_report, record, report_sha256)
 
 
 def validate_envelope_record(record: dict) -> dict:
@@ -746,14 +422,7 @@ def validate_envelope_record(record: dict) -> dict:
     An inconsistent or mutated record raises EnvelopeError and is never
     normalized into a pass.
     """
-    if type(record) is not dict:
-        raise EnvelopeError("envelope")
-    _require_exact(record, ENVELOPE_KEYS, "envelope")
-    _effective_keys(record["schema"])
-    rebuilt = bind_report(record, record["report_sha256"])
-    if rebuilt != record:
-        raise EnvelopeError("envelope_semantic_mismatch")
-    return record
+    return _shared_call(_evidence.require_envelope_record_data, record)
 
 
 def encode_envelope(record: dict) -> bytes:

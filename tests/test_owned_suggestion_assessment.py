@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'measurements'))
 import sealed_measurement_contract as contracts
 import suggestion_evidence as ev
-from test_suggestion_evidence import prepared_inputs
+from test_suggestion_evidence import prepared_inputs, structural_members
 
 
 class AdmissionTypes(unittest.TestCase):
@@ -60,27 +60,11 @@ def context_fixture():
         'source_content_sha256': plan['source']['content_sha256'],
         'reference_sha256': plan['reference']['sha256'], 'policy': ev.POLICY,
         'receipt_sha256': None, 'source_files': plan['source']['files'], 'reference_approval': 'accept'}
-    historical = json.loads((ROOT/'measurements/owned-slice-b-20f6d8b/declared/prepare.v2.json').read_bytes())
-    runtime = {k: historical[k] for k in ('toolchain','image','candidate_profile','probe_evidence',
-        'network','runtime','oci','ceilings','materialize_ceilings')}
-    import hashlib
-    config = (ROOT/'execution/aee-checker-sealed/cargo-config.toml').read_bytes()
-    tool_hash = hashlib.sha256(b'cargo-config.toml\0'+str(len(config)).encode()+b'\0'+config).hexdigest()
-    prepare = {'schema': ev.PREFIX+'prepare.v0','family':ev.FAMILY,'plan_sha256':plan_hash,
-        'variant':'base','profile':ev.PROFILE,'source':plan['source'],'pins_sha256':'a'*64,
-        'materialized':{'subject_tree_sha256':plan['subject_tree_sha256'],
-            'corpus_tree_sha256':variant['tree_sha256'],'corpus_manifest_sha256':variant['manifest']['sha256'],
-            'corpus_id_count':5,'vendor_sha256':ev.digest(b''),'tool_sha256':tool_hash},'runtime':runtime}
-    prepare_raw=ev.encode(prepare)
-    parent={'schema':ev.PREFIX+'authorization.v0','plan_sha256':plan_hash,
-        'source_content_sha256':plan['source']['content_sha256'],'profile':ev.PROFILE,
-        'prepares':[{'variant':'base','sha256':ev.digest(prepare_raw)},
-                    {'variant':'outer-whitespace','sha256':'e'*64}],
-        'reference_sha256':plan['reference']['sha256'],'operator':'fixture-only','decision':'execute'}
-    parent_raw=ev.encode(parent)
-    auth={'schema':ev.PREFIX+'variant-authorization.v0','parent_authorization_sha256':ev.digest(parent_raw),
-        'plan_sha256':plan_hash,'variant':'base','prepare_sha256':ev.digest(prepare_raw),
-        'profile':ev.PROFILE,'source_content_sha256':plan['source']['content_sha256']}
+    evidence = structural_members(inputs)
+    inputs = dataclasses.replace(inputs, evidence_members=tuple(sorted(evidence.items())))
+    prepare_raw = evidence['base/prepare.json']
+    parent_raw = evidence['authorization.json']
+    auth = ev.decode(evidence['base/authorization.json'])
     context=contracts.OwnedAssessmentAdmissionContext(ev.FAMILY,ev.PROFILE,'base',inputs,
         ev.encode(expected),prepare_raw,parent_raw,ev.encode(auth))
     contract=contracts.OwnedAssessmentVariantContract(plan_hash,'base',variant['manifest']['sha256'],

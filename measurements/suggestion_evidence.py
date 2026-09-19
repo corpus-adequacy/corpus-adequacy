@@ -5,6 +5,7 @@ constitute a producer or a package reader, and never authenticate execution.
 """
 from __future__ import annotations
 
+import contained_contract as _contained_contract
 import copy
 import hashlib
 import json
@@ -468,7 +469,7 @@ SOURCE_PATHS = tuple(sorted(set(_OWNED.execution_paths) | {
     'measurements/suggestion_readback.py'}))
 
 
-def _members(snapshot, *, count):
+def _members(snapshot, *, count, max_bytes=65536):
     if type(snapshot) is not tuple or len(snapshot) != count:
         refuse('syntax', 'wrong-shape')
     result = {}
@@ -484,7 +485,7 @@ def _members(snapshot, *, count):
             refuse('filesystem', 'unsafe-member')
         if type(raw) is not bytes:
             refuse('syntax', 'wrong-shape')
-        if len(raw) > 65536:
+        if len(raw) > max_bytes:
             refuse('limits', 'member-bytes')
         previous = name
         folded.add(name.casefold())
@@ -537,10 +538,12 @@ class AssessmentInputs:
 
     retained_members: tuple[tuple[str, bytes], ...]
     basis_members: tuple[tuple[str, bytes], ...]
+    evidence_members: tuple[tuple[str, bytes], ...] = ()
 
     def __post_init__(self):
         _members(self.retained_members, count=15)
         require_basis(self.basis_members)
+        _evidence_members(self.evidence_members)
 
 
 def _proposal(doc):
@@ -646,6 +649,8 @@ def evaluate_preflight(inputs):
     refusal; malformed/misbound snapshots raise, never manufacture passed gates.
     """
     if type(inputs) is not AssessmentInputs:
+        refuse('syntax', 'wrong-shape')
+    if getattr(inputs, 'evidence_members', None) != ():
         refuse('syntax', 'wrong-shape')
     members = _members(inputs.retained_members, count=15)
     basis = require_basis(inputs.basis_members)
@@ -754,7 +759,8 @@ def evaluate_assessment(inputs, observations, views, engine_controls, journal):
     Arguments are decoded retained wire records. Package loading must separately
     enforce canonical raw bytes and package/index budgets before this boundary.
     """
-    gates, validated = evaluate_preflight(inputs)
+    structure = require_assessment_structure(inputs, require_collections=True)
+    gates, validated = structure['gates'], structure['values']
     plan_hash = digest(dict(inputs.retained_members)['plan.json'])
     if (type(observations) is not list or len(observations) > 8
             or type(views) is not list or len(views) > 8
@@ -793,40 +799,18 @@ def evaluate_assessment(inputs, observations, views, engine_controls, journal):
         if not settled and event['observation'] is not None:
             refuse('syntax', 'wrong-shape')
         normalized_journal.append({k: event[k] for k in ('seq', 'slot', 'event', 'reason')})
-    if validated is None:
-        _journal(normalized_journal, [])
-        expected_controls = [{'variant': v, 'positive': 'not-run', 'inert': 'not-run',
-                              'barrier': 'stop'} for v in VARIANTS]
-        if encode(engine_controls) != encode(expected_controls):
-            refuse('replay', 'engine-control-mismatch')
-        if (not normalized_journal or normalized_journal[0]['event'] != 'preflight-refused'
-                or any(e['event'] != 'not-started' for e in normalized_journal[1:])):
-            refuse('replay', 'schedule-mismatch')
-        return gates + [_gate(n, 'not-run', 'prerequisite-refused') for n in range(3, 7)] + [
-            _gate(7, 'not-run', 'missing-review'), _gate(8)]
     if any(e['event'] == 'preflight-refused' for e in normalized_journal):
         refuse('replay', 'schedule-mismatch')
     projected = [project_observation(o, ids=validated['execution']['ids'], plan_sha256=plan_hash)
                  for o in observations]
-    return gates + evaluate_execution_gates(validated['execution'], observations, projected,
-                                            engine_controls, normalized_journal)
+    gates += evaluate_execution_gates(validated['execution'], observations, projected,
+                                      engine_controls, normalized_journal)
+    unproved = _assessment_envelopes(structure, observations)
+    return AssessmentEvaluation(encode(gates), unproved)
 
 
 # Closed runtime data pinned to the existing source validators; no runtime imports.
-_CANDIDATE_RESOURCE_PROFILE_V2 = {'cpu_rate_millicpu': 1000,
- 'deadline_seconds': 120,
- 'memory_bytes': 4294967296,
- 'memory_swap_bytes': 4294967296,
- 'nofile_hard': 1024,
- 'nofile_soft': 1024,
- 'output_bytes': 4194304,
- 'pids': 512,
- 'schema': 'corpus-adequacy.aee-checker-sealed.resource-profile.v2',
- 'tmp_bytes': 16777216,
- 'tmp_inodes': 2048,
- 'work_bytes': 268435456,
- 'work_exec': True,
- 'work_inodes': 16384}
+_CANDIDATE_RESOURCE_PROFILE_V2 = _contained_contract.CANDIDATE_RESOURCE_PROFILE_V2
 _NETWORK_CUTOFF = {'cutoff': 'after_materialization',
  'materialization': 'online',
  'sealed_oci': 'none'}
@@ -839,14 +823,11 @@ _OCI_CONTRACT = {'cap_drop': ['ALL'],
  'pids': 512,
  'read_only': True,
  'user': '65532:65532'}
-_DECLARED_CEILINGS = {'deadline_seconds': 8,
- 'disk_bytes': 1048576,
- 'file_count': 128,
- 'output_bytes': 4194304}
+_DECLARED_CEILINGS = _contained_contract.DECLARED_CEILINGS
 _MATERIALIZE_CEILINGS = {'deadline_seconds': 300,
  'disk_bytes': 67108864,
  'entry_count': 10000,
- 'output_bytes': 4194304}
+ 'output_bytes': _contained_contract.OUTPUT_CAP_BYTES}
 _INSPECT_KEYS = ('cap_drop', 'memory', 'memory_swap', 'network_mode', 'no_new_privileges', 'offline_env', 'pids', 'read_only_root', 'readonly_mounts', 'tmpfs', 'user')
 _TOOL_TREE_SHA256 = '9347dbb76a065d01681b3cb3cae495aad64f5026d5f5b62c90283a0a1e4afa51'
 
@@ -924,40 +905,14 @@ def _require_expected_admission(expected, plan, plan_hash):
         refuse('expectation', 'expected-identity-mismatch')
 
 
-def require_assessment_context(context, profile, contract):
-    """Revalidate actual bytes even for forged instances; no effects or disk claim.
-
-    Explicit expected bytes come from the trusted caller, not a package choice.
-    Approval is a supplied assertion, not an authenticated reviewer identity.
-    No runtime caller is wired by this module or by constructor success.
-    """
-    from sealed_measurement_contract import OwnedAssessmentAdmissionContext, OwnedAssessmentVariantContract
-    if type(context) is not OwnedAssessmentAdmissionContext:
-        refuse('syntax', 'wrong-shape')
-    try:
-        context.__post_init__()
-    except (ValueError, AttributeError, TypeError):
-        refuse('syntax', 'wrong-shape')
-    if profile != PROFILE or context.profile != profile:
-        refuse('support', 'unsupported-profile')
-    if context.family != FAMILY:
-        refuse('support', 'unsupported-family')
-    gates, values = evaluate_preflight(context.assessment_inputs)
-    if values is None or any(g['status'] != 'passed' for g in gates):
-        refuse('input', 'argument-invalid')
+def _require_variant_preparation(values, variant_name, prepare_raw, parent_raw, auth_raw):
     plan = values['plan']; plan_hash = values['execution']['plan_sha256']
-    expected = require_expected(context.expected_raw)
-    _require_expected_admission(expected, plan, plan_hash)
-    index = VARIANTS.index(context.variant); variant = plan['variants'][index]
-    derived = OwnedAssessmentVariantContract(plan_hash, context.variant,
-        variant['manifest']['sha256'], variant['tree_sha256'], values['execution']['ids'])
-    if type(contract) is not OwnedAssessmentVariantContract or contract != derived:
-        refuse('binding', 'plan-variant')
-    prepare = decode(context.prepare_raw, max_bytes=65536, canonical=True)
+    index = VARIANTS.index(variant_name); variant = plan['variants'][index]
+    prepare = decode(prepare_raw, max_bytes=65536, canonical=True)
     exact(prepare, ('schema', 'family', 'plan_sha256', 'variant', 'profile', 'source',
                     'pins_sha256', 'materialized', 'runtime'))
     require_assessment_dispatch(prepare['family'], prepare['profile'], prepare['schema'])
-    if (prepare['plan_sha256'] != plan_hash or prepare['variant'] != context.variant
+    if (prepare['plan_sha256'] != plan_hash or prepare['variant'] != variant_name
             or encode(prepare['source']) != encode(plan['source'])):
         refuse('binding', 'source-identity')
     require_digest(prepare['pins_sha256'])
@@ -969,7 +924,7 @@ def require_assessment_context(context, profile, contract):
     if encode(materialized) != encode(want):
         refuse('binding', 'corpus-derivation')
     require_runtime_preparation(prepare['runtime'])
-    parent = decode(context.parent_authorization_raw, max_bytes=65536, canonical=True)
+    parent = decode(parent_raw, max_bytes=65536, canonical=True)
     exact(parent, ('schema', 'plan_sha256', 'source_content_sha256', 'profile', 'prepares',
                    'reference_sha256', 'operator', 'decision'))
     if parent['schema'] != PREFIX+'authorization.v0':
@@ -986,25 +941,60 @@ def require_assessment_context(context, profile, contract):
         require_digest(row['sha256'])
         if row['variant'] != name:
             refuse('binding', 'prepare-authorization')
-    prepare_hash = digest(context.prepare_raw)
+    prepare_hash = digest(prepare_raw)
     if parent['prepares'][index]['sha256'] != prepare_hash:
         refuse('binding', 'prepare-authorization')
-    auth = decode(context.variant_authorization_raw, max_bytes=65536, canonical=True)
+    auth = decode(auth_raw, max_bytes=65536, canonical=True)
     expected_auth = {'schema': PREFIX+'variant-authorization.v0',
-        'parent_authorization_sha256': digest(context.parent_authorization_raw),
-        'plan_sha256': plan_hash, 'variant': context.variant, 'prepare_sha256': prepare_hash,
+        'parent_authorization_sha256': digest(parent_raw),
+        'plan_sha256': plan_hash, 'variant': variant_name, 'prepare_sha256': prepare_hash,
         'profile': PROFILE, 'source_content_sha256': plan['source']['content_sha256']}
     if encode(auth) != encode(expected_auth):
         refuse('binding', 'prepare-authorization')
     return prepare
 
 
-def derive_disposition(gates, observations, review, *, proposal_sha256, evidence_index_sha256):
+def require_assessment_context(context, profile, contract):
+    """Shared structural revalidation, then separate trusted-caller expectation."""
+    from sealed_measurement_contract import OwnedAssessmentAdmissionContext, OwnedAssessmentVariantContract
+    if type(context) is not OwnedAssessmentAdmissionContext:
+        refuse('syntax', 'wrong-shape')
+    try:
+        context.__post_init__()
+    except (ValueError, AttributeError, TypeError):
+        refuse('syntax', 'wrong-shape')
+    if profile != PROFILE or context.profile != profile:
+        refuse('support', 'unsupported-profile')
+    if context.family != FAMILY:
+        refuse('support', 'unsupported-family')
+    structure = require_assessment_structure(context.assessment_inputs, require_collections=False)
+    values = structure['values']; plan = values['plan']; plan_hash = values['execution']['plan_sha256']
+    members = structure['members']; name = context.variant
+    for actual, path in ((context.prepare_raw, name+'/prepare.json'),
+                         (context.parent_authorization_raw, 'authorization.json'),
+                         (context.variant_authorization_raw, name+'/authorization.json')):
+        if actual != members[path]:
+            refuse('binding', 'prepare-authorization')
+    expected = require_expected(context.expected_raw)
+    _require_expected_admission(expected, plan, plan_hash)
+    variant = plan['variants'][VARIANTS.index(name)]
+    derived = OwnedAssessmentVariantContract(plan_hash, name, variant['manifest']['sha256'],
+        variant['tree_sha256'], values['execution']['ids'])
+    if type(contract) is not OwnedAssessmentVariantContract or contract != derived:
+        refuse('binding', 'plan-variant')
+    return copy.deepcopy(structure['prepares'][name])
+
+
+def derive_disposition(evaluation, observations, review, *, proposal_sha256, evidence_index_sha256):
     """Combine freshly recomputed gates with review; never mutate indexed gates.
 
     This internal composition primitive is not a receipt verifier. Its caller
     must use evaluate_assessment's result, not package-supplied gate claims.
     """
+    if type(evaluation) is not AssessmentEvaluation:
+        refuse('syntax', 'wrong-shape')
+    evaluation.__post_init__()
+    gates = decode(evaluation.gates_raw, max_bytes=65536, canonical=True)
     require_digest(proposal_sha256); require_digest(evidence_index_sha256)
     if type(gates) is not list or len(gates) != 9:
         refuse('syntax', 'wrong-shape')
@@ -1020,6 +1010,8 @@ def derive_disposition(gates, observations, review, *, proposal_sha256, evidence
             require_slot(slot)
     if encode(gates[7]) != encode(_gate(7, 'not-run', 'missing-review')):
         refuse('replay', 'gate-mismatch')
+    if encode(gates[8]) != encode(_gate(8)):
+        refuse('replay', 'gate-mismatch')
     if review is not None:
         if len(encode(review)) > 65536:
             refuse('limits', 'member-bytes')
@@ -1031,7 +1023,8 @@ def derive_disposition(gates, observations, review, *, proposal_sha256, evidence
         if review['decision'] not in ('accept', 'reject'):
             refuse('syntax', 'wrong-shape')
     # Even a late accept cannot override faithful failed/abnormal execution.
-    if any(o['state'] != 'returned' or o['raw']['raised'] for o in observations):
+    if evaluation.envelope_unproved_slots or any(
+            o['state'] != 'returned' or o['raw']['raised'] for o in observations):
         return 'unproved'
     checked = [g for g in gates if g['id'] != 7]
     if any(g['status'] == 'refused' for g in checked):
@@ -1041,3 +1034,800 @@ def derive_disposition(gates, observations, review, *, proposal_sha256, evidence
     if review is None:
         return 'pending-review'
     return 'refused' if review['decision'] == 'reject' else 'eligible-for-human-corpus-PR'
+
+
+# Shared legacy envelope state model. Runtime wrappers delegate here.
+import kernel_readback as _kernel_readback
+
+class EnvelopeContractError(_contained_contract.ContractError):
+    def __init__(self, message):
+        super().__init__(message, code="contradictory-record")
+
+_envelope_ENVELOPE_SCHEMA = "corpus-adequacy.execution-envelope.v0"
+
+
+_envelope_ENVELOPE_SCHEMA_V1 = "corpus-adequacy.execution-envelope.v1"
+
+
+_envelope_ENVELOPE_SCHEMA_V2 = "corpus-adequacy.execution-envelope.v2"
+
+
+_envelope_ENVELOPE_SCHEMA_V3 = "corpus-adequacy.execution-envelope.v3"
+
+
+_envelope_ENVELOPE_SCHEMAS = (_envelope_ENVELOPE_SCHEMA, _envelope_ENVELOPE_SCHEMA_V1, _envelope_ENVELOPE_SCHEMA_V2, _envelope_ENVELOPE_SCHEMA_V3)
+
+
+_envelope_OWNER_BOUND_SCHEMAS = (_envelope_ENVELOPE_SCHEMA_V2, _envelope_ENVELOPE_SCHEMA_V3)
+
+
+_envelope_RESOURCE_OBSERVING_SCHEMAS = (_envelope_ENVELOPE_SCHEMA_V1, _envelope_ENVELOPE_SCHEMA_V2, _envelope_ENVELOPE_SCHEMA_V3)
+
+
+_envelope_CONTAINED_PROFILE = "contained-oci-v0"
+
+
+_envelope_CONTAINED_PROFILE_V1 = "contained-oci-v1"
+
+
+_envelope_REQUESTED_RESOURCE_PROFILE = {
+    _envelope_CONTAINED_PROFILE: _contained_contract.require_resource_profile,
+    _envelope_CONTAINED_PROFILE_V1: _contained_contract.require_resource_profile_v2,
+}
+
+
+_envelope_ENVELOPE_SCHEMA_BY_PROFILE = {
+    _envelope_CONTAINED_PROFILE: _envelope_ENVELOPE_SCHEMA,
+    _envelope_CONTAINED_PROFILE_V1: _envelope_ENVELOPE_SCHEMA_V3,
+}
+
+
+_envelope_CONTAINED_USER = _contained_contract.CONTAINED_USER
+
+
+_envelope_OFFLINE_ENV_NAME = "CARGO_NET_OFFLINE"
+
+
+_envelope_SETUP_STATUSES = ("ready", "unavailable", "refused")
+
+
+_envelope_ENVELOPE_STATUSES = ("verified", "unverified")
+
+
+_envelope_CANDIDATE_OUTCOMES = ("completed", "timeout", "output-cap", "unproved", "not-run")
+
+
+_envelope_CLEANUP_RESULTS = ("removed-and-absent", "remove-failed", "absence-unproved")
+
+
+_envelope_PUBLICATION_PERMISSIONS = ("permitted", "withheld")
+
+
+_envelope_EFFECTIVE_KEYS = (
+    "cap_add", "cap_drop", "devices", "env_names", "image", "image_env_names",
+    "memory", "memory_swap", "mounts", "network_mode", "no_new_privileges",
+    "pid_mode", "pids_limit", "privileged", "read_only_root",
+    "runtime_version", "tmpfs", "user", "userns_mode",
+)
+
+
+_envelope_EFFECTIVE_KEYS_V1 = _envelope_EFFECTIVE_KEYS + (
+    "cpu_period", "cpu_quota", "daemon", "nano_cpus", "ulimit_nofile")
+
+
+_envelope_EFFECTIVE_KEYS_V3 = _envelope_EFFECTIVE_KEYS_V1 + ("kernel",)
+
+
+_envelope_REQUESTED_KEYS = (
+    "execution_profile", "image_id", "mount_spec", "resource_profile", "sealed",
+)
+
+
+_envelope_REQUESTED_KEYS_V2 = _envelope_REQUESTED_KEYS + ("tmpfs",)
+
+
+_envelope_ENVELOPE_KEYS = (
+    "candidate_outcome", "cleanup", "effective", "envelope_status",
+    "execution_commit", "non_claims", "prepare_sha256",
+    "publication_permission", "report_sha256", "requested", "schema",
+    "setup_status", "unverified_field", "withheld_reason",
+)
+
+
+_envelope_NON_CLAIMS = (
+    "States the envelope one Docker daemon reported for one container on one "
+    "host at one time.",
+    "Does not prove kernel or runtime escape resistance.",
+    "Does not prove the absence of side channels.",
+    "Does not prove an uncompromised daemon or operator.",
+    "Does not authenticate the candidate author or prove candidate correctness.",
+    "Not a sandbox-completeness claim, not a score, not an audit, not a "
+    "certification, and not publication authorization.",
+)
+
+
+def _envelope_effective_keys(schema):
+    if schema == _envelope_ENVELOPE_SCHEMA:
+        return _envelope_EFFECTIVE_KEYS
+    if schema in (_envelope_ENVELOPE_SCHEMA_V1, _envelope_ENVELOPE_SCHEMA_V2):
+        return _envelope_EFFECTIVE_KEYS_V1
+    if schema == _envelope_ENVELOPE_SCHEMA_V3:
+        return _envelope_EFFECTIVE_KEYS_V3
+    raise EnvelopeContractError("envelope_schema_shape")
+
+
+def _envelope_v1_integer(value, where):
+    if type(value) is not int or value < 0:
+        raise EnvelopeContractError(where)
+    return value
+
+
+def _envelope_v1_identity(value, where):
+    if not isinstance(value, str) or not value.strip():
+        raise EnvelopeContractError(where)
+    return value
+
+
+def _envelope_v1_options(value, where):
+    if type(value) is not list or any(not isinstance(x, str) or not x for x in value):
+        raise EnvelopeContractError(where)
+    return sorted(value)
+
+
+def _envelope_require_v1_values(effective):
+    """Shared stored-value rules; projection cannot stand in for reader validation."""
+    for key in ("cpu_period", "cpu_quota", "nano_cpus"):
+        _envelope_v1_integer(effective[key], key)
+    daemon = effective["daemon"]
+    _envelope_require_exact(daemon, ("kernel_version", "cgroup_version", "cgroup_driver",
+                            "security_options"), "daemon")
+    for key in ("kernel_version", "cgroup_version", "cgroup_driver"):
+        _envelope_v1_identity(daemon[key], "daemon." + key)
+    options = daemon["security_options"]
+    if options != _envelope_v1_options(options, "daemon.security_options"):
+        raise EnvelopeContractError("daemon.security_options")
+    nofile = effective["ulimit_nofile"]
+    if nofile is not None:
+        _envelope_require_exact(nofile, ("soft", "hard"), "ulimit_nofile")
+        if (type(nofile["soft"]) is not int or type(nofile["hard"]) is not int or
+                not 0 <= nofile["soft"] <= nofile["hard"]):
+            raise EnvelopeContractError("ulimit_nofile")
+
+
+def _envelope_require_kernel_readback(kernel, profile) -> None:
+    """The kernel must hold exactly what was requested. The first problem names the field.
+
+    A differing value is `readback_mismatch:<field>`, a value that did not read in the kernel's
+    own form is `readback_unreadable:<field>`; either leaves the envelope unverified. This is the
+    kernel's view for one container at one moment, not proof the limit was ever reached.
+    """
+    try:
+        problems = _kernel_readback.compare(kernel, _kernel_readback.expected_readback(profile))
+    except (_kernel_readback.ReadbackError, _contained_contract.ContractError) as exc:
+        raise EnvelopeContractError("kernel") from exc
+    if problems:
+        raise EnvelopeContractError(problems[0])
+
+
+def _envelope_resource_profile_loader(execution_profile):
+    """The resource-profile loader a requested execution profile admits; any other refuses."""
+    if (type(execution_profile) is not str or
+            execution_profile not in _envelope_REQUESTED_RESOURCE_PROFILE):
+        raise EnvelopeContractError("execution_profile")
+    return _envelope_REQUESTED_RESOURCE_PROFILE[execution_profile]
+
+
+def _envelope_envelope_schema_for_profile(execution_profile) -> str:
+    """The envelope schema a candidate run under `execution_profile` emits."""
+    if (type(execution_profile) is not str or
+            execution_profile not in _envelope_ENVELOPE_SCHEMA_BY_PROFILE):
+        raise EnvelopeContractError("execution_profile")
+    return _envelope_ENVELOPE_SCHEMA_BY_PROFILE[execution_profile]
+
+
+def _envelope_require_schema_profile(schema, execution_profile) -> None:
+    if schema in _envelope_OWNER_BOUND_SCHEMAS and execution_profile != _envelope_CONTAINED_PROFILE_V1:
+        raise EnvelopeContractError("envelope_schema_profile")
+
+
+def _envelope_requested_envelope(*, execution_profile, image_id, mount_spec,
+                       resource_profile, sealed, schema=None) -> dict:
+    """The declaration side. These values are compared, never projected.
+
+    The pinned image's own environment is NOT here: it is an observation of
+    an immutable artifact, so it sits in `effective` and the environment
+    check is observation against observation, with no declaration involved.
+    """
+    loader = _envelope_resource_profile_loader(execution_profile)
+    if type(sealed) is not bool:
+        raise EnvelopeContractError("sealed")
+    if schema is None:
+        schema = _envelope_ENVELOPE_SCHEMA
+    if schema not in _envelope_ENVELOPE_SCHEMAS:
+        raise EnvelopeContractError("envelope_schema_shape")
+    _envelope_require_schema_profile(schema, execution_profile)
+    requested = {
+        "execution_profile": execution_profile,
+        "image_id": _contained_contract.require_image_id(image_id),
+        "mount_spec": sorted(
+            destination for _key, destination
+            in _contained_contract._require_mount_spec(mount_spec)),
+        "resource_profile": loader(resource_profile),
+        "sealed": sealed,
+    }
+    if schema in _envelope_OWNER_BOUND_SCHEMAS:
+        requested["tmpfs"] = {
+            destination: _contained_contract.tmpfs_request(
+                requested["resource_profile"], destination=destination, owner_bound=True)
+            for destination in ("/tmp", "/work")
+        }
+    return requested
+
+
+def _envelope_require_exact(doc, keys, where: str) -> None:
+    if type(doc) is not dict or set(doc) != set(keys):
+        raise EnvelopeContractError(where)
+
+
+def _envelope_require_requested_record(requested, *, schema=None) -> dict:
+    """Validate that a stored requested declaration conforms to the closed schema.
+
+    Enforces that execution_profile is a contained profile paired with its own
+    resource-profile version (contained-oci-v0 with RESOURCE_PROFILE_SCHEMA,
+    contained-oci-v1 with RESOURCE_PROFILE_V2_SCHEMA), image_id is a valid
+    sha256 digest, sealed is strictly a bool, resource_profile has positive
+    integer limits and bool work_exec, and mount_spec is a strictly sorted
+    list of unique destination strings starting with '/'.
+    """
+    keys = _envelope_REQUESTED_KEYS_V2 if schema in _envelope_OWNER_BOUND_SCHEMAS else _envelope_REQUESTED_KEYS
+    _envelope_require_exact(requested, keys, "requested")
+    _envelope_require_schema_profile(schema, requested["execution_profile"])
+    loader = _envelope_resource_profile_loader(requested["execution_profile"])
+    try:
+        _contained_contract.require_image_id(requested["image_id"])
+    except _contained_contract.ContractError as exc:
+        raise EnvelopeContractError("image_id") from exc
+    if type(requested["sealed"]) is not bool:
+        raise EnvelopeContractError("sealed")
+    try:
+        loader(requested["resource_profile"])
+    except _contained_contract.ContractError as exc:
+        raise EnvelopeContractError("resource_profile") from exc
+    mount_spec = requested["mount_spec"]
+    try:
+        _contained_contract.validate_mount_destinations(mount_spec, strictly_sorted=True)
+    except _contained_contract.ContractError as exc:
+        raise EnvelopeContractError("mount_spec") from exc
+    if schema in _envelope_OWNER_BOUND_SCHEMAS:
+        expected_tmpfs = {
+            destination: _contained_contract.tmpfs_request(
+                requested["resource_profile"], destination=destination, owner_bound=True)
+            for destination in ("/tmp", "/work")
+        }
+        try:
+            for spec in requested["tmpfs"].values():
+                _contained_contract.require_tmpfs_spec(spec, owner_bound=True)
+        except (AttributeError, _contained_contract.ContractError) as exc:
+            raise EnvelopeContractError("tmpfs") from exc
+        if requested["tmpfs"] != expected_tmpfs:
+            raise EnvelopeContractError("tmpfs")
+    return requested
+
+
+def _envelope_requests_cpu_and_nofile(requested) -> bool:
+    """A v2 resource profile is a request for CPU and nofile limits; a v1 one is not.
+
+    After `require_requested_record` this is exactly a contained-oci-v1 request, since that
+    profile pairs only with a v2 resource profile.
+    """
+    return requested["resource_profile"]["schema"] == _contained_contract.RESOURCE_PROFILE_V2_SCHEMA
+
+
+def _envelope_require_cpu_and_nofile_match(effective, profile) -> None:
+    """Exact comparison of daemon-stored CPU and nofile against a v2 request.
+
+    The daemon may discard a limit and store it unset (0, or no nofile entry); that reads as a
+    mismatch here, never as satisfied. `NanoCpus` must be stored unset: moby refuses it beside a
+    CFS period, so a nonzero value next to the requested period/quota is not what the v2 codec
+    asked for. This compares configuration the daemon reports, not a limit the kernel applied.
+    """
+    if effective["cpu_period"] != _contained_contract.CPU_PERIOD_USEC:
+        raise EnvelopeContractError("cpu_period")
+    if effective["cpu_quota"] != _contained_contract.cpu_quota_usec(profile):
+        raise EnvelopeContractError("cpu_quota")
+    if effective["nano_cpus"] != 0:
+        raise EnvelopeContractError("nano_cpus")
+    if effective["ulimit_nofile"] != {
+            "soft": profile["nofile_soft"], "hard": profile["nofile_hard"]}:
+        raise EnvelopeContractError("ulimit_nofile")
+
+
+def _envelope_require_envelope_matches_request(effective, requested, *, schema=_envelope_ENVELOPE_SCHEMA) -> None:
+    """Hold one observation against one declaration. Observation cannot yield.
+
+    The v0 fields retain their declaration comparisons. For a v2 request the
+    observed CPU period, quota and nofile soft/hard are compared exactly and
+    NanoCpus must be stored unset (0), so a v2 request needs a v1 or v2 envelope.
+    For a v1 resource request those fields, and the daemon fields always, are
+    observations with shape checks, not requested limits.
+    """
+    _envelope_require_requested_record(requested, schema=schema)
+    _envelope_require_exact(effective, _envelope_effective_keys(schema),
+                       "effective" if schema == _envelope_ENVELOPE_SCHEMA else "envelope_schema_shape")
+    if schema in _envelope_RESOURCE_OBSERVING_SCHEMAS:
+        _envelope_require_v1_values(effective)
+    profile = requested["resource_profile"]
+    if _envelope_requests_cpu_and_nofile(requested) and schema not in _envelope_RESOURCE_OBSERVING_SCHEMAS:
+        raise EnvelopeContractError("envelope_schema_profile")
+
+    if effective["image"] != requested["image_id"]:
+        raise EnvelopeContractError("image")
+    if not isinstance(effective["runtime_version"], str) or not effective[
+            "runtime_version"].strip():
+        raise EnvelopeContractError("runtime_version")
+    if type(effective["privileged"]) is not bool or effective["privileged"] is not False:
+        raise EnvelopeContractError("privileged")
+    if effective["cap_add"] != [] or type(effective["cap_add"]) is not list:
+        raise EnvelopeContractError("cap_add")
+    if effective["cap_drop"] != ["ALL"] or type(effective["cap_drop"]) is not list:
+        raise EnvelopeContractError("cap_drop")
+    if effective["devices"] != [] or type(effective["devices"]) is not list:
+        raise EnvelopeContractError("devices")
+    if effective["pid_mode"] != "":
+        raise EnvelopeContractError("pid_mode")
+    if effective["userns_mode"] != "":
+        raise EnvelopeContractError("userns_mode")
+    if type(effective["no_new_privileges"]) is not bool or effective["no_new_privileges"] is not True:
+        raise EnvelopeContractError("no_new_privileges")
+    if type(effective["read_only_root"]) is not bool or effective["read_only_root"] is not True:
+        raise EnvelopeContractError("read_only_root")
+    if effective["user"] != _envelope_CONTAINED_USER:
+        raise EnvelopeContractError("user")
+
+    sealed = requested["sealed"]
+    if sealed and effective["network_mode"] != "none":
+        raise EnvelopeContractError("network_mode")
+    if not sealed and effective["network_mode"] == "none":
+        raise EnvelopeContractError("network_mode")
+
+    if type(effective["memory"]) is not int or effective["memory"] != profile["memory_bytes"]:
+        raise EnvelopeContractError("memory")
+    if type(effective["memory_swap"]) is not int or effective["memory_swap"] != profile["memory_swap_bytes"]:
+        raise EnvelopeContractError("memory_swap")
+    if type(effective["pids_limit"]) is not int or effective["pids_limit"] != profile["pids"]:
+        raise EnvelopeContractError("pids_limit")
+
+    if type(effective["tmpfs"]) is not dict:
+        raise EnvelopeContractError("tmpfs")
+    expected_tmpfs = requested["tmpfs"] if schema in _envelope_OWNER_BOUND_SCHEMAS else {
+        "/tmp": {"exec": False, "nr_inodes": profile["tmp_inodes"],
+                 "size": profile["tmp_bytes"]},
+        "/work": {"exec": profile["work_exec"],
+                  "nr_inodes": profile["work_inodes"], "size": profile["work_bytes"]},
+    }
+    if schema in _envelope_OWNER_BOUND_SCHEMAS:
+        try:
+            for spec in effective["tmpfs"].values():
+                _contained_contract.require_tmpfs_spec(spec, owner_bound=True)
+        except (AttributeError, _contained_contract.ContractError) as exc:
+            raise EnvelopeContractError("tmpfs") from exc
+    if effective["tmpfs"] != expected_tmpfs:
+        raise EnvelopeContractError("tmpfs")
+    if schema not in _envelope_OWNER_BOUND_SCHEMAS:
+        for _dest, spec in effective["tmpfs"].items():
+            if type(spec) is not dict:
+                raise EnvelopeContractError("tmpfs")
+            if type(spec.get("exec")) is not bool:
+                raise EnvelopeContractError("tmpfs")
+            if type(spec.get("nr_inodes")) is not int or type(spec.get("size")) is not int:
+                raise EnvelopeContractError("tmpfs")
+
+    # The allowed environment is the pinned image's own observed environment
+    # plus exactly what the create argv adds. A name injected at create time
+    # is outside that set by construction, so no denylist is needed and no
+    # value is ever read.
+    if type(effective["image_env_names"]) not in (list, tuple) or any(
+            not isinstance(name, str) or not name for name in effective["image_env_names"]):
+        raise EnvelopeContractError("image_env_names")
+    if type(effective["env_names"]) not in (list, tuple) or any(
+            not isinstance(name, str) or not name for name in effective["env_names"]):
+        raise EnvelopeContractError("env_names")
+
+    allowed = set(effective["image_env_names"])
+    if sealed:
+        allowed.add(_envelope_OFFLINE_ENV_NAME)
+    if set(effective["env_names"]) - allowed:
+        raise EnvelopeContractError("env_names")
+    if sealed != (_envelope_OFFLINE_ENV_NAME in effective["env_names"]):
+        raise EnvelopeContractError("env_names")
+
+    if type(effective["mounts"]) not in (list, tuple):
+        raise EnvelopeContractError("mounts")
+    for mount in effective["mounts"]:
+        if type(mount) is not dict:
+            raise EnvelopeContractError("mounts")
+        if type(mount.get("rw")) is not bool or mount.get("rw") is not False:
+            raise EnvelopeContractError("mounts")
+        if not isinstance(mount.get("destination"), str) or not isinstance(mount.get("type"), str):
+            raise EnvelopeContractError("mounts")
+
+    expected_mounts = [
+        {"destination": destination, "rw": False, "type": "bind"}
+        for destination in requested["mount_spec"]
+    ]
+    if effective["mounts"] != expected_mounts:
+        raise EnvelopeContractError("mounts")
+
+    if _envelope_requests_cpu_and_nofile(requested):
+        _envelope_require_cpu_and_nofile_match(effective, profile)
+    if schema == _envelope_ENVELOPE_SCHEMA_V3:
+        _envelope_require_kernel_readback(effective["kernel"], profile)
+
+
+def _envelope_require_member(value, members, where: str) -> str:
+    for member in members:
+        if value == member:
+            return member
+    raise EnvelopeContractError(where)
+
+
+def _envelope_require_hex(value, length: int, where: str) -> str:
+    if (not isinstance(value, str) or len(value) != length or
+            any(ch not in _contained_contract.HEX64 for ch in value)):
+        raise EnvelopeContractError(where)
+    return value
+
+
+def envelope_permission_data(*, setup_status, envelope_status, candidate_outcome,
+                           cleanup) -> tuple[str, str | None]:
+    """One rule. Permission is derived, never supplied."""
+    if setup_status != "ready":
+        return "withheld", "setup_status"
+    if envelope_status != "verified":
+        return "withheld", "envelope_status"
+    if candidate_outcome != "completed":
+        return "withheld", "candidate_outcome"
+    if cleanup != "removed-and-absent":
+        return "withheld", "cleanup"
+    return "permitted", None
+
+
+def _envelope_build_envelope_record(*, requested, setup_status, envelope_status,
+                          unverified_field, effective, candidate_outcome,
+                          cleanup, prepare_sha256, execution_commit,
+                          report_sha256, schema=_envelope_ENVELOPE_SCHEMA) -> dict:
+    """Close the state model over one contained run.
+
+    Setup, candidate and cleanup failures are preserved rather than folded
+    together, and no combination manufactures a score. There is deliberately
+    no `publication_permission` parameter: it cannot be caller-supplied.
+    """
+    _envelope_effective_keys(schema)
+    _envelope_require_requested_record(requested, schema=schema)
+    # A v2 resource request needs v1's CPU/nofile fields. Historical v1 and v2 records remain
+    # valid; new contained-oci-v1 emissions select v3, which also carries the kernel read-back.
+    if _envelope_requests_cpu_and_nofile(requested) and schema not in _envelope_RESOURCE_OBSERVING_SCHEMAS:
+        raise EnvelopeContractError("envelope_schema_profile")
+    setup_status = _envelope_require_member(setup_status, _envelope_SETUP_STATUSES, "setup_status")
+    envelope_status = _envelope_require_member(
+        envelope_status, _envelope_ENVELOPE_STATUSES, "envelope_status")
+    candidate_outcome = _envelope_require_member(
+        candidate_outcome, _envelope_CANDIDATE_OUTCOMES, "candidate_outcome")
+    cleanup = _envelope_require_member(cleanup, _envelope_CLEANUP_RESULTS, "cleanup")
+
+    if setup_status != "ready":
+        if candidate_outcome != "not-run":
+            raise EnvelopeContractError("candidate_outcome")
+        if envelope_status != "unverified":
+            raise EnvelopeContractError("envelope_status")
+        if effective is not None:
+            raise EnvelopeContractError("effective")
+
+    if envelope_status == "verified":
+        if unverified_field is not None:
+            raise EnvelopeContractError("unverified_field")
+        _envelope_require_exact(effective, _envelope_effective_keys(schema),
+                       "effective" if schema == _envelope_ENVELOPE_SCHEMA else "envelope_schema_shape")
+        _envelope_require_envelope_matches_request(effective, requested, schema=schema)
+    else:
+        if not isinstance(unverified_field, str) or not unverified_field:
+            raise EnvelopeContractError("unverified_field")
+        if effective is not None:
+            raise EnvelopeContractError("effective")
+
+    permission, reason = envelope_permission_data(
+        setup_status=setup_status,
+        envelope_status=envelope_status,
+        candidate_outcome=candidate_outcome,
+        cleanup=cleanup,
+    )
+    record = {
+        "candidate_outcome": candidate_outcome,
+        "cleanup": cleanup,
+        "effective": None if effective is None else dict(effective),
+        "envelope_status": envelope_status,
+        "execution_commit": _envelope_require_hex(execution_commit, 40, "execution_commit"),
+        "non_claims": list(_envelope_NON_CLAIMS),
+        "prepare_sha256": _envelope_require_hex(prepare_sha256, 64, "prepare_sha256"),
+        "publication_permission": permission,
+        "report_sha256": (
+            None if report_sha256 is None
+            else _envelope_require_hex(report_sha256, 64, "report_sha256")),
+        "requested": dict(requested),
+        "schema": schema,
+        "setup_status": setup_status,
+        "unverified_field": unverified_field,
+        "withheld_reason": reason,
+    }
+    _envelope_require_exact(record, _envelope_ENVELOPE_KEYS, "envelope")
+    return record
+
+
+def _envelope_bind_report(record: dict, report_sha256) -> dict:
+    """Attach the produced report digest. Envelope to report, never back."""
+    _envelope_require_exact(record, _envelope_ENVELOPE_KEYS, "envelope")
+    _envelope_effective_keys(record["schema"])
+    return _envelope_build_envelope_record(
+        schema=record["schema"],
+        requested=record["requested"],
+        setup_status=record["setup_status"],
+        envelope_status=record["envelope_status"],
+        unverified_field=record["unverified_field"],
+        effective=record["effective"],
+        candidate_outcome=record["candidate_outcome"],
+        cleanup=record["cleanup"],
+        prepare_sha256=record["prepare_sha256"],
+        execution_commit=record["execution_commit"],
+        report_sha256=report_sha256,
+    )
+
+
+def require_envelope_record_data(record: dict) -> dict:
+    """Validate that an execution-envelope record is internally consistent.
+
+    Reconstructs the envelope record through bind_report and requires exact
+    equality with the original document. Round-trip equality verifies the
+    closure of the state model (derived publication permission, withheld reason,
+    schema, non-claims, and state invariants) against explicit nested validators
+    for requested declarations and effective observations. It does not prove
+    that the record was authentic or produced by a specific unverified run.
+    An inconsistent or mutated record raises EnvelopeError and is never
+    normalized into a pass.
+    """
+    if type(record) is not dict:
+        raise EnvelopeContractError("envelope")
+    _envelope_require_exact(record, _envelope_ENVELOPE_KEYS, "envelope")
+    _envelope_effective_keys(record["schema"])
+    rebuilt = _envelope_bind_report(record, record["report_sha256"])
+    if rebuilt != record:
+        raise EnvelopeContractError("envelope_semantic_mismatch")
+    return record
+
+
+
+
+@dataclass(frozen=True, slots=True)
+class AssessmentEvaluation:
+    """Local recomputation result, never a retained package authority."""
+    gates_raw: bytes
+    envelope_unproved_slots: tuple[int, ...]
+
+    def __post_init__(self):
+        if type(self.gates_raw) is not bytes or len(self.gates_raw) > 65536:
+            refuse('syntax', 'wrong-shape')
+        slots = self.envelope_unproved_slots
+        if (type(slots) is not tuple or any(type(n) is not int or not 0 <= n < 8 for n in slots)
+                or tuple(sorted(set(slots))) != slots):
+            refuse('syntax', 'wrong-shape')
+
+
+def _evidence_members(snapshot):
+    if type(snapshot) is not tuple or len(snapshot) > 23:
+        refuse('limits', 'entry-count')
+    members = _members(snapshot, count=len(snapshot), max_bytes=262144)
+    for path, raw in members.items():
+        if not path.endswith('/envelopes/collection-index.v0.json') and len(raw) > 65536:
+            refuse('limits', 'member-bytes')
+    return members
+
+
+def _require_inventory(members, expected):
+    if set(expected) - members.keys():
+        refuse('filesystem', 'missing-member')
+    if members.keys() - set(expected):
+        refuse('filesystem', 'surplus-member')
+
+
+def require_assessment_structure(inputs, *, require_collections):
+    """One pure structural policy; external expected/approval never enters here."""
+    if type(inputs) is not AssessmentInputs or type(require_collections) is not bool:
+        refuse('syntax', 'wrong-shape')
+    try:
+        inputs.__post_init__()
+    except (AttributeError, TypeError):
+        refuse('syntax', 'wrong-shape')
+    members = _evidence_members(inputs.evidence_members)
+    preflight = AssessmentInputs(inputs.retained_members, inputs.basis_members)
+    gates, values = evaluate_preflight(preflight)
+    if values is None or any(g['status'] != 'passed' for g in gates):
+        refuse('replay', 'preflight-refused')
+    plan = values['plan']; plan_hash = values['execution']['plan_sha256']
+    required = {'authorization.json'}
+    for name in VARIANTS:
+        required.update(name+'/'+p for p in ('prepare.json','authorization.json',
+            'pins/control.json','pins/sites.json','pins/manifest.json','pins/pins.json'))
+    collection_paths = set()
+    if require_collections:
+        for name in VARIANTS:
+            required.add(name+'/envelopes/collection-index.v0.json')
+        for path in members:
+            if re.fullmatch(r'(base|outer-whitespace)/envelopes/member-000[0-3]\.json', path):
+                collection_paths.add(path)
+    _require_inventory(members, required | collection_paths)
+    prepares = {}
+    for name, variant in zip(VARIANTS, plan['variants']):
+        prepare = _require_variant_preparation(values, name, members[name+'/prepare.json'],
+            members['authorization.json'], members[name+'/authorization.json'])
+        # Fixed owned execution manifest includes runner/selectors/build/entrypoint/mutations.
+        # Original legacy bytes are admitted by their code-owned pin, not normalized JSON.
+        for pin in ('control.json', 'sites.json', 'manifest.json'):
+            if digest(members[name+'/pins/'+pin]) != _OWNED.pin_digest(pin):
+                refuse('binding', 'corpus-derivation')
+        pins_raw = members[name+'/pins/pins.json']
+        pins = decode(pins_raw, max_bytes=65536, canonical=True)
+        expected_pins = {'schema': PREFIX+'pins.v0', 'plan_sha256': plan_hash, 'variant': name,
+            'instrument_commit': _OWNED.instrument_commit, 'subject_tree_sha256': _OWNED.subject_tree_sha256,
+            'adapter_sha256': _OWNED.adapter_sha256,
+            'corpus': {'kind':'local-derived-owned-v0', 'plan_sha256':plan_hash, 'variant':name,
+                'manifest_sha256':variant['manifest']['sha256'], 'tree_sha256':variant['tree_sha256'],
+                'corpus_digest':variant['corpus_digest'], 'ids':list(values['execution']['ids'])},
+            'control_sha256':_OWNED.pin_digest('control.json'), 'sites_sha256':_OWNED.pin_digest('sites.json'),
+            'manifest_sha256':_OWNED.pin_digest('manifest.json')}
+        if encode(pins) != encode(expected_pins) or prepare['pins_sha256'] != digest(pins_raw):
+            refuse('binding', 'prepare-authorization')
+        prepares[name] = prepare
+    return {'gates':gates, 'values':values, 'members':members, 'prepares':prepares}
+
+
+_COLLECTION_SCHEMAS = ('corpus-adequacy.execution-envelope-collection.v0',
+                       'corpus-adequacy.execution-envelope-collection.v1')
+_COLLECTION_NON_CLAIMS = (
+    'States that these attempted invocations left these records in one collection run.',
+    'Does not authenticate origin: a digest binds bytes, not who produced them.',
+    'Cannot detect substitution of a byte-identical record from a different run.',
+    'Not a score, not an audit, not a certification, and not publication authorization.',
+)
+_COLLECTION_NON_CLAIMS_V1 = _COLLECTION_NON_CLAIMS + (
+    "Step attribution is the engine's own record of what it ran; the run nonce names this "
+    'index, not its members, so a byte-identical member remains substitutable.',)
+
+
+def parse_collection_snapshot(snapshot):
+    """Bounded transport codec over retained bytes, then the single envelope judge.
+
+    Historical schemas remain supported here; the assessment consumer requires v1/v3.
+    Strict JSON/types are intentional new-domain constraints, not legacy loader changes.
+    """
+    if type(snapshot) is not tuple or len(snapshot) > 257:
+        refuse('limits', 'entry-count')
+    members = _members(snapshot, count=len(snapshot), max_bytes=262144)
+    index_name = 'collection-index.v0.json'
+    if index_name not in members:
+        refuse('filesystem', 'missing-member')
+    index = decode(members[index_name], max_bytes=262144)
+    if type(index) is not dict or index.get('schema') not in _COLLECTION_SCHEMAS:
+        refuse('support', 'unsupported-schema')
+    v1 = index['schema'] == _COLLECTION_SCHEMAS[1]
+    keys = ('attempts','execution_commit','ledger','members','non_claims','prepare_sha256','report_sha256','schema')
+    exact(index, keys + (('run_nonce',) if v1 else ()))
+    if index['non_claims'] != list(_COLLECTION_NON_CLAIMS_V1 if v1 else _COLLECTION_NON_CLAIMS):
+        refuse('syntax', 'wrong-shape')
+    if v1 and (type(index['run_nonce']) is not str or not re.fullmatch('[0-9a-f]{32}',index['run_nonce'])):
+        refuse('syntax', 'wrong-shape')
+    attempts = index['attempts']; rows = index['ledger']; entries = index['members']
+    if type(attempts) is not int or not 0 <= attempts <= 256:
+        refuse('syntax', 'wrong-shape')
+    if type(rows) is not list or len(rows) != attempts or type(entries) is not list or len(entries) > 256:
+        refuse('syntax', 'wrong-shape')
+    for key, size in (('execution_commit',40),('prepare_sha256',64),('report_sha256',64)):
+        value=index[key]
+        if value is not None and (type(value) is not str or not re.fullmatch('[0-9a-f]{'+str(size)+'}',value)):
+            refuse('syntax', 'wrong-shape')
+    recorded=[]
+    for ordinal,row in enumerate(rows):
+        if type(row) is not dict or row.get('state') not in ('recorded','raised','no-envelope'):
+            refuse('syntax', 'wrong-shape')
+        row_keys=('ordinal','state') + (('step','returncode','run_nonce','previous_member_sha256') if v1 else ())
+        exact(row, row_keys + (('exception_type',) if row['state']=='raised' else ()))
+        if type(row['ordinal']) is not int or row['ordinal'] != ordinal:
+            refuse('replay', 'schedule-mismatch')
+        if row['state']=='raised': text(row['exception_type'],128)
+        if row['state']=='recorded': recorded.append(ordinal)
+        if v1:
+            step=exact(row['step'],('kind','group','id'))
+            if step['kind'] not in ('build','baseline','control','mutant'):
+                refuse('syntax','wrong-shape')
+            for key in ('group','id'):
+                if step[key] is not None:text(step[key],128)
+            if ((step['kind'] in ('control','mutant') and step['group'] is None)
+                    or (step['kind'] in ('build','baseline') and step['id'] is not None)):
+                refuse('syntax','wrong-shape')
+            if row['run_nonce'] != index['run_nonce']:
+                refuse('replay','schedule-mismatch')
+            rc=row['returncode']
+            if rc is not None and (row['state']!='recorded' or type(rc) is not int or not -(2**31)<=rc<2**31):
+                refuse('syntax','wrong-shape')
+    for entry in entries:
+        exact(entry,('ordinal','relpath','sha256'))
+        if type(entry['ordinal']) is not int:refuse('syntax','wrong-shape')
+        require_digest(entry['sha256'])
+    if [e['ordinal'] for e in entries] != recorded:
+        refuse('replay','schedule-mismatch')
+    required={index_name}; docs=[]; digests={}; total=0
+    for entry in entries:
+        name='member-%04d.json'%entry['ordinal']
+        if entry['relpath']!=name:refuse('replay','schedule-mismatch')
+        required.add(name)
+        if name not in members:refuse('filesystem','missing-member')
+        raw=members[name];total+=len(raw)
+        if len(raw)>65536:refuse('limits','member-bytes')
+        if total>5242880-262144:refuse('limits','aggregate-bytes')
+        if digest(raw)!=entry['sha256']:refuse('binding','envelope-binding')
+        doc=decode(raw,max_bytes=65536)
+        try:
+            require_envelope_record_data(doc)
+        except _contained_contract.ContractError:
+            refuse('envelope','contradictory-record')
+        if doc['report_sha256'] != index['report_sha256']:
+            refuse('binding','envelope-binding')
+        docs.append(doc);digests[entry['ordinal']]=digest(raw)
+    _require_inventory(members,required)
+    if v1:
+        previous=None
+        for row in rows:
+            if row['previous_member_sha256']!=previous:refuse('replay','schedule-mismatch')
+            if row['state']=='recorded':previous=digests[row['ordinal']]
+    return {'index':index,'ledger':rows,'members':docs}
+
+
+def _assessment_envelopes(structure, observations):
+    raw_members=structure['members']; unproved=[]
+    for name in VARIANTS:
+        prefix=name+'/envelopes/'
+        snapshot=tuple((p.removeprefix(prefix),raw) for p,raw in sorted(raw_members.items()) if p.startswith(prefix))
+        loaded=parse_collection_snapshot(snapshot);index=loaded['index'];rows=loaded['ledger']
+        entered=[o for o in observations if o['slot']['variant']==name]
+        if index['schema']!=_COLLECTION_SCHEMAS[1]:refuse('support','unsupported-schema')
+        if len(rows)!=len(entered) or len(rows)>4:refuse('replay','schedule-mismatch')
+        prepare=structure['prepares'][name]; prepare_hash=digest(raw_members[name+'/prepare.json'])
+        source=prepare['source']['commit']; recorded=loaded['members']
+        if (index['report_sha256'] is not None or
+                index['prepare_sha256'] != (prepare_hash if recorded else None) or
+                index['execution_commit'] != (source if recorded else None)):
+            refuse('binding','envelope-binding')
+        records=iter(recorded)
+        for row,obs in zip(rows,entered):
+            slot=obs['slot']; ordinal=require_slot(slot)
+            if row['ordinal']!=slot['ordinal'] or encode(row['step'])!=encode(slot['step']):
+                refuse('replay','schedule-mismatch')
+            if row['state']!='recorded':
+                if obs['envelope'] is not None:refuse('binding','envelope-binding')
+                if (row['state']=='raised') != (obs['state']=='exception'):
+                    refuse('replay','schedule-mismatch')
+                unproved.append(ordinal);continue
+            doc=next(records)
+            if doc['schema']!=_envelope_ENVELOPE_SCHEMA_V3:refuse('support','unsupported-schema')
+            path=prefix+'member-%04d.json'%row['ordinal'];raw=raw_members[path]
+            expected_ref={'member':path,'sha256':digest(raw),'bytes':len(raw)}
+            if encode(obs['envelope'])!=encode(expected_ref):refuse('binding','envelope-binding')
+            requested=_envelope_requested_envelope(execution_profile=PROFILE,
+                image_id=prepare['runtime']['toolchain']['image_id'],
+                mount_spec=_contained_contract.DEFAULT_MOUNT_SPEC+(('subject','/subject'),),
+                resource_profile=prepare['runtime']['candidate_profile'],sealed=True,
+                schema=_envelope_ENVELOPE_SCHEMA_V3)
+            if (doc['execution_commit']!=source or doc['prepare_sha256']!=prepare_hash
+                    or doc['report_sha256'] is not None or encode(doc['requested'])!=encode(requested)):
+                refuse('binding','envelope-binding')
+            if doc['publication_permission']!='permitted' or doc['envelope_status']!='verified':
+                unproved.append(ordinal)
+    return tuple(unproved)
