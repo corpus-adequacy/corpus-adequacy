@@ -133,3 +133,118 @@ class ContextAdmission(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ProducerCLI(unittest.TestCase):
+    def run_cli(self, *args):
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            p = subprocess.run([sys.executable, str(ROOT/'measurements/owned_suggestion_assessment.py'), *args],
+                cwd=cwd, stdout=stdout, stderr=stderr, timeout=5)
+            stdout.seek(0); raw=stdout.read(65537)
+            stderr.seek(0); err=stderr.read(65537)
+        self.assertLessEqual(len(raw),65536);self.assertLessEqual(len(err),65536)
+        return p.returncode,raw,err
+
+    def test_producer_unknown_command_is_closed(self):
+        code,raw,err=self.run_cli('not-a-command')
+        self.assertEqual(code,2);self.assertEqual(err,b'')
+        self.assertEqual(ev.decode(raw,canonical=True),{
+            'schema':ev.PREFIX+'command-result.v0','command':'invalid','status':'refused','artifacts':[],
+            'reasons':[{'stage':'input','code':'argument-invalid','member':None}]})
+
+    def test_all_commands_require_explicit_inputs(self):
+        for command in ('plan','prepare','authorize','execute','finalize'):
+            code,raw,err=self.run_cli(command)
+            self.assertEqual((code,err),(2,b''))
+            doc=ev.decode(raw,canonical=True)
+            self.assertEqual(doc['command'],command)
+            self.assertEqual(doc['reasons'][0]['code'],'argument-invalid')
+
+
+def producer_workspace(test):
+    """Committed synthetic source identity, real installed bytes; never live approval."""
+    import os, subprocess, tempfile
+    folder=tempfile.TemporaryDirectory();test.addCleanup(folder.cleanup)
+    base=Path(folder.name).resolve();source=base/'source';source.mkdir()
+    def git(*args):
+        run=subprocess.run(['git','-C',str(source),*args],capture_output=True,timeout=5,
+            env=dict(os.environ,GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL='/dev/null'))
+        test.assertEqual(run.returncode,0,run.stderr)
+        return run.stdout.decode().strip()
+    git('init','-q')
+    total=0
+    for name in ev.SOURCE_PATHS:
+        raw=(ROOT/name).read_bytes();total+=len(raw)
+        path=source/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw)
+    for name in ('control.json','sites.json'):
+        path=source/'measurements/owned-independent-v0'/name
+        path.write_bytes((ROOT/'measurements/owned-independent-v0'/name).read_bytes())
+    test.assertLess(total,4*1024*1024)
+    git('add','--','.')
+    git('-c','user.name=Synthetic test','-c','user.email=synthetic@example.invalid','commit','-qm','synthetic source fixture')
+    inputs=prepared_inputs();members=dict(inputs.retained_members)
+    basis=base/'basis';basis.mkdir()
+    for name,raw in inputs.basis_members:
+        path=basis/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw)
+    for name in ('proposal.json','reference.json'):(base/name).write_bytes(members[name])
+    return base,source,basis,git
+
+
+class ProducerSourceIdentity(unittest.TestCase):
+    def test_real_source_measurement_and_dirty_missing_untracked_refusals(self):
+        import aee_checker_sealed_run as run
+        base,source,basis,git=producer_workspace(self)
+        self.assertTrue(hasattr(run,'assessment_execution_identity'))
+        identity=run.assessment_execution_identity(source)
+        self.assertEqual(identity['commit'],git('rev-parse','HEAD'))
+        self.assertEqual([row['path'] for row in identity['files']],list(ev.SOURCE_PATHS))
+        import hashlib
+        digest=hashlib.sha256()
+        for name in ev.SOURCE_PATHS:
+            raw=(source/name).read_bytes();digest.update(name.encode()+b'\0'+str(len(raw)).encode()+b'\0'+raw)
+        self.assertEqual(identity['content_sha256'],digest.hexdigest())
+        target=source/'measurements/owned_suggestion_assessment.py';raw=target.read_bytes()
+        target.write_bytes(raw+b'\n# dirty\n')
+        with self.assertRaises(ev.EvidenceError):run.assessment_execution_identity(source)
+        target.unlink()
+        with self.assertRaises(ev.EvidenceError):run.assessment_execution_identity(source)
+        target.write_bytes(raw)
+        import subprocess
+        untracked=base/'untracked';untracked.mkdir()
+        subprocess.run(['git','-C',str(untracked),'init','-q'],check=True,capture_output=True,timeout=5)
+        p=untracked/'measurements/owned_suggestion_assessment.py';p.parent.mkdir();p.write_bytes(raw)
+        with self.assertRaises(ev.EvidenceError):run.assessment_execution_identity(untracked)
+
+
+class ProducerPlan(ProducerCLI):
+    def test_actual_plan_cli_preserves_basis_and_derives_both_corpora(self):
+        base,source,basis,git=producer_workspace(self)
+        before=reader_basis=__import__('suggestion_readback').load_assessment_basis(basis)
+        dest=base/'plan'
+        args=['plan','--proposal',str(base/'proposal.json'),'--reference',str(base/'reference.json'),
+              '--reference-sha256',ev.digest((base/'reference.json').read_bytes()),'--reference-approval','accept',
+              '--root',str(source),'--basis-dir',str(basis),'--out',str(dest)]
+        code,raw,err=self.run_cli(*args)
+        self.assertEqual((code,err),(0,b''),raw)
+        result=ev.decode(raw,canonical=True)
+        self.assertEqual(result['artifacts'],[{'kind':'plan','sha256':ev.digest((dest/'plan.json').read_bytes())}])
+        members=__import__('suggestion_readback').load_package(dest)
+        retained=tuple((p,b) for p,b in members if p in ('plan.json','proposal.json','reference.json') or '/corpus/' in p)
+        gates,values=ev.evaluate_preflight(ev.AssessmentInputs(retained,reader_basis))
+        self.assertEqual([g['status'] for g in gates],['passed']*3)
+        self.assertEqual(values['plan']['source']['commit'],git('rev-parse','HEAD'))
+        self.assertEqual(__import__('suggestion_readback').load_assessment_basis(basis),before)
+        code,raw,err=self.run_cli(*args)
+        self.assertEqual(code,2);self.assertEqual(ev.decode(raw)['artifacts'],[])
+
+    def test_rejected_reference_never_publishes_a_plan(self):
+        base,source,basis,git=producer_workspace(self)
+        for approval,reason in (('reject','reference-rejected'),('unavailable','reference-required')):
+            dest=base/approval
+            code,raw,err=self.run_cli('plan','--proposal',str(base/'proposal.json'),
+                '--reference',str(base/'reference.json'),'--reference-sha256',ev.digest((base/'reference.json').read_bytes()),
+                '--reference-approval',approval,'--root',str(source),'--basis-dir',str(basis),'--out',str(dest))
+            self.assertEqual(code,2);self.assertEqual(ev.decode(raw)['reasons'][0]['code'],reason)
+            self.assertFalse(dest.exists())

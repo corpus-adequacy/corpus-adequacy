@@ -2095,3 +2095,45 @@ def compare_package(package):
         'source_content_sha256':package['plan']['source']['content_sha256'],'origin':'producer-reported'}
     if encode(package['receipt'])!=encode(expected_receipt): issues.append(('replay','receipt-mismatch','receipt.json'))
     return disposition,issues
+
+
+def build_assessment_plan(proposal_raw, reference_raw, basis_members, source):
+    """Construct a plan from explicit bytes, then validate it with the shared judge."""
+    basis = require_basis(basis_members)
+    proposal = _proposal(decode(proposal_raw, max_bytes=65536))
+    _source(source)
+    original = decode(basis['MANIFEST.json'], max_bytes=65536)
+    vector = proposal['vector']
+    if (vector['id'].casefold() in {r['id'].casefold() for r in original['vectors']}
+            or vector['file'].casefold() in {p.casefold() for p in basis}):
+        refuse('binding', 'id-set')
+    rows = original['vectors'] + [{k: vector[k] for k in ('id','file','value_class')}]
+    ids = require_ids([r['id'] for r in rows])
+    _reference(reference_raw, proposal_raw, proposal, ids)
+    files = {p: raw for p,raw in basis.items() if p != 'MANIFEST.json'}
+    files[vector['file']] = json.dumps(vector['document'], sort_keys=True, separators=(',', ':')).encode()
+    members = {'proposal.json': proposal_raw, 'reference.json': reference_raw}
+    variants = []
+    for name in VARIANTS:
+        vectors = {p: raw if name=='base' else b' \n'+raw+b'\n\t' for p,raw in files.items()}
+        corpus_hash = _corpus_digest(rows, vectors)
+        manifest = {'vectors': rows, 'corpusDigest': corpus_hash}
+        vectors['MANIFEST.json'] = (json.dumps(manifest,sort_keys=True,indent=2)+'\n').encode()
+        prefix=name+'/corpus/'
+        members.update({prefix+p:raw for p,raw in vectors.items()})
+        variants.append({'variant':name,'manifest':_raw_ref(members,prefix+'MANIFEST.json'),
+            'vectors':[{'id':row['id'],'file':row['file'],'sha256':digest(vectors[row['file']]),
+                        'bytes':len(vectors[row['file']])} for row in rows],
+            'tree_sha256':_tree(vectors),'corpus_digest':corpus_hash})
+    slots=[{'variant':name,'ordinal':n,'step':{'kind':kind,'group':'independent','id':row_id}}
+           for name in VARIANTS for n,(kind,row_id) in enumerate(STEPS)]
+    plan={'schema':PREFIX+'plan.v0','family':FAMILY,'proposal':_raw_ref(members,'proposal.json'),
+        'reference':_raw_ref(members,'reference.json'),'source':copy.deepcopy(source),
+        'instrument_commit':_OWNED.instrument_commit,'subject_tree_sha256':_OWNED.subject_tree_sha256,
+        'adapter_sha256':_OWNED.adapter_sha256,'profile':PROFILE,'policy':POLICY,'variants':variants,
+        'slots':slots,'control_sha256':_OWNED.pin_digest('control.json'),'sites_sha256':_OWNED.pin_digest('sites.json')}
+    members['plan.json']=encode(plan)
+    snapshot=tuple(sorted(members.items()))
+    gates,values=evaluate_preflight(AssessmentInputs(snapshot,basis_members))
+    if values is None or any(g['status']!='passed' for g in gates): refuse('replay','preflight-refused')
+    return snapshot

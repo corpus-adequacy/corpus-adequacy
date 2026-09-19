@@ -248,6 +248,45 @@ def execution_identity(root: Path, *, contract=AEE_CHECKER_SEALED_CONTRACT) -> d
     return identity
 
 
+def assessment_execution_identity(root: Path) -> dict:
+    """Measure the closed assessment Source from immutable HEAD-bound raw bytes."""
+    import suggestion_evidence as evidence
+    import suggestion_readback as readback
+    root = Path(root)
+    paths = evidence.SOURCE_PATHS
+    def git(*args):
+        try:
+            return _git_ok(['-C', str(root), *args], root, 5)
+        except PrepareError:
+            evidence.refuse('binding', 'source-identity')
+    def clean():
+        if git('status', '--porcelain', '--untracked-files=normal', '--', *paths):
+            evidence.refuse('binding', 'source-identity')
+    clean()
+    commit = git('rev-parse', 'HEAD')
+    if len(commit) != 40:
+        evidence.refuse('binding', 'source-identity')
+    aggregate = hashlib.sha256()
+    files = []
+    for name in paths:
+        parts = readback._absolute_parts(root / name)
+        try:
+            with readback._directory(parts[:-1]) as parent:
+                raw = readback._read_file(parent, parts[-1], remaining=ca.OUTPUT_CAP_BYTES,
+                                          cap=ca.OUTPUT_CAP_BYTES, seen=set())
+        except OSError:
+            evidence.refuse('binding', 'source-identity')
+        object_id = hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+        if git('rev-parse', 'HEAD:'+name) != object_id:
+            evidence.refuse('binding', 'source-identity')
+        aggregate.update(name.encode()+b'\0'+str(len(raw)).encode()+b'\0'+raw)
+        files.append({'path': name, 'sha256': hashlib.sha256(raw).hexdigest()})
+    clean()
+    if git('rev-parse', 'HEAD') != commit:
+        evidence.refuse('binding', 'source-identity')
+    return {'commit': commit, 'content_sha256': aggregate.hexdigest(), 'files': files}
+
+
 def record_toolchain(toolchain: dict) -> dict:
     return require_vendor_toolchain(toolchain)
 
