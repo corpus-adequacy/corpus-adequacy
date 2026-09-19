@@ -39,6 +39,14 @@ python3 corpus_adequacy.py --inspect <manifest.json> --json
 python3 examples/reason-token-projections/walkthrough.py
 ```
 
+For invocation errors, a literal `--json` before the `--` separator requests
+one `corpus-adequacy.error.v0` object on stdout and exit 2. Human diagnostics
+may also appear on stderr. This covers missing arguments and invalid option
+combinations before any input is read or candidate is run; it is not an
+adequacy result. After `--`, the spelling `--json` is positional data.
+Successful `--help` and `--version` requests still print text and exit 0.
+Non-JSON invocation errors retain the normal usage/error output on stderr.
+
 `--inspect` bounded-reads one regular manifest file and validates only the
 declarations in those exact bytes. Its JSON form is the closed,
 deterministic `corpus-adequacy.inspect.v0` document. It keeps declared values,

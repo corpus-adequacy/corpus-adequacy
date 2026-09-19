@@ -345,11 +345,11 @@ def load_json_document(raw, *, root=None, where: str):
 def error_envelope(exc: BaseException, *, operation: str) -> dict:
     """Parseable --json body for a run that never produced a report.
 
-    `operation` is the verb (`measure`, `project`, or `inspect`). One envelope, no
+    `operation` is the verb (`measure`, `project`, `inspect`, or `invoke`). One envelope, no
     second parser rule. The field and stderr share that verb.
     """
-    if operation not in ("measure", "project", "inspect"):
-        raise ValueError("error_envelope operation must be measure, project or inspect")
+    if operation not in ("measure", "project", "inspect", "invoke"):
+        raise ValueError("error_envelope operation must be measure, project, inspect or invoke")
     return {
         "schema": ERROR_SCHEMA,
         "ok": False,
@@ -4915,8 +4915,33 @@ def _diff_cli(args) -> int:
     return 0
 
 
+class _InvocationParser(argparse.ArgumentParser):
+    """Keep explicit JSON refusal output available even before parsing succeeds."""
+
+    def __init__(self, *, argv, **kwargs):
+        super().__init__(**kwargs)
+        # Only the literal option requests JSON on the parser-error path. After
+        # `--` the same spelling is positional data, not an output-mode request.
+        options = argv[:argv.index("--")] if "--" in argv else argv
+        self._json_errors = "--json" in options
+
+    def error(self, message):
+        if self._json_errors:
+            print(json.dumps(error_envelope(ValueError(message), operation="invoke"),
+                             indent=2, sort_keys=True))
+        super().error(message)
+
+    def diff_report_path(self, value):
+        # Some argparse versions consume a recognized option as a nargs=2
+        # operand. Refuse the literal flag before Path normalizes ./--json,
+        # which is still a valid way to name a report file.
+        if self._json_errors and value == "--json":
+            raise argparse.ArgumentTypeError("--json is an output option, not a report path")
+        return Path(value)
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = _InvocationParser(argv=sys.argv[1:], description=__doc__.split("\n")[0])
     ap.add_argument("--version", action="store_true",
                     help="print tool version (and commit, if resolvable) and exit")
     ap.add_argument("manifest", type=Path, nargs="?")
@@ -4926,7 +4951,7 @@ def main() -> int:
                             help="project survivors.v0 from an existing report.v0 file")
     projection.add_argument("--rules", action="store_true",
                             help="project rules.v0 from an existing report.v0 and manifest")
-    projection.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), type=Path,
+    projection.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), type=ap.diff_report_path,
                             help="project diff.v0 from two existing report.v0 files")
     projection.add_argument("--inspect", type=Path,
                             help="inspect manifest declarations without binding or execution")
