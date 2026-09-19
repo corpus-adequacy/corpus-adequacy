@@ -136,8 +136,39 @@ def plan_command(args):
     return _completed('plan',[('plan',members['plan.json'])])
 
 
+def _load_plan_stage(path, basis_dir, expected_path):
+    members=dict(reader.load_package(path))
+    retained=tuple(sorted((p,raw) for p,raw in members.items()
+        if p in ('plan.json','proposal.json','reference.json') or '/corpus/' in p))
+    pins={p:raw for p,raw in members.items() if '/pins/' in p}
+    allowed={name+'/pins/'+pin for name in ev.VARIANTS
+        for pin in ('control.json','sites.json','manifest.json','pins.json')}
+    if set(members)!=set(p for p,_ in retained)|allowed:
+        ev.refuse('filesystem','surplus-member')
+    inputs=ev.AssessmentInputs(retained,reader.load_assessment_basis(basis_dir))
+    gates,values=ev.evaluate_preflight(inputs)
+    if values is None or any(g['status']!='passed' for g in gates):
+        ev.refuse('replay','preflight-refused')
+    expected_raw=reader.load_expected(expected_path)
+    ev._require_expected_admission(ev.require_expected(expected_raw),values['plan'],
+                                  values['execution']['plan_sha256'])
+    return inputs,pins,values,expected_raw
+
+
+def authorize_command(args):
+    inputs,pins,values,expected=_load_plan_stage(args.plan_dir,args.basis_dir,args.expected)
+    prepares={'base':_read_input(args.base_prepare),
+              'outer-whitespace':_read_input(args.whitespace_prepare)}
+    output=ev.build_assessment_authorization(inputs,pins,prepares,expected,args.operator)
+    _publish(output,args.out)
+    return _completed('authorize',[('authorization',output['authorization.json']),
+        ('variant-authorization-base',output['base/authorization.json']),
+        ('variant-authorization-outer-whitespace',output['outer-whitespace/authorization.json'])])
+
+
 def dispatch(args):
     if args.command=='plan':return plan_command(args)
+    if args.command=='authorize':return authorize_command(args)
     ev.refuse('input','internal-error')
 
 

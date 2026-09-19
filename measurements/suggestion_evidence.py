@@ -829,7 +829,7 @@ _MATERIALIZE_CEILINGS = {'deadline_seconds': 300,
  'entry_count': 10000,
  'output_bytes': _contained_contract.OUTPUT_CAP_BYTES}
 _INSPECT_KEYS = ('cap_drop', 'memory', 'memory_swap', 'network_mode', 'no_new_privileges', 'offline_env', 'pids', 'read_only_root', 'readonly_mounts', 'tmpfs', 'user')
-_TOOL_TREE_SHA256 = '9347dbb76a065d01681b3cb3cae495aad64f5026d5f5b62c90283a0a1e4afa51'
+_TOOL_TREE_SHA256 = '25a225d61331c075a8bf7c7dddff0767cdf055074aa0da20bdbfed8eee0302e9'
 
 
 def require_runtime_preparation(runtime):
@@ -983,6 +983,23 @@ def require_assessment_context(context, profile, contract):
     if type(contract) is not OwnedAssessmentVariantContract or contract != derived:
         refuse('binding', 'plan-variant')
     return copy.deepcopy(structure['prepares'][name])
+
+
+def admit_assessment_call(context, profile, contract, prepare_raw, *, authorization_raw=None):
+    """Each real consumer revalidates its carrier and separately supplied bytes.
+
+    None means a legacy call, not a validated assessment. The authorization
+    argument, where present, is always the selected variant authorization.
+    """
+    from sealed_measurement_contract import OwnedAssessmentVariantContract
+    if context is None and type(contract) is not OwnedAssessmentVariantContract:
+        return None
+    prepare = require_assessment_context(context, profile, contract)
+    if (type(prepare_raw) is not bytes or prepare_raw != context.prepare_raw
+            or (authorization_raw is not None
+                and authorization_raw != context.variant_authorization_raw)):
+        refuse('binding', 'prepare-authorization')
+    return prepare
 
 
 def derive_disposition(evaluation, observations, review, *, proposal_sha256, evidence_index_sha256):
@@ -2137,3 +2154,29 @@ def build_assessment_plan(proposal_raw, reference_raw, basis_members, source):
     gates,values=evaluate_preflight(AssessmentInputs(snapshot,basis_members))
     if values is None or any(g['status']!='passed' for g in gates): refuse('replay','preflight-refused')
     return snapshot
+
+
+def build_assessment_authorization(inputs, pins, prepares, expected_raw, operator):
+    """Construct authorization, then admit all emitted bytes through shared rules."""
+    text(operator)
+    gates,values=evaluate_preflight(inputs)
+    if values is None or any(g['status']!='passed' for g in gates):
+        refuse('replay','preflight-refused')
+    plan=values['plan'];plan_hash=values['execution']['plan_sha256']
+    _require_expected_admission(require_expected(expected_raw),plan,plan_hash)
+    if type(prepares) is not dict or set(prepares)!=set(VARIANTS):
+        refuse('syntax','wrong-shape')
+    parent={'schema':PREFIX+'authorization.v0','plan_sha256':plan_hash,
+        'source_content_sha256':plan['source']['content_sha256'],'profile':PROFILE,
+        'prepares':[{'variant':name,'sha256':digest(prepares[name])} for name in VARIANTS],
+        'reference_sha256':plan['reference']['sha256'],'operator':operator,'decision':'execute'}
+    raw=encode(parent);result={'authorization.json':raw}
+    for name in VARIANTS:
+        result[name+'/authorization.json']=encode({'schema':PREFIX+'variant-authorization.v0',
+            'parent_authorization_sha256':digest(raw),'plan_sha256':plan_hash,'variant':name,
+            'prepare_sha256':digest(prepares[name]),'profile':PROFILE,
+            'source_content_sha256':plan['source']['content_sha256']})
+    evidence={**pins,**{name+'/prepare.json':raw for name,raw in prepares.items()},**result}
+    require_assessment_structure(AssessmentInputs(inputs.retained_members,inputs.basis_members,
+        tuple(sorted(evidence.items()))),require_collections=False)
+    return result

@@ -248,3 +248,269 @@ class ProducerPlan(ProducerCLI):
                 '--reference-approval',approval,'--root',str(source),'--basis-dir',str(basis),'--out',str(dest))
             self.assertEqual(code,2);self.assertEqual(ev.decode(raw)['reasons'][0]['code'],reason)
             self.assertFalse(dest.exists())
+
+
+class DerivedContractConsumers(unittest.TestCase):
+    def test_fixed_owned_projections_and_dynamic_adapter_ids(self):
+        import aee_checker_sealed_candidate as candidate
+        context, contract = context_fixture()
+        self.assertEqual(contract.candidate_build, contracts.OWNED_INDEPENDENT_V0_CONTRACT.candidate_build)
+        self.assertEqual(contract.site_ids, ('upper-guard-first-overflow-only',))
+        self.assertEqual(contract.corpus_id_count, 5)
+        self.assertEqual(candidate.sealed_adapter_for(contract).__name__, 'owned_contained_v1')
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            contract.ids = ('changed',)
+
+
+class FourConsumerAdmission(unittest.TestCase):
+    def invoke(self, name, context, selected_contract, **changes):
+        import aee_checker_sealed_candidate as candidate
+        import aee_checker_sealed_runtime as runtime
+        import aee_checker_sealed_execute as funnel
+        import aee_checker_sealed_driver as driver
+        import envelope_collection as collection
+        kwargs = dict(prepare_raw=context.prepare_raw, execution_profile=ev.PROFILE,
+                      contract=selected_contract, assessment_context=context)
+        if name == 'candidate':
+            kwargs.update(mounts={}, binding=candidate.envelope_binding(
+                prepare_sha256=ev.digest(context.prepare_raw),
+                execution_commit=ev.decode(context.prepare_raw)['source']['commit']))
+            function = candidate.run_sealed_candidate
+        elif name == 'runtime':
+            kwargs.update(materialized={key: Path('/nonexistent')/key for key in ('corpus','vendor','tool')},
+                          envelope_sink=lambda record: None, ledger=collection.Ledger())
+            function = runtime.make_sealed_backend
+        elif name == 'funnel':
+            kwargs.update(authorize_raw=context.variant_authorization_raw,
+                          pins_dir=ROOT/'measurements/owned-independent-v0',
+                          manifest=json.loads((ROOT/'measurements/owned-independent-v0/manifest.json').read_bytes()),
+                          manifest_path=ROOT/'measurements/owned-independent-v0/manifest.json',
+                          execution_backend=lambda *a, **k: None)
+            function = funnel.run_execution_funnel
+        else:
+            kwargs.update(authorize_raw=context.variant_authorization_raw,
+                          pins_dir=ROOT/'measurements/owned-independent-v0',
+                          materialize_dest=Path('/nonexistent'), root=ROOT)
+            function = driver.run_authorized
+        kwargs.update(changes)
+        return function(**kwargs)
+
+    def test_all_four_refuse_crossing_before_effects(self):
+        from unittest import mock
+        import aee_checker_sealed_candidate as candidate
+        import aee_checker_sealed_driver as driver
+        import corpus_adequacy as ca
+        context, contract = context_fixture()
+        expected = ev.decode(context.expected_raw); expected['reference_approval']='reject'
+        cases = [dict(assessment_context=None), dict(contract=contracts.OWNED_INDEPENDENT_V0_CONTRACT),
+                 dict(prepare_raw=context.prepare_raw+b' '),
+                 dict(assessment_context=dataclasses.replace(context,expected_raw=ev.encode(expected))),
+                 dict(execution_profile='contained-oci-v0')]
+        with mock.patch.object(candidate,'_run_sealed_candidate',side_effect=AssertionError('transport')) as run, \
+             mock.patch.object(driver,'materialize_pinned',side_effect=AssertionError('network')) as mat, \
+             mock.patch.object(ca,'_run_process',side_effect=AssertionError('engine')) as engine:
+            for name in ('candidate','runtime','funnel','driver'):
+                for changes in cases:
+                    with self.subTest(consumer=name,changes=tuple(changes)), self.assertRaises(ev.EvidenceError):
+                        self.invoke(name,context,contract,**changes)
+            self.assertEqual((run.call_count,mat.call_count,engine.call_count),(0,0,0))
+
+    def test_candidate_admits_context_and_checks_binding(self):
+        from unittest import mock
+        import aee_checker_sealed_candidate as candidate
+        context, contract=context_fixture()
+        with mock.patch.object(candidate,'_run_sealed_candidate',return_value='terminal synthetic transport') as run:
+            self.assertEqual(self.invoke('candidate',context,contract),'terminal synthetic transport')
+            self.assertEqual(run.call_args.kwargs['image_id'],ev.decode(context.prepare_raw)['runtime']['toolchain']['image_id'])
+            with self.assertRaises(ev.EvidenceError):
+                self.invoke('candidate',context,contract,binding={'prepare_sha256':'f'*64,'execution_commit':'a'*40})
+            self.assertEqual(run.call_count,1)
+
+    def test_funnel_uses_real_order_binder_and_combined_engine(self):
+        from unittest import mock
+        import corpus_adequacy as ca
+        context,contract=context_fixture()
+        with mock.patch.object(ca,'_run_process',return_value={'synthetic':True}) as engine:
+            self.assertEqual(self.invoke('funnel',context,contract),{'synthetic':True})
+            call=engine.call_args.kwargs
+            self.assertIs(call['separate_build_phase'],False)
+            self.assertEqual(len(call['mutation_order']),3)
+            self.assertIn('CONTROL',call['mutation_order'][0])
+            with self.assertRaises(ev.EvidenceError):
+                self.invoke('funnel',context,contract,authorize_raw=context.parent_authorization_raw)
+            self.assertEqual(engine.call_count,1)
+
+    def test_runtime_admission_is_not_conditional_on_sink(self):
+        context,contract=context_fixture()
+        with self.assertRaises(ev.EvidenceError):
+            self.invoke('runtime',context,contract,envelope_sink=None)
+        with self.assertRaises(ev.EvidenceError):
+            self.invoke('runtime',context,contract,ledger=None)
+        self.assertTrue(callable(self.invoke('runtime',context,contract)))
+
+
+class OfflinePreparation(unittest.TestCase):
+    def inputs(self):
+        import tempfile, tarfile
+        root=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        inputs=root/'inputs';inputs.mkdir();(inputs/'vendor').mkdir()
+        with tarfile.open(inputs/'subject.tar.gz','w:gz') as archive:
+            archive.add(ROOT/'fixtures/contained-v1-owned/candidate',arcname='repo/fixtures/contained-v1-owned/candidate')
+        context,_=context_fixture()
+        tc=ev.decode(context.prepare_raw)['runtime']['toolchain']
+        (inputs/'toolchain.json').write_bytes(ev.encode(tc))
+        return root, inputs, context, tc
+
+    def materialize(self, root, inputs, context):
+        import aee_checker_sealed_materialize as mat
+        return mat.materialize_owned_assessment(inputs,root/'out',
+            retained_members=context.assessment_inputs.retained_members,variant='base',
+            template=ROOT/'execution/aee-checker-sealed/cargo-config.toml')
+
+    def test_actual_archive_and_derived_corpus_with_terminal_host_observation(self):
+        from unittest import mock
+        import aee_checker_sealed_materialize as mat
+        root,inputs,context,tc=self.inputs()
+        inspect=json.dumps([{'Id':tc['image_id'],'Os':'linux','Architecture':tc['platform'].split('/')[1]}]).encode()
+        with mock.patch.object(mat,'docker_bounded',return_value=inspect) as host, \
+             mock.patch.object(mat,'_observe_image_cmd',side_effect=[tc['rustc_Vv'],tc['cargo_V']+'\n']) as observe, \
+             mock.patch.object(mat,'materialize_pinned',side_effect=AssertionError('network')):
+            got=self.materialize(root,inputs,context)
+        want=ev.decode(context.prepare_raw)['materialized']
+        for key,value in want.items():self.assertEqual(got[key],value,key)
+        self.assertEqual(host.call_args.args[0],['image','inspect',tc['image_id']])
+        self.assertEqual(observe.call_count,2)
+        self.assertEqual((root/'out/corpus/vectors/proposal.json').read_bytes(),dict(context.assessment_inputs.retained_members)['base/corpus/proposal.json'])
+
+    def test_wrong_materialized_filename_and_forged_hash_refuse(self):
+        from unittest import mock
+        import aee_checker_sealed_materialize as mat
+        root,inputs,context,tc=self.inputs()
+        inspect=json.dumps([{'Id':tc['image_id'],'Os':'linux','Architecture':tc['platform'].split('/')[1]}]).encode()
+        with mock.patch.object(mat,'docker_bounded',return_value=inspect), \
+             mock.patch.object(mat,'_observe_image_cmd',side_effect=[tc['rustc_Vv'],tc['cargo_V']+'\n']):
+            self.materialize(root,inputs,context)
+        (root/'out/prepare.json').write_bytes(context.prepare_raw)
+        copied=mat.copy_owned_assessment_preparation(root/'out',root/'copy',context=context)
+        self.assertEqual(copied['tool_sha256'],'25a225d61331c075a8bf7c7dddff0767cdf055074aa0da20bdbfed8eee0302e9')
+        (root/'out/tool/config.toml').rename(root/'out/tool/cargo-config.toml')
+        with self.assertRaises(ev.EvidenceError):
+            mat.copy_owned_assessment_preparation(root/'out',root/'wrong',context=context)
+        altered=ev.decode(context.prepare_raw)
+        altered['materialized']['tool_sha256']='9347dbb76a065d01681b3cb3cae495aad64f5026d5f5b62c90283a0a1e4afa51'
+        evidence=dict(context.assessment_inputs.evidence_members)
+        prepares={v:evidence[v+'/prepare.json'] for v in ev.VARIANTS};prepares['base']=ev.encode(altered)
+        with self.assertRaises(ev.EvidenceError):
+            ev.build_assessment_authorization(dataclasses.replace(context.assessment_inputs,evidence_members=()),
+                {p:b for p,b in evidence.items() if '/pins/' in p},prepares,context.expected_raw,'fixture')
+
+    def test_bad_inputs_refuse_before_host(self):
+        from unittest import mock
+        import aee_checker_sealed_materialize as mat
+        import aee_checker_sealed_common as common
+        for kind in ('surplus','vendor','symlink','bad-toolchain','archive-link'):
+            root,inputs,context,tc=self.inputs()
+            if kind=='surplus':(inputs/'extra').write_bytes(b'x')
+            elif kind=='vendor':(inputs/'vendor/x').write_bytes(b'x')
+            elif kind=='symlink':
+                (inputs/'toolchain.json').unlink();(inputs/'toolchain.json').symlink_to(root/'missing')
+            elif kind=='bad-toolchain':(inputs/'toolchain.json').write_bytes(b'{}\n')
+            else:
+                import tarfile
+                with tarfile.open(inputs/'subject.tar.gz','w:gz') as archive:
+                    entry=tarfile.TarInfo('repo/fixtures/contained-v1-owned/candidate/evil');entry.type=tarfile.SYMTYPE;entry.linkname='/tmp/outside';archive.addfile(entry)
+            with self.subTest(kind=kind),mock.patch.object(mat,'docker_bounded',side_effect=AssertionError('host before offline admission')) as host:
+                with self.assertRaises((ev.EvidenceError,common.PrepareError)):
+                    self.materialize(root,inputs,context)
+                self.assertEqual(host.call_count,0)
+
+
+class ProducerAuthorization(unittest.TestCase):
+    def test_builds_three_bound_records_and_reuses_structure(self):
+        context,_=context_fixture()
+        records=dict(context.assessment_inputs.evidence_members)
+        inputs=dataclasses.replace(context.assessment_inputs,evidence_members=())
+        pins={p:b for p,b in records.items() if '/pins/' in p}
+        prepares={v:records[v+'/prepare.json'] for v in ev.VARIANTS}
+        output=ev.build_assessment_authorization(inputs,pins,prepares,context.expected_raw,'test operator')
+        self.assertEqual(set(output),{'authorization.json','base/authorization.json','outer-whitespace/authorization.json'})
+        evidence={**pins,**{v+'/prepare.json':b for v,b in prepares.items()},**output}
+        structure=ev.require_assessment_structure(dataclasses.replace(inputs,evidence_members=tuple(sorted(evidence.items()))),require_collections=False)
+        self.assertEqual(structure['prepares']['base']['variant'],'base')
+        self.assertEqual(ev.decode(output['authorization.json'])['operator'],'test operator')
+
+    def test_crossed_preparation_and_unapproved_expected_refuse(self):
+        context,_=context_fixture();records=dict(context.assessment_inputs.evidence_members)
+        inputs=dataclasses.replace(context.assessment_inputs,evidence_members=())
+        pins={p:b for p,b in records.items() if '/pins/' in p}
+        prepares={v:records[v+'/prepare.json'] for v in ev.VARIANTS}
+        bad=ev.decode(context.expected_raw);bad['reference_approval']='unavailable'
+        for changed,expected in ((dict.fromkeys(ev.VARIANTS,prepares['base']),context.expected_raw),(prepares,ev.encode(bad))):
+            with self.assertRaises(ev.EvidenceError):
+                ev.build_assessment_authorization(inputs,pins,changed,expected,'test operator')
+
+
+class ProducerAuthorizationCLI(ProducerCLI):
+    def test_cli_authorizes_exact_plan_and_publishes_only_three_records(self):
+        import tempfile
+        from argparse import Namespace
+        import owned_suggestion_assessment as producer
+        context,_=context_fixture(); all_p=dict(context.assessment_inputs.evidence_members)
+        root=Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        basis=root/'basis';basis.mkdir()
+        for name,raw in context.assessment_inputs.basis_members:
+            path=basis/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw)
+        plan=root/'plan'
+        producer._publish({**dict(context.assessment_inputs.retained_members),
+                           **{p:b for p,b in all_p.items() if '/pins/' in p}},plan)
+        for variant in ev.VARIANTS:(root/(variant+'.json')).write_bytes(all_p[variant+'/prepare.json'])
+        expected=root/'expected.json';expected.write_bytes(context.expected_raw)
+        args=['authorize','--plan-dir',str(plan),'--basis-dir',str(basis),'--expected',str(expected),
+              '--base-prepare',str(root/'base.json'),'--whitespace-prepare',str(root/'outer-whitespace.json'),
+              '--operator','fixture operator','--out',str(root/'authorized')]
+        code,raw,err=self.run_cli(*args)
+        self.assertEqual((code,err),(0,b''),raw)
+        result=ev.decode(raw,canonical=True);self.assertEqual(len(result['artifacts']),3)
+        import suggestion_readback as reader
+        self.assertEqual(set(dict(reader.load_package(root/'authorized'))),
+                         {'authorization.json','base/authorization.json','outer-whitespace/authorization.json'})
+        code,raw,err=self.run_cli(*args)
+        self.assertEqual(code,2);self.assertEqual(ev.decode(raw)['artifacts'],[])
+
+
+class RuntimeCallAdmission(FourConsumerAdmission):
+    def test_revalidates_at_call_time_before_subject_or_candidate_effect(self):
+        from unittest import mock
+        import aee_checker_sealed_runtime as runtime
+        import corpus_adequacy as ca
+        for corruption in ('profile','context','step'):
+            context,contract=context_fixture()
+            backend=self.invoke('runtime',context,contract)
+            step={'kind':'baseline','group':'independent','id':None}
+            if corruption=='profile':setattr(backend,ca.BACKEND_PROFILE_ATTRIBUTE,'contained-oci-v0')
+            elif corruption=='context':object.__setattr__(context,'prepare_raw',context.prepare_raw+b' ')
+            else:step['kind']='build'
+            with self.subTest(corruption=corruption), \
+                 mock.patch.object(runtime,'normalize_readonly_bind_modes',side_effect=AssertionError('subject effect')) as normalize, \
+                 mock.patch.object(runtime.candidate,'run_sealed_candidate',side_effect=AssertionError('candidate effect')) as candidate:
+                with self.assertRaises(ev.EvidenceError):
+                    backend({'_repo_root':Path('/missing')},[{'id':'<batch>'}],rebuild=True,step=step)
+                self.assertEqual((normalize.call_count,candidate.call_count),(0,0))
+
+
+class DriverSourceAdmission(FourConsumerAdmission):
+    def test_actual_dirty_source_refuses_before_materializer_or_backend(self):
+        from unittest import mock
+        import aee_checker_sealed_driver as driver
+        import aee_checker_sealed_runtime as runtime
+        context,contract=context_fixture()
+        _,source,_,_=producer_workspace(self)
+        target=source/ev.SOURCE_PATHS[0]
+        target.write_bytes(target.read_bytes()+b'\n# fixture drift\n')
+        # Actual dirty fixture source, never a mocked matching source dictionary.
+        with mock.patch.object(driver,'materialize_pinned',side_effect=AssertionError('network')) as old, \
+             mock.patch.object(runtime,'make_sealed_backend',side_effect=AssertionError('backend')) as backend:
+            with self.assertRaises(ev.EvidenceError) as refusal:
+                self.invoke('driver',context,contract,root=source)
+            self.assertEqual(refusal.exception.code,'source-identity')
+            self.assertEqual((old.call_count,backend.call_count),(0,0))

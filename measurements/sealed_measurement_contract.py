@@ -314,6 +314,65 @@ class OwnedAssessmentVariantContract:
     corpus_tree_sha256: str
     ids: tuple[str, ...]
 
+    # Only these immutable code-owned fields are shared with the legacy machinery.
+    # No generic delegation: corpus identity remains the derived five-row variant.
+    @property
+    def mutation_group(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.mutation_group
+
+    @property
+    def control_id(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.control_id
+
+    @property
+    def inert_control_ids(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.inert_control_ids
+
+    @property
+    def site_ids(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.site_ids
+
+    @property
+    def operator(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.operator
+
+    @property
+    def site_replacement(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.site_replacement
+
+    @property
+    def candidate_build(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.candidate_build
+
+    @property
+    def candidate_entrypoint(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.candidate_entrypoint
+
+    @property
+    def candidate_complete_returncodes(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.candidate_complete_returncodes
+
+    @property
+    def subject_subdir(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.subject_subdir
+
+    @property
+    def subject_tree_sha256(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.subject_tree_sha256
+
+    @property
+    def container_context_relpath(self):
+        return OWNED_INDEPENDENT_V0_CONTRACT.container_context_relpath
+
+    @property
+    def corpus_id_count(self):
+        return len(self.ids)
+
+    def pin_digest(self, name):
+        if name not in ('control.json', 'sites.json', 'manifest.json'):
+            raise ValueError('assessment pin is plan-derived')
+        return OWNED_INDEPENDENT_V0_CONTRACT.pin_digest(name)
+
     def __post_init__(self):
         for value in (self.plan_sha256, self.corpus_manifest_sha256, self.corpus_tree_sha256):
             if type(value) is not str or not _HEX64.fullmatch(value):

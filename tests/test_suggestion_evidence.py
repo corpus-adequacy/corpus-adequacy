@@ -541,7 +541,7 @@ def structural_members(inputs):
     runtime = {k: historical[k] for k in ('toolchain','image','candidate_profile','probe_evidence',
         'network','runtime','oci','ceilings','materialize_ceilings')}
     config = (ROOT/'execution/aee-checker-sealed/cargo-config.toml').read_bytes()
-    tool_hash = ev._tree({'cargo-config.toml': config})
+    tool_hash = ev._tree({'config.toml': config})
     members = {}; prepares = []
     for v, variant in zip(ev.VARIANTS, plan['variants']):
         for name in ('control.json','sites.json','manifest.json'):

@@ -8,6 +8,8 @@ mutation adequacy, not sandbox-efficacy, not certification, not ranking.
 
 from __future__ import annotations
 
+import suggestion_evidence as assessment_evidence
+
 import sys
 from pathlib import Path
 
@@ -105,7 +107,7 @@ def bind_authorized_mutation_order(*, manifest: dict, sites: dict,
 
 def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
                          pins_dir: Path, manifest: dict, manifest_path: Path,
-                         execution_backend, execution_profile,
+                         execution_backend, execution_profile, assessment_context=None,
                          contract=AEE_CHECKER_SEALED_CONTRACT) -> dict:
     """Admit the authorized PREPARE under the resolved profile, then run the engine.
 
@@ -113,10 +115,14 @@ def run_execution_funnel(*, authorize_raw: bytes, prepare_raw: bytes,
     contained-oci-v0. Admission is the shared dispatcher's, after authorization: prepare.v1
     only under contained-oci-v0, prepare.v2 only under contained-oci-v1, before any effect.
     """
+    admitted = assessment_evidence.admit_assessment_call(
+        assessment_context, execution_profile, contract, prepare_raw,
+        authorization_raw=authorize_raw)
     try:
-        validate_authorize(authorize_raw, prepare_raw, contract=contract)
-        load_prepare_for_profile(
-            prepare_raw, execution_profile=execution_profile, contract=contract)
+        if admitted is None:
+            validate_authorize(authorize_raw, prepare_raw, contract=contract)
+            load_prepare_for_profile(
+                prepare_raw, execution_profile=execution_profile, contract=contract)
         sites = load_frozen_sites(Path(pins_dir), contract=contract)
         control_raw = verify_file_digest(
             Path(pins_dir) / "control.json", contract.pin_digest("control.json"))

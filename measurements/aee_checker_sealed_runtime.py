@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import suggestion_evidence as assessment_evidence
+
 import hashlib
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from sealed_measurement_contract import AEE_CHECKER_SEALED_CONTRACT
 
 def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_profile,
                         transport=None, envelope_sink=None, ledger=None,
-                        diagnostic_sink=None,
+                        diagnostic_sink=None, assessment_context=None,
                         contract=AEE_CHECKER_SEALED_CONTRACT):
     """Return a backend that executes only the PREPARE-bound sealed candidate.
 
@@ -29,6 +31,10 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
     run. The record is a sibling artifact: it never enters the report the
     generic engine builds, and it is not consulted for any verdict here.
     """
+    admitted = assessment_evidence.admit_assessment_call(
+        assessment_context, execution_profile, contract, prepare_raw)
+    if admitted is not None and (envelope_sink is None or ledger is None):
+        assessment_evidence.refuse('binding', 'prepare-authorization')
     required = ("corpus", "vendor", "tool")
     if type(prepare_raw) is not bytes or any(
             not isinstance(materialized.get(key), Path) for key in required):
@@ -37,17 +43,29 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
         raise PrepareError("candidate diagnostics require invocation ledger")
     binding = None
     if envelope_sink is not None:
-        prepare = load_prepare_for_profile(
+        prepare = (load_prepare_for_profile(
             prepare_raw, execution_profile=execution_profile, contract=contract)
+            if admitted is None else admitted)
         binding = candidate.envelope_binding(
             prepare_sha256=hashlib.sha256(prepare_raw).hexdigest(),
-            execution_commit=prepare["execution"]["commit"],
+            execution_commit=prepare["execution" if admitted is None else "source"]["commit"],
         )
     # The candidate's own rule, applied here too so an unrecorded backend under a profile that
     # must be recorded is refused before it exists, not at its first call.
     candidate.require_recording(execution_profile=execution_profile, binding=binding)
 
     def backend(execution_manifest: dict, vectors, *, rebuild=True, step=None):
+        if admitted is not None:
+            declared = getattr(backend, ca.BACKEND_PROFILE_ATTRIBUTE, None)
+            assessment_evidence.admit_assessment_call(
+                assessment_context, declared, contract, prepare_raw)
+            ordinal = ledger.attempts
+            plan = assessment_evidence.decode(
+                dict(assessment_context.assessment_inputs.retained_members)['plan.json'])
+            steps = [slot['step'] for slot in plan['slots']
+                     if slot['variant'] == assessment_context.variant]
+            if ordinal >= len(steps) or step != steps[ordinal]:
+                assessment_evidence.refuse('replay', 'schedule-mismatch')
         if vectors is None or rebuild is not True:
             raise ca.ManifestError(
                 "sealed runtime requires one combined build-and-run execution")
@@ -82,6 +100,7 @@ def make_sealed_backend(*, prepare_raw: bytes, materialized: dict, execution_pro
                 transport=transport,
                 binding=binding,
                 contract=contract,
+                **({"assessment_context": assessment_context} if admitted is not None else {}),
             )
         except BaseException as exc:
             if ledger is not None:
