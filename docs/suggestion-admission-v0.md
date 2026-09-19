@@ -102,6 +102,27 @@ record naming a real route encodes. What can bind a record to a run is `recordin
 reader holding the recording recomputes it from `Recording.canonical()` and compares. The encoder
 never sees the recording, and nothing here does that comparison for you.
 
+## Where value evidence stops on the owned fixture (#270)
+
+Before any model call, the pilot design requires this precondition: a committed boundary-value
+template must leave at least one held-out mutant alive. If it leaves none, a model has nothing
+left to find that the template would not find, so the run is void and records `template-exhausted`.
+
+A feasibility probe checked that precondition on the owned fixture, and it fails there. The
+candidate's guards compare against exactly `0`, the maximum and `i64::MIN`. Of eight guard
+perturbations:
+- five are killed by a seven-vector boundary template;
+- one is killed by the frozen corpus;
+- one is killable only at an arbitrary interior value, which the authoring rules refuse;
+- one is equivalent. The fixture's `minimum-sentinel` guard is unreachable, because `value < 0`
+  catches `i64::MIN` first.
+
+So on this fixture no pilot can yield suggestion-value evidence, whoever authors the held-out set.
+The probe, its recorded output and its limits are in
+[`design/g-feasibility-probe/`](design/g-feasibility-probe/README.md). It is not evidence and no
+record derives from it. Value evidence would need a subject with more comparisons, or a
+consented structured corpus.
+
 ## Non-claims
 
 No model output is evaluated. No suggestion value, real-fault detection, adequacy or provider
