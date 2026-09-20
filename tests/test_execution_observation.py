@@ -74,6 +74,7 @@ def fixture():
             'exit_policy': {'accepted_exit_codes': [0], 'unproved_exit_codes': []},
         },
         'schedule': schedule, 'steps': steps,
+        'cleanup': {'restored': True, 'isolated_tree_removed': True, 'evidence_sha256': D},
         'closure': {'reason': None, 'stop_step': None, 'prefix_sha256': None,
                     'admission_sha256': None, 'consumption_sha256': None},
         'non_claims': ['no-adequacy-score', 'no-policy-authentication', 'no-global-replay-prevention'],
@@ -171,6 +172,10 @@ class ObservationCodec(unittest.TestCase):
             obj = bad if target == 'root' else bad['schedule'][1] if target == 'schedule' else bad['steps'][1]['slots'][0]
             obj[field] = []
             with self.subTest(field=field), self.assertRaises(ValueError): self.codec.encode_observation(bad)
+
+    def test_cleanup_failure_cannot_be_awaiting_admission(self):
+        doc = fixture(); doc['cleanup']['isolated_tree_removed'] = False
+        with self.assertRaises(ValueError): self.codec.encode_observation(doc)
 
     def test_canonical_round_trip_preserves_corpus_values_even_verdict_key(self):
         doc = fixture()

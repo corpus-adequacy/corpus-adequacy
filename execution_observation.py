@@ -15,7 +15,7 @@ MAX_DEPTH = 64
 NON_CLAIMS = ['no-adequacy-score', 'no-policy-authentication', 'no-global-replay-prevention']
 REASONS = frozenset({'operator-prerequisite-refused', 'build-failed', 'anchor-mismatch',
                      'source-drift', 'restoration-failed', 'cleanup-failed', 'timeout',
-                     'output-cap', 'signal', 'unproved', 'unexpected-exit', 'parse-error',
+                     'output-cap', 'signal', 'unproved', 'incomplete', 'unexpected-exit', 'parse-error',
                      'selector-missing', 'backend-failed', 'interrupted', 'policy-refused',
                      'evidence-incomplete', 'binding-mismatch', 'operator-refused'})
 ADMISSION_REASONS = frozenset({'policy-refused', 'evidence-incomplete', 'binding-mismatch', 'operator-refused'})
@@ -300,7 +300,7 @@ def _step(step, declaration, invocations):
 
 
 def _observation(doc, kind):
-    _object(doc, 'schema session phase bindings schedule steps closure non_claims', 'observation')
+    _object(doc, 'schema session phase bindings schedule steps cleanup closure non_claims', 'observation')
     _text(doc['session'], 'session')
     _bindings(doc['bindings']); _schedule(doc['schedule'])
     if doc['non_claims'] != NON_CLAIMS:
@@ -316,7 +316,13 @@ def _observation(doc, kind):
             _digest(closure[key])
     if kind == 'prefix' and any(closure[key] is not None for key in ('prefix_sha256', 'admission_sha256', 'consumption_sha256')):
         _fail('prefix cannot bind future artifacts')
+    cleanup = _object(doc['cleanup'], 'restored isolated_tree_removed evidence_sha256', 'cleanup')
+    _digest(cleanup['evidence_sha256'])
+    if any(type(cleanup[k]) is not bool for k in ('restored', 'isolated_tree_removed')):
+        _fail('invalid cleanup state')
     phase = doc['phase']
+    if phase != 'stopped' and not (cleanup['restored'] and cleanup['isolated_tree_removed']):
+        _fail('cleanup failure cannot authorize continuation')
     if phase == 'awaiting_admission' and kind == 'prefix':
         for declaration, step in zip(doc['schedule'], doc['steps']):
             if step['state'] != ('pending' if declaration['kind'] == 'ordinary' else 'complete'):

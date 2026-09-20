@@ -20,7 +20,7 @@ measurement claims.
 Prefix schema: `corpus-adequacy.execution-observation-prefix.v0`.
 Final schema: `corpus-adequacy.execution-observation.v0`.
 Both contain exactly: `schema`, `session`, `phase`, `bindings`, `schedule`,
-`steps`, `closure`, `non_claims`.
+`steps`, `cleanup`, `closure`, `non_claims`.
 
 `bindings` contains exactly `tool_version`, `tool_commit`, `tool_content_sha256`,
 `tool_source_state`, `manifest_sha256`, `corpus_sha256`, `source_sha256`,
@@ -52,6 +52,9 @@ slot, never equality. An invocation receipt contains `invocation_id`, `step_id`,
 `vector_id`, `source_sha256`, `raw_sha256`, `raw_size`, `evidence_sha256`.
 Invocation IDs are unique; identical raw digests from fresh calls are allowed.
 An unstarted slot has no invocation receipt. Build has no vector receipts.
+
+`cleanup` contains exactly boolean `restored`, boolean `isolated_tree_removed`,
+and `evidence_sha256`. A non-stopped artifact requires both booleans true.
 
 `closure` contains exactly `reason`, `stop_step`, `prefix_sha256`,
 `admission_sha256`, `consumption_sha256`; unused bindings are null.
@@ -102,3 +105,33 @@ The shared byte drain retains only its bounded prefix on timeout/output-cap or
 incomplete collection. It makes no claim to have captured a failing child's full
 output. The legacy text adapter preserves replacement decoding and exception
 types.
+
+## Prefix API and initial restrictions
+
+`observe_prefix(manifest_path, execution_profile=..., backend=..., context_raw=...,
+output_root=..., policy_identity=..., interpreter_identity=..., control_preflight=...)`
+executes only build, baseline and controls. Policy/interpreter digests are explicit
+operator arguments because the context bytes remain opaque. The built-in local
+backend derives its identity from tool sources and the Python runtime; custom
+backends declare `backend_identity`, `environment_identity`, `execution_profile`
+and `accepts_step=True`. A subclass is a custom backend.
+
+The optional control preflight receives a frozen step, immutable retained
+receipts and context digest. It returns a closed proceed/stop object with exact
+step ID and immutable evidence bytes matching its digest. It runs before source
+mutation and is never available to ordinary resume. Changing declared sources
+inside this hook refuses before mutation.
+
+The first route accepts process JSON outcomes, explicit control polarities,
+relative contained vector files, trusted-local or contained-oci-v1. It refuses
+exclusions, known holes and expected-mover declarations instead of dropping them.
+Output must be outside the measured tree. Execution requires the existing POSIX
+advisory lock and no-follow file operations; unsupported platforms refuse before
+effects. Raw observed values still do not imply qualified controls.
+
+A new session directory retains exact context, an execution intent, completed
+step checkpoints, digest-addressed blobs and (on success) `prefix.json`. Unexpected
+backend exceptions or unverifiable results retain an `interrupted.json` record
+and completed checkpoints, but produce no valid prefix. An unclosed attempt
+must not be called not_run when its backend progress is unknown. This partial
+record cannot be admitted, interpreted as a complete run or silently resumed.
