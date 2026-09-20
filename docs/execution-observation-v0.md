@@ -83,3 +83,22 @@ that field. `decision` is allow/refuse. Reasons use the closed generic codes
 `policy-refused`, `evidence-incomplete`, `binding-mismatch`, `operator-refused`;
 allow has none and refuse has at least one. Public validation binds the exact
 private decision/context bytes but does not interpret their policy semantics.
+
+## Backend transport
+
+Observation execution uses a separate `_ObservationExecution(process, receipts)`;
+legacy six-field `_ProcessExecution` alone is refused on this route. Each receipt
+transports immutable original stdout/stderr bytes in addition to the public
+bindings. Snapshotting recomputes byte hashes and selector projections using the
+same `child_outcome` implementation; a hash of selected JSON is not the hash of
+the original response. `raw_sha256`/`raw_size` name stdout; the invocation-evidence
+object binds both streams, return code and capture state. Transport bytes are
+stored separately from the public observation artifact.
+
+Receipts cover the exact invoked prefix of the scheduled vectors. After an
+abnormal invocation there is no subsequent child call; the remaining vector
+slots become `not_run`. Omitting a vector without such a stop is a refusal.
+The shared byte drain retains only its bounded prefix on timeout/output-cap or
+incomplete collection. It makes no claim to have captured a failing child's full
+output. The legacy text adapter preserves replacement decoding and exception
+types.

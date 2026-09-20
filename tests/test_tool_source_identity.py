@@ -58,6 +58,7 @@ EXPECTED_TOOL_SOURCE_PATHS = (
     "execution_observation.py",
     "isolated_tree.py",
     "module_child.py",
+    "observation_session.py",
 )
 
 

@@ -676,8 +676,8 @@ class Mutations(unittest.TestCase):
     def test_swapping_normal_streams_breaks_rc0_payload(self):
         run = _mutated_run(
             self,
-            "cmd, proc.returncode, stdout_text, stderr_text",
-            "cmd, proc.returncode, stderr_text, stdout_text",
+            "cmd, proc.returncode, stdout_bytes, stderr_bytes",
+            "cmd, proc.returncode, stderr_bytes, stdout_bytes",
         )
         body = (
             "import sys\n"

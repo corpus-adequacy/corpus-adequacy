@@ -123,6 +123,7 @@ TOOL_SOURCE_PATHS = (
     "execution_observation.py",
     "isolated_tree.py",
     "module_child.py",
+    "observation_session.py",
 )
 # The digest is domain-tagged so it cannot be confused with a bare concatenation
 # of the same bytes under some other rule.
@@ -3863,17 +3864,25 @@ class _ProcessMutationSession:
         self.declared_controls = declared_controls
         self.baselines = {}
 
+    def _backend_kwargs(self, vectors, step):
+        return {"step": dict(step)} if self.accepts_step else {}
+
+    def _snapshot_execution(self, result):
+        return _snapshot_process_execution(result)
+
     def execute(self, vectors=None, *, rebuild=True, record_selectors=False, step):
         execution_manifest = _execution_manifest(self.manifest)
         execution_vectors = copy.deepcopy(vectors)
-        step_kwargs = {"step": dict(step)} if self.accepts_step else {}
         sources = [
             _resolved_contained_source(path, self.manifest["_repo_root"])
             for path in self.manifest["_source_paths"]
         ]
         source_guard = _SourceGuard(sources, repo_root=None)
         try:
-            result = _snapshot_process_execution(self.backend(
+            step_kwargs = self._backend_kwargs(execution_vectors, step)
+            if source_guard.verify_clean():
+                raise ManifestError("declared source changed while binding execution request")
+            result = self._snapshot_execution(self.backend(
                 execution_manifest, execution_vectors, rebuild=rebuild, **step_kwargs))
             changed = source_guard.verify_clean()
             if changed:
@@ -3973,91 +3982,95 @@ def _expected_mover_attribution(mutant: dict, baseline: dict, outcome: dict) -> 
     return name in observed, "expected mover %r; observed changed names %r" % (name, observed)
 
 
-def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) -> None:
-    """One unique-anchor replacement, backend run, restore, and compare."""
+def _execute_mutation_observation(session, group: str, mut: dict) -> dict:
+    """Apply one unique source replacement, execute and restore; never compare.
+
+    Both scored and observation consumers use these exact execution facts.
+    A backend exception still unwinds source restoration before it propagates.
+    """
     m = session.manifest
-    tally = session.accumulator.state
-    acknowledged = session.acknowledged
-    vectors, baseline, baseline_diag = session.baselines[group]
-    scope = mut.get("scope", "declared")
+    vectors = session.baselines[group][0]
     sources = [_resolved_contained_source(sp, m["_repo_root"])
                for sp in m["_source_paths"]]
     hits = [(sp, sp.read_text(encoding="utf-8").count(mut["anchor"]))
             for sp in sources]
     total = sum(n for _, n in hits)
-    if total == 0:
-        detail = "%s / %s: anchor not found in any declared source" % (
-            group, mut["label"])
-        if mut.get("control"):
-            _record_control(
-                tally["results"], tally["control_statuses"],
-                group, mut["label"], scope, polarity=_control_polarity(mut), changed=False,
-                moved=0, error=detail)
-            tally["failures"].append(
-                "control %r ended abnormally (%s); that is not a kill and "
-                "this run has no adequacy score" % (mut["label"], detail))
-        else:
-            tally["failures"].append(detail)
-        return
-    if total > 1:
-        detail = (
-            "%s / %s: the anchor occurs %d times across the declared sources, so "
-            "the substitution would pick one arbitrarily. Make it unique"
-            % (group, mut["label"], total))
-        if mut.get("control"):
-            _record_control(
-                tally["results"], tally["control_statuses"],
-                group, mut["label"], scope, polarity=_control_polarity(mut), changed=False,
-                moved=0, error=detail)
-            tally["failures"].append(
-                "control %r ended abnormally (%s); that is not a kill and "
-                "this run has no adequacy score" % (mut["label"], detail))
-        else:
-            tally["failures"].append(detail)
-        return
-
+    if total != 1:
+        detail = ("%s / %s: anchor not found in any declared source" %
+                  (group, mut["label"]) if total == 0 else
+                  "%s / %s: the anchor occurs %d times across the declared sources, so "
+                  "the substitution would pick one arbitrarily. Make it unique" %
+                  (group, mut["label"], total))
+        return {"anchor_hits": total, "application": "failed", "execution": None,
+                "restored": True, "detail": detail}
     target = next(sp for sp, n in hits if n == 1)
     target = _resolved_contained_source(target, m["_repo_root"])
     step_guard = _SourceGuard(sources, repo_root=None)
     original = target.read_text(encoding="utf-8")
     target = _resolved_contained_source(target, m["_repo_root"])
     mutated = original.replace(mut["anchor"], mut["replacement"], 1)
-    target.write_text(mutated, encoding="utf-8")
     try:
+        target.write_text(mutated, encoding="utf-8")
         execution = session.execute(vectors, rebuild=True, step=_step(
             "control" if mut.get("control") else "mutant", group, mut.get("id")))
-        out = execution.outcomes
-        out_diag = execution.diagnostics
-        raised = execution.raised
-        if not execution.built:
-            # Cursor's ruling on the design: rustc exit 1 yields no verdict, so
-            # the corpus never saw this mutant. Counting it killed would let a
-            # typo in the substitution print as "rule covered". Measure a
-            # load-bearing arm with a variant that COMPILES, or declare it
-            # equivalent.
-            if mut.get("control"):
-                _record_control(
-                    tally["results"], tally["control_statuses"],
-                    group, mut["label"], scope,
-                    polarity=_control_polarity(mut), changed=False,
-                    moved=0, error=execution.detail)
-                tally["failures"].append(
-                    "control %r ended abnormally (%s); that is not a kill and "
-                    "this run has no adequacy score"
-                    % (mut["label"], execution.detail))
-                return
-            tally["results"].append({"group": group, "label": mut["label"],
-                                     "verdict": "unproved", "scope": scope, "moved": 0,
-                                     "how": "the mutant does not build, so the corpus was "
-                                            "never run against it: %s"
-                                            % execution.detail})
-            tally["unproved"] += 1
-            return
     finally:
         step_guard.restore()
         leaked = step_guard.verify_clean()
         if leaked:
             raise ManifestError("declared source restoration failed: %s" % leaked)
+    return {"anchor_hits": 1, "application": "applied", "execution": execution,
+            "restored": True, "detail": None}
+
+
+def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) -> None:
+    """Score the shared guarded execution facts using the existing comparator."""
+    m = session.manifest
+    tally = session.accumulator.state
+    acknowledged = session.acknowledged
+    vectors, baseline, baseline_diag = session.baselines[group]
+    scope = mut.get("scope", "declared")
+    facts = _execute_mutation_observation(session, group, mut)
+    if facts["execution"] is None:
+        detail = facts["detail"]
+        if mut.get("control"):
+            _record_control(
+                tally["results"], tally["control_statuses"],
+                group, mut["label"], scope, polarity=_control_polarity(mut), changed=False,
+                moved=0, error=detail)
+            tally["failures"].append(
+                "control %r ended abnormally (%s); that is not a kill and "
+                "this run has no adequacy score" % (mut["label"], detail))
+        else:
+            tally["failures"].append(detail)
+        return
+    execution = facts["execution"]
+    out = execution.outcomes
+    out_diag = execution.diagnostics
+    raised = execution.raised
+    if not execution.built:
+        # Cursor's ruling on the design: rustc exit 1 yields no verdict, so
+        # the corpus never saw this mutant. Counting it killed would let a
+        # typo in the substitution print as "rule covered". Measure a
+        # load-bearing arm with a variant that COMPILES, or declare it
+        # equivalent.
+        if mut.get("control"):
+            _record_control(
+                tally["results"], tally["control_statuses"],
+                group, mut["label"], scope,
+                polarity=_control_polarity(mut), changed=False,
+                moved=0, error=execution.detail)
+            tally["failures"].append(
+                "control %r ended abnormally (%s); that is not a kill and "
+                "this run has no adequacy score"
+                % (mut["label"], execution.detail))
+            return
+        tally["results"].append({"group": group, "label": mut["label"],
+                                 "verdict": "unproved", "scope": scope, "moved": 0,
+                                 "how": "the mutant does not build, so the corpus was "
+                                        "never run against it: %s"
+                                        % execution.detail})
+        tally["unproved"] += 1
+        return
 
     moved = [vid for vid, val in out.items() if baseline.get(vid) != val]
     # The silent class, adopted from the forcing gate in
