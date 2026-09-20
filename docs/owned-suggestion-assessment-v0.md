@@ -94,3 +94,11 @@ establish hosted proof, external corpus permission, production peak memory,
 full-capacity operation or the separate experiments' outcomes. A real run needs
 fresh preparation, approved inputs, resources and independent final review at
 its exact source identity.
+
+## Retained local example
+
+The [owned assessment handoff](../measurements/owned-assessment-8c4034c-20260920/README.md)
+contains the original final package from source `8c4034c`, separate expected
+identity, and an offline verification command. It supports inspection of a real
+local producer report; origin remains unverified. Replaying it runs no candidate
+and grants no permission for another execution.

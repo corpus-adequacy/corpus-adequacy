@@ -1,0 +1,30 @@
+{
+  "corpusDigest": "beb5ecc91482a8cc4b2b72581bd9eebcc6773b2ee8d694810e7637a3e6224c3d",
+  "vectors": [
+    {
+      "file": "allow.json",
+      "id": "allow",
+      "value_class": "accepted-interior"
+    },
+    {
+      "file": "boundary.json",
+      "id": "boundary",
+      "value_class": "accepted-boundary"
+    },
+    {
+      "file": "negative.json",
+      "id": "negative",
+      "value_class": "negative-refusal"
+    },
+    {
+      "file": "over-limit.json",
+      "id": "over-limit",
+      "value_class": "upper-refusal"
+    },
+    {
+      "file": "above-max-by-two.json",
+      "id": "above-max-by-two",
+      "value_class": "upper-refusal-second"
+    }
+  ]
+}
