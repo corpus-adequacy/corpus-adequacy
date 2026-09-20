@@ -174,3 +174,39 @@ all vector receipts survived; it does not reconstruct a lost successful return.
 prefix takes no admission; an awaiting prefix needs a fully bound refusal. An allow
 admission cannot be used to close without consuming/executing. Binding validation
 is not authentication of the policy author or correctness of a private decision.
+
+## Operator commands
+
+The CLI has no custom backend import option. It only offers `trusted-local`;
+contained execution uses an explicitly reviewed Python facade and backend.
+Context and decision files contain bounded opaque bytes, not candidate options.
+Policy and interpreter identities use `sha256:<64 lowercase hex>`.
+
+```sh
+python3 corpus_adequacy.py observe-prefix manifest.json \
+  --profile trusted-local --context context.bin \
+  --policy-identity sha256:... --interpreter-identity sha256:... \
+  --output-root observations
+python3 corpus_adequacy.py observe-resume manifest.json \
+  --profile trusted-local --prefix observations/SESSION/prefix.json \
+  --admission admission.json --context context.bin --decision decision.bin \
+  --ledger-root observation-ledger --output-root continuations
+python3 corpus_adequacy.py observe-close observations/SESSION/prefix.json \
+  --admission refusal.json --context context.bin --decision decision.bin \
+  --output-root closures
+```
+
+For an already stopped prefix, omit admission/context/decision on `observe-close`.
+The CLI writes canonical JSON naming the durable artifact path, SHA-256 and phase.
+Exit 0 means an artifact was written, exit 1 means a stopped artifact was written,
+and exit 2 means refusal/error. A refused admission can be successfully closed
+with exit 0. None of these observation exits asserts adequacy. Ordinary manifest
+invocation still uses the existing scored report and exit meanings.
+
+Cleanup proof is persisted separately and bound to consumption. Recovery never
+infers source restoration merely because a temporary directory is absent. A
+prepared completion artifact permits reconciliation of final-publication failure
+without replacing a completed run with a new interruption. A verified abnormal
+receipt keeps its actual reason (for example timeout) and governs the unstarted
+suffix. Per-step `restored` means that step's substitution was restored (or was
+never applied); it does not claim that a later step or the whole tree is clean.

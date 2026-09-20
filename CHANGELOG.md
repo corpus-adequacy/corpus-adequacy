@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add operator-controlled, scoreless process execution observations: a durable
+  baseline/control prefix, explicitly admitted one-use continuation, and stopped
+  or refused closure. Serial raw receipts support conservative crash recovery.
+  Existing scored runs retain their comparison rules and report format.
+- The runtime source identity now includes the observation codec and session
+  driver. These changed tool bytes require fresh PREPARE evidence before a hosted
+  execution bound to the prior identity; this change is not hosted proof.
+
 ## 0.4.0 — 2026-09-19
 
 Source-only release. It identifies source, not a run. Since 0.3.0:

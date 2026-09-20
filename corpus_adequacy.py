@@ -4995,6 +4995,9 @@ class _InvocationParser(argparse.ArgumentParser):
 
 
 def main() -> int:
+    if len(sys.argv)>1 and sys.argv[1] in ('observe-prefix','observe-resume','observe-close'):
+        from observation_session import observation_cli
+        return observation_cli(sys.argv[1:])
     ap = _InvocationParser(argv=sys.argv[1:], description=__doc__.split("\n")[0])
     ap.add_argument("--version", action="store_true",
                     help="print tool version (and commit, if resolvable) and exit")

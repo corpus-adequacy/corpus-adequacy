@@ -699,6 +699,9 @@ def resume_observation(prefix_path: Path, admission_path: Path, *, context_raw: 
                     if stopped: break
         except BaseException as error:
             if consumption_path is not None:
+                try: _save_cleanup(root,doc,doc['closure']['consumption_sha256'])
+                except OSError as cleanup_error:
+                    error.add_note('cleanup evidence persistence failed: '+type(cleanup_error).__name__)
                 record={'schema':'corpus-adequacy.observation-interruption.v0','state':'unclosed',
                         'session':prefix['session'],'step_id':schedule[last]['step_id'],
                         'error_class':type(error).__name__,'cleanup':doc['cleanup']}
@@ -706,16 +709,24 @@ def resume_observation(prefix_path: Path, admission_path: Path, *, context_raw: 
                 except OSError as persistence_error:
                     error.add_note('interruption persistence failed: '+type(persistence_error).__name__)
             raise
-        cleanup_raw=codec.canonical_bytes({k:v for k,v in doc['cleanup'].items() if k!='evidence_sha256'})
-        doc['cleanup']['evidence_sha256']=_blob(root,cleanup_raw)
+        _save_cleanup(root,doc,doc['closure']['consumption_sha256'])
         if not (doc['cleanup']['restored'] and doc['cleanup']['isolated_tree_removed']) and doc['phase']!='stopped':
             _stop(doc,last,'cleanup-failed',doc['cleanup']['evidence_sha256'])
         raw=codec.encode_observation(doc)
+        _persist_new(root/'completion-intent.json',raw)
         path=root/'final.json'; _persist_new(path,raw)
         _persist_new(consumption_path.with_suffix('.completed.json'),codec.canonical_bytes({
             'consumption_sha256':doc['closure']['consumption_sha256'],
             'final_sha256':codec.sha256(raw),'final_path':str(path.resolve())}))
         return path
+
+
+def _save_cleanup(root,doc,consumption_digest):
+    raw=codec.canonical_bytes({'schema':'corpus-adequacy.observation-cleanup.v0',
+        'consumption_sha256':consumption_digest,'restored':doc['cleanup']['restored'],
+        'isolated_tree_removed':doc['cleanup']['isolated_tree_removed']})
+    doc['cleanup']['evidence_sha256']=_blob(root,raw)
+    _persist_new(root/'cleanup.json',raw)
 
 
 class _DurableObservationSession(ObservationSession):
@@ -811,11 +822,18 @@ def recover_observation(prefix_path: Path, admission_path: Path, *, context_raw:
         if consumption_path.with_suffix('.completed.json').exists():
             raise ca.ManifestError('consumed run already completed')
         old_root=Path(record['output_root'])
-        if (old_root/'final.json').exists():
+        if (old_root/'final.json').exists() or (old_root/'completion-intent.json').exists():
             # Publication may have succeeded before completion receipt persistence.
-            raw=_artifact(old_root/'final.json'); final=codec.load_observation(raw,kind='final')
-            if final['closure']['consumption_sha256']!=codec.sha256(consumption_raw):
+            prepared=old_root/('final.json' if (old_root/'final.json').exists() else 'completion-intent.json')
+            raw=_artifact(prepared); final=codec.load_observation(raw,kind='final')
+            if (final['closure']['consumption_sha256']!=codec.sha256(consumption_raw)
+                    or final['session']!=prefix['session'] or final['bindings']!=prefix['bindings']
+                    or final['schedule']!=prefix['schedule']
+                    or final['closure']['prefix_sha256']!=codec.sha256(prefix_raw)
+                    or final['closure']['admission_sha256']!=codec.sha256(admission_raw)):
                 raise ca.ManifestError('published final differs from consumption')
+            _copy_evidence(prepared,final,None)
+            if not (old_root/'final.json').exists(): _persist_new(old_root/'final.json',raw)
             _persist_new(consumption_path.with_suffix('.completed.json'),codec.canonical_bytes({
                 'consumption_sha256':codec.sha256(consumption_raw),'final_sha256':codec.sha256(raw),
                 'final_path':str((old_root/'final.json').resolve())}))
@@ -884,13 +902,13 @@ def recover_observation(prefix_path: Path, admission_path: Path, *, context_raw:
         doc['closure'].update(prefix_sha256=codec.sha256(prefix_raw),admission_sha256=codec.sha256(admission_raw),
                               consumption_sha256=codec.sha256(consumption_raw))
         first=next(i for i,row in enumerate(doc['schedule']) if row['kind']=='ordinary')
-        current=first
+        current=first; retained_stop=None
         for ordinal,(row,execution,dispatch) in enumerate(observed):
             _blob(root,_artifact(old_root/('dispatch-%06d.json'%ordinal)))
             index=next(i for i,r in enumerate(doc['schedule']) if r['step_id']==row['step_id'])
             current=index; step=doc['steps'][index]
             step.update(application='applied',anchor_hits=1)
-            _record_execution(step,row,execution,dispatch['source_sha256'],root)
+            retained_stop=_record_execution(step,row,execution,dispatch['source_sha256'],root)
             if all(slot['state']=='observed' for slot in step['slots']): step['state']='complete'
         if unmatched:
             row,vid,dispatch,raw=unmatched
@@ -905,13 +923,23 @@ def recover_observation(prefix_path: Path, admission_path: Path, *, context_raw:
             evidence=_blob(root,codec.canonical_bytes({'schema':'corpus-adequacy.recovery-boundary.v0',
                 'consumption_sha256':codec.sha256(consumption_raw),'verified_receipts':len(observed),
                 'unmatched_dispatch':None}))
-        # Never claim cleanup for a still-present tree after a hard crash.
         removed=not Path(record['isolated_root']).exists()
-        doc['cleanup']={'restored':removed,'isolated_tree_removed':removed,'evidence_sha256':None}
+        restored=False
+        if (old_root/'cleanup.json').exists():
+            cleanup,cleanup_raw=_canonical_record(old_root/'cleanup.json',
+                'schema consumption_sha256 restored isolated_tree_removed',
+                'corpus-adequacy.observation-cleanup.v0')
+            if cleanup['consumption_sha256']!=codec.sha256(consumption_raw) or any(type(cleanup[k]) is not bool for k in ('restored','isolated_tree_removed')):
+                raise ca.ManifestError('cleanup record differs from consumption')
+            restored=cleanup['restored']
+        doc['cleanup']={'restored':restored,'isolated_tree_removed':removed,'evidence_sha256':None}
         doc['cleanup']['evidence_sha256']=_blob(root,codec.canonical_bytes({'isolated_tree_absent':removed,
-            'consumption_sha256':codec.sha256(consumption_raw)}))
-        _stop(doc,current,'interrupted',evidence)
-        doc['steps'][current]['restored']=removed
+            'restoration_recorded':restored,'consumption_sha256':codec.sha256(consumption_raw)}))
+        if retained_stop is not None and unmatched is None:
+            _stop(doc,current,*retained_stop)
+        else:
+            _stop(doc,current,'interrupted',evidence)
+        doc['steps'][current]['restored']=restored
         for step in doc['steps'][first:current]:
             checkpoint=_artifact(old_root/(step['step_id']+'.json'))
             if checkpoint!=codec.canonical_bytes(step):
@@ -920,3 +948,56 @@ def recover_observation(prefix_path: Path, admission_path: Path, *, context_raw:
         _persist_new(consumption_path.with_suffix('.completed.json'),codec.canonical_bytes({
             'consumption_sha256':codec.sha256(consumption_raw),'final_sha256':codec.sha256(raw),'final_path':str(path.resolve())}))
         return path
+
+
+def observation_cli(argv):
+    """Explicit operator entry points; candidates cannot select this route."""
+    import argparse
+    class Parser(argparse.ArgumentParser):
+        def error(self,message):
+            raise ca.ManifestError(message)
+    operation=argv[0]
+    parser=Parser(prog='corpus_adequacy.py '+operation)
+    parser.add_argument('input',type=Path)
+    parser.add_argument('--output-root',type=Path,required=True)
+    if operation!='observe-close':
+        parser.add_argument('--profile',choices=['trusted-local'],required=True,
+                            help='contained execution requires a reviewed Python facade')
+    parser.add_argument('--context',type=Path,required=operation!='observe-close')
+    if operation=='observe-prefix':
+        parser.add_argument('--policy-identity',required=True)
+        parser.add_argument('--interpreter-identity',required=True)
+    else:
+        parser.add_argument('--admission',type=Path,required=operation=='observe-resume')
+        parser.add_argument('--decision',type=Path,required=operation=='observe-resume')
+    if operation=='observe-resume':
+        parser.add_argument('--prefix',type=Path,required=True)
+        parser.add_argument('--ledger-root',type=Path,required=True)
+    try:
+        args=parser.parse_args(argv[1:])
+        context_raw=_artifact(args.context) if args.context is not None else None
+        if operation=='observe-prefix':
+            path=observe_prefix(args.input,execution_profile=args.profile,context_raw=context_raw,
+                output_root=args.output_root,policy_identity=args.policy_identity,
+                interpreter_identity=args.interpreter_identity)
+            kind='prefix'
+        else:
+            decision_raw=_artifact(args.decision) if args.decision is not None else None
+            kind='final'
+            if operation=='observe-resume':
+                path=resume_observation(args.prefix,args.admission,context_raw=context_raw,decision_raw=decision_raw,
+                    manifest_path=args.input,execution_profile=args.profile,backend=None,
+                    ledger_root=args.ledger_root,output_root=args.output_root)
+            else:
+                path=close_observation(args.input,output_root=args.output_root,admission_path=args.admission,
+                                       context_raw=context_raw,decision_raw=decision_raw)
+        raw=_artifact(path); doc=codec.load_observation(raw,kind=kind)
+        result={'schema':'corpus-adequacy.observation-command.v0','operation':operation,
+                'artifact_path':str(path.resolve()),'artifact_sha256':codec.sha256(raw),'phase':doc['phase']}
+        sys.stdout.write(codec.canonical_bytes(result).decode('utf-8'))
+        return 1 if doc['phase']=='stopped' else 0
+    except (ca.ManifestError,ValueError,OSError) as error:
+        result={'schema':'corpus-adequacy.observation-error.v0','operation':operation,'error':str(error)}
+        sys.stdout.write(codec.canonical_bytes(result).decode('utf-8'))
+        print('could not observe: '+str(error),file=sys.stderr)
+        return 2

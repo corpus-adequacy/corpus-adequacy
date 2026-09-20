@@ -38,6 +38,7 @@ def corpus(root, count=2):
     return path
 
 
+@unittest.skipIf(ca.fcntl is None, 'observation execution requires POSIX advisory locks')
 class PrefixExecution(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
