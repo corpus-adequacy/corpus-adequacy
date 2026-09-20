@@ -119,6 +119,21 @@ class PrefixExecution(unittest.TestCase):
         # Build-only + one call per vector; still no ordinary mutation.
         self.assertEqual(calls, ['build'] + ['baseline']*2 + ['control']*6)
 
+    def test_vector_only_failure_retains_executed_prefix_without_final(self):
+        class BadVectorBackend(obs.LocalObservationBackend):
+            backend_identity=D; environment_identity=E
+            def __call__(self,m,vectors=None,*,rebuild=True,step,observation):
+                if vectors and vectors[0]['id']=='v1':
+                    return obs._ObservationExecution(ca._ProcessExecution(False,'invalid vector status',{}, {}, {}, {}),())
+                return super().__call__(m,vectors,rebuild=rebuild,step=step,observation=observation)
+        with self.assertRaisesRegex(ca.ManifestError,'vector-only'):
+            self.run_prefix(backend=BadVectorBackend())
+        root=next((self.root/'evidence').iterdir())
+        self.assertFalse((root/'prefix.json').exists())
+        self.assertEqual(len(list(root.glob('receipt-*.json'))),1)
+        self.assertEqual(len(list(root.glob('dispatch-*.json'))),2)
+        self.assertEqual(json.loads((root/'interrupted.json').read_bytes())['state'],'unclosed')
+
     def test_build_failure_is_build_only_and_no_child_runs(self):
         doc = json.loads(self.manifest.read_text()); doc['build'] = [sys.executable,'-c','raise SystemExit(1)']
         self.manifest.write_text(json.dumps(doc))

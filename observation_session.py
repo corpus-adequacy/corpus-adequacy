@@ -755,8 +755,8 @@ class _DurableObservationSession(ObservationSession):
             kwargs['observation']=copy.deepcopy(self.request)
         return kwargs
 
-    def _snapshot_execution(self,result):
-        execution=super()._snapshot_execution(result)
+    def _retain_receipts(self,execution):
+        # Only called after the shared source guard has verified and restored.
         for receipt in execution.receipts:
             _blob(self.root,receipt.raw_stdout); _blob(self.root,receipt.raw_stderr)
             raw=receipt_evidence(receipt); _blob(self.root,raw)
@@ -774,7 +774,9 @@ class _DurableObservationSession(ObservationSession):
         for vector in vectors:
             execution=super().execute([vector],rebuild=False,record_selectors=record_selectors,step=step)
             process=execution.process
-            if not process.built: return execution
+            if not process.built:
+                raise ca.ManifestError('vector-only backend returned a build failure without invocation evidence')
+            self._retain_receipts(execution)
             outcomes.update(process.outcomes); diagnostics.update(process.diagnostics); raised.update(process.raised)
             for key,values in process.selector_keys_seen.items(): seen.setdefault(key,set()).update(values)
             receipts.extend(execution.receipts)
@@ -919,7 +921,7 @@ def recover_observation(prefix_path: Path, admission_path: Path, *, context_raw:
             slot.update(state='abnormal',reason='interrupted',evidence_sha256=evidence)
         else:
             pending=next((i for i in range(first,len(doc['steps'])) if any(s['state']=='pending' for s in doc['steps'][i]['slots'])),None)
-            if pending is not None: current=pending
+            if pending is not None and retained_stop is None: current=pending
             evidence=_blob(root,codec.canonical_bytes({'schema':'corpus-adequacy.recovery-boundary.v0',
                 'consumption_sha256':codec.sha256(consumption_raw),'verified_receipts':len(observed),
                 'unmatched_dispatch':None}))

@@ -20,7 +20,7 @@ def make_admission(prefix, decision='allow'):
     value = dict(schema=codec.ADMISSION_SCHEMA, session=doc['session'],
                  prefix_sha256=codec.sha256(prefix.read_bytes()),
                  context_sha256=codec.sha256(b'context'), decision_sha256=codec.sha256(b'decision'),
-                 policy_identity=D, interpreter_identity=E, next_step=doc['schedule'][-1]['step_id'],
+                 policy_identity=D, interpreter_identity=E, next_step=next(row['step_id'] for row in doc['schedule'] if row['kind']=='ordinary'),
                  decision=decision, reasons=[] if decision=='allow' else ['policy-refused'], nonce='one')
     value['decision_binding_sha256']=codec.sha256(codec.canonical_bytes(value))
     path=prefix.parent/(decision+'.json'); path.write_bytes(codec.encode_observation(value))
@@ -261,6 +261,61 @@ obs.resume_observation(Path(sys.argv[1]),Path(sys.argv[2]),context_raw=b'context
         self.admission.write_bytes(codec.encode_observation(admission))
         with mock.patch.object(ca,'_execute_mutation_observation',side_effect=AssertionError('replay')):
             with self.assertRaises(FileExistsError): self.resume(output_root=self.root/'new-nonce')
+
+    def fresh_prefix(self,backend=None):
+        self.prefix=obs.observe_prefix(self.manifest,execution_profile='trusted-local',backend=backend,
+            context_raw=b'context',output_root=self.root/'another-prefix',policy_identity=D,interpreter_identity=E)
+        self.admission=make_admission(self.prefix)
+
+    def test_vector_only_build_failure_never_erases_prior_receipt(self):
+        class BadVectorBackend(obs.LocalObservationBackend):
+            backend_identity=D; environment_identity=E
+            def __call__(self,m,vectors=None,*,rebuild=True,step,observation):
+                if step['kind']=='mutant' and vectors and vectors[0]['id']=='v1':
+                    return obs._ObservationExecution(ca._ProcessExecution(False,'invalid vector build failure',{}, {}, {}, {}),())
+                return super().__call__(m,vectors,rebuild=rebuild,step=step,observation=observation)
+        backend=BadVectorBackend(); self.fresh_prefix(backend)
+        with self.assertRaises(ca.ManifestError): self.resume(backend=backend)
+        doc=codec.load_observation(self.recover().read_bytes(),kind='final')
+        self.assertEqual([s['state'] for s in doc['steps'][-1]['slots']],['observed','abnormal'])
+        self.assertEqual(doc['steps'][-1]['slots'][0]['outcome'],9)
+        self.assertEqual(doc['steps'][-1]['slots'][1]['reason'],'interrupted')
+
+    def test_source_guard_refusal_cannot_leave_verified_receipt(self):
+        class WritesSource(obs.LocalObservationBackend):
+            backend_identity=D; environment_identity=E
+            def __call__(self,m,vectors=None,*,rebuild=True,step,observation):
+                result=super().__call__(m,vectors,rebuild=rebuild,step=step,observation=observation)
+                if step['kind']=='mutant' and vectors:
+                    m['_source_paths'][0].write_text('changed after capture')
+                return result
+        backend=WritesSource(); self.fresh_prefix(backend)
+        with self.assertRaisesRegex(ca.ManifestError,'changed a declared source'): self.resume(backend=backend)
+        root=next((self.root/'final').iterdir())
+        self.assertEqual(list(root.glob('receipt-*.json')),[])
+        doc=codec.load_observation(self.recover().read_bytes(),kind='final')
+        self.assertEqual([s['state'] for s in doc['steps'][-1]['slots']],['abnormal','not_run'])
+        self.assertIsNone(doc['steps'][-1]['slots'][0]['outcome'])
+
+    def test_timeout_on_final_vector_stops_its_step_before_later_ordinary(self):
+        manifest=json.loads(self.manifest.read_bytes())
+        manifest['mutants']['g'].append({'label':'second','anchor':'VALUE = 7','replacement':'VALUE = 10'})
+        self.manifest.write_text(json.dumps(manifest)); self.fresh_prefix()
+        persist=obs._persist_new; run=obs.run_capped_bytes; calls=[]
+        def fail_final(path,raw):
+            if path.name in ('completion-intent.json','final.json'): raise OSError('publication')
+            return persist(path,raw)
+        def timeout_second(*args,**kwargs):
+            calls.append(True)
+            if len(calls)==2: raise obs.RawTermination('timeout',b'',b'',TimeoutError('child'),None)
+            return run(*args,**kwargs)
+        with mock.patch.object(obs,'_persist_new',side_effect=fail_final), mock.patch.object(obs,'run_capped_bytes',side_effect=timeout_second):
+            with self.assertRaises(OSError): self.resume()
+        doc=codec.load_observation(self.recover().read_bytes(),kind='final')
+        self.assertEqual([s['state'] for s in doc['steps'][-2:]],['stopped','not_run'])
+        self.assertEqual(doc['closure']['stop_step'],doc['steps'][-2]['step_id'])
+        self.assertEqual(doc['closure']['reason'],'timeout')
+        self.assertEqual(doc['steps'][-2]['slots'][0]['outcome'],9)
 
     def test_two_processes_with_distinct_outputs_consume_once(self):
         ctx=multiprocessing.get_context('spawn'); barrier=ctx.Barrier(2); queue=ctx.Queue()
