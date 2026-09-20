@@ -1,0 +1,7 @@
+{
+  "anchor": "pub fn check(value: i64, maximum: i64) -> (bool, &'static str, String) {",
+  "control": true,
+  "label": "CONTROL immediate owned-fixture refusal",
+  "replacement": "pub fn check(value: i64, maximum: i64) -> (bool, &'static str, String) {\n    return (false, \"control-refusal\", \"positive control\".to_owned());",
+  "scope": "declared"
+}

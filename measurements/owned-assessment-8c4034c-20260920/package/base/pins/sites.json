@@ -1,0 +1,11 @@
+{
+  "sites": [
+    {
+      "anchor": "if value > maximum",
+      "id": "upper-guard-first-overflow-only",
+      "label": "truncate owned-fixture upper guard to the first value above maximum",
+      "manifest_replacement": "if value > maximum && value <= maximum.saturating_add(1)",
+      "replacement": "value > maximum && value <= maximum.saturating_add(1)"
+    }
+  ]
+}

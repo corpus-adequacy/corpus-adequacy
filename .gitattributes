@@ -79,3 +79,7 @@ contained_contract.py text eol=lf
 measurements/suggestion_evidence.py text eol=lf
 measurements/suggestion_readback.py text eol=lf
 measurements/owned_suggestion_assessment.py text eol=lf
+
+measurements/owned-assessment-8c4034c-20260920/** -text
+# Whitespace is an intentional measured input in this retained variant.
+measurements/owned-assessment-8c4034c-20260920/package/outer-whitespace/corpus/*.json -whitespace

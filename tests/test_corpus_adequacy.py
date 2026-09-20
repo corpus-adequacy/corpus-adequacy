@@ -4368,6 +4368,8 @@ class PositionalManifestInputBounds(unittest.TestCase):
             "measurements/aee-checker-25b9dfa/manifest.json": 2952,
             "measurements/owned-contained-v1/manifest.json": 1846,
             "measurements/owned-independent-v0/manifest.json": 1759,
+            "measurements/owned-assessment-8c4034c-20260920/package/base/pins/manifest.json": 1759,
+            "measurements/owned-assessment-8c4034c-20260920/package/outer-whitespace/pins/manifest.json": 1759,
             "measurements/tersign-0e560c1/manifest.json": 4502,
             "measurements/tersign-1cc5ea32/manifest.json": 4502,
         }
