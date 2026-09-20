@@ -115,7 +115,8 @@ class PrefixExecution(unittest.TestCase):
                 if kwargs['step']['kind'] == 'mutant': raise AssertionError('ordinary executed')
                 return super().__call__(manifest, *args, **kwargs)
         self.run_prefix(backend=Tracked())
-        self.assertEqual(calls, ['build', 'baseline', 'control', 'control'])
+        # Build-only + one call per vector; still no ordinary mutation.
+        self.assertEqual(calls, ['build'] + ['baseline']*2 + ['control']*6)
 
     def test_build_failure_is_build_only_and_no_child_runs(self):
         doc = json.loads(self.manifest.read_text()); doc['build'] = [sys.executable,'-c','raise SystemExit(1)']

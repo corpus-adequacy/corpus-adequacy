@@ -135,3 +135,42 @@ backend exceptions or unverifiable results retain an `interrupted.json` record
 and completed checkpoints, but produce no valid prefix. An unclosed attempt
 must not be called not_run when its backend progress is unknown. This partial
 record cannot be admitted, interpreted as a complete run or silently resumed.
+
+## One-use continuation and recovery
+
+`resume_observation` validates the prefix, admission, opaque context and decision,
+current manifest/corpus/source/tool/backend/environment and schedule before effects.
+The operator supplies one authoritative `ledger_root` outside the measured tree.
+A lock and a session-derived create-exclusive consumption file are fsynced before
+ordinary substitution. Even a torn consumption record blocks reuse. Changing the
+output directory or admission nonce cannot release that session. Using a different
+ledger is outside this local guarantee.
+
+Continuation serializes backend calls into build-only and individual vector calls.
+Each canonical dispatch binds session, step, vector, invocation, mutated source,
+profile, backend and consumption. A pre-call marker and dispatch are durable before
+calling the backend. Receipt evidence binds the dispatch and retained raw streams,
+and is fsynced before the next vector. Custom observation backends must honor
+`vectors=None` for build-only and `rebuild=False` for an individual vector call.
+
+`recover_observation` never executes a backend. Exactly one unmatched dispatch may
+produce an `abnormal` slot with reason `interrupted`, `receipt: null`, no outcome,
+diagnostic or selector claims, and the dispatch digest as evidence. This is the
+only receipt-less abnormal case. The codec validates its shape; recovery validates
+the actual canonical dispatch, ordering and bindings. It does not claim the child
+actually started, completed, or produced empty output. Later proven-unstarted slots
+are `not_run`. Missing, contradictory or multiple unmatched intents refuse closure.
+A malformed/torn consumption record remains consumed and cannot be recovered into
+a trustworthy final artifact automatically.
+
+Recovery retains an isolated tree still present after a hard crash and reports
+cleanup false; it does not kill an unverified PID or assume an orphan child stopped.
+A stopped final is not an admission to continue. An interruption during final
+publication can be reconciled using the same consumption and retained receipts,
+without repeating a vector. Recovery may conservatively retain `stopped` even when
+all vector receipts survived; it does not reconstruct a lost successful return.
+
+`prepare_closure` is pure and `close_observation` persists its exact bytes. A stopped
+prefix takes no admission; an awaiting prefix needs a fully bound refusal. An allow
+admission cannot be used to close without consuming/executing. Binding validation
+is not authentication of the policy author or correctness of a private decision.

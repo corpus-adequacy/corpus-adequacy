@@ -34,6 +34,7 @@ class _InvocationReceipt:
     returncode: int | None
     abnormal: str | None
     selector_presence: tuple[bool, bool] | None
+    dispatch_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ def receipt_evidence(receipt):
     """Canonical invocation receipt. Bytes are persisted separately by their hashes."""
     return codec.canonical_bytes({
         'schema': 'corpus-adequacy.invocation-evidence.v0',
+        'dispatch_sha256': receipt.dispatch_sha256,
         'invocation_id': receipt.invocation_id, 'step_id': receipt.step_id,
         'vector_id': receipt.vector_id, 'source_sha256': receipt.source_sha256,
         'stdout_sha256': codec.sha256(receipt.raw_stdout), 'stdout_size': len(receipt.raw_stdout),
@@ -116,7 +118,7 @@ def _make_receipt(request, vid, raw, stderr, returncode, abnormal, presence):
     from dataclasses import replace
     receipt = _InvocationReceipt(request['invocations'][vid], request['step_id'], vid,
         request['source_sha256'], codec.sha256(raw), len(raw), '', raw, stderr,
-        returncode, abnormal, presence)
+        returncode, abnormal, presence, request.get('dispatch_sha256'))
     return replace(receipt, evidence_sha256=codec.sha256(receipt_evidence(receipt)))
 
 
@@ -174,7 +176,8 @@ def _snapshot_observation_execution(result, expected_step, expected_vectors, *, 
         raise ca.ManifestError('receipt order/set differs from invocation schedule')
     outcomes, diagnostics, raised, seen = {}, {}, {}, {}
     for index, receipt in enumerate(receipts):
-        if (receipt.step_id != request['step_id'] or receipt.source_sha256 != request['source_sha256']
+        if (receipt.dispatch_sha256 != request.get('dispatch_sha256')
+                or receipt.step_id != request['step_id'] or receipt.source_sha256 != request['source_sha256']
                 or receipt.invocation_id != request['invocations'].get(receipt.vector_id)
                 or type(receipt.raw_stdout) is not bytes or type(receipt.raw_stderr) is not bytes
                 or type(receipt.raw_size) is not int or receipt.raw_size != len(receipt.raw_stdout)
@@ -512,7 +515,7 @@ def observe_prefix(manifest_path: Path, *, execution_profile: str, backend=None,
         with _isolated(m,doc['cleanup']) as isolated:
             if source_digest(isolated) != bindings['source_sha256'] or _corpus_digest(isolated,vectors) != bindings['corpus_sha256']:
                 raise ca.ManifestError('inputs changed during isolation')
-            session = ObservationSession(isolated,backend)
+            session = _DurableObservationSession(isolated,backend,root,session_id,bindings,None)
             for group in sorted(m['mutants']):
                 session.baselines[group] = ([v for v in vectors if ca._group_of(v,m)==group],{}, {})
             for index,row in enumerate(schedule):
@@ -564,3 +567,356 @@ def observe_prefix(manifest_path: Path, *, execution_profile: str, backend=None,
     path=root/'prefix.json'; _persist_new(path,raw)
     codec.load_observation(ca.read_bounded_regular_file(path,cap=codec.MAX_BYTES),kind='prefix')
     return path
+
+
+def _artifact(path):
+    return ca.read_bounded_regular_file(Path(path), cap=codec.MAX_BYTES)
+
+
+def _copy_evidence(prefix_path, doc, root):
+    """Verify every referenced retained blob before copying; never follow links."""
+    digests = {doc['bindings']['context_sha256'], doc['cleanup']['evidence_sha256']}
+    for step in doc['steps']:
+        for record in (step['preflight'], step['failure']):
+            if record: digests.add(record['evidence_sha256'])
+        for slot in step['slots']:
+            if slot['evidence_sha256']: digests.add(slot['evidence_sha256'])
+            if slot['receipt']:
+                digests.update((slot['receipt']['raw_sha256'], slot['receipt']['evidence_sha256']))
+    pending = list(digests); checked = set()
+    receipt_digests = {slot['receipt']['evidence_sha256'] for step in doc['steps']
+                       for slot in step['slots'] if slot['receipt']}
+    while pending:
+        digest = pending.pop()
+        if digest in checked: continue
+        codec._digest(digest)
+        raw = _artifact(Path(prefix_path).parent/'blobs'/digest.removeprefix('sha256:'))
+        if codec.sha256(raw) != digest:
+            raise ca.ManifestError('predecessor evidence digest mismatch')
+        checked.add(digest)
+        if digest in receipt_digests:
+            evidence = ca.load_json_document(raw, root=dict, where='invocation evidence')
+            for key in ('stdout_sha256', 'stderr_sha256', 'dispatch_sha256'):
+                if evidence.get(key) is not None: pending.append(evidence[key])
+        if root is not None: _blob(root, raw)
+
+
+def close_observation(prefix_path: Path, *, output_root: Path, admission_path=None,
+                      context_raw=None, decision_raw=None) -> Path:
+    prefix_raw = _artifact(prefix_path)
+    admission_raw = None if admission_path is None else _artifact(admission_path)
+    raw = codec.prepare_closure(prefix_raw, admission_raw=admission_raw,
+                                context_raw=context_raw, decision_raw=decision_raw)
+    doc = codec.load_observation(prefix_raw, kind='prefix')
+    _copy_evidence(prefix_path, doc, None)
+    root = _evidence_root(output_root, Path(prefix_path).parent, str(uuid.uuid4()))
+    _copy_evidence(prefix_path, doc, root)
+    _blob(root, prefix_raw)
+    if admission_raw is not None:
+        _blob(root, admission_raw); _blob(root, context_raw); _blob(root, decision_raw)
+    path = root/'final.json'; _persist_new(path, raw)
+    return path
+
+
+def _consume(ledger_root, record):
+    """The name exists before writing: even a torn record permanently consumes."""
+    key = codec.sha256(record['session'].encode()).removeprefix('sha256:')
+    path = Path(ledger_root)/(key+'.consumed.json')
+    raw = codec.canonical_bytes(record)
+    directory = os.open(ledger_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return path, codec.sha256(raw)
+
+
+def resume_observation(prefix_path: Path, admission_path: Path, *, context_raw: bytes,
+                       decision_raw: bytes, manifest_path: Path, execution_profile: str,
+                       backend, ledger_root: Path, output_root: Path) -> Path:
+    """Consume one admission under the operator's ledger, execute only ordinary rows."""
+    prefix_raw = _artifact(prefix_path); admission_raw = _artifact(admission_path)
+    prefix = codec.load_observation(prefix_raw, kind='prefix')
+    admission = codec.load_observation(admission_raw, kind='admission')
+    codec.validate_admission(prefix, admission, context_raw=context_raw, decision_raw=decision_raw)
+    if admission['decision'] != 'allow':
+        raise ca.ManifestError('resume requires allow admission')
+    backend = LocalObservationBackend() if backend is None else backend
+    m, vectors, profile = _inputs(manifest_path, execution_profile, backend)
+    bindings = _bindings(m,vectors,profile,backend,context_raw,
+                         prefix['bindings']['policy_identity'],prefix['bindings']['interpreter_identity'])
+    schedule, work = _schedule(m,vectors)
+    if bindings != prefix['bindings'] or schedule != prefix['schedule']:
+        raise ca.ManifestError('current execution bindings differ from prefix')
+    _copy_evidence(prefix_path, prefix, None)
+    ledger_root = Path(ledger_root)
+    if ledger_root.resolve().is_relative_to(m['_repo_root'].resolve()):
+        raise ca.ManifestError('consumption ledger must be outside measured tree')
+    ledger_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with ca._TreeLock(ledger_root):
+        root = _evidence_root(output_root,m['_repo_root'],str(uuid.uuid4()))
+        _copy_evidence(prefix_path,prefix,root)
+        for raw in (prefix_raw,admission_raw,context_raw,decision_raw): _blob(root,raw)
+        doc = copy.deepcopy(prefix); doc['schema']=codec.FINAL_SCHEMA; doc['phase']='complete'
+        doc['cleanup']={'restored':False,'isolated_tree_removed':False,'evidence_sha256':None}
+        doc['closure'].update(prefix_sha256=codec.sha256(prefix_raw),admission_sha256=codec.sha256(admission_raw))
+        consumption_path = None
+        last = next(i for i,row in enumerate(schedule) if row['kind']=='ordinary')
+        try:
+            with _isolated(m,doc['cleanup']) as isolated:
+                if source_digest(isolated)!=bindings['source_sha256'] or _corpus_digest(isolated,vectors)!=bindings['corpus_sha256']:
+                    raise ca.ManifestError('inputs changed during resume isolation')
+                # Re-pin originals under the source lock before permanently consuming.
+                if _bindings(m,vectors,profile,backend,context_raw,bindings['policy_identity'],bindings['interpreter_identity']) != bindings:
+                    raise ca.ManifestError('bindings changed before consumption')
+                consumption_path, consumption_digest = _consume(ledger_root, {
+                    'schema':'corpus-adequacy.observation-consumption.v0','session':prefix['session'],
+                    'prefix_sha256':codec.sha256(prefix_raw),'admission_sha256':codec.sha256(admission_raw),
+                    'next_step':admission['next_step'],'nonce':admission['nonce'],
+                    'output_root':str(root.resolve()),'isolated_root':str(isolated['_repo_root'])})
+                doc['closure']['consumption_sha256']=consumption_digest
+                session=_DurableObservationSession(isolated,backend,root,prefix['session'],bindings,consumption_digest)
+                for group in sorted(m['mutants']):
+                    session.baselines[group]=([v for v in vectors if ca._group_of(v,m)==group],{}, {})
+                for index,row in enumerate(schedule):
+                    if row['kind']!='ordinary': continue
+                    last=index; step=doc['steps'][index]; session.step_id=row['step_id']
+                    _persist_new(root/(row['step_id']+'.intent.json'),codec.canonical_bytes({
+                        'step_id':row['step_id'],'state':'dispatch-intent','vector_ids':row['vector_ids'],
+                        'consumption_sha256':consumption_digest}))
+                    facts=ca._execute_mutation_observation(session,row['group'],work[row['step_id']])
+                    step.update(application=facts['application'],anchor_hits=facts['anchor_hits'],restored=facts['restored'])
+                    if facts['execution'] is None:
+                        evidence=_blob(root,codec.canonical_bytes({'reason':'anchor-mismatch','detail':facts['detail']}))
+                        _stop(doc,index,'anchor-mismatch',evidence); break
+                    stopped=_record_execution(step,row,facts['execution'],session.request['source_sha256'],root)
+                    if stopped: _stop(doc,index,*stopped)
+                    _persist_new(root/(row['step_id']+'.json'),codec.canonical_bytes(step))
+                    if stopped: break
+        except BaseException as error:
+            if consumption_path is not None:
+                record={'schema':'corpus-adequacy.observation-interruption.v0','state':'unclosed',
+                        'session':prefix['session'],'step_id':schedule[last]['step_id'],
+                        'error_class':type(error).__name__,'cleanup':doc['cleanup']}
+                try: _persist_new(root/'interrupted.json',codec.canonical_bytes(record))
+                except OSError as persistence_error:
+                    error.add_note('interruption persistence failed: '+type(persistence_error).__name__)
+            raise
+        cleanup_raw=codec.canonical_bytes({k:v for k,v in doc['cleanup'].items() if k!='evidence_sha256'})
+        doc['cleanup']['evidence_sha256']=_blob(root,cleanup_raw)
+        if not (doc['cleanup']['restored'] and doc['cleanup']['isolated_tree_removed']) and doc['phase']!='stopped':
+            _stop(doc,last,'cleanup-failed',doc['cleanup']['evidence_sha256'])
+        raw=codec.encode_observation(doc)
+        path=root/'final.json'; _persist_new(path,raw)
+        _persist_new(consumption_path.with_suffix('.completed.json'),codec.canonical_bytes({
+            'consumption_sha256':doc['closure']['consumption_sha256'],
+            'final_sha256':codec.sha256(raw),'final_path':str(path.resolve())}))
+        return path
+
+
+class _DurableObservationSession(ObservationSession):
+    """Serial vector calls: durable dispatch, guarded backend, durable receipt."""
+    def __init__(self, manifest, backend, root, session_id, bindings, consumption_digest):
+        super().__init__(manifest,backend)
+        self.root=root; self.session_id=session_id; self.bindings=bindings
+        self.consumption_digest=consumption_digest; self.ordinal=0
+
+    def _backend_kwargs(self,vectors,step):
+        kwargs=super()._backend_kwargs(vectors,step)
+        if vectors:
+            if len(vectors)!=1: raise ca.ManifestError('durable dispatch is strictly serial')
+            vector_id=vectors[0][self.manifest['id_key']]
+            intent={'schema':'corpus-adequacy.invocation-dispatch.v0','session':self.session_id,
+                    'step_id':self.step_id,'vector_id':vector_id,
+                    'invocation_id':self.request['invocations'][vector_id],
+                    'source_sha256':self.request['source_sha256'],
+                    'execution_profile':self.bindings['execution_profile'],
+                    'backend_sha256':self.bindings['backend_sha256'],
+                    'consumption_sha256':self.consumption_digest,'ordinal':self.ordinal}
+            raw=codec.canonical_bytes(intent); digest=_blob(self.root,raw)
+            _persist_new(self.root/('call-%06d.intent.json'%self.ordinal),codec.canonical_bytes({'dispatch_sha256':digest}))
+            _persist_new(self.root/('dispatch-%06d.json'%self.ordinal),raw)
+            self.request['dispatch_sha256']=digest
+            kwargs['observation']=copy.deepcopy(self.request)
+        return kwargs
+
+    def _snapshot_execution(self,result):
+        execution=super()._snapshot_execution(result)
+        for receipt in execution.receipts:
+            _blob(self.root,receipt.raw_stdout); _blob(self.root,receipt.raw_stderr)
+            raw=receipt_evidence(receipt); _blob(self.root,raw)
+            _persist_new(self.root/('receipt-%06d.json'%self.ordinal),raw)
+            self.ordinal+=1
+        return execution
+
+    def execute(self,vectors=None,*,rebuild=True,record_selectors=False,step):
+        if vectors is None:
+            return super().execute(None,rebuild=rebuild,record_selectors=record_selectors,step=step)
+        if rebuild:
+            build=super().execute(None,rebuild=True,record_selectors=record_selectors,step=step)
+            if not build.process.built: return build
+        outcomes,diagnostics,raised,seen,receipts={},{},{},{},[]
+        for vector in vectors:
+            execution=super().execute([vector],rebuild=False,record_selectors=record_selectors,step=step)
+            process=execution.process
+            if not process.built: return execution
+            outcomes.update(process.outcomes); diagnostics.update(process.diagnostics); raised.update(process.raised)
+            for key,values in process.selector_keys_seen.items(): seen.setdefault(key,set()).update(values)
+            receipts.extend(execution.receipts)
+            if raised: break
+        return _ObservationExecution(ca._ProcessExecution(True,'serial durable execution',outcomes,diagnostics,raised,seen),tuple(receipts))
+
+
+def _canonical_record(path, keys, schema):
+    raw=_artifact(path)
+    value=ca.load_json_document(raw,root=dict,where='observation journal')
+    codec._object(value,keys,'journal')
+    if value['schema']!=schema or codec.canonical_bytes(value)!=raw:
+        raise ca.ManifestError('noncanonical or wrong journal schema')
+    return value,raw
+
+
+def recover_observation(prefix_path: Path, admission_path: Path, *, context_raw: bytes,
+                        decision_raw: bytes, manifest_path: Path, ledger_root: Path,
+                        output_root: Path) -> Path:
+    """Close a consumed interruption from exact serial evidence, never retry a child.
+
+    A still-present isolated tree is retained with failed/unknown cleanup. Recovery
+    does not kill unverified PIDs or infer that an orphan child has terminated.
+    """
+    prefix_raw=_artifact(prefix_path); admission_raw=_artifact(admission_path)
+    prefix=codec.load_observation(prefix_raw,kind='prefix')
+    admission=codec.load_observation(admission_raw,kind='admission')
+    codec.validate_admission(prefix,admission,context_raw=context_raw,decision_raw=decision_raw)
+    if admission['decision']!='allow': raise ca.ManifestError('recovery requires consumed allow')
+    current_identity=ca.tool_identity()
+    if any(prefix['bindings'][key]!=value for key,value in current_identity.items()):
+        raise ca.ManifestError('recovery tool identity differs from prefix')
+    m=ca.load_manifest(Path(manifest_path))
+    if m['_manifest_sha256']!=prefix['bindings']['manifest_sha256'] or source_digest(m)!=prefix['bindings']['source_sha256']:
+        raise ca.ManifestError('recovery original source/manifest changed')
+    key=codec.sha256(prefix['session'].encode()).removeprefix('sha256:')
+    ledger_root=Path(ledger_root); consumption_path=ledger_root/(key+'.consumed.json')
+    with ca._TreeLock(ledger_root), ca._TreeLock(m['_repo_root']):
+        record,consumption_raw=_canonical_record(consumption_path,
+            'schema session prefix_sha256 admission_sha256 next_step nonce output_root isolated_root',
+            'corpus-adequacy.observation-consumption.v0')
+        expected={'session':prefix['session'],'prefix_sha256':codec.sha256(prefix_raw),
+                  'admission_sha256':codec.sha256(admission_raw),'next_step':admission['next_step'],'nonce':admission['nonce']}
+        if any(record[k]!=v for k,v in expected.items()): raise ca.ManifestError('consumption differs from admission')
+        if consumption_path.with_suffix('.completed.json').exists():
+            raise ca.ManifestError('consumed run already completed')
+        old_root=Path(record['output_root'])
+        if (old_root/'final.json').exists():
+            # Publication may have succeeded before completion receipt persistence.
+            raw=_artifact(old_root/'final.json'); final=codec.load_observation(raw,kind='final')
+            if final['closure']['consumption_sha256']!=codec.sha256(consumption_raw):
+                raise ca.ManifestError('published final differs from consumption')
+            _persist_new(consumption_path.with_suffix('.completed.json'),codec.canonical_bytes({
+                'consumption_sha256':codec.sha256(consumption_raw),'final_sha256':codec.sha256(raw),
+                'final_path':str((old_root/'final.json').resolve())}))
+            return old_root/'final.json'
+        # Validate the complete serial journal before publishing anything.
+        dispatches=sorted(old_root.glob('dispatch-*.json')); receipt_paths=sorted(old_root.glob('receipt-*.json'))
+        calls=sorted(old_root.glob('call-*.intent.json'))
+        if len(calls)!=len(dispatches): raise ca.ManifestError('dispatch intent missing or incomplete')
+        if len(receipt_paths)>len(dispatches): raise ca.ManifestError('receipt without dispatch')
+        observed=[]; unmatched=None; seen_ids=set()
+        schedule=[(row,vid) for row in prefix['schedule'] if row['kind']=='ordinary' for vid in row['vector_ids']]
+        for ordinal,path in enumerate(dispatches):
+            if path.name!='dispatch-%06d.json'%ordinal or ordinal>=len(schedule):
+                raise ca.ManifestError('ambiguous dispatch sequence')
+            dispatch,raw=_canonical_record(path,
+                'schema session step_id vector_id invocation_id source_sha256 execution_profile backend_sha256 consumption_sha256 ordinal',
+                'corpus-adequacy.invocation-dispatch.v0')
+            row,vid=schedule[ordinal]
+            call_raw=_artifact(old_root/('call-%06d.intent.json'%ordinal))
+            if call_raw!=codec.canonical_bytes({'dispatch_sha256':codec.sha256(raw)}):
+                raise ca.ManifestError('dispatch differs from pre-call intent')
+            expected={'session':prefix['session'],'step_id':row['step_id'],'vector_id':vid,'ordinal':ordinal,
+                      'execution_profile':prefix['bindings']['execution_profile'],
+                      'backend_sha256':prefix['bindings']['backend_sha256'],'consumption_sha256':codec.sha256(consumption_raw)}
+            codec._digest(dispatch['source_sha256']); codec._text(dispatch['invocation_id'],'invocation')
+            if any(dispatch[k]!=v for k,v in expected.items()) or dispatch['invocation_id'] in seen_ids:
+                raise ca.ManifestError('dispatch binding/order differs')
+            seen_ids.add(dispatch['invocation_id'])
+            receipt_path=old_root/('receipt-%06d.json'%ordinal)
+            if not receipt_path.exists():
+                if ordinal!=len(dispatches)-1 or unmatched is not None:
+                    raise ca.ManifestError('multiple or out-of-order unmatched dispatches')
+                unmatched=(row,vid,dispatch,raw); continue
+            evidence,evidence_raw=_canonical_record(receipt_path,
+                'schema dispatch_sha256 invocation_id step_id vector_id source_sha256 stdout_sha256 stdout_size stderr_sha256 stderr_size returncode abnormal selector_presence',
+                'corpus-adequacy.invocation-evidence.v0')
+            if evidence['dispatch_sha256']!=codec.sha256(raw): raise ca.ManifestError('receipt dispatch differs')
+            for field in ('invocation_id','step_id','vector_id','source_sha256'):
+                if evidence[field]!=dispatch[field]: raise ca.ManifestError('receipt invocation differs')
+            streams=[]
+            for name in ('stdout','stderr'):
+                digest=evidence[name+'_sha256']; codec._digest(digest)
+                data=_artifact(old_root/'blobs'/digest.removeprefix('sha256:'))
+                if codec.sha256(data)!=digest or len(data)!=evidence[name+'_size']:
+                    raise ca.ManifestError('receipt raw bytes differ')
+                streams.append(data)
+            receipt=_InvocationReceipt(dispatch['invocation_id'],row['step_id'],vid,dispatch['source_sha256'],
+                evidence['stdout_sha256'],evidence['stdout_size'],codec.sha256(evidence_raw),streams[0],streams[1],
+                evidence['returncode'],evidence['abnormal'],tuple(evidence['selector_presence']) if evidence['selector_presence'] is not None else None,
+                codec.sha256(raw))
+            value,diagnostic,reason,presence,seen=_parsed_capture(m,*streams,receipt.returncode,receipt.abnormal)
+            execution=_ObservationExecution(ca._ProcessExecution(True,'recovered receipt',
+                {vid:value} if reason is None else {},{vid:diagnostic} if reason is None else {},
+                {vid:reason} if reason else {},seen),(receipt,))
+            _snapshot_observation_execution(execution,None,[{m['id_key']:vid}],manifest=m,
+                request={'step_id':row['step_id'],'source_sha256':dispatch['source_sha256'],
+                         'invocations':{vid:dispatch['invocation_id']},'dispatch_sha256':codec.sha256(raw)})
+            if reason and ordinal!=len(dispatches)-1: raise ca.ManifestError('execution after abnormal receipt')
+            observed.append((row,execution,dispatch))
+        if [p.name for p in receipt_paths]!=['receipt-%06d.json'%i for i in range(len(observed))]:
+            raise ca.ManifestError('ambiguous receipt sequence')
+        root=_evidence_root(output_root,m['_repo_root'],str(uuid.uuid4()))
+        _copy_evidence(prefix_path,prefix,root)
+        for raw in (prefix_raw,admission_raw,context_raw,decision_raw,consumption_raw): _blob(root,raw)
+        doc=copy.deepcopy(prefix); doc.update(schema=codec.FINAL_SCHEMA,phase='stopped')
+        doc['closure'].update(prefix_sha256=codec.sha256(prefix_raw),admission_sha256=codec.sha256(admission_raw),
+                              consumption_sha256=codec.sha256(consumption_raw))
+        first=next(i for i,row in enumerate(doc['schedule']) if row['kind']=='ordinary')
+        current=first
+        for ordinal,(row,execution,dispatch) in enumerate(observed):
+            _blob(root,_artifact(old_root/('dispatch-%06d.json'%ordinal)))
+            index=next(i for i,r in enumerate(doc['schedule']) if r['step_id']==row['step_id'])
+            current=index; step=doc['steps'][index]
+            step.update(application='applied',anchor_hits=1)
+            _record_execution(step,row,execution,dispatch['source_sha256'],root)
+            if all(slot['state']=='observed' for slot in step['slots']): step['state']='complete'
+        if unmatched:
+            row,vid,dispatch,raw=unmatched
+            current=next(i for i,r in enumerate(doc['schedule']) if r['step_id']==row['step_id'])
+            step=doc['steps'][current]; step.update(source_sha256=dispatch['source_sha256'],application='applied',anchor_hits=1)
+            evidence=_blob(root,raw)
+            slot=next(s for s in step['slots'] if s['vector_id']==vid)
+            slot.update(state='abnormal',reason='interrupted',evidence_sha256=evidence)
+        else:
+            pending=next((i for i in range(first,len(doc['steps'])) if any(s['state']=='pending' for s in doc['steps'][i]['slots'])),None)
+            if pending is not None: current=pending
+            evidence=_blob(root,codec.canonical_bytes({'schema':'corpus-adequacy.recovery-boundary.v0',
+                'consumption_sha256':codec.sha256(consumption_raw),'verified_receipts':len(observed),
+                'unmatched_dispatch':None}))
+        # Never claim cleanup for a still-present tree after a hard crash.
+        removed=not Path(record['isolated_root']).exists()
+        doc['cleanup']={'restored':removed,'isolated_tree_removed':removed,'evidence_sha256':None}
+        doc['cleanup']['evidence_sha256']=_blob(root,codec.canonical_bytes({'isolated_tree_absent':removed,
+            'consumption_sha256':codec.sha256(consumption_raw)}))
+        _stop(doc,current,'interrupted',evidence)
+        doc['steps'][current]['restored']=removed
+        for step in doc['steps'][first:current]:
+            checkpoint=_artifact(old_root/(step['step_id']+'.json'))
+            if checkpoint!=codec.canonical_bytes(step):
+                raise ca.ManifestError('completed step checkpoint differs during recovery')
+        raw=codec.encode_observation(doc); path=root/'final.json'; _persist_new(path,raw)
+        _persist_new(consumption_path.with_suffix('.completed.json'),codec.canonical_bytes({
+            'consumption_sha256':codec.sha256(consumption_raw),'final_sha256':codec.sha256(raw),'final_path':str(path.resolve())}))
+        return path

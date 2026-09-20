@@ -249,7 +249,10 @@ def _step(step, declaration, invocations):
         if state in ('abnormal', 'not_run'):
             stopped_slot = True
         if state in ('observed', 'abnormal'):
-            _receipt(slot['receipt'], declaration, step, slot, invocations)
+            if state == 'abnormal' and slot['reason'] == 'interrupted' and slot['receipt'] is None:
+                _digest(slot['evidence_sha256'])  # journal validator must bind exact dispatch
+            else:
+                _receipt(slot['receipt'], declaration, step, slot, invocations)
         elif slot['receipt'] is not None:
             _fail('unstarted slot cannot have receipt')
         if state == 'observed':
@@ -438,3 +441,31 @@ def validate_admission(prefix, admission, *, context_raw, decision_raw):
         _fail('context differs from prefix')
     if any(admission[key] != value for key, value in expected.items()):
         _fail('admission differs from predecessor bindings')
+
+
+def prepare_closure(prefix_raw, *, admission_raw=None, context_raw=None, decision_raw=None):
+    """Prepare a stopped/refused final without executing or publishing anything."""
+    doc = load_observation(prefix_raw, kind='prefix')
+    admission_digest = None
+    if doc['phase'] == 'stopped':
+        if any(value is not None for value in (admission_raw, context_raw, decision_raw)):
+            _fail('stopped prefix takes no admission')
+    else:
+        if any(type(value) is not bytes for value in (admission_raw, context_raw, decision_raw)):
+            _fail('awaiting closure requires admission, context and decision bytes')
+        admission = load_observation(admission_raw, kind='admission')
+        validate_admission(doc, admission, context_raw=context_raw, decision_raw=decision_raw)
+        if admission['decision'] != 'refuse':
+            _fail('allow admission cannot close without execution')
+        admission_digest = sha256(admission_raw)
+        reason = admission['reasons'][0]
+        doc['phase'] = 'refused'; doc['closure']['reason'] = reason
+        for row, step in zip(doc['schedule'], doc['steps']):
+            if row['kind'] != 'ordinary':
+                continue
+            step.update(state='not_run', application='not_run', restored=True)
+            for slot in step['slots']:
+                slot.update(state='not_run', reason=reason, evidence_sha256=admission_digest)
+    doc['schema'] = FINAL_SCHEMA
+    doc['closure'].update(prefix_sha256=sha256(prefix_raw), admission_sha256=admission_digest)
+    return encode_observation(doc)
