@@ -55,6 +55,7 @@ EXPECTED_TOOL_SOURCE_PATHS = (
     "bounded_run.py",
     "contained_contract.py",
     "corpus_adequacy.py",
+    "execution_observation.py",
     "isolated_tree.py",
     "module_child.py",
 )
