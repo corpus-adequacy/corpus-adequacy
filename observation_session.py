@@ -939,7 +939,14 @@ def recover_observation(prefix_path: Path, admission_path: Path, *, context_raw:
             slot.update(state='abnormal',reason='interrupted',evidence_sha256=evidence)
         else:
             pending=next((i for i in range(first,len(doc['steps'])) if any(s['state']=='pending' for s in doc['steps'][i]['slots'])),None)
-            if pending is not None and retained_stop is None: current=pending
+            if pending is not None and retained_stop is None:
+                # Receipts close individual invocations, not the enclosing
+                # mutation step. A callback may fail after the final vector
+                # but before that step's durable checkpoint is written.
+                # Keep that uncheckpointed step as the interruption boundary.
+                checkpoint=old_root/(doc['steps'][current]['step_id']+'.json')
+                if not observed or checkpoint.exists() or checkpoint.is_symlink():
+                    current=pending
             evidence=_blob(root,codec.canonical_bytes({'schema':'corpus-adequacy.recovery-boundary.v0',
                 'consumption_sha256':codec.sha256(consumption_raw),'verified_receipts':len(observed),
                 'unmatched_dispatch':None}))

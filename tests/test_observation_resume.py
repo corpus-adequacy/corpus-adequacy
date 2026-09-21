@@ -320,6 +320,43 @@ obs.resume_observation(Path(sys.argv[1]),Path(sys.argv[2]),context_raw=b'context
         self.assertEqual(doc['closure']['reason'],'timeout')
         self.assertEqual(doc['steps'][-2]['slots'][0]['outcome'],9)
 
+    def test_callback_failure_after_last_vector_keeps_uncheckpointed_step_boundary(self):
+        manifest=json.loads(self.manifest.read_bytes())
+        manifest['mutants']['g'].append({'label':'second','anchor':'VALUE = 7','replacement':'VALUE = 10'})
+        self.manifest.write_text(json.dumps(manifest)); self.fresh_prefix()
+        seen=[]
+        def fail_second(receipt,path):
+            seen.append((receipt.step_id,receipt.vector_id))
+            if len(seen)==2:raise RuntimeError('operator closeout failed')
+        with self.assertRaisesRegex(RuntimeError,'operator closeout failed'):
+            self.resume(on_verified_receipt=fail_second)
+        self.assertEqual(len(seen),2)
+        root=next((self.root/'final').iterdir())
+        self.assertEqual(len(list(root.glob('receipt-*.json'))),2)
+        self.assertFalse((root/'step-0004.json').exists())
+        with mock.patch.object(obs,'run_capped_bytes',side_effect=AssertionError('recovery executed')):
+            doc=codec.load_observation(self.recover().read_bytes(),kind='final')
+        self.assertEqual([step['state'] for step in doc['steps'][-2:]],['stopped','not_run'])
+        self.assertEqual([slot['state'] for slot in doc['steps'][-2]['slots']],['observed','observed'])
+        self.assertEqual(doc['closure']['stop_step'],doc['steps'][-2]['step_id'])
+        self.assertEqual(doc['closure']['reason'],'interrupted')
+
+    def test_recovery_still_requires_checkpoint_for_prior_completed_step(self):
+        manifest=json.loads(self.manifest.read_bytes())
+        manifest['mutants']['g'].append({'label':'second','anchor':'VALUE = 7','replacement':'VALUE = 10'})
+        self.manifest.write_text(json.dumps(manifest)); self.fresh_prefix()
+        seen=[]
+        def fail_third(receipt,path):
+            seen.append(receipt)
+            if len(seen)==3:raise RuntimeError('later callback failed')
+        with self.assertRaisesRegex(RuntimeError,'later callback failed'):
+            self.resume(on_verified_receipt=fail_third)
+        root=next((self.root/'final').iterdir())
+        checkpoint=root/'step-0004.json'
+        self.assertTrue(checkpoint.is_file())
+        checkpoint.unlink()
+        with self.assertRaises(ca.ManifestError):self.recover()
+
     def test_two_processes_with_distinct_outputs_consume_once(self):
         ctx=multiprocessing.get_context('spawn'); barrier=ctx.Barrier(2); queue=ctx.Queue()
         processes=[ctx.Process(target=race_worker,args=(barrier,queue,str(self.prefix),str(self.admission),
