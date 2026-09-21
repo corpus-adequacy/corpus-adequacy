@@ -13,7 +13,7 @@ import corpus_adequacy as ca
 class SharedExecutionPrimitive(unittest.TestCase):
     def session(self, root, backend=None):
         source = root / 'subject.py'
-        source.write_text('import json\nVALUE = 7\nprint(json.dumps({"value": VALUE}))\n')
+        source.write_text('import json, sys\nVALUE = 7\nsys.stdout.buffer.write((json.dumps({"value": VALUE}) + "\\n").encode("utf-8"))\n')
         vector = root / 'vector.json'; vector.write_text('{}\n')
         manifest = {'_repo_root': root, '_source_paths': [source], 'runner': 'process',
                     'entrypoint_command': [sys.executable, 'subject.py', '{vector}'],
@@ -77,6 +77,12 @@ class SharedExecutionPrimitive(unittest.TestCase):
 
 
 class RawChildCapture(unittest.TestCase):
+    def test_raw_crlf_is_not_normalized(self):
+        import bounded_run as br
+        command = [sys.executable, '-c', 'import os; os.write(1, b"row\\r\\n")']
+        result = br.run_capped_bytes(command, Path.cwd(), 3)
+        self.assertEqual(result.stdout, b'row\r\n')
+
     def test_invalid_utf8_retains_actual_bytes_and_legacy_returns_text(self):
         import bounded_run as br
         command = [sys.executable, '-c', 'import os; os.write(1, bytes([255, 0, 10])); os.write(2, b"err")']
