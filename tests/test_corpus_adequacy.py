@@ -5356,7 +5356,7 @@ class SharedMutationStep(unittest.TestCase):
     @unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
     def test_mutation_skip_source_restoration(self):
         """Remove the step finally-restore and working-tree bytes drift."""
-        step = inspect.getsource(ca._run_mutation_step)
+        step = inspect.getsource(ca._execute_mutation_observation)
         self.assertIn("finally:", step)
         self.assertIn("step_guard.restore()", step)
         with tempfile.TemporaryDirectory() as d:

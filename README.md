@@ -9,7 +9,8 @@ human can read.
 
 A report also names the tool bytes that produced it. `tool_commit` is the
 40-hex `HEAD` only when every declared runtime source — `bounded_run.py`,
-`corpus_adequacy.py`, `isolated_tree.py`, `module_child.py` — is byte-identical
+`corpus_adequacy.py`, `execution_observation.py`, `observation_session.py`,
+`isolated_tree.py`, `module_child.py` — is byte-identical
 to that commit; otherwise it is `null`, because a commit id beside bytes it
 does not name is not provenance. `tool_source_state` says which case it was:
 `exact` when the bytes match, `dirty` when the comparison was made and they
@@ -38,6 +39,13 @@ python3 corpus_adequacy.py --inspect <manifest.json>
 python3 corpus_adequacy.py --inspect <manifest.json> --json
 python3 examples/reason-token-projections/walkthrough.py
 ```
+
+An operator may use `observe-prefix`, `observe-resume` and `observe-close` to
+retain raw process observations without an adequacy score. The prefix executes
+baseline and controls, then pauses before ordinary mutations. Continuation needs
+an explicitly bound admission and a one-use local ledger. See the
+[execution observation contract](docs/execution-observation-v0.md) for commands,
+restrictions, crash recovery and the separate meaning of observation exit codes.
 
 For invocation errors, a literal `--json` before the `--` separator requests
 one `corpus-adequacy.error.v0` object on stdout and exit 2. Human diagnostics

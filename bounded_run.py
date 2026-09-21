@@ -55,7 +55,7 @@ def _posix_process_group() -> bool:
     return hasattr(os, "killpg") and hasattr(os, "setsid")
 
 
-def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess:
+def _capture_capped(cmd: list[str], cwd: Path, timeout: int) -> tuple:
     """subprocess.run with a ceiling on how much output is ever held.
 
     Drains stdout and stderr concurrently through pipes. One locked
@@ -88,6 +88,7 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
     timed_out = False
     killed = False
     chunks = {1: [], 2: []}
+    capture_closed = False
     reader_error: list[BaseException] = []
 
     def kill_boundary() -> None:
@@ -117,7 +118,7 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
     def charge(which: int, data: bytes) -> None:
         nonlocal total, overflow
         with lock:
-            if overflow:
+            if overflow or capture_closed:
                 return
             data, overflowed = _charge_before_retain(total, cap, data)
             if data:
@@ -201,16 +202,62 @@ def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.Completed
             if thread.is_alive():
                 thread.join(timeout=4 * READ_WAIT_SECONDS)
 
+    # Freeze the retained prefix under the same lock used for charging. A late
+    # reader after incomplete drain cannot append to the published snapshot.
+    with lock:
+        capture_closed = True
+        stdout_bytes = b"".join(chunks[1])
+        stderr_bytes = b"".join(chunks[2])
+        chunks[1].clear()
+        chunks[2].clear()
+    error = None
     if overflow:
-        raise _OutputTooLarge()
-    if timed_out:
-        raise subprocess.TimeoutExpired(cmd, timeout)
-    if reader_error:
-        raise reader_error[0]
-    if incomplete_drain:
-        raise _OutputDrainIncomplete("capped child output did not reach EOF")
-    stdout_text = b"".join(chunks[1]).decode("utf-8", "replace")
-    stderr_text = b"".join(chunks[2]).decode("utf-8", "replace")
-    return subprocess.CompletedProcess(
-        cmd, proc.returncode, stdout_text, stderr_text
-    )
+        error = _OutputTooLarge()
+    elif timed_out:
+        error = subprocess.TimeoutExpired(cmd, timeout)
+    elif reader_error:
+        error = reader_error[0]
+    elif incomplete_drain:
+        error = _OutputDrainIncomplete("capped child output did not reach EOF")
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout_bytes, stderr_bytes), error
+
+
+class RawTermination(Exception):
+    """A failed bounded invocation with its retained byte prefix, never an outcome.
+
+    The prefix is the bytes charged before capture freeze. It is not a claim
+    that a failing child's complete output was captured. Combined length stays
+    within OUTPUT_CAP_BYTES; the original exception is retained separately.
+    """
+
+    def __init__(self, reason, stdout, stderr, cause, returncode=None):
+        super().__init__(reason)
+        self.reason = reason
+        self.stdout = stdout
+        self.stderr = stderr
+        self.cause = cause
+        self.returncode = returncode
+
+
+def run_capped_bytes(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess:
+    """Original bounded bytes, including a typed partial capture on failure."""
+    try:
+        completed, error = _capture_capped(cmd, cwd, timeout)
+    except OSError as exc:
+        raise RawTermination("incomplete", b"", b"", exc) from exc
+    if error is not None:
+        reason = ("output-cap" if isinstance(error, _OutputTooLarge) else
+                  "timeout" if isinstance(error, subprocess.TimeoutExpired) else "incomplete")
+        raise RawTermination(reason, completed.stdout, completed.stderr,
+                             error, completed.returncode) from error
+    return completed
+
+
+def _run_capped(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess:
+    """Legacy text adapter: same exceptions and replacement decoding as before."""
+    completed, error = _capture_capped(cmd, cwd, timeout)
+    if error is not None:
+        raise error
+    return subprocess.CompletedProcess(cmd, completed.returncode,
+        completed.stdout.decode("utf-8", "replace"),
+        completed.stderr.decode("utf-8", "replace"))
