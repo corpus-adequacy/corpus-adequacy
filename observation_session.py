@@ -488,12 +488,20 @@ def _record_execution(step, row, execution, source_sha, root):
 
 def observe_prefix(manifest_path: Path, *, execution_profile: str, backend=None,
                    context_raw: bytes, output_root: Path, policy_identity: str,
-                   interpreter_identity: str, control_preflight=None) -> Path:
-    """Execute build/baselines/controls, restore and close, then durably pause."""
+                   interpreter_identity: str, control_preflight=None,
+                   on_verified_receipt=None) -> Path:
+    """Execute and durably pause. The optional operator hook sees each verified receipt.
+
+    The hook runs after that invocation's source guard and receipt fsync, before
+    the next dispatch. It does not certify whole-step restoration or closure.
+    A hook error interrupts the session and leaves the next vector unstarted.
+    """
     if type(context_raw) is not bytes or len(context_raw)>codec.MAX_BYTES:
         raise ca.ManifestError('operator context must be bounded bytes')
     if control_preflight is not None and not callable(control_preflight):
         raise ca.ManifestError('control preflight must be operator callable')
+    if on_verified_receipt is not None and not callable(on_verified_receipt):
+        raise ca.ManifestError('verified receipt hook must be operator callable')
     backend = LocalObservationBackend() if backend is None else backend
     m, vectors, profile = _inputs(manifest_path, execution_profile, backend)
     if ca.fcntl is None or not hasattr(os,'O_NOFOLLOW'):
@@ -515,7 +523,8 @@ def observe_prefix(manifest_path: Path, *, execution_profile: str, backend=None,
         with _isolated(m,doc['cleanup']) as isolated:
             if source_digest(isolated) != bindings['source_sha256'] or _corpus_digest(isolated,vectors) != bindings['corpus_sha256']:
                 raise ca.ManifestError('inputs changed during isolation')
-            session = _DurableObservationSession(isolated,backend,root,session_id,bindings,None)
+            session = _DurableObservationSession(isolated,backend,root,session_id,bindings,None,
+                                                on_verified_receipt)
             for group in sorted(m['mutants']):
                 session.baselines[group] = ([v for v in vectors if ca._group_of(v,m)==group],{}, {})
             for index,row in enumerate(schedule):
@@ -637,14 +646,17 @@ def _consume(ledger_root, record):
 
 def resume_observation(prefix_path: Path, admission_path: Path, *, context_raw: bytes,
                        decision_raw: bytes, manifest_path: Path, execution_profile: str,
-                       backend, ledger_root: Path, output_root: Path) -> Path:
-    """Consume one admission under the operator's ledger, execute only ordinary rows."""
+                       backend, ledger_root: Path, output_root: Path,
+                       on_verified_receipt=None) -> Path:
+    """Consume one admission and execute ordinary rows with the same receipt hook."""
     prefix_raw = _artifact(prefix_path); admission_raw = _artifact(admission_path)
     prefix = codec.load_observation(prefix_raw, kind='prefix')
     admission = codec.load_observation(admission_raw, kind='admission')
     codec.validate_admission(prefix, admission, context_raw=context_raw, decision_raw=decision_raw)
     if admission['decision'] != 'allow':
         raise ca.ManifestError('resume requires allow admission')
+    if on_verified_receipt is not None and not callable(on_verified_receipt):
+        raise ca.ManifestError('verified receipt hook must be operator callable')
     backend = LocalObservationBackend() if backend is None else backend
     m, vectors, profile = _inputs(manifest_path, execution_profile, backend)
     bindings = _bindings(m,vectors,profile,backend,context_raw,
@@ -679,7 +691,8 @@ def resume_observation(prefix_path: Path, admission_path: Path, *, context_raw: 
                     'next_step':admission['next_step'],'nonce':admission['nonce'],
                     'output_root':str(root.resolve()),'isolated_root':str(isolated['_repo_root'])})
                 doc['closure']['consumption_sha256']=consumption_digest
-                session=_DurableObservationSession(isolated,backend,root,prefix['session'],bindings,consumption_digest)
+                session=_DurableObservationSession(isolated,backend,root,prefix['session'],bindings,
+                                                   consumption_digest,on_verified_receipt)
                 for group in sorted(m['mutants']):
                     session.baselines[group]=([v for v in vectors if ca._group_of(v,m)==group],{}, {})
                 for index,row in enumerate(schedule):
@@ -731,10 +744,12 @@ def _save_cleanup(root,doc,consumption_digest):
 
 class _DurableObservationSession(ObservationSession):
     """Serial vector calls: durable dispatch, guarded backend, durable receipt."""
-    def __init__(self, manifest, backend, root, session_id, bindings, consumption_digest):
+    def __init__(self, manifest, backend, root, session_id, bindings, consumption_digest,
+                 on_verified_receipt=None):
         super().__init__(manifest,backend)
         self.root=root; self.session_id=session_id; self.bindings=bindings
         self.consumption_digest=consumption_digest; self.ordinal=0
+        self.on_verified_receipt=on_verified_receipt
 
     def _backend_kwargs(self,vectors,step):
         kwargs=super()._backend_kwargs(vectors,step)
@@ -760,8 +775,11 @@ class _DurableObservationSession(ObservationSession):
         for receipt in execution.receipts:
             _blob(self.root,receipt.raw_stdout); _blob(self.root,receipt.raw_stderr)
             raw=receipt_evidence(receipt); _blob(self.root,raw)
-            _persist_new(self.root/('receipt-%06d.json'%self.ordinal),raw)
+            path=self.root/('receipt-%06d.json'%self.ordinal)
+            _persist_new(path,raw)
             self.ordinal+=1
+            if self.on_verified_receipt is not None:
+                self.on_verified_receipt(receipt,path)
         return execution
 
     def execute(self,vectors=None,*,rebuild=True,record_selectors=False,step):

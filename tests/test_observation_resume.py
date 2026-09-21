@@ -282,6 +282,7 @@ obs.resume_observation(Path(sys.argv[1]),Path(sys.argv[2]),context_raw=b'context
         self.assertEqual(doc['steps'][-1]['slots'][1]['reason'],'interrupted')
 
     def test_source_guard_refusal_cannot_leave_verified_receipt(self):
+        callbacks=[]
         class WritesSource(obs.LocalObservationBackend):
             backend_identity=D; environment_identity=E
             def __call__(self,m,vectors=None,*,rebuild=True,step,observation):
@@ -290,7 +291,9 @@ obs.resume_observation(Path(sys.argv[1]),Path(sys.argv[2]),context_raw=b'context
                     m['_source_paths'][0].write_text('changed after capture')
                 return result
         backend=WritesSource(); self.fresh_prefix(backend)
-        with self.assertRaisesRegex(ca.ManifestError,'changed a declared source'): self.resume(backend=backend)
+        with self.assertRaisesRegex(ca.ManifestError,'changed a declared source'):
+            self.resume(backend=backend,on_verified_receipt=lambda receipt,path: callbacks.append(receipt))
+        self.assertEqual(callbacks,[])
         root=next((self.root/'final').iterdir())
         self.assertEqual(list(root.glob('receipt-*.json')),[])
         doc=codec.load_observation(self.recover().read_bytes(),kind='final')

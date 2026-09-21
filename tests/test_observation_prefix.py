@@ -71,6 +71,44 @@ class PrefixExecution(unittest.TestCase):
                     raw = (path.parent/'blobs'/h).read_bytes()
                     self.assertEqual(codec.sha256(raw), slot['receipt']['raw_sha256'])
 
+    def test_verified_receipt_hook_runs_after_persistence_before_next_dispatch(self):
+        seen = []
+        def verified(receipt, path):
+            self.assertTrue(path.is_file())
+            self.assertEqual(codec.sha256(path.read_bytes()), receipt.evidence_sha256)
+            self.assertEqual(json.loads(path.read_bytes())['dispatch_sha256'], receipt.dispatch_sha256)
+            self.assertEqual(len(list(path.parent.glob('dispatch-*.json'))), len(seen)+1)
+            seen.append((receipt.vector_id, path.name))
+        path = self.run_prefix(on_verified_receipt=verified)
+        self.assertEqual(len(seen), 6)
+        self.assertEqual(seen[0], ('v0', 'receipt-000000.json'))
+        self.assertEqual(seen[-1], ('v1', 'receipt-000005.json'))
+        self.assertTrue(path.exists())
+
+    def test_verified_receipt_hook_error_stops_before_next_dispatch(self):
+        def fail(receipt, path):
+            raise RuntimeError('operator closure failed')
+        with self.assertRaisesRegex(RuntimeError, 'operator closure failed'):
+            self.run_prefix(on_verified_receipt=fail)
+        root = next((self.root/'evidence').iterdir())
+        self.assertEqual(len(list(root.glob('receipt-*.json'))), 1)
+        self.assertEqual(len(list(root.glob('dispatch-*.json'))), 1)
+        self.assertEqual(json.loads((root/'interrupted.json').read_bytes())['state'], 'unclosed')
+
+    def test_receipt_persistence_failure_does_not_call_hook(self):
+        persist = obs._persist_new
+        seen = []
+        def fail_receipt(path, raw):
+            if path.name == 'receipt-000000.json':
+                raise OSError('receipt persistence failed')
+            return persist(path, raw)
+        with mock.patch.object(obs, '_persist_new', side_effect=fail_receipt):
+            with self.assertRaisesRegex(OSError, 'receipt persistence failed'):
+                self.run_prefix(on_verified_receipt=lambda receipt, path: seen.append(receipt))
+        self.assertEqual(seen, [])
+        root = next((self.root/'evidence').iterdir())
+        self.assertEqual(len(list(root.glob('dispatch-*.json'))), 1)
+
     def test_preflight_stop_is_before_substitution_and_closes_full_suffix(self):
         evidence = b'private prerequisite refusal'
         def gate(step, receipts, context_sha256):
