@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-09-21
+
+Source-only release. It identifies source, not a run. Since 0.4.0:
 - Add operator-controlled, scoreless process execution observations: a durable
   baseline/control prefix, explicitly admitted one-use continuation, and stopped
   or refused closure. Serial raw receipts support conservative crash recovery.
