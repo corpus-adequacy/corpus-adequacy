@@ -92,6 +92,29 @@ class BaselineOnly(unittest.TestCase):
                 self.run_prefix(vector_ids=selection)
         self.assertFalse((self.root/'evidence').exists())
 
+    def test_unknown_id_among_known_vectors_refuses_before_effects(self):
+        with mock.patch.object(obs.LocalObservationBackend, '__call__',
+                               side_effect=AssertionError('backend dispatched')):
+            with self.assertRaisesRegex(ca.ManifestError, 'names an unknown vector'):
+                self.run_prefix(vector_ids=['v1', 'absent'])
+        self.assertFalse((self.root/'evidence').exists())
+
+    def test_stop_evidence_binds_boundary_selection_and_operator_context(self):
+        context = b'operator-selected baseline context'
+        path = self.run_prefix(context_raw=context, vector_ids=['v2', 'v0'])
+        doc = codec.load_observation(path.read_bytes(), kind='prefix')
+        stop = doc['steps'][2]['failure']
+        raw = (path.parent/'blobs'/stop['evidence_sha256'].removeprefix('sha256:')).read_bytes()
+        self.assertEqual(codec.sha256(raw), stop['evidence_sha256'])
+        self.assertEqual(json.loads(raw), {
+            'schema': 'corpus-adequacy.observation-operator-stop.v0',
+            'reason': 'operator-refused',
+            'stop_before': 'control',
+            'context_sha256': codec.sha256(context),
+            'vector_ids': ['v0', 'v2'],
+        })
+        self.assertEqual(doc['bindings']['context_sha256'], codec.sha256(context))
+
     def test_selection_cannot_change_normal_resumable_prefix(self):
         with self.assertRaises(ca.ManifestError):
             self.run_prefix(stop_before=None)
@@ -116,6 +139,8 @@ class BaselineOnly(unittest.TestCase):
     def test_selection_cannot_drop_a_declared_group(self):
         manifest = json.loads(self.manifest.read_bytes())
         manifest['mutants']['other'] = copy.deepcopy(manifest['mutants']['g'])
+        for mutant in manifest['mutants']['other']:
+            mutant['label'] = 'other-' + mutant['label']
         manifest['group_key'] = 'group'
         self.manifest.write_text(json.dumps(manifest))
         vectors = json.loads((self.manifest.parent/'vectors.json').read_bytes())
@@ -123,9 +148,14 @@ class BaselineOnly(unittest.TestCase):
             vector['group'] = 'g'
         vectors[-1]['group'] = 'other'
         (self.manifest.parent/'vectors.json').write_text(json.dumps(vectors))
-        with self.assertRaises(ca.ManifestError):
+        with self.assertRaisesRegex(ca.ManifestError, 'retain every declared group'):
             self.run_prefix()
         self.assertFalse((self.root/'evidence').exists())
+        path = self.run_prefix(vector_ids=['v1', 'v2'])
+        doc = codec.load_observation(path.read_bytes(), kind='prefix')
+        self.assertEqual(doc['phase'], 'stopped')
+        self.assertEqual([row['vector_ids'] for row in doc['schedule']
+                          if row['kind'] == 'baseline'], [['v1'], ['v2']])
 
     def test_selection_changes_evidence_binding_and_default_selects_all(self):
         first = codec.load_observation(self.run_prefix().read_bytes(), kind='prefix')
