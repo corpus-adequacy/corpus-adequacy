@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-09-24
+
+Source-only release. It identifies source, not a run. Since 0.5.0:
+- Add an operator-selected baseline-only observation prefix through
+  `observe_prefix(stop_before="control", vector_ids=[...])`. Full manifest
+  validation precedes selection and execution; selected vectors retain corpus
+  order and every declared group. The stop evidence binds the boundary,
+  selection and operator context. The stopped prefix cannot be resumed.
+- Existing scored runs, report formats and default observation behavior remain
+  unchanged. The runtime source identity changes, so consumers must explicitly
+  re-pin. Hosted executions bound to the prior identity require fresh PREPARE
+  evidence; this release is not hosted proof.
+
 ## 0.5.0 — 2026-09-21
 
 Source-only release. It identifies source, not a run. Since 0.4.0:
