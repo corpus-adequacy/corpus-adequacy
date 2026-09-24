@@ -138,6 +138,33 @@ record cannot be admitted, interpreted as a complete run or silently resumed.
 
 ## One-use continuation and recovery
 
+### Baseline-only operator probe
+
+The Python API also accepts `stop_before="control"` and optional
+`vector_ids=[...]`. This executes build and baselines through the same input
+validation, isolated source tree, durable intent and verified-receipt hook as
+the normal prefix. The full manifest must still declare a positive control;
+an intentionally short probe cannot bypass that check.
+
+Explicit vector IDs must be unique, known, nonempty strings in a nonempty
+list. Selection retains corpus order and at least one vector in every declared
+group. The selected vector files are bound into `corpus_sha256` together with
+the original vector-index digest, and the schedule names the selected IDs.
+With no selection all vectors are used. Vector selection is accepted only in
+this baseline-only mode, and that mode cannot combine with `control_preflight`.
+Neither option can be selected by manifest fields.
+
+After successful baselines, an operator-stop evidence blob records the boundary,
+selected IDs and context digest. The prefix uses the existing `stopped` phase
+and `operator-refused` reason: the operator declined to execute controls. No
+control or ordinary invocation is implied, and the suffix is `not_run`.
+This prefix cannot be admitted or resumed; it may be closed without execution.
+Execution failure or interruption before that boundary retains its actual
+failure evidence. Source restoration and isolated-tree removal remain explicit
+cleanup facts. This probe produces no score and does not qualify controls.
+
+### Ordinary continuation
+
 `resume_observation` validates the prefix, admission, opaque context and decision,
 current manifest/corpus/source/tool/backend/environment and schedule before effects.
 The operator supplies one authoritative `ledger_root` outside the measured tree.

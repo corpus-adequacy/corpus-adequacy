@@ -338,7 +338,8 @@ def _inputs(manifest_path, profile, backend):
     raw = ca.read_bounded_regular_file(Path(manifest_path))
     declaration = ca.load_json_document(raw, root=dict, where='observation manifest')
     if any(key in declaration for key in ('observation_mode', 'control_preflight', 'admission',
-                                         'operator_context', 'policy_identity', 'interpreter_identity', 'backend')):
+                                         'operator_context', 'policy_identity', 'interpreter_identity', 'backend',
+                                         'stop_before', 'vector_ids')):
         raise ca.ManifestError('manifest cannot select operator observation controls')
     m = ca.load_manifest_bytes(raw, Path(manifest_path))
     resolved = ca.resolve_execution_profile(operator=profile, manifest=m)
@@ -489,12 +490,14 @@ def _record_execution(step, row, execution, source_sha, root):
 def observe_prefix(manifest_path: Path, *, execution_profile: str, backend=None,
                    context_raw: bytes, output_root: Path, policy_identity: str,
                    interpreter_identity: str, control_preflight=None,
-                   on_verified_receipt=None) -> Path:
+                   on_verified_receipt=None, stop_before=None, vector_ids=None) -> Path:
     """Execute and durably pause. The optional operator hook sees each verified receipt.
 
     The hook runs after that invocation's source guard and receipt fsync, before
     the next dispatch. It does not certify whole-step restoration or closure.
     A hook error interrupts the session and leaves the next vector unstarted.
+    stop_before='control' retains a non-resumable stopped prefix after baselines.
+    Only that mode permits explicit vector selection, in original corpus order.
     """
     if type(context_raw) is not bytes or len(context_raw)>codec.MAX_BYTES:
         raise ca.ManifestError('operator context must be bounded bytes')
@@ -502,8 +505,25 @@ def observe_prefix(manifest_path: Path, *, execution_profile: str, backend=None,
         raise ca.ManifestError('control preflight must be operator callable')
     if on_verified_receipt is not None and not callable(on_verified_receipt):
         raise ca.ManifestError('verified receipt hook must be operator callable')
+    if stop_before is not None and (type(stop_before) is not str or stop_before != 'control'):
+        raise ca.ManifestError('observation stop boundary must be control or None')
+    if stop_before is not None and control_preflight is not None:
+        raise ca.ManifestError('baseline-only stop cannot combine with control preflight')
+    if vector_ids is not None and stop_before != 'control':
+        raise ca.ManifestError('vector selection requires a baseline-only stopped prefix')
     backend = LocalObservationBackend() if backend is None else backend
     m, vectors, profile = _inputs(manifest_path, execution_profile, backend)
+    if vector_ids is not None:
+        if (type(vector_ids) is not list or not vector_ids
+                or any(type(vid) is not str or not vid for vid in vector_ids)
+                or len(set(vector_ids)) != len(vector_ids)):
+            raise ca.ManifestError('vector selection must contain unique nonempty IDs')
+        selected = set(vector_ids)
+        if not selected <= {v[m['id_key']] for v in vectors}:
+            raise ca.ManifestError('vector selection names an unknown vector')
+        vectors = [v for v in vectors if v[m['id_key']] in selected]
+        if not set(m['mutants']) <= {ca._group_of(v, m) for v in vectors}:
+            raise ca.ManifestError('vector selection must retain every declared group')
     if ca.fcntl is None or not hasattr(os,'O_NOFOLLOW'):
         raise ca.ManifestError('observation execution requires advisory locking and no-follow opens')
     bindings = _bindings(m,vectors,profile,backend,context_raw,policy_identity,interpreter_identity)
@@ -530,6 +550,15 @@ def observe_prefix(manifest_path: Path, *, execution_profile: str, backend=None,
             for index,row in enumerate(schedule):
                 if row['kind']=='ordinary': break
                 last=index; step=doc['steps'][index]; session.step_id=row['step_id']
+                if row['kind']=='control' and stop_before=='control':
+                    evidence=_blob(root,codec.canonical_bytes({
+                        'schema':'corpus-adequacy.observation-operator-stop.v0',
+                        'reason':'operator-refused','stop_before':'control',
+                        'context_sha256':bindings['context_sha256'],
+                        'vector_ids':[v[m['id_key']] for v in vectors]}))
+                    _not_run(step,'operator-refused',evidence)
+                    _stop(doc,index,'operator-refused',evidence)
+                    break
                 if row['kind']=='control' and control_preflight is not None:
                     if source_digest(session.manifest) != bindings['source_sha256']:
                         raise ca.ManifestError('source drift before control preflight')
