@@ -177,6 +177,16 @@ class UnsupportedFilesystem(unittest.TestCase):
                     self.assertEqual(caught.exception.code, 'unsupported-filesystem')
 
 
+class ErrorResult(unittest.TestCase):
+    def test_refusal_details_keep_the_refusal_stage(self):
+        # Details are further reasons behind one refusal; each row keeps that refusal's
+        # stage, not a fixed one (#242).
+        exc = ev.EvidenceError('binding', 'observation-profile', ('test-detail',))
+        result, code = reader._error_result(reader._result(), exc)
+        self.assertEqual((code, result['load'], result['reasons']), (1, 'complete', [
+            {'stage': 'binding', 'code': 'observation-profile', 'member': None},
+            {'stage': 'binding', 'code': 'test-detail', 'member': None}]))
+
 
 class ReaderCLI(unittest.TestCase):
     def run_cli(self, *args):

@@ -255,6 +255,35 @@ class ProducerPlan(ProducerCLI):
             self.assertFalse(dest.exists())
 
 
+class ProducerErrorBoundary(unittest.TestCase):
+    def test_command_result_reports_the_refusal_without_its_details(self):
+        # The producer's command result reports stage/code only; the offline reader also
+        # lists the refused gate carried in details (#242).
+        import io, types
+        from unittest import mock
+        import owned_suggestion_assessment as producer
+        import suggestion_readback as reader
+        gates=[{'id':0,'status':'passed','reason':None,'witnesses':[]},
+               {'id':1,'status':'passed','reason':None,'witnesses':[]},
+               {'id':2,'status':'refused','reason':'corpus-separation','witnesses':[]}]
+        with self.assertRaises(ev.EvidenceError) as caught:
+            ev.refuse_preflight(gates)
+        refusal=caught.exception
+        self.assertEqual(refusal.details,('corpus-separation',))
+        argv=['plan','--proposal','p','--reference','r','--reference-sha256','0'*64,
+              '--reference-approval','accept','--root','x','--out','o','--basis-dir','b']
+        out=io.BytesIO()
+        with mock.patch.object(producer,'dispatch',side_effect=refusal), \
+             mock.patch.object(sys,'stdout',types.SimpleNamespace(buffer=out)):
+            code=producer.main(argv)
+        self.assertEqual(code,2)
+        self.assertEqual(ev.decode(out.getvalue(),canonical=True)['reasons'],
+                         [{'stage':'replay','code':'preflight-refused','member':None}])
+        result,_=reader._error_result(reader._result(),refusal)
+        self.assertEqual([(r['stage'],r['code']) for r in result['reasons']],
+                         [('replay','preflight-refused'),('replay','corpus-separation')])
+
+
 class DerivedContractConsumers(unittest.TestCase):
     def test_fixed_owned_projections_and_dynamic_adapter_ids(self):
         import aee_checker_sealed_candidate as candidate
