@@ -2,19 +2,26 @@
 
 ## Unreleased
 
-- The offline reader now reports a retained observation whose `profile`
-  disagrees with the package's declared profile as an internal contradiction
+## 0.7.0 — 2026-09-25
+
+Source-only release. It identifies source, not a run. Since 0.6.0:
+- The offline reader reports a retained observation whose `profile`
+  contradicts the package's declared profile as an internal contradiction
   (`binding/observation-profile`, exit 1, `internal_consistency=mismatch`)
   instead of an unsupported input (`support/unsupported-profile`, exit 2). An
   observation `route` has no declared counterpart in the package and is still
-  refused as unsupported. Both remain refusals. `suggestion_evidence.py` is
-  part of the runtime source identity, so consumers must explicitly re-pin.
+  refused as unsupported. Both remain refusals.
 - When the offline reader refuses a package because its preflight fails, the
-  result now also names each refused preflight gate by its closed gate reason
+  result also names the refused preflight gate by its closed gate reason
   (`proposal-shape`, `freeze-drift` or `corpus-separation`) as an additional
   `replay` reason. `preflight-refused` stays the first reason in its stage;
   exit code, `load` and `internal_consistency` are unchanged. The producer's
   own refusals are unchanged.
+- New tests pin the per-observation route and profile refusals on returned and
+  exception-state observations.
+- Valid packages verify as before. The runtime source identity changes, so
+  consumers must explicitly re-pin. Hosted executions bound to the prior
+  identity require fresh PREPARE evidence; this release is not hosted proof.
 
 ## 0.6.0 — 2026-09-24
 
