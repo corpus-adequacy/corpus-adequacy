@@ -32,15 +32,25 @@ _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
 
 
 class EvidenceError(ValueError):
-    """A bounded reason, never an untrusted exception string."""
+    """A bounded reason, never an untrusted exception string.
 
-    def __init__(self, stage, code):
-        self.stage, self.code = stage, code
+    ``details`` holds further closed reason codes behind the same refusal, such as
+    the refused preflight gates behind ``preflight-refused``.
+    """
+
+    def __init__(self, stage, code, details=()):
+        self.stage, self.code, self.details = stage, code, tuple(details)
         super().__init__(f'{stage}/{code}')
 
 
 def refuse(stage, code):
     raise EvidenceError(stage, code)
+
+
+def refuse_preflight(gates):
+    """Refuse a failed preflight and keep each refused gate's closed reason (#235)."""
+    raise EvidenceError('replay', 'preflight-refused',
+                        tuple(g['reason'] for g in gates if g['status'] == 'refused' and g['reason']))
 
 
 def exact(doc, fields):
@@ -1710,7 +1720,7 @@ def require_assessment_structure(inputs, *, require_collections):
     preflight = AssessmentInputs(inputs.retained_members, inputs.basis_members)
     gates, values = evaluate_preflight(preflight)
     if values is None or any(g['status'] != 'passed' for g in gates):
-        refuse('replay', 'preflight-refused')
+        refuse_preflight(gates)
     plan = values['plan']; plan_hash = values['execution']['plan_sha256']
     required = {'authorization.json'}
     for name in VARIANTS:

@@ -293,13 +293,16 @@ _STAGE_ORDER = ('input','filesystem','limits','syntax','support','journal','bind
 
 
 def _reasons(issues):
-    rows=sorted(set(issues),key=lambda r:(_STAGE_ORDER.index(r[0]),(r[2] or '').encode(),r[1]))
+    # preflight-refused stays ahead of the gate reasons it carries (#235).
+    rows=sorted(set(issues),key=lambda r:(_STAGE_ORDER.index(r[0]),(r[2] or '').encode(),
+                                          r[1]!='preflight-refused',r[1]))
     if len(rows)>32: rows=rows[:31]+[('result','reasons-truncated',None)]
     return [{'stage':stage,'code':code,'member':member} for stage,code,member in rows]
 
 
 def _error_result(result,exc):
-    result['reasons']=_reasons([(r['stage'],r['code'],r['member']) for r in result['reasons']]+[(exc.stage,exc.code,None)])
+    result['reasons']=_reasons([(r['stage'],r['code'],r['member']) for r in result['reasons']]+[(exc.stage,exc.code,None)]
+                               +[(exc.stage,detail,None) for detail in exc.details])
     semantic = exc.stage in ('binding','expectation') or (exc.stage=='replay' and exc.code!='schedule-mismatch')
     if semantic:
         result['load']='complete'

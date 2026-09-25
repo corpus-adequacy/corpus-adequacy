@@ -395,6 +395,40 @@ class PackageCLI(ReaderCLI):
                 (1,'complete','mismatch','not-evaluated'),result)
             self.assertEqual(result['reasons'][0]['code'],reason)
 
+    def test_preflight_refusal_names_the_refusing_gate(self):
+        # Each preflight gate is reached with every digest rebound; the result keeps
+        # preflight-refused first and adds the refused gate's own closed reason (#235).
+        def proposal(members):
+            doc=ev.decode(members['proposal.json']);doc['vector']['document'].update(value=True)
+            members['proposal.json']=ev.encode(doc)
+            plan=ev.decode(members['plan.json'])
+            plan['proposal'].update(sha256=ev.digest(members['proposal.json']),bytes=len(members['proposal.json']))
+            return plan
+        def freeze(members):
+            plan=ev.decode(members['plan.json']);plan['adapter_sha256']='0'*64
+            return plan
+        def transformation(members):
+            plan=ev.decode(members['plan.json']);variant=plan['variants'][1]
+            row=variant['vectors'][0];path='outer-whitespace/corpus/'+row['file']
+            raw=members[path];self.assertTrue(raw.startswith(b' \n') and raw.endswith(b'\n\t'))
+            members[path]=b'\n'+raw[2:-2]+b' \n'
+            row.update(sha256=ev.digest(members[path]),bytes=len(members[path]))
+            files={r['file']:members['outer-whitespace/corpus/'+r['file']] for r in variant['vectors']}
+            files['MANIFEST.json']=members['outer-whitespace/corpus/MANIFEST.json']
+            variant['tree_sha256']=ev._tree(files)
+            return plan
+        for change,gate in ((proposal,'proposal-shape'),(freeze,'freeze-drift'),
+                            (transformation,'corpus-separation')):
+            with self.subTest(gate=gate):
+                self.members,self.basis_members,self.expected_doc=package_fixture()
+                self.members['plan.json']=ev.encode(change(self.members))
+                gates=ev.decode(self.members['gates.json']);gates['plan_sha256']=ev.digest(self.members['plan.json'])
+                self.members['gates.json']=ev.encode(gates);rebind_final(self.members)
+                code,result=self.verify(anchored=False)
+                self.assertEqual((code,result['load'],result['internal_consistency'],result['reasons']),
+                    (1,'complete','mismatch',[{'stage':'replay','code':'preflight-refused','member':None},
+                                              {'stage':'replay','code':gate,'member':None}]),result)
+
     def test_rebound_observation_route_or_profile_change_is_refused(self):
         # Route/profile are outside the projection and all digests are rebound, so only these
         # checks refuse. The fixture expectation has no receipt pin (#235). A profile that

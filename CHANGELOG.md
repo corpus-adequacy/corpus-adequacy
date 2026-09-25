@@ -9,6 +9,12 @@
   observation `route` has no declared counterpart in the package and is still
   refused as unsupported. Both remain refusals. `suggestion_evidence.py` is
   part of the runtime source identity, so consumers must explicitly re-pin.
+- When the offline reader refuses a package because its preflight fails, the
+  result now also names each refused preflight gate by its closed gate reason
+  (`proposal-shape`, `freeze-drift` or `corpus-separation`) as an additional
+  `replay` reason. `preflight-refused` stays the first reason in its stage;
+  exit code, `load` and `internal_consistency` are unchanged. The producer's
+  own refusals are unchanged.
 
 ## 0.6.0 — 2026-09-24
 
