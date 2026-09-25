@@ -513,6 +513,31 @@ class PackageCLI(ReaderCLI):
         self.assertIn('gate-mismatch',[r['code'] for r in result['reasons']])
 
     def test_stopped_execution_with_empty_unentered_collection_is_unproved(self):
+        self.stop_after_backend_exception()
+        code,result=self.verify(anchored=False)
+        self.assertEqual((code,result['internal_consistency'],result['replay_disposition']),(0,'match','unproved'),result)
+
+    def test_exception_observation_route_or_profile_change_is_refused(self):
+        # The only retained observation is exception-state: the profile check in replay and
+        # the route check in projection cover it too, not only returned observations (#235).
+        refusal={'profile':(1,'complete','mismatch',
+                            [{'stage':'binding','code':'observation-profile','member':None}]),
+                 'route':(2,'unsupported','not-evaluated',
+                          [{'stage':'support','code':'unsupported-profile','member':None}])}
+        for field,value in (('profile','contained-oci-v0'),('route','contained-oci-v1')):
+            with self.subTest(field=field):
+                self.members,self.basis_members,self.expected_doc=package_fixture()
+                self.stop_after_backend_exception()
+                doc=ev.decode(self.members['base/observations/0.json'])
+                self.assertEqual(doc['state'],'exception')
+                doc[field]=value;self.members['base/observations/0.json']=ev.encode(doc)
+                refresh_package_refs(self.members,review='accept',disposition='unproved')
+                code,result=self.verify(anchored=False)
+                self.assertEqual((code,result['load'],result['internal_consistency'],result['reasons']),
+                                 refusal[field],result)
+
+    def stop_after_backend_exception(self):
+        """Valid unproved package: slot 0 raised, every later slot not started."""
         import copy
         plan=ev.decode(self.members['plan.json']);slot=plan['slots'][0]
         doc=ev.decode(self.members['base/observations/0.json'])
@@ -540,8 +565,6 @@ class PackageCLI(ReaderCLI):
         gates['engine_control_events']=[]
         self.members['gates.json']=ev.encode(gates)
         refresh_package_refs(self.members,review='accept',disposition='unproved')
-        code,result=self.verify(anchored=False)
-        self.assertEqual((code,result['internal_consistency'],result['replay_disposition']),(0,'match','unproved'),result)
 
     def test_review_binding_and_journal_or_ledger_schedule_are_checked(self):
         self.members,self.basis_members,self.expected_doc=package_fixture(review='accept')
