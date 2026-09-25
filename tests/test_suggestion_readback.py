@@ -395,6 +395,22 @@ class PackageCLI(ReaderCLI):
                 (1,'complete','mismatch','not-evaluated'),result)
             self.assertEqual(result['reasons'][0]['code'],reason)
 
+    def test_rebound_observation_route_or_profile_change_is_refused(self):
+        # Route/profile are outside the projection and all digests are rebound, so only the
+        # per-observation check refuses. The fixture expectation has no receipt pin (#235).
+        self.assertIsNone(self.expected_doc['receipt_sha256'])
+        for member in ('base/observations/0.json','outer-whitespace/observations/3.json'):
+            for field,value in (('profile','contained-oci-v0'),('route','contained-oci-v1')):
+                self.members,self.basis_members,self.expected_doc=package_fixture()
+                doc=ev.decode(self.members[member]);doc[field]=value;self.members[member]=ev.encode(doc)
+                refresh_package_refs(self.members)
+                for mode,anchored in (('audit',False),('audit',True),('handoff',True)):
+                    with self.subTest(member=member,field=field,mode=mode,anchored=anchored):
+                        code,result=self.verify(mode=mode,anchored=anchored)
+                        self.assertEqual((code,result['load'],result['internal_consistency'],result['reasons']),
+                            (2,'unsupported','not-evaluated',
+                             [{'stage':'support','code':'unsupported-profile','member':None}]),result)
+
     def test_new_metadata_and_support_are_strict(self):
         for raw,stage,reason,load in (
             (b'{"x":1,"x":2}\n','syntax','duplicate-key','invalid'),

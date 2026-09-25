@@ -93,6 +93,17 @@ class Projection(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ev.EvidenceError):
                 self.project(raw)
 
+    def test_route_and_profile_are_checked_per_observation(self):
+        # Neither field enters the projection, so this refusal is their only guard (#235).
+        self.assertEqual(self.project(observation())['rows'], ROWS)
+        for field, value in (('profile', 'contained-oci-v0'), ('profile', 'contained-oci-v1 '),
+                             ('route', 'contained-oci-v1'), ('route', 'fake')):
+            raw = observation(); raw[field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ev.EvidenceError) as caught:
+                    self.project(raw)
+                self.assertEqual((caught.exception.stage, caught.exception.code), ('support', 'unsupported-profile'))
+
 
 def assessment():
     observations, views, journal = [], [], []
