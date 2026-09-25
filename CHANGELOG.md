@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The offline reader now reports a retained observation whose `profile`
+  disagrees with the package's declared profile as an internal contradiction
+  (`binding/observation-profile`, exit 1, `internal_consistency=mismatch`)
+  instead of an unsupported input (`support/unsupported-profile`, exit 2). An
+  observation `route` has no declared counterpart in the package and is still
+  refused as unsupported. Both remain refusals. `suggestion_evidence.py` is
+  part of the runtime source identity, so consumers must explicitly re-pin.
+
 ## 0.6.0 — 2026-09-24
 
 Source-only release. It identifies source, not a run. Since 0.5.0:

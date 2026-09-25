@@ -2157,6 +2157,10 @@ def replay_assessment_evidence(package):
     if gates['plan_sha256']!=plan_hash: refuse('binding','plan-variant')
     if encode(gates['views'])!=encode([_raw_ref(m,p) for p in package['view_paths']]):
         refuse('binding','member-digest')
+    # The framed plan already declares the supported profile; a retained observation that
+    # disagrees contradicts the package itself rather than being an unsupported input (#235).
+    if any(o['profile']!=package['plan']['profile'] for o in package['observations']):
+        refuse('binding','observation-profile')
     evaluation=evaluate_assessment(package['inputs'],package['observations'],package['views'],
         gates['engine_controls'],package['journal'],engine_control_events=gates['engine_control_events'])
     issues=[]

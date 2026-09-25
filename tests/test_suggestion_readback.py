@@ -396,9 +396,15 @@ class PackageCLI(ReaderCLI):
             self.assertEqual(result['reasons'][0]['code'],reason)
 
     def test_rebound_observation_route_or_profile_change_is_refused(self):
-        # Route/profile are outside the projection and all digests are rebound, so only the
-        # per-observation check refuses. The fixture expectation has no receipt pin (#235).
+        # Route/profile are outside the projection and all digests are rebound, so only these
+        # checks refuse. The fixture expectation has no receipt pin (#235). A profile that
+        # disagrees with the package's own declared profile is a contradiction; a route has no
+        # declared counterpart in the package and stays an unsupported input.
         self.assertIsNone(self.expected_doc['receipt_sha256'])
+        refusal={'profile':(1,'complete','mismatch',
+                            [{'stage':'binding','code':'observation-profile','member':None}]),
+                 'route':(2,'unsupported','not-evaluated',
+                          [{'stage':'support','code':'unsupported-profile','member':None}])}
         for member in ('base/observations/0.json','outer-whitespace/observations/3.json'):
             for field,value in (('profile','contained-oci-v0'),('route','contained-oci-v1')):
                 self.members,self.basis_members,self.expected_doc=package_fixture()
@@ -408,8 +414,9 @@ class PackageCLI(ReaderCLI):
                     with self.subTest(member=member,field=field,mode=mode,anchored=anchored):
                         code,result=self.verify(mode=mode,anchored=anchored)
                         self.assertEqual((code,result['load'],result['internal_consistency'],result['reasons']),
-                            (2,'unsupported','not-evaluated',
-                             [{'stage':'support','code':'unsupported-profile','member':None}]),result)
+                            refusal[field],result)
+                        self.assertEqual(result['replay_disposition'],'not-evaluated')
+                        self.assertEqual(result['expected_identity'],'match' if anchored else 'not-supplied')
 
     def test_new_metadata_and_support_are_strict(self):
         for raw,stage,reason,load in (
