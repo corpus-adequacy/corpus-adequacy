@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- The text summary says how many kills came without a moved declared outcome,
+  grouped by each mutant's exact termination class set (or `raises` on the
+  module runner), for example `(53.4%; 2 without a moved outcome: 2
+  unexpected-exit)`, and prints nothing extra when every kill moved an outcome.
+  A kill that moved an outcome and also terminated keeps its class on a separate
+  line. A killed row without a supported recorded reason is `unclassified`.
+  New sibling projection `--kills` (`corpus-adequacy.kills.v0`) over an existing
+  `report.v0` file, from the same classifier. What counts as killed, the score
+  and `report.v0` are unchanged.
+
 ## 0.7.0 — 2026-09-25
 
 Source-only release. It identifies source, not a run. Since 0.6.0:

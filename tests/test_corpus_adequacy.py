@@ -4229,6 +4229,154 @@ class SurvivorFindings(unittest.TestCase):
                     self.assertEqual(rows[0]["vector_id"], "v1")
 
 
+class KillEvidence(unittest.TestCase):
+    """Issue #244: separate kills without a moved outcome; the kill rule is unchanged."""
+
+    def _kill(self, label, *, moved=0, how="", **extra):
+        return producer_shaped_row("killed", label, moved=moved, how=how, **extra)
+
+    def _report(self, runner, rows, **over):
+        killed = sum(r["verdict"] == "killed" for r in rows)
+        return producer_shaped_report(runner=runner, mutants=rows, killed=killed,
+                                      declared_total=len(rows), **over)
+
+    def test_one_classifier_per_runner_uses_recorded_evidence_only(self):
+        cases = [
+            ("process", self._kill("a", moved=2, how="2 vector(s) moved"), ("moved-outcome", ())),
+            ("batch", self._kill("a", moved=1, how="the moved vector is the expected one"),
+             ("moved-outcome", ())),
+            ("process", self._kill("a", how="unexpected-exit"),
+             ("without-moved-outcome", ("unexpected-exit",))),
+            ("batch", self._kill("a", how="timeout"), ("without-moved-outcome", ("timeout",))),
+            ("process", self._kill("a", how="output-cap"),
+             ("without-moved-outcome", ("output-cap",))),
+            ("process", self._kill("a", how="signal"), ("without-moved-outcome", ("signal",))),
+            ("process", self._kill("a", how="timeout, unexpected-exit"),
+             ("without-moved-outcome", ("timeout", "unexpected-exit"))),
+            # A termination beside a moved vector stays an outcome kill; the class is kept.
+            ("process", self._kill("a", moved=1, how="signal"), ("moved-outcome", ("signal",))),
+            ("module", self._kill("a", how="timeout"), ("without-moved-outcome", ("timeout",))),
+            ("module", self._kill("a", how="raises on 2 vector(s)", raised=["v1", "v2"]),
+             ("without-moved-outcome", ("raises",))),
+            ("module", self._kill("a", moved=1, how="raises on 1 vector(s)", raised=["v1"]),
+             ("moved-outcome", ("raises",))),
+            ("module", self._kill("a", moved=3, how="3 vector(s) moved"), ("moved-outcome", ())),
+            # Insufficient evidence is exposed, never inferred from prose.
+            ("module", self._kill("a", how="raises on 1 vector(s)"), ("unclassified", ())),
+            ("process", self._kill("a", how="an older free-text reason"), ("unclassified", ())),
+            ("process", self._kill("a", how="raises on 1 vector(s)", raised=["v1"]),
+             ("unclassified", ())),
+        ]
+        for runner, row, expected in cases:
+            with self.subTest(runner=runner, how=row["how"], moved=row["moved"]):
+                self.assertEqual(ca.classify_kill(row, runner), expected)
+        with self.assertRaises(ValueError):
+            ca.classify_kill(producer_shaped_row("survived", "s"), "process")
+
+    def _mixed_report(self):
+        return self._report("process", [
+            self._kill("outcome-1", moved=2, how="2 vector(s) moved"),
+            self._kill("outcome-2", moved=1, how="1 vector(s) moved"),
+            self._kill("exit-1", how="unexpected-exit"),
+            self._kill("exit-2", how="unexpected-exit"),
+            self._kill("two-classes", how="timeout, unexpected-exit"),
+            self._kill("mixed", moved=1, how="signal"),
+            producer_shaped_row("survived", "hole", how="no vector distinguishes it"),
+        ], survived=1)
+
+    def test_projection_counts_mutants_and_partitions_by_exact_class_set(self):
+        doc = ca.kill_evidence(self._mixed_report(), report_sha256="sha256:" + "a" * 64)
+        self.assertEqual(doc["schema"], "corpus-adequacy.kills.v0")
+        self.assertEqual(doc["source_schema"], ca.REPORT_SCHEMA)
+        self.assertEqual(doc["report_sha256"], "sha256:" + "a" * 64)
+        self.assertEqual((doc["killed"], doc["without_moved_outcome"], doc["unclassified"],
+                          doc["moved_outcome_also_terminated"]), (6, 3, 0, 1))
+        self.assertEqual(doc["without_moved_outcome_by_classes"], [
+            {"classes": ["timeout", "unexpected-exit"], "kills": 1},
+            {"classes": ["unexpected-exit"], "kills": 2}])
+        self.assertEqual(sum(g["kills"] for g in doc["without_moved_outcome_by_classes"]),
+                         doc["without_moved_outcome"])
+        by_rule = {k["rule"]: k for k in doc["kills"]}
+        self.assertEqual(set(by_rule), {"outcome-1", "outcome-2", "exit-1", "exit-2",
+                                        "two-classes", "mixed"})
+        self.assertEqual((by_rule["mixed"]["basis"], by_rule["mixed"]["classes"]),
+                         ("moved-outcome", ["signal"]))
+        self.assertEqual((by_rule["exit-1"]["basis"], by_rule["exit-1"]["classes"]),
+                         ("without-moved-outcome", ["unexpected-exit"]))
+
+    def _text(self, report):
+        stdout = io.StringIO()
+        with (mock.patch.object(sys, "argv", ["corpus_adequacy.py", "m.json"]),
+              mock.patch.object(sys, "stdout", stdout),
+              mock.patch.object(ca, "run", return_value=report)):
+            ca.main()
+        return stdout.getvalue().splitlines()
+
+    def test_text_summary_names_kills_without_a_moved_outcome(self):
+        report = self._mixed_report()
+        report.update(score_percent=85.7)
+        lines = self._text(report)
+        summary = [l for l in lines if "DECLARED in-scope rules killed" in l]
+        self.assertEqual(len(summary), 1)
+        self.assertTrue(summary[0].startswith(
+            "6 of 7 DECLARED in-scope rules killed (85.7%; 3 without a moved outcome: "
+            "1 timeout+unexpected-exit, 2 unexpected-exit)."), summary[0])
+        self.assertIn("1 kill with a moved outcome also terminated or raised: 1 signal.", lines)
+        # Text and projection read the same classifier.
+        doc = ca.kill_evidence(report, report_sha256="sha256:" + "a" * 64)
+        self.assertIn("%d without a moved outcome" % doc["without_moved_outcome"], summary[0])
+
+    def test_text_summary_is_unchanged_when_every_kill_moved_an_outcome(self):
+        report = self._report("process", [self._kill("o", moved=1, how="1 vector(s) moved")],
+                              score_percent=100.0)
+        summary = [l for l in self._text(report) if "DECLARED in-scope rules killed" in l]
+        self.assertTrue(summary[0].startswith("1 of 1 DECLARED in-scope rules killed (100.0%). "),
+                        summary[0])
+
+    def test_unclassified_kills_are_named_not_absorbed(self):
+        report = self._report("module", [
+            self._kill("r", how="raises on 1 vector(s)", raised=["v1"]),
+            self._kill("old", how="raises on 1 vector(s)")], score_percent=100.0)
+        summary = [l for l in self._text(report) if "DECLARED in-scope rules killed" in l][0]
+        self.assertIn("(100.0%; 1 without a moved outcome: 1 raises; 1 unclassified).", summary)
+
+    def test_a_failed_control_run_stays_failed_beside_the_breakdown(self):
+        report = self._report("process", [self._kill("exit", how="unexpected-exit")],
+                              score_percent=None, adequate=False,
+                              failures=["control 'c' survived: the harness cannot detect a change"])
+        lines = self._text(report)
+        summary = [l for l in lines if "DECLARED in-scope rules killed" in l][0]
+        self.assertIn("(no result; 1 without a moved outcome: 1 unexpected-exit)", summary)
+        self.assertIn("FAIL: control 'c' survived: the harness cannot detect a change", lines)
+
+    def test_kills_cli_projects_an_existing_report_without_measuring(self):
+        report = self._mixed_report()
+        # Not the canonical encoding: the digest must name the exact bytes read.
+        raw = ca.encode_report_v0(report) + b"\n"
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "report.json"
+            path.write_bytes(raw)
+            stdout = io.StringIO()
+            with (mock.patch.object(sys, "argv", ["corpus_adequacy.py", "--kills", str(path), "--json"]),
+                  mock.patch.object(sys, "stdout", stdout),
+                  mock.patch.object(ca, "run", side_effect=AssertionError("--kills measured"))):
+                rc = ca.main()
+        self.assertEqual(rc, 0)
+        doc = json.loads(stdout.getvalue())
+        self.assertEqual(doc, ca.kill_evidence(report, report_sha256="sha256:" + hashlib.sha256(raw).hexdigest()))
+        self.assertEqual(ca.encode_report_v0(report) + b"\n", raw)
+
+    def test_kills_and_survivors_are_mutually_exclusive(self):
+        stderr = io.StringIO()
+        with (mock.patch.object(sys, "argv", ["corpus_adequacy.py", "--kills", "--survivors", "r.json"]),
+              mock.patch.object(sys, "stderr", stderr),
+              mock.patch.object(ca, "run", side_effect=AssertionError("measured"))):
+            with self.assertRaises(SystemExit) as caught:
+                ca.main()
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("argument --survivors: not allowed with argument --kills", stderr.getvalue())
+
+
 class PositionalManifestInputBounds(unittest.TestCase):
     def _manifest_bytes(self, size=None):
         raw = json.dumps({

@@ -31,6 +31,8 @@ python3 corpus_adequacy.py <manifest.json>
 python3 corpus_adequacy.py <manifest.json> --json
 python3 corpus_adequacy.py --survivors <report.json>
 python3 corpus_adequacy.py --survivors <report.json> --json
+python3 corpus_adequacy.py --kills <report.json>
+python3 corpus_adequacy.py --kills <report.json> --json
 python3 corpus_adequacy.py --rules <report.json> --manifest <manifest.json>
 python3 corpus_adequacy.py --rules <report.json> --manifest <manifest.json> --json
 python3 corpus_adequacy.py --diff <old.report.v0> <new.report.v0>
@@ -111,6 +113,33 @@ optional on `unexercised`/`known-hole`, and forbidden otherwise. Unknown
 keys and missing required keys fail closed on distinct routes. This is a
 consumer closed-set, not a `report.v1` and not a change to production
 `report.v0` or `survivors.v0` bytes.
+
+A mutant is killed when a declared outcome moves, when its child terminates
+(`timeout`, `output-cap`, `unexpected-exit`, `signal`) on vectors where the
+unmutated run completed, or, on the module runner, when the entrypoint raises.
+Those are all kills and stay kills. What differs is the evidence: a termination
+or a raise shows the corpus reached the fault, not that a declared outcome
+caught it. The text summary therefore says how many kills came without a moved
+outcome, for example `55 of 103 DECLARED in-scope rules killed (53.4%; 2 without
+a moved outcome: 2 unexpected-exit)`, and prints nothing extra when every kill
+moved an outcome. The unit is one mutant. A mutant is grouped by its exact set of
+classes (`timeout+unexpected-exit` is one group), so the groups add up to the
+count. A mutant that moved an outcome is an outcome kill even if it also
+terminated or raised on another vector; that class stays visible on a separate
+line and does not enter the count. The classes come from what the row records:
+`how` on process and batch, `how` or the `raised` list on the module runner.
+A killed row that records neither a moved outcome nor a supported class is
+reported as `unclassified` rather than guessed. `--kills` is a sibling
+projection over an existing `report.v0` file, like `--survivors`: it does not
+measure, `--json` writes `corpus-adequacy.kills.v0` with the same counts from the
+same classifier and every killed row, and `report_sha256` names the exact report
+bytes it describes. `report.v0`, its score and its denominator are unchanged.
+
+There is no Stryker-style invalid class here. Stryker leaves test-runner failures
+out of its score; this tool counts a termination on vectors the baseline
+completed as a kill. A child that exits with a declared `unproved_exit_codes`
+code makes that mutant `unproved`, and an unproved mutant fails the run, so it is
+not a way to set crashes aside. The count above is what lets a reader weigh them.
 
 `corpus-adequacy.manifest.v1` keeps the v0 measurement fields and semantics and
 requires a closed `rules` inventory. Each author-written row is either
