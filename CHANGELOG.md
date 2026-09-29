@@ -2,15 +2,26 @@
 
 ## Unreleased
 
+## 0.8.0 — 2026-09-29
+
+Source-only release. It identifies source, not a run. Since 0.7.0:
 - The text summary says how many kills came without a moved declared outcome,
   grouped by each mutant's exact termination class set (or `raises` on the
   module runner), for example `(53.4%; 2 without a moved outcome: 2
-  unexpected-exit)`, and prints nothing extra when every kill moved an outcome.
-  A kill that moved an outcome and also terminated keeps its class on a separate
-  line. A killed row without a supported recorded reason is `unclassified`.
-  New sibling projection `--kills` (`corpus-adequacy.kills.v0`) over an existing
-  `report.v0` file, from the same classifier. What counts as killed, the score
-  and `report.v0` are unchanged.
+  unexpected-exit)`. A kill that moved an outcome and also terminated or raised
+  is not counted there; its class is shown on a separate line. When every kill
+  moved an outcome and none also recorded a termination or raise, the summary is
+  unchanged. A killed row without a supported recorded reason is `unclassified`,
+  never inferred.
+- New read-only sibling projection `--kills` (`corpus-adequacy.kills.v0`) over
+  an existing `report.v0` file, from the same classifier. It lists every killed
+  row with its basis and classes and names the exact report bytes by sha256.
+- New tests pin how refusal details carry their stage in the offline reader and
+  stay out of the producer's command result.
+- What counts as killed, the score, the denominator and `report.v0` are
+  unchanged. The runtime source identity changes, so consumers must explicitly
+  re-pin. Hosted executions bound to the prior identity require fresh PREPARE
+  evidence; this release is not hosted proof.
 
 ## 0.7.0 — 2026-09-25
 
