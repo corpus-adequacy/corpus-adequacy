@@ -103,6 +103,7 @@ MANIFEST_V1_SCHEMA = "corpus-adequacy.manifest.v1"
 ERROR_SCHEMA = "corpus-adequacy.error.v0"
 REPORT_SCHEMA = "corpus-adequacy.report.v0"
 SURVIVORS_SCHEMA = "corpus-adequacy.survivors.v0"
+KILLS_SCHEMA = "corpus-adequacy.kills.v0"
 RULES_SCHEMA = "corpus-adequacy.rules.v0"
 DIFF_SCHEMA = "corpus-adequacy.diff.v0"
 INSPECT_SCHEMA = "corpus-adequacy.inspect.v0"
@@ -932,6 +933,118 @@ def survivor_findings(report, manifest=None):
     }
 
 
+def classify_kill(row, runner):
+    """Say what a killed row's own record shows about how it was killed.
+
+    Returns ``(basis, classes)``. The unit is one mutant row. ``moved-outcome``:
+    at least one declared outcome moved, whatever else happened; any termination
+    or raise recorded beside it is kept in ``classes``. ``without-moved-outcome``:
+    no outcome moved and the row records why the mutant was still distinguished,
+    as termination classes (process, batch, module) or ``raises`` (module
+    entrypoint exceptions, from the structured ``raised`` list). ``unclassified``:
+    no outcome moved and the row does not record a supported reason; nothing is
+    inferred from free text. The kill rule itself is not consulted or changed.
+    """
+    if row.get("verdict") != "killed":
+        raise ValueError("classify_kill takes killed rows only, got %r" % row.get("verdict"))
+    moved = row.get("moved")
+    if type(moved) is not int or moved < 0:
+        return ("unclassified", ())
+    how = row.get("how")
+    classes = None
+    if runner == "module":
+        if row.get("raised"):
+            classes = ("raises",)
+        elif how in TERMINATED_KINDS:
+            classes = (how,)
+    elif runner in ("process", "batch") and isinstance(how, str):
+        # The only record of the termination classes on these runners is `how`,
+        # which the producer writes as the sorted, comma-joined class names.
+        parts = how.split(", ")
+        if parts and all(part in TERMINATED_KINDS for part in parts):
+            classes = tuple(sorted(set(parts)))
+    if moved > 0:
+        return ("moved-outcome", classes or ())
+    if classes:
+        return ("without-moved-outcome", classes)
+    return ("unclassified", ())
+
+
+def _kill_basis_counts(rows, runner) -> dict:
+    """The one tally of classify_kill that the text summary and kills.v0 share."""
+    kills, groups = [], {}
+    without = unclassified = also = 0
+    for row in rows:
+        if row.get("verdict") != "killed":
+            continue
+        basis, classes = classify_kill(row, runner)
+        kills.append({"rule": row["label"], "group": row["group"], "basis": basis,
+                      "classes": list(classes), "moved": row.get("moved")})
+        if basis == "without-moved-outcome":
+            without += 1
+            groups[classes] = groups.get(classes, 0) + 1
+        elif basis == "unclassified":
+            unclassified += 1
+        elif classes:
+            also += 1
+    kills.sort(key=lambda k: (k["group"], k["rule"]))
+    return {
+        "killed": len(kills),
+        "without_moved_outcome": without,
+        # Disjoint: each kill without a moved outcome sits in exactly one exact class set.
+        "without_moved_outcome_by_classes": [
+            {"classes": list(classes), "kills": count} for classes, count in sorted(groups.items())],
+        "moved_outcome_also_terminated": also,
+        "unclassified": unclassified,
+        "kills": kills,
+    }
+
+
+def kill_evidence(report, *, report_sha256) -> dict:
+    """Project kills.v0 from an existing report. Pure; does not measure or rescore.
+
+    Counts come from the rows through classify_kill, not from producer summary
+    fields. `report_sha256` names the exact report bytes this describes.
+    """
+    rows = _require_report_rows(report)
+    _require_canonical_sha256(report_sha256, "report_sha256")
+    return {
+        "schema": KILLS_SCHEMA,
+        "source_schema": REPORT_SCHEMA,
+        "report_sha256": report_sha256,
+        "manifest_sha256": report.get("manifest_sha256"),
+        "runner": report.get("runner"),
+        **_kill_basis_counts(rows, report.get("runner")),
+    }
+
+
+def _kill_basis_text(counts) -> str:
+    """Suffix for the score's parentheses; empty when every kill moved an outcome."""
+    parts = []
+    if counts["without_moved_outcome"]:
+        parts.append("%d without a moved outcome: %s" % (
+            counts["without_moved_outcome"],
+            ", ".join("%d %s" % (g["kills"], "+".join(g["classes"]))
+                      for g in counts["without_moved_outcome_by_classes"])))
+    if counts["unclassified"]:
+        parts.append("%d unclassified" % counts["unclassified"])
+    return "".join("; " + part for part in parts)
+
+
+def _kill_also_terminated_line(counts):
+    """A moved-outcome kill keeps its termination or raise visible, outside the subset."""
+    also = [k for k in counts["kills"] if k["basis"] == "moved-outcome" and k["classes"]]
+    if not also:
+        return None
+    by_class = {}
+    for kill in also:
+        label = "+".join(kill["classes"])
+        by_class[label] = by_class.get(label, 0) + 1
+    return "%d kill%s with a moved outcome also terminated or raised: %s." % (
+        len(also), "" if len(also) == 1 else "s",
+        ", ".join("%d %s" % (n, label) for label, n in sorted(by_class.items())))
+
+
 def rule_inventory_projection(report, manifest) -> dict:
     """Project rules.v0 from one exact-byte-matched manifest; never executes a run."""
     _require_report_rows(report)
@@ -986,6 +1099,18 @@ def encode_survivors_v0(doc: dict) -> bytes:
     except UnicodeEncodeError:
         raise ReportEncodingError(
             "survivors projection contains text that cannot be encoded as valid UTF-8") from None
+
+
+def encode_kills_v0(doc: dict) -> bytes:
+    """Sole byte form of a kills.v0 projection. Never calls encode_report_v0."""
+    if doc.get("schema") != KILLS_SCHEMA:
+        raise ValueError("encode_kills_v0 accepts only %s" % KILLS_SCHEMA)
+    try:
+        return (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8")
+    except UnicodeEncodeError:
+        raise ReportEncodingError(
+            "kills projection contains text that cannot be encoded as valid UTF-8") from None
 
 
 def _require_rules_v0_document(doc: dict) -> None:
@@ -4852,6 +4977,34 @@ def _survivors_cli(args, ap) -> int:
     return 0
 
 
+def _kills_cli(args, ap) -> int:
+    """Sibling path like --survivors: read a report.v0 file. Never calls run()."""
+    if args.manifest is None:
+        ap.error("report is required")
+    try:
+        raw = read_bounded_regular_file(args.manifest)
+        report = _parse_projection_json(raw)
+        projected = kill_evidence(report, report_sha256=_file_sha256(raw))
+        encoded = encode_kills_v0(projected) if args.json else None
+    except (ManifestError, OSError, json.JSONDecodeError, ReportEncodingError, ValueError) as exc:
+        print("could not project: %s" % exc, file=sys.stderr)
+        if args.json:
+            print(json.dumps(error_envelope(exc, operation="project"), indent=2, sort_keys=True))
+        return 2
+    if args.json:
+        assert encoded is not None
+        _write_encoded(encoded)
+        return 0
+    print("%d kills in report %s (%d without a moved outcome, %d unclassified)"
+          % (projected["killed"], projected["report_sha256"],
+             projected["without_moved_outcome"], projected["unclassified"]))
+    for kill in projected["kills"]:
+        print("%-22s %-21s %s" % (kill["group"], kill["basis"], kill["rule"]))
+        if kill["classes"]:
+            print("    %s" % "+".join(kill["classes"]))
+    return 0
+
+
 def _render_rules_v0(projected: dict) -> None:
     """Render only values already supplied by the index; never recompute a tally."""
     inventory = projected["inventory"]
@@ -5006,6 +5159,8 @@ def main() -> int:
     projection = ap.add_mutually_exclusive_group()
     projection.add_argument("--survivors", action="store_true",
                             help="project survivors.v0 from an existing report.v0 file")
+    projection.add_argument("--kills", action="store_true",
+                            help="project kills.v0 from an existing report.v0 file")
     projection.add_argument("--rules", action="store_true",
                             help="project rules.v0 from an existing report.v0 and manifest")
     projection.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), type=ap.diff_report_path,
@@ -5042,6 +5197,8 @@ def main() -> int:
         return 2
     if args.survivors:
         return _survivors_cli(args, ap)
+    if args.kills:
+        return _kills_cli(args, ap)
     if args.rules:
         return _rules_cli(args)
     if args.diff is not None:
@@ -5076,12 +5233,20 @@ def main() -> int:
         # exclude almost everything and still print 100%.
         pct = ("no result" if rep["score_percent"] is None
                else "%.1f%%" % rep["score_percent"])
+        # How many kills rest on something other than a moved declared outcome
+        # (#244). Counted by the same classifier as --kills; what counts as
+        # killed does not change.
+        kill_counts = _kill_basis_counts(rep["mutants"], rep.get("runner"))
+        pct += _kill_basis_text(kill_counts)
         print("%d of %d DECLARED in-scope rules killed (%s). %d declared equivalent, "
               "%d declared out of scope, %d unproved. %d rules declared in total."
               % (rep["killed"],
                  _scored_denominator(rep["killed"], rep["survived"], rep["silent"]), pct,
                  rep["equivalent"], rep["unexercised_out_of_scope"], rep["unproved"],
                  rep["declared_total"]))
+        also_line = _kill_also_terminated_line(kill_counts)
+        if also_line is not None:
+            print(also_line)
         if rep["score_percent"] is not None:
             print("This is %.1f%% of what the AUTHOR DECLARED, not of the rules the "
                   "implementation has. A rule nobody declared is invisible to this check."
