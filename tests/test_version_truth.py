@@ -50,6 +50,7 @@ RELEASE_DATES = {
     "0.5.0": "2026-09-21",
     "0.6.0": "2026-09-24",
     "0.7.0": "2026-09-25",
+    "0.8.0": "2026-09-29",
 }
 
 
@@ -631,7 +632,7 @@ INVALID_CHANGELOGS = (
 
 class VersionReleaseTruth(unittest.TestCase):
     def test_checkout_satisfies_version_release_truth(self):
-        self.assertEqual(check_version_release_truth(REPO_ROOT), "0.7.0")
+        self.assertEqual(check_version_release_truth(REPO_ROOT), "0.8.0")
 
     def test_cli_reports_the_pinned_version_literally(self):
         # The literal, not ca.VERSION: a bump that misses the constant must fail here.
@@ -640,7 +641,7 @@ class VersionReleaseTruth(unittest.TestCase):
             capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(result.returncode, 0)
-        self.assertIn("corpus-adequacy 0.7.0 ", result.stdout)
+        self.assertIn("corpus-adequacy 0.8.0 ", result.stdout)
 
     def test_v013_changelog_names_the_trusted_local_boundary(self):
         changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")

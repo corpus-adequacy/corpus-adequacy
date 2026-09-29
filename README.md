@@ -121,8 +121,9 @@ Those are all kills and stay kills. What differs is the evidence: a termination
 or a raise shows the corpus reached the fault, not that a declared outcome
 caught it. The text summary therefore says how many kills came without a moved
 outcome, for example `55 of 103 DECLARED in-scope rules killed (53.4%; 2 without
-a moved outcome: 2 unexpected-exit)`, and prints nothing extra when every kill
-moved an outcome. The unit is one mutant. A mutant is grouped by its exact set of
+a moved outcome: 2 unexpected-exit)`. When every kill moved an outcome and none
+also recorded a termination or raise, the summary is unchanged. The unit is one
+mutant. A mutant is grouped by its exact set of
 classes (`timeout+unexpected-exit` is one group), so the groups add up to the
 count. A mutant that moved an outcome is an outcome kill even if it also
 terminated or raised on another vector; that class stays visible on a separate
