@@ -136,6 +136,54 @@ class ResumeExecution(unittest.TestCase):
         self.assertEqual([s['state'] for s in doc['steps'][-1]['slots']],['observed','abnormal'])
         self.assertEqual(doc['steps'][-1]['slots'][0]['outcome'],9)
 
+    def test_receipt_loss_before_and_after_child_has_same_recovery_projection(self):
+        run = obs.run_capped_bytes
+        projections = []
+        marker = self.root/'ordinary-calls'
+        fields = ('state', 'reason', 'receipt', 'outcome', 'diagnostic',
+                  'selector_presence')
+        for after_child in (False, True):
+            with self.subTest(after_child=after_child):
+                if after_child:
+                    self.fresh_prefix()
+                ledger = self.root/('ledger-after' if after_child else 'ledger-before')
+                output = self.root/('final-after' if after_child else 'final-before')
+                completed = []
+
+                def lose_receipt(*args, **kwargs):
+                    if after_child:
+                        result = run(*args, **kwargs)
+                        self.assertEqual(result.returncode, 0)
+                        completed.append(result)
+                    raise KeyboardInterrupt('before receipt retention')
+
+                with mock.patch.object(obs, 'run_capped_bytes', side_effect=lose_receipt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        self.resume(ledger_root=ledger, output_root=output)
+                self.assertEqual(len(completed), int(after_child))
+                self.assertEqual(marker.read_text().splitlines() if marker.exists() else [],
+                                 ['called'] if after_child else [])
+                # This controller-only marker is never supplied to recovery.
+                with mock.patch.object(obs, 'run_capped_bytes',
+                                       side_effect=AssertionError('recovery executed')) as backend:
+                    path = obs.recover_observation(
+                        self.prefix, self.admission, context_raw=b'context',
+                        decision_raw=b'decision', manifest_path=self.manifest,
+                        ledger_root=ledger, output_root=self.root/('recovered-'+str(after_child)))
+                    backend.assert_not_called()
+                    with self.assertRaises(FileExistsError):
+                        self.resume(ledger_root=ledger, output_root=self.root/('retry-'+str(after_child)))
+                    backend.assert_not_called()
+                doc = codec.load_observation(path.read_bytes(), kind='final')
+                slots = doc['steps'][-1]['slots']
+                projection = [tuple(slot[field] for field in fields) for slot in slots]
+                projections.append(projection)
+                self.assertEqual(projection, [
+                    ('abnormal', 'interrupted', None, None, None, None),
+                    ('not_run', 'interrupted', None, None, None, None)])
+        # Fresh session and invocation identities need not be byte-identical.
+        self.assertEqual(projections[0], projections[1])
+
     def interrupt(self):
         with mock.patch.object(obs,'run_capped_bytes',side_effect=KeyboardInterrupt('child')):
             with self.assertRaises(KeyboardInterrupt): self.resume()
