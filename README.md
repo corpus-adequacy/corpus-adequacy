@@ -263,6 +263,10 @@ The addressable measurement lives at `measurements/tersign-1cc5ea32/` (manifest,
 adapted vectors, cases). The durable entrypoint is `python3`, not a host
 interpreter path. Full `report.v0` bytes are recorded after that source commit.
 
+A walk-through of what that measurement found, what Tersign found beneath it,
+and the re-pin at `measurements/tersign-0e560c1/` is in
+[docs/worked-examples/tersign-integer-valued-float.md](docs/worked-examples/tersign-integer-valued-float.md).
+
 ## Support and release
 
 Maintained on CPython 3.13 on ubuntu-latest, macos-latest, and windows-latest.
