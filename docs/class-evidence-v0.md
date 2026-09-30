@@ -79,6 +79,22 @@ visibility classifier as loading. Callers cannot supply class, status, or
 result counts; the decoder refuses parity mismatches against the validated
 report and against the derived class.
 
+`predecessor_attempt_sha256` is a digest the attempt states, not a link the
+loader follows. `load_class_attempt_v0` validates one supplied attempt against
+its explicit dependencies (provenance, manifest, report, environment). It takes
+no predecessor artifact and has no resolver. A canonical digest therefore loads
+exactly as a null one does, with or without any artifact behind it, and it is
+kept byte for byte. Successful loading establishes none of the following: that
+the predecessor exists, a complete attempt history, chronology, uniqueness, or
+latest-attempt status. `completed` is the status of the validated supplied
+report, not of a series. A `latest` flag or an `overall_score` key is refused as
+an extra key. This digest is distinct from `predecessor_event_sha256` in
+`visibility_events`, which `_require_visibility_chain_v0` checks against the
+preceding event of the same provenance. Invocation, interruption, and recovery
+are specified in the [execution observation contract](execution-observation-v0.md).
+Its consumption guarantee holds for one authoritative ledger and is not a global
+execution history either.
+
 ## Loaders
 
 `load_class_provenance_v0` and `load_class_attempt_v0` open only the explicit

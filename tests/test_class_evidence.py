@@ -1134,6 +1134,56 @@ class ClassAttemptV0(unittest.TestCase):
             with self.assertRaises(ca.ManifestError):
                 ca.encode_class_attempt_v0(derived)
 
+    def test_unresolved_canonical_predecessor_loads_without_claiming_history(self):
+        # Issue #249: the loader validates one supplied attempt and its explicit
+        # dependencies. A canonical predecessor digest with no predecessor artifact
+        # anywhere loads exactly like a null one; it is not resolved, and loading
+        # establishes no history, chronology, uniqueness or latest status.
+        unresolved = "sha256:" + "e" * 64
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            ws = self._workspace(root)
+            deps = {"provenance_path": ws["prov_path"],
+                    "manifest_path": ws["manifest_path"],
+                    "report_path": ws["report_path"],
+                    "environment_path": ws["env_path"]}
+            loaded, encoded, paths = {}, {}, {}
+            for name, predecessor in (("null", None), ("unresolved", unresolved)):
+                derived = ca.derive_class_attempt_v0(
+                    attempt_id="attempt-0001",
+                    provenance_raw=ws["prov_raw"],
+                    manifest_raw=ws["manifest_raw"],
+                    report_raw=ws["report_raw"],
+                    environment_raw=ws["env_raw"],
+                    predecessor=predecessor,
+                )
+                encoded[name] = ca.encode_class_attempt_v0(derived)
+                paths[name] = root / ("attempt-%s.json" % name)
+                paths[name].write_bytes(encoded[name])
+                loaded[name] = ca.load_class_attempt_v0(paths[name], **deps)
+                self.assertEqual(loaded[name]["predecessor_attempt_sha256"], predecessor)
+            for key in ("status", "result", "rows", "effective_class",
+                        "visibility_status", "non_claims"):
+                self.assertEqual(loaded["null"][key], loaded["unresolved"][key], key)
+            self.assertEqual(loaded["unresolved"]["non_claims"], CLASS_NON_CLAIMS)
+            self.assertEqual(loaded["unresolved"]["status"], "completed")
+            self.assertEqual(loaded["unresolved"]["status"],
+                             ca._class_attempt_status(ws["report"]))
+            self.assertNotEqual(encoded["null"], encoded["unresolved"])
+            self.assertNotIn(b"e" * 64, encoded["null"])
+            self.assertIn(b'"predecessor_attempt_sha256": "' + unresolved.encode() + b'"',
+                          encoded["unresolved"])
+            # Explicit dependencies are the only inputs; nothing resolves history.
+            params = set(inspect.signature(ca.load_class_attempt_v0).parameters)
+            self.assertEqual(params, {"attempt_path", "provenance_path", "manifest_path",
+                                      "report_path", "environment_path", "classifier"})
+            # Control: a wrong dependent report is still refused on its digest.
+            other = root / "other-report.json"
+            other.write_bytes(ws["report_raw"] + b"\n")
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_class_attempt_v0(paths["unresolved"], **dict(deps, report_path=other))
+            self.assertRegex(str(cm.exception).lower(), r"digest")
+
     def test_canonical_attempt_bytes_round_trip(self):
         with tempfile.TemporaryDirectory() as d:
             ws = self._workspace(Path(d))
