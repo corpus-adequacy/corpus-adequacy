@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a Contributor Covenant 3.0 Code of Conduct with a private conduct-reporting
+  address, its single-reader and continuity limits, and links from contributor,
+  support, and security guidance (#166).
+
 ## 0.8.0 — 2026-09-29
 
 Source-only release. It identifies source, not a run. Since 0.7.0:
