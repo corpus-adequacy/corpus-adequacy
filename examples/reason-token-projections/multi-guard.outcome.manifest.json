@@ -1,0 +1,46 @@
+{
+  "schema": "corpus-adequacy.manifest.v0",
+  "runner": "process",
+  "repo_root": ".",
+  "implementation": "multi_guard_check.py",
+  "implementation_sources": [
+    "multi_guard_check.py"
+  ],
+  "build": [],
+  "entrypoint_command": [
+    "python3",
+    "multi_guard_check.py",
+    "{vector}"
+  ],
+  "outcome_from": [
+    "state",
+    "reason"
+  ],
+  "vectors": "multi-guard.vectors.json",
+  "id_key": "vector_id",
+  "vector_path_key": "path",
+  "default_group": "g",
+  "mutants": {
+    "g": [
+      {
+        "label": "reason-token",
+        "anchor": "if not vector[\"payload_ok\"]:",
+        "replacement": "if False:"
+      },
+      {
+        "label": "CONTROL state",
+        "control": true,
+        "control_polarity": "positive",
+        "anchor": "state = \"fail\"",
+        "replacement": "state = \"pass\""
+      },
+      {
+        "label": "CONTROL unused",
+        "control": true,
+        "control_polarity": "inert",
+        "anchor": "unused = \"constant\"",
+        "replacement": "unused = \"other\""
+      }
+    ]
+  }
+}

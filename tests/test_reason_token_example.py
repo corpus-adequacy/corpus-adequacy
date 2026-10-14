@@ -336,3 +336,59 @@ class ThreeProjections(unittest.TestCase):
             payload["silent_means"],
             "diagnostic movement without declared-outcome movement and "
             "denominator-only")
+
+
+@unittest.skipIf(ca.fcntl is None, "process/batch scoring requires an advisory lock")
+class MultipleGuards(ThreeProjections):
+    """Same fail state, different first failing check; reuse CLI assertions."""
+
+    def _report(self, name: str) -> dict:
+        path = EXAMPLE / ("multi-guard.%s.manifest.json" % name)
+        self.assertTrue(path.is_file(), "missing multi-guard projection")
+        return self.wt.invoke_report(path)
+
+    def test_native_guard_order_and_removal(self):
+        import tempfile
+
+        path = EXAMPLE / "multi_guard_check.py"
+        self.assertTrue(path.is_file(), "missing multi-guard checker")
+        source = path.read_text(encoding="utf-8")
+        manifest = _json(EXAMPLE / "multi-guard.outcome.manifest.json")
+        mutant = manifest["mutants"]["g"][0]
+        self.assertEqual(source.count(mutant["anchor"]), 1)
+        changed = source.replace(mutant["anchor"], mutant["replacement"])
+        with tempfile.TemporaryDirectory() as tmp:
+            checker = Path(tmp) / "check.py"
+            vector = Path(tmp) / "vector.json"
+            for code, expected in (
+                (source, ["payload-digest", "payload-digest", "artifact-digest", "ok"]),
+                (changed, ["artifact-digest", "ok", "artifact-digest", "ok"]),
+            ):
+                checker.write_text(code, encoding="utf-8")
+                for (payload, artifact), reason in zip(
+                    ((False, False), (False, True), (True, False), (True, True)), expected
+                ):
+                    with self.subTest(changed=code == changed, payload=payload, artifact=artifact):
+                        vector.write_text(json.dumps({"payload_ok": payload, "artifact_ok": artifact}))
+                        proc = subprocess.run(
+                            [sys.executable, str(checker), str(vector)],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        self.assertEqual(proc.returncode, 0, proc.stderr)
+                        self.assertEqual(json.loads(proc.stdout), {
+                            "state": "pass" if reason == "ok" else "fail", "reason": reason,
+                        })
+
+    def test_shared_population_and_only_selectors_differ(self):
+        paths = [EXAMPLE / ("multi-guard.%s.manifest.json" % name)
+                 for name in ("outcome", "decision-only", "diagnostic")]
+        for path in paths:
+            self.assertTrue(path.is_file(), "missing multi-guard projection")
+        manifests = [_json(path) for path in paths]
+        for doc in manifests[1:]:
+            self.assertEqual(_shared_manifest(doc), _shared_manifest(manifests[0]))
+        self.assertEqual([_selector_fields(doc) for doc in manifests], [
+            {"outcome_from": ["state", "reason"]},
+            {"outcome_from": ["state"]},
+            {"outcome_from": ["state"], "diagnostic_from": ["reason"]},
+        ])

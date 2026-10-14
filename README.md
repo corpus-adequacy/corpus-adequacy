@@ -94,6 +94,29 @@ absent inventory is not a measured zero. This example does not establish
 whole-corpus adequacy, adapter fidelity, rule ownership, cross-platform
 process support, security effectiveness, or reachability.
 
+The synthetic multi-guard variant uses two boolean checks, both failing. Removing
+only the first check changes `fail/payload-digest` to `fail/artifact-digest`.
+It models check ordering; it does **not** validate real digests. Run each fixed
+projection through the same CLI (agent-assisted example and regression tests):
+
+```sh
+python3 corpus_adequacy.py examples/reason-token-projections/multi-guard.outcome.manifest.json --json
+python3 corpus_adequacy.py examples/reason-token-projections/multi-guard.decision-only.manifest.json --json
+python3 corpus_adequacy.py examples/reason-token-projections/multi-guard.diagnostic.manifest.json --json
+```
+
+All three use identical checker, vector, mutation and control declarations;
+only selectors differ. With healthy controls, the ordinary row is respectively
+`killed`, `survived`, and `silent`; exits are respectively 0, 1, and 1.
+The positive control changes the reported state and the inert control changes an
+unused constant. Neither establishes cryptographic correctness. The regression
+also exercises all four boolean input combinations before and after removing the
+first check. That observed synthetic check ordering does not establish why a
+third-party checker chose a reason. If a reason is normative, select it as an
+outcome; if informative, select it as a diagnostic. Leaving it out measures
+state alone. These reports answer different questions and are not evidence of a
+corpus improvement or whole-corpus adequacy.
+
 `--survivors` is a sibling projection over an existing `report.v0` file. It does
 not measure, does not call the runner, and does not change `report.v0` bytes.
 `--json` on that path writes `corpus-adequacy.survivors.v0`. Plain `--json`
