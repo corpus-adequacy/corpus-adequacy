@@ -9,7 +9,6 @@ for manifests that never declared the container.
 
 from __future__ import annotations
 
-import inspect
 import json
 import subprocess
 import sys
@@ -134,7 +133,7 @@ def _write_vectors(tmp: Path, rows: list[tuple[str, dict]]) -> None:
 
 
 def _manifest(tmp: Path, *, checker: str, mutants: list, vectors: list,
-              foreclosed=None) -> Path:
+              foreclosed=None, extra=None) -> Path:
     (tmp / "check.py").write_text(checker, encoding="utf-8")
     _write_vectors(tmp, vectors)
     digest = ca._file_sha256((tmp / "vectors.json").read_bytes())
@@ -159,9 +158,20 @@ def _manifest(tmp: Path, *, checker: str, mutants: list, vectors: list,
     }
     if foreclosed is not None:
         raw["foreclosed"] = {"g": list(foreclosed)}
+    if extra:
+        raw.update(extra)
     path = tmp / "m.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
+
+
+def _stamp_child(tmp: Path, checker: str) -> str:
+    """Rewrite the checker so a live child writes tmp/CHILD_RAN (absolute)."""
+    stamp = tmp / "CHILD_RAN"
+    return checker.replace(
+        "import json, sys\n",
+        "import json, sys\nopen(%r, 'w').write('1')\n" % str(stamp),
+        1)
 
 
 def _row(report: dict, label: str) -> dict:
@@ -304,12 +314,284 @@ class ForeclosedProof(unittest.TestCase):
                 for item in report["failures"]),
             report["failures"])
 
+    def test_f3_anchor_interaction_is_unproved_with_a_report(self):
+        # `by` replacement duplicates `label`'s anchor, so F3's second
+        # lookup is not unique on the already-mutated tree.
+        checker = """\
+import json, sys
+vector = json.load(open(sys.argv[1], encoding="utf-8"))
+accepted = True
+reason = "ok"
+# MARKER_A
+if vector.get("a"):
+    reason = "has-a"
+# MARKER_B
+if vector.get("b"):
+    reason = "has-b"
+print(json.dumps({"accepted": accepted, "reason": reason}))
+"""
+        by_mut = {"label": "L-a", "anchor": "# MARKER_A",
+                  "replacement": "# MARKER_B"}
+        label_mut = {"label": "R-b", "anchor": "# MARKER_B",
+                     "replacement": "# MARKER_X"}
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _manifest(
+                tmp, checker=checker, mutants=[by_mut, label_mut],
+                vectors=[("v_ok", {"value": 1}), ("v_a", {"a": True})],
+                foreclosed=[_entry(
+                    "R-b", "L-a",
+                    edit=[{"op": "add", "path": "/b", "value": True}],
+                    refused_at={"reason": "has-b"})])
+            before = (tmp / "check.py").read_bytes()
+            proc = subprocess.run(
+                [sys.executable, str(REPO / "corpus_adequacy.py"),
+                 str(path), "--json"],
+                capture_output=True, timeout=60)
+            after = (tmp / "check.py").read_bytes()
+        self.assertEqual(before, after)
+        self.assertNotIn(b"StopIteration", proc.stderr)
+        self.assertNotIn(b"Traceback", proc.stderr)
+        self.assertEqual(proc.returncode, 1)
+        report = json.loads(proc.stdout.decode("utf-8"))
+        row = _row(report, "R-b")
+        self.assertIn(row.get("verdict"), ("unproved", "survived"))
+        self.assertNotEqual(row.get("verdict"), "foreclosed")
+        if row.get("verdict") != "unproved":
+            self.assertTrue(
+                any("foreclosure-unproved" in item
+                    for item in report["failures"]),
+                report["failures"])
+        self.assertFalse(report["adequate"])
+
+    def test_cross_group_witness_base_is_refused_before_a_child(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _manifest(
+                tmp, checker=_stamp_child(tmp, FORECLOSED_CHECKER),
+                mutants=[L_MUTANT, R_FLAG],
+                vectors=[V_OK, V_SCHEMA],
+                extra={
+                    "group_key": "grp",
+                    "mutants": {
+                        "g": [dict(L_MUTANT), dict(R_FLAG),
+                              dict(CONTROL, label="CONTROL g")],
+                        "h": [dict(CONTROL, label="CONTROL h")],
+                    },
+                    "foreclosed": {"g": [_entry(
+                        "R-flag", "L-schema", edit=_add_flag())]},
+                })
+            vectors = json.loads((tmp / "vectors.json").read_text())
+            vectors["vectors"][0]["grp"] = "g"
+            vectors["vectors"][1]["grp"] = "h"
+            vectors["vectors"][1]["vector_id"] = "v_h"
+            (tmp / "v_schema.json").rename(tmp / "v_h.json")
+            vectors["vectors"][1]["path"] = "v_h.json"
+            (tmp / "vectors.json").write_text(json.dumps(vectors), encoding="utf-8")
+            digest = ca._file_sha256((tmp / "vectors.json").read_bytes())
+            (tmp / "digest.json").write_text(
+                json.dumps({"corpus_digest": digest}), encoding="utf-8")
+            raw = json.loads(path.read_text())
+            raw["foreclosed"]["g"][0]["witness"]["base"] = "v_h"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.run(path, execution_profile="trusted-local")
+            self.assertIn("v_h", str(cm.exception))
+            self.assertRegex(str(cm.exception), r"group|not a corpus vector")
+            self.assertFalse((tmp / "CHILD_RAN").exists())
+
+    def test_scalar_none_pinned_outcome_is_not_refused(self):
+        checker = """\
+import json, sys
+vector = json.load(open(sys.argv[1], encoding="utf-8"))
+doc = {}
+if vector.get("emit"):
+    doc["reason"] = "ok"
+print(json.dumps(doc))
+"""
+        left = {"label": "L-x", "anchor": 'if vector.get("emit"):',
+                "replacement": "if False:"}
+        right = {"label": "R-y", "anchor": 'doc["reason"] = "ok"',
+                 "replacement": 'doc["reason"] = "XX"'}
+        control = {
+            "label": "CONTROL s", "control": True,
+            "control_polarity": "positive",
+            "anchor": "doc = {}", "replacement": "doc = {'reason': 'ctl'}",
+        }
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _manifest(
+                tmp, checker=checker, mutants=[left, right],
+                vectors=[("v_ok", {"value": 1}), ("v_emit", {"emit": True})],
+                extra={
+                    "outcome_from": "reason",
+                    "mutants": {"g": [left, right, control]},
+                    "foreclosed": {"g": [{
+                        "label": "R-y", "by": "L-x",
+                        "witness": {"base": "v_ok", "edit": [
+                            {"op": "add", "path": "/emit", "value": True}]},
+                        "refused_at": {"reason": "ok"},
+                        "reason": "scalar none is a pinned outcome",
+                        "recorded": "2026-11-02",
+                    }]},
+                })
+            report = ca.run(path, execution_profile="trusted-local")
+        self.assertIsInstance(report, dict)
+        self.assertTrue(any(row["label"] == "R-y" for row in report["mutants"]))
+        self.assertFalse(
+            any("not accepting" in item for item in report["failures"]))
+
+    def test_witness_edit_op_is_refused_at_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _manifest(
+                Path(d), checker=FORECLOSED_CHECKER,
+                mutants=[L_MUTANT, R_FLAG],
+                vectors=[V_OK, V_SCHEMA],
+                foreclosed=[_entry(
+                    "R-flag", "L-schema",
+                    edit=[{"op": "bad", "path": "/flag", "value": True}])])
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(path)
+        self.assertIn("RFC 6902", str(cm.exception))
+
+    def test_witness_patch_failure_is_refused_before_a_child(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = _manifest(
+                tmp, checker=_stamp_child(tmp, FORECLOSED_CHECKER),
+                mutants=[L_MUTANT, R_FLAG],
+                vectors=[V_OK, V_SCHEMA],
+                foreclosed=[_entry(
+                    "R-flag", "L-schema",
+                    edit=[{"op": "remove", "path": "/nonexistent"}])])
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.run(path, execution_profile="trusted-local")
+            self.assertIn("JSON Pointer", str(cm.exception))
+            self.assertFalse((tmp / "CHILD_RAN").exists())
+
+    def test_test_names_foreclosed_is_refused_at_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _manifest(
+                Path(d), checker=FORECLOSED_CHECKER,
+                mutants=[L_MUTANT, R_FLAG],
+                vectors=[V_OK, V_SCHEMA],
+                foreclosed=[_entry("R-flag", "L-schema", edit=_add_flag())],
+                extra={
+                    "runner": "batch",
+                    "outcome_parse": "test-names",
+                    "accepted_exit_codes": [0, 101],
+                })
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(path)
+        self.assertIn("test-names", str(cm.exception))
+
+    def test_missing_f4_row_is_foreclosure_unproved(self):
+        missing = {
+            "label": "R-missing",
+            "anchor": "THIS ANCHOR DOES NOT EXIST",
+            "replacement": "xxx",
+        }
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_manifest(
+                Path(d), checker=FORECLOSED_CHECKER,
+                mutants=[L_MUTANT, missing],
+                vectors=[V_OK, V_SCHEMA],
+                foreclosed=[_entry(
+                    "R-missing", "L-schema", edit=_add_flag())]),
+                execution_profile="trusted-local")
+        self.assertEqual(
+            [row for row in report["mutants"] if row["label"] == "R-missing"],
+            [])
+        self.assertTrue(
+            any("foreclosure-unproved" in item for item in report["failures"]),
+            report["failures"])
+        self.assertFalse(report["adequate"])
+
+    def test_known_hole_and_foreclosed_same_label_refused_at_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _manifest(
+                Path(d), checker=FORECLOSED_CHECKER,
+                mutants=[L_MUTANT, R_FLAG],
+                vectors=[V_OK, V_SCHEMA],
+                foreclosed=[_entry("R-flag", "L-schema", edit=_add_flag())],
+                extra={
+                    "known_holes": {
+                        "sha256:dead": [{
+                            "label": "R-flag",
+                            "reason": "acked hole",
+                            "recorded": "2026-01-01",
+                        }],
+                    },
+                })
+            with self.assertRaises(ca.ManifestError) as cm:
+                ca.load_manifest(path)
+        self.assertIn("known hole", str(cm.exception))
+        self.assertIn("R-flag", str(cm.exception))
+
+    def test_f0_mismatch_is_foreclosure_unproved(self):
+        checker = """\
+import json, sys
+from pathlib import Path
+vector = json.load(open(sys.argv[1], encoding="utf-8"))
+stamp = Path(__file__).with_name("f0-stamp.txt")
+n = int(stamp.read_text()) if stamp.exists() else 0
+stamp.write_text(str(n + 1))
+accepted = True
+reason = "ok" if n == 0 else "drifted"
+if "flag" in vector:
+    reason = "unknown-field"
+elif vector.get("flag"):
+    reason = "flag-set"
+print(json.dumps({"accepted": accepted, "reason": reason}))
+"""
+        with tempfile.TemporaryDirectory() as d:
+            report = ca.run(_manifest(
+                Path(d), checker=checker,
+                mutants=[L_MUTANT, R_FLAG],
+                vectors=[V_OK, V_SCHEMA],
+                foreclosed=[_entry("R-flag", "L-schema", edit=_add_flag())]),
+                execution_profile="trusted-local")
+        self.assertNotEqual(_row(report, "R-flag").get("verdict"), "foreclosed")
+        self.assertTrue(
+            any("foreclosure-unproved" in item for item in report["failures"]),
+            report["failures"])
+        self.assertFalse(report["adequate"])
+
     def test_f3_helper_applies_two_mutants_in_one_execution(self):
-        source = inspect.getsource(ca._execute_mutations_observation)
-        self.assertIn("for mut in mutants", source)
-        one = inspect.getsource(ca._execute_mutation_observation)
-        self.assertIn("finally:", one)
-        self.assertIn("step_guard.restore()", one)
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            source = tmp / "check.py"
+            original = "KEEP\n# MARKER_A\n# MARKER_B\n"
+            source.write_text(original, encoding="utf-8")
+            seen = []
+
+            class Session:
+                manifest = {"_repo_root": tmp, "_source_paths": [source]}
+
+                def execute(self, vectors, rebuild=True, step=None):
+                    seen.append(source.read_text(encoding="utf-8"))
+
+                    class Execution:
+                        built = True
+                        raised = {}
+                        outcomes = {}
+                        detail = None
+
+                    return Execution()
+
+            facts = ca._execute_mutations_observation(
+                Session(), "g",
+                [{"label": "A", "anchor": "# MARKER_A",
+                  "replacement": "# REPL_A"},
+                 {"label": "B", "anchor": "# MARKER_B",
+                  "replacement": "# REPL_B"}],
+                vectors=[])
+            restored = source.read_text(encoding="utf-8")
+        self.assertEqual(facts["application"], "applied")
+        self.assertEqual(len(seen), 1)
+        self.assertIn("# REPL_A", seen[0])
+        self.assertIn("# REPL_B", seen[0])
+        self.assertEqual(restored, original)
 
 
 @unittest.skipIf(ca.fcntl is None, "process scoring requires an advisory lock")
