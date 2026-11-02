@@ -133,6 +133,7 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _MANIFEST_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 REPORT_VERDICTS = frozenset({
     "equivalent",
+    "foreclosed",
     "unproved",
     "killed",
     "unexercised",
@@ -145,6 +146,8 @@ REPORT_VERDICTS = frozenset({
     "control-MOVED",
     "control-error",
 })
+_FORECLOSED_REPORT_KEYS = frozenset({"foreclosed", "foreclosed_ratio"})
+_WITNESS_NAME = ".corpus-adequacy-witness.json"
 TOOL_SOURCE_STATES = frozenset({"exact", "dirty", "unresolved"})
 DIFF_NON_CLAIMS = (
     "This projection does not establish causation for any verdict transition.",
@@ -702,8 +705,13 @@ def _report_v0_document(manifest_path: Path, m: dict, *,
     Process and batch always emit `originals_unverified_against_head` (`[]`
     when the caller supplies nothing). Module never emits it.
     Identity keys are present so `_with_tool_identity` only overwrites values.
+    `foreclosed` and `foreclosed_ratio` are derived here, and only when the
+    manifest declared the container, so `_report_v0` stays the identity wrapper.
     """
     denom = _scored_denominator(killed, survived, silent)
+    n_foreclosed = sum(
+        1 for row in results
+        if isinstance(row, dict) and row.get("verdict") == "foreclosed")
     report = {
         "schema": REPORT_SCHEMA,
         "manifest": str(manifest_path),
@@ -722,7 +730,7 @@ def _report_v0_document(manifest_path: Path, m: dict, *,
         "unexercised_out_of_scope": out_of_scope,
         "unproved": unproved,
         "declared_total": (killed + survived + silent + equivalent + out_of_scope
-                           + unproved + known_holes),
+                           + unproved + known_holes + n_foreclosed),
         "out_of_scope_ratio": None if denom == 0 else round(out_of_scope / denom, 2),
         "score_percent": score,
         "score_means": SCORE_MEANS,
@@ -734,6 +742,10 @@ def _report_v0_document(manifest_path: Path, m: dict, *,
         "tool_source_state": None,
         "tool_content_sha256": None,
     }
+    if "foreclosed" in m:
+        report["foreclosed"] = n_foreclosed
+        report["foreclosed_ratio"] = (
+            None if denom == 0 else round(n_foreclosed / denom, 2))
     extra = _runner_specific_report_key(m["runner"])
     if extra is not None:
         report[extra] = (
@@ -757,7 +769,7 @@ def _report_v0_required_keys(runner):
 
 
 def _report_v0_allowed_keys(runner):
-    return _report_v0_keys(runner)
+    return _report_v0_keys(runner) | _FORECLOSED_REPORT_KEYS
 
 
 _MUTANT_ROW_BASE_KEYS = frozenset({"group", "label", "verdict", "moved", "how"})
@@ -777,10 +789,12 @@ def _mutant_row_optional_keys(verdict):
 def _mutant_row_required_keys(verdict):
     """Producer-required row keys for one verdict."""
     required = set(_MUTANT_ROW_BASE_KEYS)
-    if verdict != "equivalent":
+    if verdict not in ("equivalent", "foreclosed"):
         required.add("scope")
     if verdict == "silent":
         required.add("moved_diagnostic")
+    if verdict == "foreclosed":
+        required.update({"f1", "f2", "f3"})
     return frozenset(required)
 
 
@@ -853,6 +867,17 @@ def _require_report_rows(report) -> list:
     for key in _REPORT_INT_KEYS:
         if type(report[key]) is not int or report[key] < 0:
             raise ManifestError("report.%s must be a non-negative int" % key)
+    has_foreclosed = "foreclosed" in report
+    has_ratio = "foreclosed_ratio" in report
+    if has_foreclosed != has_ratio:
+        raise ManifestError(
+            "report.foreclosed and report.foreclosed_ratio must appear together")
+    if has_foreclosed:
+        if type(report["foreclosed"]) is not int or report["foreclosed"] < 0:
+            raise ManifestError("report.foreclosed must be a non-negative int")
+        ratio = report["foreclosed_ratio"]
+        if ratio is not None and type(ratio) not in (int, float):
+            raise ManifestError("report.foreclosed_ratio must be a number or null")
     if not isinstance(report.get("control_status"), str) or not report["control_status"]:
         raise ManifestError("report.control_status must be a non-empty string")
     _require_canonical_sha256(report.get("manifest_sha256"), "report.manifest_sha256")
@@ -2009,6 +2034,8 @@ def _class_counts_from_rows(rows: list) -> dict:
         verdict = row["verdict"]
         if isinstance(verdict, str) and verdict.startswith("control-"):
             continue
+        if verdict == "foreclosed":
+            continue
         field = _ORDINARY_VERDICT_TO_COUNT.get(verdict)
         if field is None:
             raise ManifestError("mutant verdict %r is not an ordinary class count" % verdict)
@@ -2021,12 +2048,18 @@ def _class_report_summary_parity(report: dict) -> None:
     if len(rows) > CLASS_ROWS_MAX:
         raise ManifestError("report.mutants exceeds %d rows" % CLASS_ROWS_MAX)
     counts = _class_counts_from_rows(rows)
+    n_foreclosed = sum(1 for row in rows if row["verdict"] == "foreclosed")
     for field, value in counts.items():
         if report[field] != value:
             raise ManifestError("report.%s does not match mutant rows" % field)
-    declared_total = sum(counts.values())
+    declared_total = sum(counts.values()) + n_foreclosed
     if report["declared_total"] != declared_total:
         raise ManifestError("report.declared_total does not match mutant rows")
+    if "foreclosed" in report:
+        if report["foreclosed"] != n_foreclosed:
+            raise ManifestError("report.foreclosed does not match mutant rows")
+    elif n_foreclosed:
+        raise ManifestError("report.foreclosed does not match mutant rows")
     if type(report["failures"]) is not list or any(
             not isinstance(item, str) for item in report["failures"]):
         raise ManifestError("report.failures must be a list of strings")
@@ -2538,6 +2571,132 @@ def _require_unique_labels(m: dict) -> None:
             seen_acknowledgements.add(ident)
 
 
+def _ordinary_mutant_index(m: dict) -> dict:
+    """In-scope non-control mutants keyed by exact label."""
+    index = {}
+    for group, entries in m["mutants"].items():
+        for entry in entries:
+            if entry.get("control") or entry.get("scope") == "out_of_scope":
+                continue
+            index[label_identity(entry)] = (group, entry)
+    return index
+
+
+def _require_foreclosed_declaration(m: dict) -> None:
+    """Refuse a present foreclosed container that cannot be proved as specified.
+
+    Closed load refusals: outcome_parse is test-names; runner is not process
+    with a JSON outcome_from; container or entry shape; unknown, control,
+    out-of-scope, equivalent, known-hole, or equal label/by; refused_at member
+    outside outcome_from; blank reason; missing recorded; RFC 6902 op/path/
+    value/from presence. After vectors load, still ManifestError (exit 2):
+    witness.base in the catalog, in the entry's own group, and the patch
+    applies to that base file. After baselines, before ordinary mutants:
+    the base is in that group's pinned outcomes (a present JSON null counts).
+    """
+    if "foreclosed" not in m:
+        return
+    if m.get("outcome_parse") == "test-names":
+        raise ManifestError(
+            "foreclosed cannot be read beside outcome_parse test-names; "
+            "F1 attributes a JSON outcome member")
+    if m["runner"] != "process":
+        raise ManifestError(
+            "foreclosed is implemented only for runner=process with a JSON "
+            "outcome_from; F1 attributes a refused_at member on that projection "
+            "and F0-F3 run one witness vector, which runner=%s cannot do"
+            % m["runner"])
+    require_shape(m["foreclosed"], dict, "foreclosed")
+    members = selector_members(m.get("outcome_from"))
+    if not members:
+        raise ManifestError(
+            "foreclosed requires outcome_from so F1 can attribute refused_at")
+    ordinary = _ordinary_mutant_index(m)
+    equivalent_labels = {
+        label_identity(entry)
+        for entries in m["equivalent"].values() for entry in entries}
+    known_hole_labels = {
+        label_identity(entry)
+        for entries in m["known_holes"].values() for entry in entries}
+    seen = set()
+    for group, entries in m["foreclosed"].items():
+        require_shape(entries, list, "foreclosed[%s]" % group)
+        for i, entry in enumerate(entries):
+            where = "foreclosed[%s][%d]" % (group, i)
+            require_shape(entry, dict, where)
+            for key in ("label", "by", "witness", "refused_at", "reason", "recorded"):
+                _req(entry, key, where)
+            ident = label_identity(entry, where)
+            if ident in seen:
+                raise ManifestError(
+                    "%s repeats foreclosure of %r" % (where, ident))
+            seen.add(ident)
+            if not str(entry["reason"]).strip():
+                raise ManifestError(
+                    "%s %r: a foreclosure needs a stated reason" % (where, ident))
+            by = entry["by"]
+            if not isinstance(by, str) or not by.strip():
+                raise ManifestError("%s.by must be a non-empty string" % where)
+            if ident == by:
+                raise ManifestError(
+                    "%s %r: label and by are the same mutant" % (where, ident))
+            if ident in equivalent_labels:
+                raise ManifestError(
+                    "%s %r names a declared equivalent; foreclosure is proved "
+                    "on an ordinary mutant" % (where, ident))
+            if by in equivalent_labels:
+                raise ManifestError(
+                    "%s.by %r names a declared equivalent" % (where, by))
+            if ident in known_hole_labels:
+                raise ManifestError(
+                    "%s %r names a declared known hole; foreclosure is proved "
+                    "on an ordinary mutant" % (where, ident))
+            if by in known_hole_labels:
+                raise ManifestError(
+                    "%s.by %r names a declared known hole" % (where, by))
+            for named, field in ((ident, "label"), (by, "by")):
+                found = ordinary.get(named)
+                if found is None:
+                    declared = None
+                    for g, ms in m["mutants"].items():
+                        for mut in ms:
+                            if label_identity(mut) == named:
+                                declared = (g, mut)
+                                break
+                    if declared is None:
+                        raise ManifestError(
+                            "%s.%s %r is not a declared mutant" % (where, field, named))
+                    _group, mut = declared
+                    if mut.get("control"):
+                        raise ManifestError(
+                            "%s.%s %r names a control" % (where, field, named))
+                    raise ManifestError(
+                        "%s.%s %r names an out-of-scope mutant" % (where, field, named))
+                declared_group, _mut = found
+                if declared_group != group:
+                    raise ManifestError(
+                        "%s.%s %r is not in group %r" % (where, field, named, group))
+            witness = entry["witness"]
+            require_shape(witness, dict, where + ".witness")
+            for key in ("base", "edit"):
+                _req(witness, key, where + ".witness")
+            if not isinstance(witness["base"], str) or not witness["base"].strip():
+                raise ManifestError("%s.witness.base must be a non-empty string" % where)
+            require_shape(witness["edit"], list, where + ".witness.edit")
+            for j, op in enumerate(witness["edit"]):
+                _require_json_patch_operation(
+                    op, "%s.witness.edit[%d]" % (where, j))
+            refused_at = entry["refused_at"]
+            require_shape(refused_at, dict, where + ".refused_at")
+            if not refused_at:
+                raise ManifestError("%s.refused_at names no outcome member" % where)
+            for member in refused_at:
+                if member not in members:
+                    raise ManifestError(
+                        "%s.refused_at member %r is not declared in outcome_from"
+                        % (where, member))
+
+
 def _require_expected_mover(m: dict, mutant: dict) -> None:
     if "expected_mover" not in mutant:
         return
@@ -2968,6 +3127,7 @@ def parse_manifest_declaration(manifest_bytes: bytes) -> dict:
                     "equivalent[%s][%d] %r: an equivalence needs a stated reason, never a bare claim"
                     % (group, i, e["label"]))
     _require_unique_labels(m)
+    _require_foreclosed_declaration(m)
     m["_rule_inventory"] = rule_inventory_index(m)
     return m
 
@@ -3912,6 +4072,7 @@ def _new_process_tally() -> dict:
         "unproved": 0,
         "silent": 0,
         "known_holes": 0,
+        "foreclosed": 0,
         "control_statuses": [],
         "failures": [],
     }
@@ -4084,7 +4245,8 @@ def _finalize_process_tally(tally: dict, m: dict, acknowledged: dict,
                         "or declare the diagnostic channel part of the pinned surface" % silent)
     if denom == 0 and (declared_controls == 0 or control_status == "killed"):
         failures.append(null_result_reading(
-            tally["known_holes"], tally["equivalent"], tally["out_of_scope"]))
+            tally["known_holes"], tally["equivalent"], tally["out_of_scope"],
+            tally.get("foreclosed", 0)))
     return {
         "killed": killed,
         "survived": survived,
@@ -4093,6 +4255,7 @@ def _finalize_process_tally(tally: dict, m: dict, acknowledged: dict,
         "out_of_scope": tally["out_of_scope"],
         "unproved": unproved,
         "known_holes": tally["known_holes"],
+        "foreclosed": tally.get("foreclosed", 0),
         "score": score,
         "results": results,
         "failures": failures,
@@ -4105,6 +4268,298 @@ def _expected_mover_attribution(mutant: dict, baseline: dict, outcome: dict) -> 
     name = mutant["expected_mover"]
     observed = sorted(set(baseline["<batch>"]) ^ set(outcome["<batch>"]))
     return name in observed, "expected mover %r; observed changed names %r" % (name, observed)
+
+
+def _json_pointer_tokens(pointer: str) -> list:
+    if pointer == "":
+        return []
+    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        raise ManifestError("JSON Pointer must be empty or start with /")
+    tokens = []
+    for raw in pointer[1:].split("/"):
+        tokens.append(raw.replace("~1", "/").replace("~0", "~"))
+    return tokens
+
+
+def _json_pointer_parent(doc, tokens):
+    cursor = doc
+    for token in tokens[:-1]:
+        if isinstance(cursor, list):
+            try:
+                index = int(token)
+            except (TypeError, ValueError):
+                raise ManifestError("JSON Pointer index is not an integer") from None
+            if index < 0 or index >= len(cursor):
+                raise ManifestError("JSON Pointer index is out of range")
+            cursor = cursor[index]
+            continue
+        if not isinstance(cursor, dict) or token not in cursor:
+            raise ManifestError("JSON Pointer does not resolve")
+        cursor = cursor[token]
+    return cursor
+
+
+def _json_pointer_get(doc, pointer: str):
+    tokens = _json_pointer_tokens(pointer)
+    if not tokens:
+        return doc
+    parent = _json_pointer_parent(doc, tokens)
+    token = tokens[-1]
+    if isinstance(parent, list):
+        try:
+            index = int(token)
+        except (TypeError, ValueError):
+            raise ManifestError("JSON Pointer index is not an integer") from None
+        if index < 0 or index >= len(parent):
+            raise ManifestError("JSON Pointer index is out of range")
+        return parent[index]
+    if not isinstance(parent, dict) or token not in parent:
+        raise ManifestError("JSON Pointer does not resolve")
+    return parent[token]
+
+
+def _json_pointer_add(doc, pointer: str, value):
+    tokens = _json_pointer_tokens(pointer)
+    if not tokens:
+        if not isinstance(doc, (dict, list)):
+            raise ManifestError("JSON Patch add cannot replace a scalar document")
+        if isinstance(doc, dict):
+            doc.clear()
+            if not isinstance(value, dict):
+                raise ManifestError("JSON Patch add of the document requires an object")
+            doc.update(value)
+            return
+        doc[:] = list(value)
+        return
+    parent = _json_pointer_parent(doc, tokens)
+    token = tokens[-1]
+    if isinstance(parent, list):
+        if token == "-":
+            parent.append(value)
+            return
+        try:
+            index = int(token)
+        except (TypeError, ValueError):
+            raise ManifestError("JSON Pointer index is not an integer") from None
+        if index < 0 or index > len(parent):
+            raise ManifestError("JSON Pointer index is out of range")
+        parent.insert(index, value)
+        return
+    if not isinstance(parent, dict):
+        raise ManifestError("JSON Patch add target is not an object")
+    parent[token] = value
+
+
+def _json_pointer_remove(doc, pointer: str):
+    tokens = _json_pointer_tokens(pointer)
+    if not tokens:
+        raise ManifestError("JSON Patch cannot remove the whole document")
+    parent = _json_pointer_parent(doc, tokens)
+    token = tokens[-1]
+    if isinstance(parent, list):
+        try:
+            index = int(token)
+        except (TypeError, ValueError):
+            raise ManifestError("JSON Pointer index is not an integer") from None
+        if index < 0 or index >= len(parent):
+            raise ManifestError("JSON Pointer index is out of range")
+        return parent.pop(index)
+    if not isinstance(parent, dict) or token not in parent:
+        raise ManifestError("JSON Pointer does not resolve")
+    return parent.pop(token)
+
+
+_RFC6902_OPS = frozenset({"add", "remove", "replace", "move", "copy", "test"})
+
+
+def _require_json_patch_operation(op, where: str) -> str:
+    """Refuse an RFC 6902 op that is missing its name or required keys."""
+    require_shape(op, dict, where)
+    name = op.get("op")
+    if name not in _RFC6902_OPS:
+        raise ManifestError("%s.op must be an RFC 6902 operation" % where)
+    if "path" not in op:
+        raise ManifestError("%s: missing required key 'path'" % where)
+    if name in ("add", "replace", "test") and "value" not in op:
+        raise ManifestError("%s: missing required key 'value'" % where)
+    if name in ("move", "copy") and "from" not in op:
+        raise ManifestError("%s: missing required key 'from'" % where)
+    return name
+
+
+def apply_json_patch(document, operations):
+    """Apply RFC 6902 operations to a decoded JSON document. Stdlib only."""
+    doc = copy.deepcopy(document)
+    for i, op in enumerate(operations):
+        where = "witness.edit[%d]" % i
+        name = _require_json_patch_operation(op, where)
+        path = op["path"]
+        if name == "test":
+            if _json_pointer_get(doc, path) != op["value"]:
+                raise ManifestError("%s: JSON Patch test failed" % where)
+            continue
+        if name in ("add", "replace"):
+            if name == "replace":
+                _json_pointer_remove(doc, path)
+            _json_pointer_add(doc, path, op["value"])
+            continue
+        if name == "remove":
+            _json_pointer_remove(doc, path)
+            continue
+        value = _json_pointer_get(doc, op["from"])
+        if name == "move":
+            value = copy.deepcopy(_json_pointer_remove(doc, op["from"]))
+        else:
+            value = copy.deepcopy(value)
+        _json_pointer_add(doc, path, value)
+    return doc
+
+
+def _jsonable_outcome(value):
+    return json.loads(json.dumps(value))
+
+
+def _outcome_map(members, outcome):
+    values = outcome if isinstance(outcome, tuple) else (outcome,)
+    if len(values) != len(members):
+        raise ManifestError("declared outcome width does not match outcome_from")
+    return dict(zip(members, values))
+
+
+def _vector_row(vectors, m, vector_id):
+    for row in vectors:
+        if row.get(m["id_key"]) == vector_id:
+            return row
+    return None
+
+
+def _require_foreclosed_bases(m: dict, vectors: list) -> None:
+    if "foreclosed" not in m:
+        return
+    by_id = {}
+    by_group = {}
+    for row in vectors:
+        vid = row[m["id_key"]]
+        by_id[vid] = row
+        by_group.setdefault(_group_of(row, m), set()).add(vid)
+    for group, entries in m["foreclosed"].items():
+        for i, entry in enumerate(entries):
+            where = "foreclosed[%s][%d]" % (group, i)
+            base = entry["witness"]["base"]
+            if base not in by_id:
+                raise ManifestError(
+                    "%s witness.base %r is not a corpus vector" % (where, base))
+            if base not in by_group.get(group, ()):
+                raise ManifestError(
+                    "%s witness.base %r is not a vector in group %r"
+                    % (where, base, group))
+            catalog_row = by_id[base]
+            src = _resolved_contained_source(
+                m["_repo_root"] / catalog_row[m["vector_path_key"]],
+                m["_repo_root"])
+            document = load_json_document(
+                src.read_bytes(), root=dict, where="%s.witness.base" % where)
+            apply_json_patch(document, entry["witness"]["edit"])
+
+
+def _require_foreclosed_pinned(session) -> None:
+    """Refuse a base missing from that group's baseline outcomes.
+
+    A present JSON null is a pinned outcome. Membership cannot be judged at
+    load: it is the baseline measurement. Groups that never recorded a
+    baseline are left to the proof as foreclosure-unproved.
+    """
+    m = session.manifest
+    if "foreclosed" not in m:
+        return
+    for group, entries in m["foreclosed"].items():
+        if group not in session.baselines:
+            continue
+        outcomes = session.baselines[group][1]
+        for i, entry in enumerate(entries):
+            base = entry["witness"]["base"]
+            if base not in outcomes:
+                raise ManifestError(
+                    "foreclosed[%s][%d] witness.base %r has no pinned outcome"
+                    % (group, i, base))
+
+
+def _materialize_witness(session, catalog_row, edit) -> tuple:
+    m = session.manifest
+    src = _resolved_contained_source(
+        m["_repo_root"] / catalog_row[m["vector_path_key"]], m["_repo_root"])
+    document = load_json_document(src.read_bytes(), root=dict, where="witness.base")
+    patched = apply_json_patch(document, edit)
+    dest = m["_repo_root"] / _WITNESS_NAME
+    dest.write_text(
+        json.dumps(patched, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+    row = dict(catalog_row)
+    row[m["id_key"]] = "<witness>"
+    row[m["vector_path_key"]] = _WITNESS_NAME
+    return row, dest
+
+
+def _execute_mutations_observation(session, group: str, mutants,
+                                   vectors=None, *, rebuild=True, step=None):
+    """Apply zero or more unique source replacements, execute and restore.
+
+    F3 needs `by` and `label` on the same tree. One mutant is the ordinary
+    mutation step; an empty list is an unmutated witness run.
+    """
+    m = session.manifest
+    if vectors is None:
+        vectors = session.baselines[group][0]
+    sources = [_resolved_contained_source(sp, m["_repo_root"])
+               for sp in m["_source_paths"]]
+    mutants = list(mutants)
+    if not mutants:
+        execution = session.execute(
+            vectors, rebuild=rebuild,
+            step=step or _step("baseline", group))
+        return {"anchor_hits": 0, "application": "applied", "execution": execution,
+                "restored": True, "detail": None}
+    for mut in mutants:
+        hits = [(sp, sp.read_text(encoding="utf-8").count(mut["anchor"]))
+                for sp in sources]
+        total = sum(n for _, n in hits)
+        if total != 1:
+            detail = ("%s / %s: anchor not found in any declared source" %
+                      (group, mut["label"]) if total == 0 else
+                      "%s / %s: the anchor occurs %d times across the declared sources, so "
+                      "the substitution would pick one arbitrarily. Make it unique" %
+                      (group, mut["label"], total))
+            return {"anchor_hits": total, "application": "failed", "execution": None,
+                    "restored": True, "detail": detail}
+    step_guard = _SourceGuard(sources, repo_root=None)
+    try:
+        for mut in mutants:
+            hits = [(sp, sp.read_text(encoding="utf-8").count(mut["anchor"]))
+                    for sp in sources]
+            total = sum(n for _, n in hits)
+            if total != 1:
+                detail = ("%s / %s: anchor not found in any declared source" %
+                          (group, mut["label"]) if total == 0 else
+                          "%s / %s: the anchor occurs %d times across the declared sources, so "
+                          "the substitution would pick one arbitrarily. Make it unique" %
+                          (group, mut["label"], total))
+                return {"anchor_hits": total, "application": "failed",
+                        "execution": None, "restored": True, "detail": detail}
+            target = next(sp for sp, n in hits if n == 1)
+            target = _resolved_contained_source(target, m["_repo_root"])
+            mutated = target.read_text(encoding="utf-8").replace(
+                mut["anchor"], mut["replacement"], 1)
+            target.write_text(mutated, encoding="utf-8")
+        last = mutants[-1]
+        execution = session.execute(vectors, rebuild=True, step=step or _step(
+            "control" if last.get("control") else "mutant", group, last.get("id")))
+    finally:
+        step_guard.restore()
+        leaked = step_guard.verify_clean()
+        if leaked:
+            raise ManifestError("declared source restoration failed: %s" % leaked)
+    return {"anchor_hits": len(mutants), "application": "applied",
+            "execution": execution, "restored": True, "detail": None}
 
 
 def _execute_mutation_observation(session, group: str, mut: dict) -> dict:
@@ -4145,6 +4600,178 @@ def _execute_mutation_observation(session, group: str, mut: dict) -> dict:
             raise ManifestError("declared source restoration failed: %s" % leaked)
     return {"anchor_hits": 1, "application": "applied", "execution": execution,
             "restored": True, "detail": None}
+
+
+def _foreclosure_observation(facts, vid):
+    execution = facts.get("execution")
+    if execution is None:
+        return None, facts.get("detail") or "anchor"
+    if not execution.built:
+        return None, execution.detail
+    if vid in execution.raised:
+        return None, execution.raised[vid]
+    if vid not in execution.outcomes:
+        return None, "incomplete"
+    return execution.outcomes[vid], None
+
+
+def _f1_attributed(f0, f1, members, refused_at) -> bool:
+    if f0 == f1:
+        return False
+    base = _outcome_map(members, f0)
+    moved = _outcome_map(members, f1)
+    for member in members:
+        if member in refused_at:
+            if moved[member] != refused_at[member]:
+                return False
+        elif moved[member] != base[member]:
+            return False
+    return True
+
+
+def _prove_foreclosures(session) -> dict:
+    """F0-F3 for each declared entry. The witness file never joins the catalog."""
+    m = session.manifest
+    proofs = {}
+    if "foreclosed" not in m:
+        return proofs
+    members = selector_members(m.get("outcome_from"))
+    ordinary = _ordinary_mutant_index(m)
+    dest = None
+    try:
+        for group, entries in m["foreclosed"].items():
+            if group not in session.baselines:
+                for entry in entries:
+                    ident = label_identity(entry)
+                    proofs[ident] = {
+                        "entry": entry, "group": group, "holds": False,
+                        "abnormal": None, "f1": None, "f2": None, "f3": None,
+                    }
+                continue
+            catalog = session.baselines[group][0]
+            pinned_outcomes = session.baselines[group][1]
+            for entry in entries:
+                ident = label_identity(entry)
+                base_row = _vector_row(catalog, m, entry["witness"]["base"])
+                if base_row is None:
+                    raise ManifestError(
+                        "foreclosed witness.base %r is not a corpus vector"
+                        % entry["witness"]["base"])
+                label_mut = ordinary[ident][1]
+                by_mut = ordinary[entry["by"]][1]
+                f0_facts = _execute_mutations_observation(
+                    session, group, [], vectors=[base_row], rebuild=True,
+                    step=_step("baseline", group))
+                f0, f0_err = _foreclosure_observation(f0_facts, base_row[m["id_key"]])
+                pinned = pinned_outcomes[base_row[m["id_key"]]]
+                witness_row, dest = _materialize_witness(
+                    session, base_row, entry["witness"]["edit"])
+                f1_facts = _execute_mutations_observation(
+                    session, group, [], vectors=[witness_row], rebuild=True,
+                    step=_step("baseline", group))
+                f1, f1_err = _foreclosure_observation(f1_facts, "<witness>")
+                f2_facts = _execute_mutations_observation(
+                    session, group, [by_mut], vectors=[witness_row],
+                    step=_step("mutant", group, by_mut.get("id")))
+                f2, f2_err = _foreclosure_observation(f2_facts, "<witness>")
+                f3_facts = _execute_mutations_observation(
+                    session, group, [by_mut, label_mut], vectors=[witness_row],
+                    step=_step("mutant", group, label_mut.get("id")))
+                f3, f3_err = _foreclosure_observation(f3_facts, "<witness>")
+                abnormal = next(
+                    (err for err in (f0_err, f1_err, f2_err, f3_err) if err), None)
+                holds = (
+                    abnormal is None
+                    and f0 == pinned
+                    and _f1_attributed(f0, f1, members, entry["refused_at"])
+                    and f2 != f3)
+                proofs[ident] = {
+                    "entry": entry,
+                    "group": group,
+                    "holds": holds,
+                    "abnormal": abnormal,
+                    "f1": None if f1 is None else _jsonable_outcome(f1),
+                    "f2": None if f2 is None else _jsonable_outcome(f2),
+                    "f3": None if f3 is None else _jsonable_outcome(f3),
+                }
+                dest.unlink(missing_ok=True)
+                dest = None
+    finally:
+        if dest is not None:
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+    return proofs
+
+
+def _apply_foreclosure_verdicts(tally: dict, proofs: dict) -> None:
+    """Reclassify F4 rows. No second classifier: abnormal uses unproved."""
+    if not proofs:
+        return
+    results = tally["results"]
+    by_label = {label_identity(row): row for row in results}
+    for ident, proof in proofs.items():
+        row = by_label.get(ident)
+        if row is None or str(row.get("verdict", "")).startswith("control-"):
+            tally["failures"].append(
+                "foreclosure-unproved for %r: F4 never ran, so the mutant "
+                "stays unproved" % ident)
+            continue
+        previous = row["verdict"]
+        if proof["abnormal"]:
+            _adjust_ordinary_tally(tally, previous, -1)
+            row.clear()
+            row.update({
+                "group": proof["group"], "label": ident, "verdict": "unproved",
+                "scope": "declared", "moved": 0,
+                "how": "the measurement did not complete (%s) during a "
+                       "foreclosure proof, so the corpus was never shown this "
+                       "mutant and said nothing about this rule" % proof["abnormal"],
+            })
+            tally["unproved"] += 1
+            continue
+        if not proof["holds"]:
+            tally["failures"].append(
+                "foreclosure-unproved for %r: F0-F3 did not hold, so the "
+                "mutant stays an ordinary row" % ident)
+            continue
+        if previous == "killed":
+            tally["failures"].append(
+                "foreclosed acknowledge rules that the corpus now distinguishes: "
+                "%s (now killed). Remove them; the entry should be removed"
+                % ident)
+            continue
+        if previous == "unproved":
+            tally["failures"].append(
+                "foreclosure-unproved for %r: F4 never ran, so the mutant "
+                "stays unproved" % ident)
+            continue
+        _adjust_ordinary_tally(tally, previous, -1)
+        row.clear()
+        row.update({
+            "group": proof["group"], "label": ident, "verdict": "foreclosed",
+            "moved": 0, "how": proof["entry"]["reason"],
+            "f1": proof["f1"], "f2": proof["f2"], "f3": proof["f3"],
+        })
+        tally["foreclosed"] += 1
+
+
+def _adjust_ordinary_tally(tally: dict, verdict: str, delta: int) -> None:
+    if verdict == "killed":
+        tally["killed"] += delta
+    elif verdict == "survived":
+        tally["survived"] += delta
+    elif verdict == "silent":
+        tally["silent"] += delta
+    elif verdict == "unproved":
+        tally["unproved"] += delta
+    elif verdict == "unexercised":
+        tally["out_of_scope"] += delta
+    elif verdict == "known-hole":
+        tally["known_holes"] += delta
+    elif verdict == "foreclosed":
+        tally["foreclosed"] += delta
 
 
 def _run_mutation_step(session: _ProcessMutationSession, group: str, mut: dict) -> None:
@@ -4397,6 +5024,7 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
     # actual rows again from the session's detached trusted manifest below.
     ordered_declared_mutants(m["mutants"], mutation_order)
     all_vectors = load_vector_document(m)
+    _require_foreclosed_bases(m, all_vectors)
     if m["runner"] == "batch" and m["group_key"] is None:
         m["group_key"] = "_g"
     backend = execution_backend or _default_execution_backend
@@ -4507,6 +5135,8 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
                     "would have caught. Read the corpus's own declaration of its comparison "
                     "surface and match it." % (_selector, never_seen))
 
+        _require_foreclosed_pinned(session)
+
         prev_ordinary = None
         emitted_equivalents: set = set()
         entered_ordinary = False
@@ -4555,6 +5185,14 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
         for group in sorted(m["mutants"]):
             tally["equivalent"] += _append_group_equivalents(
                 tally["results"], m, group, session.baselines, emitted_equivalents)
+        if entered_ordinary:
+            _apply_foreclosure_verdicts(tally, _prove_foreclosures(session))
+        elif "foreclosed" in m:
+            for group, entries in m["foreclosed"].items():
+                for entry in entries:
+                    tally["failures"].append(
+                        "foreclosure-unproved for %r: F4 never ran, so the mutant "
+                        "stays unproved" % label_identity(entry))
     finally:
         try:
             if guard is not None:
@@ -4829,7 +5467,7 @@ def run(manifest_path: Path, *, execution_profile) -> dict:
         control_status=_control_status(control_statuses, declared_controls))
 
 
-def null_result_reading(known_holes, equivalent, out_of_scope):
+def null_result_reading(known_holes, equivalent, out_of_scope, foreclosed=0):
     """What a denominator of zero actually licenses you to say.
 
     A null result feels like a fact about the corpus -- "this one cannot be
@@ -4841,12 +5479,16 @@ def null_result_reading(known_holes, equivalent, out_of_scope):
     announce. The message says so rather than leaving the reader to make the
     same inference unaided.
     """
-    if known_holes or equivalent or out_of_scope:
+    if known_holes or equivalent or out_of_scope or foreclosed:
+        exclusions = "declared equivalent or out of scope"
+        if foreclosed:
+            exclusions = "declared equivalent, out of scope or foreclosed"
         return ("nothing was measured: every declared in-scope rule is either a known hole, "
-                "declared equivalent or out of scope. There is no adequacy result here. "
+                "%s. There is no adequacy result here. "
                 "A null result is a statement about the DECLARATION before it is one about "
                 "the corpus: count the rules the implementation has, from the implementation "
-                "rather than from this manifest, before concluding the corpus cannot be measured")
+                "rather than from this manifest, before concluding the corpus cannot be measured"
+                % exclusions)
     return ("no non-equivalent mutants were scored, so no adequacy was measured. "
             "Declare the rules the implementation actually has; an empty declaration "
             "measures nothing and says nothing")
@@ -5244,6 +5886,11 @@ def main() -> int:
                  _scored_denominator(rep["killed"], rep["survived"], rep["silent"]), pct,
                  rep["equivalent"], rep["unexercised_out_of_scope"], rep["unproved"],
                  rep["declared_total"]))
+        if "foreclosed" in rep:
+            print("%d FORECLOSED (ratio %s). These are rules an earlier declared "
+                  "mutant still gates on the witness; they leave the denominator "
+                  "like a declared equivalent."
+                  % (rep["foreclosed"], rep.get("foreclosed_ratio")))
         also_line = _kill_also_terminated_line(kill_counts)
         if also_line is not None:
             print(also_line)

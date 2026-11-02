@@ -2838,6 +2838,7 @@ PROCESS_ONLY_REPORT_KEYS = frozenset({"originals_unverified_against_head"})
 _TEST_ROW_BASE = frozenset({"group", "label", "verdict", "moved", "how"})
 _TEST_PRODUCER_VERDICTS = (
     "equivalent",
+    "foreclosed",
     "unproved",
     "killed",
     "unexercised",
@@ -2853,14 +2854,17 @@ _TEST_PRODUCER_VERDICTS = (
 _TEST_MD_OPTIONAL = frozenset({"unexercised", "known-hole"})
 _TEST_MD_REQUIRED = frozenset({"silent"})
 _TEST_RAISED_OPTIONAL = frozenset({"killed"})
+_TEST_FORECLOSED_KEYS = frozenset({"f1", "f2", "f3"})
 
 
 def _test_row_required(verdict):
     required = set(_TEST_ROW_BASE)
-    if verdict != "equivalent":
+    if verdict not in ("equivalent", "foreclosed"):
         required.add("scope")
     if verdict in _TEST_MD_REQUIRED:
         required.add("moved_diagnostic")
+    if verdict == "foreclosed":
+        required.update(_TEST_FORECLOSED_KEYS)
     return frozenset(required)
 
 
@@ -2875,7 +2879,7 @@ def _test_row_optional(verdict):
 
 def _test_row_forbidden(verdict):
     return (
-        _TEST_ROW_BASE | {"scope", "raised", "moved_diagnostic"}
+        _TEST_ROW_BASE | {"scope", "raised", "moved_diagnostic"} | _TEST_FORECLOSED_KEYS
     ) - _test_row_required(verdict) - _test_row_optional(verdict)
 
 
@@ -2930,10 +2934,14 @@ def producer_shaped_row(verdict, label, group="g", **extra):
         "moved": extra.pop("moved", 0),
         "how": extra.pop("how", ""),
     }
-    if verdict != "equivalent":
+    if verdict not in ("equivalent", "foreclosed"):
         row["scope"] = extra.pop("scope", "declared")
     if verdict == "silent":
         row["moved_diagnostic"] = extra.pop("moved_diagnostic", 0)
+    if verdict == "foreclosed":
+        row["f1"] = extra.pop("f1", [True, "unknown-field"])
+        row["f2"] = extra.pop("f2", [True, "flag-set"])
+        row["f3"] = extra.pop("f3", [True, "ok"])
     row.update(extra)
     return row
 
