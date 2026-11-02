@@ -2585,25 +2585,27 @@ def _ordinary_mutant_index(m: dict) -> dict:
 def _require_foreclosed_declaration(m: dict) -> None:
     """Refuse a present foreclosed container that cannot be proved as specified.
 
-    Closed load refusals: runner is not process with a JSON outcome_from;
-    outcome_parse is test-names; container or entry shape; unknown, control,
-    out-of-scope, equivalent, or equal label/by; refused_at member outside
-    outcome_from; blank reason; missing recorded. witness.base membership in
-    the vector catalog is checked after vectors are loaded, still as
-    ManifestError (exit 2).
+    Closed load refusals: outcome_parse is test-names; runner is not process
+    with a JSON outcome_from; container or entry shape; unknown, control,
+    out-of-scope, equivalent, known-hole, or equal label/by; refused_at member
+    outside outcome_from; blank reason; missing recorded; RFC 6902 op/path/
+    value/from presence. After vectors load, still ManifestError (exit 2):
+    witness.base in the catalog, in the entry's own group, and the patch
+    applies to that base file. After baselines, before ordinary mutants:
+    the base is in that group's pinned outcomes (a present JSON null counts).
     """
     if "foreclosed" not in m:
         return
+    if m.get("outcome_parse") == "test-names":
+        raise ManifestError(
+            "foreclosed cannot be read beside outcome_parse test-names; "
+            "F1 attributes a JSON outcome member")
     if m["runner"] != "process":
         raise ManifestError(
             "foreclosed is implemented only for runner=process with a JSON "
             "outcome_from; F1 attributes a refused_at member on that projection "
             "and F0-F3 run one witness vector, which runner=%s cannot do"
             % m["runner"])
-    if m.get("outcome_parse") == "test-names":
-        raise ManifestError(
-            "foreclosed cannot be read beside outcome_parse test-names; "
-            "F1 attributes a JSON outcome member")
     require_shape(m["foreclosed"], dict, "foreclosed")
     members = selector_members(m.get("outcome_from"))
     if not members:
@@ -2613,6 +2615,9 @@ def _require_foreclosed_declaration(m: dict) -> None:
     equivalent_labels = {
         label_identity(entry)
         for entries in m["equivalent"].values() for entry in entries}
+    known_hole_labels = {
+        label_identity(entry)
+        for entries in m["known_holes"].values() for entry in entries}
     seen = set()
     for group, entries in m["foreclosed"].items():
         require_shape(entries, list, "foreclosed[%s]" % group)
@@ -2642,6 +2647,13 @@ def _require_foreclosed_declaration(m: dict) -> None:
             if by in equivalent_labels:
                 raise ManifestError(
                     "%s.by %r names a declared equivalent" % (where, by))
+            if ident in known_hole_labels:
+                raise ManifestError(
+                    "%s %r names a declared known hole; foreclosure is proved "
+                    "on an ordinary mutant" % (where, ident))
+            if by in known_hole_labels:
+                raise ManifestError(
+                    "%s.by %r names a declared known hole" % (where, by))
             for named, field in ((ident, "label"), (by, "by")):
                 found = ordinary.get(named)
                 if found is None:
@@ -2672,7 +2684,8 @@ def _require_foreclosed_declaration(m: dict) -> None:
                 raise ManifestError("%s.witness.base must be a non-empty string" % where)
             require_shape(witness["edit"], list, where + ".witness.edit")
             for j, op in enumerate(witness["edit"]):
-                require_shape(op, dict, "%s.witness.edit[%d]" % (where, j))
+                _require_json_patch_operation(
+                    op, "%s.witness.edit[%d]" % (where, j))
             refused_at = entry["refused_at"]
             require_shape(refused_at, dict, where + ".refused_at")
             if not refused_at:
@@ -4356,27 +4369,36 @@ def _json_pointer_remove(doc, pointer: str):
     return parent.pop(token)
 
 
+_RFC6902_OPS = frozenset({"add", "remove", "replace", "move", "copy", "test"})
+
+
+def _require_json_patch_operation(op, where: str) -> str:
+    """Refuse an RFC 6902 op that is missing its name or required keys."""
+    require_shape(op, dict, where)
+    name = op.get("op")
+    if name not in _RFC6902_OPS:
+        raise ManifestError("%s.op must be an RFC 6902 operation" % where)
+    if "path" not in op:
+        raise ManifestError("%s: missing required key 'path'" % where)
+    if name in ("add", "replace", "test") and "value" not in op:
+        raise ManifestError("%s: missing required key 'value'" % where)
+    if name in ("move", "copy") and "from" not in op:
+        raise ManifestError("%s: missing required key 'from'" % where)
+    return name
+
+
 def apply_json_patch(document, operations):
     """Apply RFC 6902 operations to a decoded JSON document. Stdlib only."""
     doc = copy.deepcopy(document)
     for i, op in enumerate(operations):
         where = "witness.edit[%d]" % i
-        require_shape(op, dict, where)
-        name = op.get("op")
-        if name not in ("add", "remove", "replace", "move", "copy", "test"):
-            raise ManifestError("%s.op must be an RFC 6902 operation" % where)
-        if "path" not in op:
-            raise ManifestError("%s: missing required key 'path'" % where)
+        name = _require_json_patch_operation(op, where)
         path = op["path"]
         if name == "test":
-            if "value" not in op:
-                raise ManifestError("%s: missing required key 'value'" % where)
             if _json_pointer_get(doc, path) != op["value"]:
                 raise ManifestError("%s: JSON Patch test failed" % where)
             continue
         if name in ("add", "replace"):
-            if "value" not in op:
-                raise ManifestError("%s: missing required key 'value'" % where)
             if name == "replace":
                 _json_pointer_remove(doc, path)
             _json_pointer_add(doc, path, op["value"])
@@ -4384,8 +4406,6 @@ def apply_json_patch(document, operations):
         if name == "remove":
             _json_pointer_remove(doc, path)
             continue
-        if "from" not in op:
-            raise ManifestError("%s: missing required key 'from'" % where)
         value = _json_pointer_get(doc, op["from"])
         if name == "move":
             value = copy.deepcopy(_json_pointer_remove(doc, op["from"]))
@@ -4416,13 +4436,51 @@ def _vector_row(vectors, m, vector_id):
 def _require_foreclosed_bases(m: dict, vectors: list) -> None:
     if "foreclosed" not in m:
         return
-    known = {row[m["id_key"]] for row in vectors}
+    by_id = {}
+    by_group = {}
+    for row in vectors:
+        vid = row[m["id_key"]]
+        by_id[vid] = row
+        by_group.setdefault(_group_of(row, m), set()).add(vid)
     for group, entries in m["foreclosed"].items():
         for i, entry in enumerate(entries):
+            where = "foreclosed[%s][%d]" % (group, i)
             base = entry["witness"]["base"]
-            if base not in known:
+            if base not in by_id:
                 raise ManifestError(
-                    "foreclosed[%s][%d] witness.base %r is not a corpus vector"
+                    "%s witness.base %r is not a corpus vector" % (where, base))
+            if base not in by_group.get(group, ()):
+                raise ManifestError(
+                    "%s witness.base %r is not a vector in group %r"
+                    % (where, base, group))
+            catalog_row = by_id[base]
+            src = _resolved_contained_source(
+                m["_repo_root"] / catalog_row[m["vector_path_key"]],
+                m["_repo_root"])
+            document = load_json_document(
+                src.read_bytes(), root=dict, where="%s.witness.base" % where)
+            apply_json_patch(document, entry["witness"]["edit"])
+
+
+def _require_foreclosed_pinned(session) -> None:
+    """Refuse a base missing from that group's baseline outcomes.
+
+    A present JSON null is a pinned outcome. Membership cannot be judged at
+    load: it is the baseline measurement. Groups that never recorded a
+    baseline are left to the proof as foreclosure-unproved.
+    """
+    m = session.manifest
+    if "foreclosed" not in m:
+        return
+    for group, entries in m["foreclosed"].items():
+        if group not in session.baselines:
+            continue
+        outcomes = session.baselines[group][1]
+        for i, entry in enumerate(entries):
+            base = entry["witness"]["base"]
+            if base not in outcomes:
+                raise ManifestError(
+                    "foreclosed[%s][%d] witness.base %r has no pinned outcome"
                     % (group, i, base))
 
 
@@ -4476,9 +4534,18 @@ def _execute_mutations_observation(session, group: str, mutants,
     step_guard = _SourceGuard(sources, repo_root=None)
     try:
         for mut in mutants:
-            target = next(
-                sp for sp in sources
-                if sp.read_text(encoding="utf-8").count(mut["anchor"]) == 1)
+            hits = [(sp, sp.read_text(encoding="utf-8").count(mut["anchor"]))
+                    for sp in sources]
+            total = sum(n for _, n in hits)
+            if total != 1:
+                detail = ("%s / %s: anchor not found in any declared source" %
+                          (group, mut["label"]) if total == 0 else
+                          "%s / %s: the anchor occurs %d times across the declared sources, so "
+                          "the substitution would pick one arbitrarily. Make it unique" %
+                          (group, mut["label"], total))
+                return {"anchor_hits": total, "application": "failed",
+                        "execution": None, "restored": True, "detail": detail}
+            target = next(sp for sp, n in hits if n == 1)
             target = _resolved_contained_source(target, m["_repo_root"])
             mutated = target.read_text(encoding="utf-8").replace(
                 mut["anchor"], mut["replacement"], 1)
@@ -4574,8 +4641,15 @@ def _prove_foreclosures(session) -> dict:
     try:
         for group, entries in m["foreclosed"].items():
             if group not in session.baselines:
+                for entry in entries:
+                    ident = label_identity(entry)
+                    proofs[ident] = {
+                        "entry": entry, "group": group, "holds": False,
+                        "abnormal": None, "f1": None, "f2": None, "f3": None,
+                    }
                 continue
             catalog = session.baselines[group][0]
+            pinned_outcomes = session.baselines[group][1]
             for entry in entries:
                 ident = label_identity(entry)
                 base_row = _vector_row(catalog, m, entry["witness"]["base"])
@@ -4589,11 +4663,7 @@ def _prove_foreclosures(session) -> dict:
                     session, group, [], vectors=[base_row], rebuild=True,
                     step=_step("baseline", group))
                 f0, f0_err = _foreclosure_observation(f0_facts, base_row[m["id_key"]])
-                pinned = session.baselines[group][1].get(base_row[m["id_key"]])
-                if pinned is None:
-                    raise ManifestError(
-                        "foreclosed witness.base %r pinned outcome is not accepting"
-                        % entry["witness"]["base"])
+                pinned = pinned_outcomes[base_row[m["id_key"]]]
                 witness_row, dest = _materialize_witness(
                     session, base_row, entry["witness"]["edit"])
                 f1_facts = _execute_mutations_observation(
@@ -4612,11 +4682,8 @@ def _prove_foreclosures(session) -> dict:
                     (err for err in (f0_err, f1_err, f2_err, f3_err) if err), None)
                 holds = (
                     abnormal is None
-                    and f0 is not None
                     and f0 == pinned
                     and _f1_attributed(f0, f1, members, entry["refused_at"])
-                    and f2 is not None
-                    and f3 is not None
                     and f2 != f3)
                 proofs[ident] = {
                     "entry": entry,
@@ -4647,6 +4714,9 @@ def _apply_foreclosure_verdicts(tally: dict, proofs: dict) -> None:
     for ident, proof in proofs.items():
         row = by_label.get(ident)
         if row is None or str(row.get("verdict", "")).startswith("control-"):
+            tally["failures"].append(
+                "foreclosure-unproved for %r: F4 never ran, so the mutant "
+                "stays unproved" % ident)
             continue
         previous = row["verdict"]
         if proof["abnormal"]:
@@ -5065,6 +5135,8 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
                     "would have caught. Read the corpus's own declaration of its comparison "
                     "surface and match it." % (_selector, never_seen))
 
+        _require_foreclosed_pinned(session)
+
         prev_ordinary = None
         emitted_equivalents: set = set()
         entered_ordinary = False
@@ -5115,6 +5187,12 @@ def _run_process(m: dict, manifest_path: Path, *, execution_backend=None,
                 tally["results"], m, group, session.baselines, emitted_equivalents)
         if entered_ordinary:
             _apply_foreclosure_verdicts(tally, _prove_foreclosures(session))
+        elif "foreclosed" in m:
+            for group, entries in m["foreclosed"].items():
+                for entry in entries:
+                    tally["failures"].append(
+                        "foreclosure-unproved for %r: F4 never ran, so the mutant "
+                        "stays unproved" % label_identity(entry))
     finally:
         try:
             if guard is not None:

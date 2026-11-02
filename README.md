@@ -523,16 +523,21 @@ plus RFC 6902 edits, materialised only in the temp tree), `refused_at` (which
 non-blank `reason`, and `recorded`. The witness never enters the corpus digest.
 
 After the control barrier the tool checks F0–F3 on the witness and F4 on the
-corpus. F0–F3 holding and F4 not killed yields verdict `foreclosed`: the row
-leaves the denominator like `equivalent`, counts in `foreclosed` and
-`declared_total`, and carries the observed F1, F2 and F3 tokens.
-`foreclosed_ratio` is printed beside `hole_ratio`. Those two report fields exist
-only when the container is present; manifests without it keep a byte-identical
-`report.v0` (tool identity aside). A failed proof is `foreclosure-unproved` and
-the `label` row is scored as an ordinary mutant. An abnormal end (timeout,
-output cap, signal, unexpected exit) is `unproved` by the existing classifier.
-F4 `killed` is the stale failure: the corpus now distinguishes the rule and the
-entry should be removed, as for a known hole.
+corpus. F0–F3 holding and F4 `survived` or `silent` yields verdict `foreclosed`:
+the row leaves the denominator like `equivalent`, counts in `foreclosed` and
+`declared_total`, and carries the observed F1, F2 and F3 tokens. F4 `unproved`
+stays `unproved` with `foreclosure-unproved`. `foreclosed_ratio` is printed
+beside `hole_ratio`. Those two report fields exist only when the container is
+present; manifests without it keep a byte-identical `report.v0` (tool identity
+aside). A failed proof is `foreclosure-unproved` and the `label` row is scored
+as an ordinary mutant. A declared entry whose proof never ran (no F4 row, or
+the group never recorded a baseline) is also `foreclosure-unproved`. An
+abnormal F0–F3 end (timeout, output cap, signal, unexpected exit, or any other
+incomplete proof observation) maps that row to `unproved` with `how` naming
+the foreclosure proof. Ordinary mutant termination on the corpus is still
+`killed`; the proof path does not treat a crash as a kill and does not grant
+`foreclosed`. F4 `killed` is the stale failure: the corpus now distinguishes
+the rule and the entry should be removed, as for a known hole.
 
 The container is process-only with a JSON `outcome_from`. F1 attributes a
 member on that projection; the module runner has one callable result, and
