@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add an optional `foreclosed` container: a mutant whose rule an earlier layer
+  forecloses leaves the denominator only when the tool proves it on every run
+  (base outcome reproduced, the witness refused on the declared member and
+  nowhere else, and the rule load-bearing behind that layer). A proof that does
+  not hold is a `foreclosure-unproved` failure, a proof that does not finish is
+  `unproved`, and an entry the corpus now distinguishes must be removed.
+  Process runners with a JSON outcome only. Reports of manifests without the
+  container are byte-identical (#256).
 - Add a Contributor Covenant 3.0 Code of Conduct with a private conduct-reporting
   address, its single-reader and continuity limits, and links from contributor,
   support, and security guidance (#166).
