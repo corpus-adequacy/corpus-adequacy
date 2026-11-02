@@ -382,8 +382,9 @@ practice and existing tool behaviour; it does not add tool rules.
 - **A group present in the corpus with no declared mutants is a hard failure** —
   the check may not silently cover less than its name claims.
 - **Manifest containers have one declared JSON kind.** `mutants`, `equivalent`,
-  and `known_holes` are objects; each group or digest value is an array of
-  objects. A wrong kind is a controlled refusal (exit 2), not a traceback.
+  `known_holes`, and the optional `foreclosed` container are objects; each group
+  or digest value is an array of objects. A wrong kind is a controlled refusal
+  (exit 2), not a traceback.
   `--json` then prints a `corpus-adequacy.error.v0` envelope on stdout.
   A missing manifest file takes the same catch: exit 2, the envelope on stdout,
   and the human `could not measure` line on stderr.
@@ -502,11 +503,46 @@ platforms without `fcntl`, `process` and `batch` still refuse before work.
 | `out_of_scope` | the corpus never claimed this rule. Requires a stated reason |
 | known hole | the corpus **does** claim it and does not exercise it. Pinned to a declared corpus digest, requires a reason and a date |
 | declared equivalent | no vector can distinguish it, with the reason stated |
+| foreclosed | an earlier declared mutant still gates every input that would reach this rule. The tool re-proves that on every run |
 
 A known hole is pinned to a digest **read from a file the manifest names**. It is
 not recomputed from the vectors, so the acknowledgement is an author-supplied
 claim, honest only if that file is kept honest — and the report says exactly
 that rather than claiming more.
+
+### Foreclosed, next to equivalent and known holes
+
+`equivalent` is a declaration with a reason. `known_holes` is a declaration
+pinned to an author-supplied digest. `foreclosed` is also author-declared, but
+the exclusion is **proved on every run** or it is not granted.
+
+Each entry names the ordinary mutant for the gated rule `R` (`label`), the
+ordinary mutant for the gating rule `L` (`by`), a `witness` (a corpus vector
+plus RFC 6902 edits, materialised only in the temp tree), `refused_at` (which
+`outcome_from` member must be the only one that moves, and to which token), a
+non-blank `reason`, and `recorded`. The witness never enters the corpus digest.
+
+After the control barrier the tool checks F0–F3 on the witness and F4 on the
+corpus. F0–F3 holding and F4 not killed yields verdict `foreclosed`: the row
+leaves the denominator like `equivalent`, counts in `foreclosed` and
+`declared_total`, and carries the observed F1, F2 and F3 tokens.
+`foreclosed_ratio` is printed beside `hole_ratio`. Those two report fields exist
+only when the container is present; manifests without it keep a byte-identical
+`report.v0` (tool identity aside). A failed proof is `foreclosure-unproved` and
+the `label` row is scored as an ordinary mutant. An abnormal end (timeout,
+output cap, signal, unexpected exit) is `unproved` by the existing classifier.
+F4 `killed` is the stale failure: the corpus now distinguishes the rule and the
+entry should be removed, as for a known hole.
+
+The container is process-only with a JSON `outcome_from`. F1 attributes a
+member on that projection; the module runner has one callable result, and
+`test-names` / batch have no per-vector JSON members to attribute. Those
+runners are refused at load. A foreclosure with no `by` mutant stays an
+`equivalent` entry. The v1 rule inventory is not given a new disposition:
+a foreclosed mutant is still an eligible in-scope label and must be linked by
+a `mutated` row, or the inventory already refuses it as unlinked. Publication
+`DISPLAY_VERDICTS` does not include `equivalent`, so `foreclosed` is not
+displayed there either.
 
 ## Provenance
 

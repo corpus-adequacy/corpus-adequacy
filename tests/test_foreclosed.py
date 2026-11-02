@@ -9,6 +9,7 @@ for manifests that never declared the container.
 
 from __future__ import annotations
 
+import inspect
 import json
 import subprocess
 import sys
@@ -302,6 +303,13 @@ class ForeclosedProof(unittest.TestCase):
             any(item.startswith("control ") and "abnormally" in item
                 for item in report["failures"]),
             report["failures"])
+
+    def test_f3_helper_applies_two_mutants_in_one_execution(self):
+        source = inspect.getsource(ca._execute_mutations_observation)
+        self.assertIn("for mut in mutants", source)
+        one = inspect.getsource(ca._execute_mutation_observation)
+        self.assertIn("finally:", one)
+        self.assertIn("step_guard.restore()", one)
 
 
 @unittest.skipIf(ca.fcntl is None, "process scoring requires an advisory lock")
